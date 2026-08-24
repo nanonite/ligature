@@ -1,0 +1,3 @@
+[submodule "vendor/concept-to-code"]
+	path = vendor/concept-to-code
+	url = git@github.com:nanonite/concept-to-code-skill.git

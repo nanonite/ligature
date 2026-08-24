@@ -1,0 +1,800 @@
+# Reliance-Graph Pipeline: Plan v5
+
+## Claim block
+
+- **Reliance architecture** — settled. S / I / C / O separation needs no further redesign.
+- **Assurance semantics** — open design; the *mechanism* is closable with no tooling gap; **profile authorship is standing human governance**, versioned and owned like `reliance-policy.md`.
+- **Bridge semantics** — closable **within** a verifier system (bounded for Kani, deductive for Creusot/Verus); **capability-gapped across** systems, ceiling `harness-tested`.
+- **G14 SCC closure** — engineering **plus an explicit non-circularity / induction discharge**. The reachability is free; the cycle rule is not.
+- **Closure** — a **per-cluster property with a kind** (`deductive` | `bounded`) under a declared profile. Degraded clusters carry a degradation record. **Never a global pipeline guarantee.**
+
+**The value does not depend on closure.** It comes from the manifest freezing the write set, forbidding spec-weakening, and routing every shortfall to a change request. That is realizable at **Prototype A + the work-package manifest**, before any bridge or closure work.
+
+| Track | Ready? | Blocking |
+|---|---|---|
+| Prototype A — G2+ **role safety only** | **yes**, after §2 | filenames, G1a/G1b split, reliance-policy doc, A006 as expected migration failure |
+| Work-package manifest (write-set freeze + change-request routing) | **yes**, after §10 | gate-implementation hashing, valid-YAML examples |
+| I-schema | **close** | detached receipt with explicit artifact manifest, computed eligibility, assurance requirement located in I, realization/config scope, protocol classification, evidence lifecycle |
+| Bridge implementation | **within-verifier only** | call-site fact semantics, typed bridge expression language |
+| Cross-verifier bridges | **capability-gapped** | no soundness theorem exists; `harness-tested` ceiling |
+| Release closure (G14) | **conceptually sound** | transitive closure + SCC well-foundedness discharge |
+
+---
+
+## 0. Changes from v4
+
+| v4 | Verdict | v5 |
+|---|---|---|
+| "No further foundational redesign required" | **Overstated** | Reliance architecture settled; **bridge and assurance semantics remain open design work**. |
+| G2+ checks "declared assurance target" at Stage 4 | **No artifact to validate** (§1) | Boundary v1.0 has no assurance field; the manifest is generated at Stage 7, after promotion. **Assurance requirement moves into I.** Prototype A G2+ = **role safety only**. |
+| `established_by: [Scheduler.C004]` | **Temporal error** (§2) | A caller *postcondition* holds after the caller returns; the call happens inside. Replaced with **call-site fact semantics**: available contract facts, required local facts, target expression. |
+| `accepted_kinds: [bounded-model-check, bridge-checked]` | **Mixes categories** (§3) | Split into independent fields: **claim / evidence-method / result / scope / trust / support**. |
+| Promotion hashes "evidence trace relations" | **Incomplete** (§4) | Explicit `artifact_manifest` of paths + hashes, including **evidence records**, conflict resolutions, exemptions, protocol debt, policy docs, schema versions. No implicit globs. |
+| Protected write set covers specs, Cargo, CI | **Gates unprotected** (§5) | **Gate implementations, schemas, policy files, harness generators, verifier config, and command registries are hash-pinned.** G13 validates before running any gate. |
+| `promotion_id` inside exemptions and conflict records | **Forward reference** (§6) | One-way: normative artifacts carry `review` blocks; the receipt lists them; only generated reports cite `promotion_id`. |
+| G14 checks each direct relation | **Misses depth** (§7) | **Transitive closure** over required-guarantee dependencies, cycle detection, trust policy applied across the whole closure, **plus an SCC well-foundedness discharge**. |
+| `<boundary_id>::<tracking_issue>` | **OK for MVP** (§8) | Keep, **add `assumption_hash` now**. Registry before broad orchestrator use. |
+| 5 dispositions | **Conflates axes** (§9) | Split `semantic_disposition` (required/incidental/bug-compat/unspecified) from `lifecycle` (accepted/aspirational/deferred/rejected/out-of-scope). |
+| G16 `unresolved > 0 → block` | **Kills dynamic-dispatch clusters** (§10) | **Risk-based**: critical/high → block; medium → human decision; low → visible accepted limitation. Never a full-coverage claim either way. |
+| "topological order" | **Ambiguous** (§11) | O edges point **caller → supplier**; scheduling uses **reverse dependency order** (suppliers first) unless modular assumptions permit parallel work. Record the rule. |
+| `- id: build ; runner: cargo ; args: [...]` | **Not valid YAML** (§12) | Block-form YAML. **Canonical examples must pass their schema in CI.** No wildcard harness names. |
+| Closure as one bit | **Loses the ceiling** | `closure_kind ∈ {deductive, bounded}`. A Kani-owned cluster satisfies the profile while delivering only bounded assurance. |
+| "Kani generic callee has no reachable assurance" | **Over-stated** | **Per-instantiation, not type-universal.** ∀-over-inputs holds; ∀-over-type-parameters does not. |
+| "concurrent clusters can never exceed `assumed`" | **Over-stated** | True for Kani and Creusot; **Verus has tracked/ghost-permission concurrency.** Ceiling is verifier- and property-class-specific. |
+
+---
+
+## 1. Thesis
+
+The skill covers layer 1 (concepts) and layer 2 (intra-concept contracts). Architecture lives in layer 3 — **client–supplier reliance edges**.
+
+> **The reliance graph is the semantic-dependency view of architecture. It records what each client relies on from each supplier. Deterministic checks validate its structure and traceability. Verifiers, bridge checks, tests, and human promotion determine which obligations are *established* — and at what closure kind.**
+
+Cross-concept reliance is one major source of contract gaps; the reliance graph makes that class explicit. Local failures — frame conditions, overflow, hidden-state mutation, partial functions, panic paths, nontermination, aliasing — remain layer-2 and Stage-8A concerns.
+
+---
+
+## 2. Local ground truth — fix before Prototype A
+
+```
+crates/*/specs/_boundaries/<caller_concept>_<caller_method>__to__<callee_concept>_<callee_method>.json
+```
+
+- **Flat files.** `validate_boundary_contracts.py` uses `glob("*.json")` — no recursion. Nested layouts are silently ignored.
+- **Doubled underscores on both sides of `to`.** Single underscores will not match.
+- **`boundary_id` == filename stem**, exactly.
+- Validate any generator against a live artifact byte-for-byte. Do not re-derive the rule.
+
+Concept schema `$defs` (8): `adversary_case`, `command`, `constraint`, `kani_f64_check`, `obligation_id`, `query`, `source_reference`, `structural_opt_out`. Crate names match `^beast-rs-[a-z]+`. Every canonical example is copied from a passing live artifact and generalized — hand-written examples are untrustworthy against `additionalProperties: false`.
+
+**Semantic policy** (`docs/reliance-policy.md`), resolving the schema-prose vs. G2+ conflict:
+
+```
+callee PRECONDITION                        → bridge specification
+callee POSTCONDITION / INVARIANT relied on → callee_guarantees
+adversary case (A*)                        → evidence / test seed, never a guarantee
+```
+
+The live `PartitionedTreeLikelihood.A006` inside `callee_guarantees` is an **expected G2+ failure** and the first regression fixture.
+
+**Prototype A scope: G2+ is role safety only.** The declared-assurance-target check is removed until §3.1 lands.
+
+---
+
+## 3. Capability-gap register
+
+The honest boundary of what this pipeline can achieve in 2026. Verifier population in the repo: **Creusot 53, Kani 23, Verus 23**.
+
+| ID | Gap | Nature | Ceiling | Response |
+|---|---|---|---|---|
+| **CG1** | **Cross-verifier composition has no soundness theorem.** Kani (CBMC bounded), Creusot (Why3/SMT deductive), Verus (SMT + ghost) differ in memory model, numeric abstraction, panic/termination semantics, trusted-assumption sets. | permanent, tooling | `harness-tested` | degradation record + tracking issue |
+| **CG2** | **Call-graph completeness is undecidable** — dynamic dispatch, fn pointers, closures, FFI. | permanent, theoretical | honest `unresolved` classes | report, never claim closure |
+| **CG3** | **Generics under Kani** verify per monomorphization: ∀-over-inputs holds, **∀-over-type-parameters does not**. | tooling | per-instantiation | **placement rule**: assign generic callees to Creusot when type-universality matters |
+| **CG4** | **Concurrency** — no coverage in Kani or Creusot. **Verus has tracked/ghost-permission concurrency.** | verifier-specific | `assumed` for Kani/Creusot; **can exceed for Verus** | property-class-specific ceiling, never a blanket rule |
+| **CG5** | **Non-falsifiable assumptions** — wait-freedom, complexity bounds, harness completeness. | permanent | `human-risk-acceptance` | typed mitigation, risk-tiered |
+| **CG6** | **Circular assume-guarantee is not automatically sound.** If A's proof assumes B and B's assumes A, the pair can be mutually satisfied yet model-inconsistent without a well-foundedness argument — step index, decreasing measure, or temporal stratification. | semantic obligation | requires explicit discharge | SCC closure needs a stated discharge rule (§8.5) |
+
+**CG1 is already latent beyond the two hand-authored boundaries.** The analysis-configuration cluster contains Creusot↔Kani intra-cluster structural edges. Cross-verifier reliance is a property of the current decomposition, not a two-edge special case — the `harness-tested` ceiling and degradation record will fire more often than a two-edge estimate implies.
+
+**Not a capability gap:** `satisfies()` *mechanism* is engineering. But **which** achieved assurance is sufficient for **which** obligation — e.g. accepting Kani bounded at `unwind: 8`, `queue_len_le_8` for a release obligation — is an irreducible risk decision. Profile authorship is versioned, owned human governance. It closes, but never stops needing a human.
+
+---
+
+## 4. Closure profile
+
+A **per-cluster** declared property, with a kind.
+
+```yaml
+# specs/_closure/mcmc-chain.yaml
+cluster: mcmc-chain
+closure_kind: deductive        # deductive | bounded
+conditions:
+  single_verifier_system: true
+  owning_verifier: creusot
+  protocol_class_all_pairwise: true
+  unresolved_indirect_calls_at_or_above_medium: 0
+  generic_callees_type_universal_or_creusot_owned: true
+  transitive_assumptions_within_policy: true
+  scc_wellfoundedness_discharged: true    # CG6; n/a if acyclic
+review:
+  reviewer: <human>
+  reviewed_at: 2026-08-2x
+```
+
+| Owning verifier | `closure_kind` | Meaning |
+|---|---|---|
+| Creusot / Verus | **deductive** | universal over inputs, modulo SMT completeness and trusted specs |
+| Kani | **bounded** | holds only within unwind/harness bounds and enumerated monomorphizations |
+
+Two clusters with identical profile bits carry different guarantees; `closure_kind` is what prevents a Kani-owned cluster from silently reading as full closure.
+
+**Degradation record** — a declared state, not a failure, on the same footing as protocol debt:
+
+```yaml
+# specs/_closure/analysis-configuration.degradation.yaml
+cluster: analysis-configuration
+failed_conditions:
+  - single_verifier_system
+affected_edges:
+  - <boundary_id of the Creusot→Kani edge>
+ceiling: harness-tested
+tracking_issue: chainlink:...
+review:
+  reviewer: <human>
+  reviewed_at: 2026-08-2x
+```
+
+---
+
+## 5. Four graphs
+
+| Graph | Meaning | Source | Normative? |
+|---|---|---|---|
+| **S** | declaration / type dependency | `gen_concept_graph.py` | **no** — candidate suggestion only |
+| **I** | **intended** method interaction **+ assurance requirement** | `docs/interaction-schema.json` | yes, after promotion |
+| **C** | **realized** call relation — `C_static` / `C_dynamic` | config-pinned extractors | observed, configuration-relative |
+| **O** | contractual reliance | `_boundaries/*.json` v1.0 | yes, after promotion |
+
+- **R2 (pre-impl):** every *eligible* I edge covered by an O artifact or a reviewed exemption.
+- **R1 (post-impl):** C reconciled with I — eligible calls, compatible configurations, risk-tiered on extraction confidence.
+- **S:** proposes candidate I edges only.
+
+R2 proves coverage **relative to accepted I**; it does not prove I complete. Since Stage 3 generates both I and O, independent candidate sources are mandatory: Mode P source call extraction, tests and runtime traces, S candidates, data-flow analysis, requirements, a separate critic pass, human promotion.
+
+### 5.1 Interaction schema (I) — now carries the assurance requirement
+
+```yaml
+# docs/interaction-schema.json → specs/_interactions/*.json
+interaction_id: I-SCHED-TQ-001
+caller:
+  concept: Scheduler
+  method: dispatch
+callee:
+  concept: TaskQueue
+  method: pop_ready
+edge_class:
+  - stateful
+  - cross-verifier
+eligibility: boundary-required      # COMPUTED from edge_class; stored must match (G1b)
+rationale: "dispatch's postcondition depends on pop_ready's return discipline"
+evidence_links:
+  - E-0143
+protocol_class: pairwise
+realization:
+  requirement: required             # required|optional|feature-gated|platform-gated|test-only|fallback-only
+  config_scope:
+    target: x86_64-unknown-linux-gnu
+    features: [default]
+    cfg: []
+reliances:                          # §3.1 of review, Option A
+  - obligation_id: TaskQueue.C003
+    required_assurance:
+      required_claims:
+        - postcondition-holds
+      accepted_evidence_kinds:
+        - creusot-deductive-check
+      minimum_scope:
+        input_domain: queue_len_le_8
+        feature_set: default
+      trust_policy:
+        assumptions_allowed: []
+review:
+  reviewer: <human>
+  reviewed_at: 2026-08-2x
+# NO promotion_id here — one-way references (§7.1)
+```
+
+### 5.2 Eligibility is computed
+
+```
+cross-verifier | cross-crate-public-api | stateful | error-panic-boundary
+  | ownership-transfer | numeric-domain-boundary   → boundary-required
+pure-data-type-reference | import-only             → inform
+marker-type | phantom-type                         → ignore
+```
+
+G1b recomputes and rejects disagreement. A proposing model cannot mark a stateful cross-verifier edge `ignore`. Exemptions are separate reviewed objects carrying a `review` block (not a `promotion_id`).
+
+### 5.3 Protocol classification — fail closed
+
+Non-pairwise classes require a protocol artifact or a protocol-debt record. An out-of-scope declaration suffices only when **all five** hold: no promoted obligation depends on the protocol; no work package touches its path; no release claim includes it; a human signed the scope cut; a tracking issue records the missing support. A normal boundary exemption is never sufficient for a temporal obligation.
+
+---
+
+## 6. Scope of the workflow
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                     LLM SIDE — proposes, NON-NORMATIVE                         │
+│  Stage 0  EVIDENCE INTAKE  → claim + origin + semantic_disposition + lifecycle │
+│  Stage 1  CONCEPTS     L1                                                      │
+│  Stage 2  INTRA-CONTRACTS L2                                                   │
+│  Stage 3  INTERACTION (I, incl. assurance requirement) + RELIANCE (O)          │
+│           + BRIDGE SPECS (call-site fact semantics)                            │
+│           + independent candidate sources                                      │
+└──────────────────────────────┬─────────────────────────────────────────────────┘
+════════════════════════════ DETERMINISM BOUNDARY (≠ AUTHORITY) ═════════════════
+                               ▼
+│  Stage 4    ADJUDICATION                                                       │
+│             G1a JSON Schema · G1b repo semantics + COMPUTED eligibility        │
+│             G2 ref-integrity · G2+ ROLE SAFETY · R2 I↔O                        │
+│             G4 evidence · G5 grounding · G11 unresolved conflicts · G15 protocol│
+                               ▼
+│  Stage 4.5  PROMOTION → detached receipt w/ EXPLICIT artifact_manifest          │
+                               ▼
+│  Stage 5    EMISSION      emit_stubs.py · G8 emitter fidelity · NO injection    │
+│  Stage 6    ATTACH GATE   attachment dimension only                             │
+│  Stage 7    WORK-PACKAGE MANIFEST  read-only · hash-pinned incl. GATE CODE      │
+                               ▼
+             ORCHESTRATION  (one issue → one owner → one worktree → one PR)
+             scheduling: REVERSE dependency order — suppliers before callers
+                               ▼
+│  Stage 8A   IMPLEMENTATION VERIFICATION                                         │
+│             per-obligation claim/evidence/scope/trust records ·                 │
+│             scoped call-site coverage · bridge checks · R1 (risk-tiered)        │
+│  Stage 8B   ACCEPTANCE (non-normative)  P: differential · R: G10R               │
+│  Stage 8C   RELEASE CLOSURE  G14 satisfies() over TRANSITIVE closure            │
+│             + SCC well-foundedness discharge (CG6)                              │
+│             → closure profile w/ closure_kind, or degradation record            │
+        │                         │                          │
+        └── change requests ──────┴── drift findings ─────────┘
+                    ▲                                         │
+                    └──── targeted evidence backfill ─────────┘
+```
+
+```mermaid
+flowchart TD
+  subgraph LLM["LLM — proposes, non-normative"]
+    S0["Stage 0 Evidence<br/>claim + semantic_disposition + lifecycle"] --> S1["Stage 1 Concepts L1"] --> S2["Stage 2 Intra-contracts L2"]
+    S2 --> S3["Stage 3 I (+assurance req) + O + bridge specs<br/>independent candidate sources"]
+  end
+  S3 --> S4["Stage 4 Adjudication<br/>G1a G1b G2 G2+role-safety R2 G4 G5 G11 G15"]
+  S4 -->|fail| FB["Findings + change requests"]
+  S4 -->|pass| P45["Stage 4.5 Promotion<br/>detached receipt, explicit artifact_manifest"]
+  P45 --> S5["Stage 5 Emission — G8"] --> S6["Stage 6 Attach gate"]
+  S6 --> S7["Stage 7 Work-package manifest<br/>gate code hash-pinned"]
+  S7 --> ORCH["Orchestration — suppliers before callers"]
+  ORCH --> S8A["Stage 8A Verification<br/>claim/evidence/scope/trust · call-site scope · bridges · R1"]
+  S8A --> S8B["Stage 8B Acceptance"] --> S8C["Stage 8C Closure<br/>G14 transitive + CG6 discharge<br/>→ closure_kind or degradation record"]
+  S8A -.unprovable.-> FB
+  S8C -.shortfall.-> FB
+  FB -.targeted backfill.-> S0
+```
+
+---
+
+## 7. Promotion
+
+### 7.1 Detached receipt with an explicit manifest
+
+```yaml
+# specs/_promotions/mcmc-chain.yaml
+promotion_id: PROM-MCMC-001
+cluster: mcmc-chain
+reviewer: <human>
+policy_version: reliance-policy@1.2
+schema_versions:
+  boundary: 1.0
+  interaction: 1.0
+accepted_at: 2026-08-2x
+artifact_manifest:
+  - path: crates/beast-rs-mcmc/specs/mcmc_chain.json
+    hash: sha256:...
+  - path: crates/beast-rs-mcmc/specs/_interactions/I-MCMC-001.json
+    hash: sha256:...
+  - path: evidence/E-0143.json
+    hash: sha256:...
+  - path: specs/_conflicts/EC-004.json
+    hash: sha256:...
+  - path: docs/reliance-policy.md
+    hash: sha256:...
+```
+
+The manifest **states the exact set**; no implicit globs. It covers concept specs, interaction specs (incl. assurance requirements), boundary specs, bridge specs, **evidence records**, evidence links, conflict resolutions, exemptions, protocol-debt records, design decisions, compatibility policy, `reliance-policy.md`, and applicable schema/policy versions. The receipt is **not** in its own manifest.
+
+Any listed file changing invalidates the receipt → **acceptance revoked**.
+
+**References are one-way:** normative artifacts carry `review` blocks and never a `promotion_id`; the receipt lists artifacts; only generated reports cite `promotion_id`.
+
+### 7.2 Authority
+
+Human sign-off required for: first cluster acceptance; new concepts; new or weakened contracts; new high/critical assumptions; compatibility-policy changes; evidence-conflict resolution; protocol exemptions and scope cuts; cross-verifier trust decisions; **assurance-profile authorship**; **closure-profile and degradation-record acceptance**.
+
+Versioned policy may auto-promote only mechanical changes with no semantic text change, no assurance-target decrease, no new assumption, and all hashes still bound. **An LLM critic may recommend; it is never the sole authority.**
+
+---
+
+## 8. Assurance and bridges
+
+> **Normative files declare *required* assurance. CI files record *achieved* assurance.**
+
+### 8.1 Type split — claim / evidence / result / scope / trust / support
+
+`bridge-checked` and `bounded-model-check` are different categories and must never share a field.
+
+| Value | Category |
+|---|---|
+| `documented` | specification state |
+| `tested`, `harness-tested` | evidence method / result |
+| `kani-bounded-model-check`, `creusot-deductive-check`, `verus-deductive-check` | verification method |
+| `callee-precondition-established`, `postcondition-holds` | claim |
+| `assumed` | trust state |
+| `unsupported` | support state |
+
+Required:
+
+```yaml
+required_assurance:
+  required_claims:
+    - callee-precondition-established
+  accepted_evidence_kinds:
+    - kani-bounded-model-check
+    - creusot-deductive-check
+    - verus-deductive-check
+  minimum_scope:
+    input_domain: queue_len_le_8
+    feature_set: default
+  trust_policy:
+    assumptions_allowed: []
+```
+
+Achieved:
+
+```yaml
+claim:
+  kind: callee-precondition-established
+  result: pass
+evidence:
+  kind: kani-bounded-model-check
+  verifier: kani
+  harness: dispatch_C002_bridge
+  scope:
+    input_domain: queue_len_le_8
+    unwind: 8
+    harness_hash: sha256:...
+trust:
+  assumptions: []
+support:
+  status: supported
+config:
+  toolchain: ...
+  target: ...
+  features: [default]
+```
+
+`proved` is retired. **`same-system-composed` stays out of the schema.** Reintroduce only when one live edge demonstrates: one common verifier model, formal caller and callee contracts, a checked call-site implication, explicit assumption handling, and a stored assurance result. Both current boundary artifacts cross systems (Creusot→Kani, Creusot→Verus); no demonstration path exists today.
+
+### 8.2 Bridge specification — call-site fact semantics
+
+A caller **postcondition** holds after the caller returns; the call to the callee happens *inside*. It cannot establish a callee precondition at an earlier call site. The real implication is:
+
+```
+caller preconditions ∧ caller invariants ∧ path condition ∧ prior call results
+   ⟹ callee precondition
+```
+
+Available facts at a call site: caller preconditions, type invariants, local assertions, branch conditions, loop invariants, previous callee postconditions, argument predicates, trusted environment assumptions. **The enclosing caller postcondition is normally not among them.**
+
+```yaml
+# specs/_bridges/BR-SCHED-TQ-001.yaml
+bridge_id: BR-SCHED-TQ-001
+boundary_id: scheduler_dispatch__to__task_queue_pop_ready
+callee_requirement: TaskQueue.C001
+available_contract_facts:
+  - obligation_id: Scheduler.C001
+    role: caller-precondition
+  - obligation_id: Scheduler.C003
+    role: invariant
+required_local_facts:
+  - fact_id: queue_ready_at_call
+    expression: "queue.has_ready_at_or_before(now)"
+target_expression: "TaskQueue.C001(args, callee_state)"
+protocol_class: pairwise
+```
+
+The assurance result records whether the verifier established the implication **at each call site**.
+
+### 8.3 Bridge logic — typed expression language (preferred)
+
+Prose `bridge_logic` cannot support machine assurance: the harness may assert a weaker property, G8 cannot check fidelity, and the result cannot show the declared bridge was checked.
+
+```yaml
+bindings:
+  caller_self: Scheduler
+  callee_self: TaskQueue
+  args:
+    now: Time
+premises:
+  - "caller_self.queue_ready(now)"
+  - "callee_self.invariant()"
+conclusion:
+  obligation_id: TaskQueue.C001
+```
+
+Generate the harness from this representation.
+
+**Temporary alternative:** make the harness itself normative and hash-pinned, and report `harness-tested` — **never `bridge-checked`**, because no machine relation exists between prose and harness.
+
+### 8.4 Assumption identity
+
+```yaml
+assumption_ref:
+  boundary_id: scheduler_dispatch__to__task_queue_pop_ready
+  tracking_issue: chainlink:713
+  assumption_hash: sha256:...
+```
+
+G1b enforces one tracking issue per assumption within a boundary. Sufficient for Prototype A and early bridge work. **Move to a registry before broad orchestrator use** — i.e. when an assumption spans boundaries, a method or boundary is renamed, one issue tracks several assumptions, history must survive text changes, or assumptions become shared project concepts.
+
+### 8.5 G14 — transitive closure plus well-foundedness
+
+Direct A→B checking passes while a C-level assumption sits below policy. G14 must:
+
+1. Load all required-guarantee dependencies.
+2. Compute the **transitive** dependency closure.
+3. Detect cycles.
+4. Evaluate each requirement with `satisfies(required_profile, achieved_record, context)`.
+5. Apply trust policy to **every assumption in the closure**.
+6. Fail if any required dependency is unsupported or below policy.
+
+**For cycles (CG6):** mutual satisfaction is not soundness. An O-SCC closes only with all of — every body meets its provided contracts; every bridge requirement passes; every assumption satisfies policy; **and an explicit well-foundedness discharge** (step index, decreasing measure, or temporal stratification showing no instantaneous circular dependence). An accepted interface contract alone does not close the release gate.
+
+---
+
+## 9. Call sites and C
+
+```yaml
+callsite_id: CS-SCHED-DISPATCH-004
+caller: Scheduler.dispatch
+callee: TaskQueue.pop_ready
+source:
+  path: crates/beast-rs-scheduler/src/dispatch.rs
+  symbol: "Scheduler::dispatch"
+  syntax_hash: sha256:...
+required_bridges:
+  - BR-SCHED-TQ-001
+```
+
+```yaml
+callsite_coverage:
+  discovered: 4
+  checked: 3
+  unresolved: 1
+coverage_scope:
+  extractor: coarse-rustc-callgraph
+  extractor_version: 0.1.0
+  supported_call_forms: [direct, monomorphized-generic]
+  unsupported_call_forms: [dynamic-trait, function-pointer]
+  completeness_claim: sound-for-supported-forms
+```
+
+Report **"all discovered call sites resolved."** Never "all call sites resolved."
+
+### 9.1 R1 / G16 risk policy
+
+| Call class | Missing from I |
+|---|---|
+| definite eligible direct call | **block** |
+| possible eligible dispatch | warn, or block promotion by risk |
+| unresolved indirect call | keep unresolved; never claim closure |
+| dynamic observation only | evidence, not completeness |
+| internal helper | ignore unless architecturally eligible |
+
+Unresolved calls are risk-tiered: **critical/high → block; medium → human decision; low → visible accepted limitation.** A blanket `unresolved > 0 → block` makes every dynamic-dispatch cluster unusable; risk tiering keeps the honest limitation visible without paralysis. Neither path permits a full-coverage claim.
+
+**Minimum viable `C_static`:** coarse compiler-backed extractor, **not MIR**. Classes: `definite-direct-call`, `possible-dispatch`, `unresolved-indirect-call`. Requirements: source-level method identity, target/feature provenance, stable call-site location, honest unresolved output, no regex-only completeness claim. MIR later for release-critical clusters or disputed edges.
+
+---
+
+## 10. Work packages
+
+Orchestrator unit: **one issue → one owner → one worktree → one PR**.
+
+**SCC grouping is advisory.** Modular verification handles many cycles; an O-SCC is a coupling warning and scheduling input. Group only when implementations must change together, a shared invariant spans both sides, a bridge cannot be checked independently, or intermediate states cannot pass CI.
+
+**Scheduling rule (recorded, not implied):** O edges point **caller → supplier**; implementation proceeds in **reverse dependency order — suppliers before callers** — unless modular assumptions permit parallel work.
+
+```yaml
+# ci/manifest/WP-MCMC-004.yaml — GENERATED, READ-ONLY
+schema: work-package-manifest/1.0
+work_package: WP-MCMC-004
+issue: chainlink:900
+depends_on:
+  - WP-MCMC-002
+coupling_notes:
+  - "O-SCC with proposal_kernel; separable — G14 closes at release"
+scheduling_rule: reverse-dependency-order
+
+functions:
+  - mcmc::Chain::step          # write-set consistent (§10.1)
+obligations:
+  - Chain.C002
+  - BR-CHAIN-PK-001
+
+provenance:
+  base_commit: a1b2c3d
+  promotion_id: PROM-MCMC-001
+  artifact_set_hash: sha256:...
+  toolchain: nightly-2026-05-01
+  target: x86_64-unknown-linux-gnu
+  features: [default]
+
+gate_integrity:                 # §5 of review — G13 validates BEFORE running any gate
+  - runner: scripts/closure_gate.py
+    hash: sha256:...
+  - runner: scripts/callsite_coverage.py
+    hash: sha256:...
+  - runner: scripts/validate_boundary_contracts.py
+    hash: sha256:...
+  - runner: docs/boundary-contract-schema.json
+    hash: sha256:...
+  - runner: docs/reliance-policy.md
+    hash: sha256:...
+
+write_policy:
+  allowed_write_set:
+    - crates/beast-rs-mcmc/src/
+    - crates/beast-rs-mcmc/tests/
+  protected_write_set:
+    - "crates/*/specs/**"
+    - "ci/manifest/**"
+    - "scripts/**"
+    - "docs/*-schema.json"
+    - "docs/reliance-policy.md"
+    - "**/Cargo.toml"
+    - "**/build.rs"
+    - "tests/harnesses/**"
+    - ".github/**"
+    - "rust-toolchain.toml"
+    - "**/kani.toml"
+    - "Justfile"
+  on_conflict: raise_change_request
+
+definition_of_done:
+  provided_guarantees:
+    - obligation_id: Chain.C002
+      required_assurance:
+        required_claims:
+          - postcondition-holds
+        accepted_evidence_kinds:
+          - creusot-deductive-check
+        minimum_scope:
+          feature_set: default
+        trust_policy:
+          assumptions_allowed: []
+      harness: chain_step_C002        # exact name, no wildcards
+  required_preconditions_to_establish:
+    - bridge_id: BR-CHAIN-PK-001
+      required_assurance:
+        required_claims:
+          - callee-precondition-established
+        accepted_evidence_kinds:
+          - creusot-deductive-check
+      callsite_requirement: all-discovered-resolved
+  required_guarantees:
+    - obligation_id: ProposalKernel.C003
+      assume_during_check: true
+      required_assurance:            # enforced by G14 at 8C, not here
+        required_claims:
+          - postcondition-holds
+        accepted_evidence_kinds:
+          - creusot-deductive-check
+  trusted_assumptions:
+    - assumption_ref:
+        boundary_id: mcmc_chain_step__to__proposal_kernel_propose
+        tracking_issue: chainlink:713
+        assumption_hash: sha256:...
+      risk: high
+      mitigations:
+        - kind: test
+          reference: tests/chain_detailed_balance.rs
+        - kind: human-risk-acceptance
+          reference: PROM-MCMC-001
+
+gates:
+  - id: build
+    runner: cargo
+    args:
+      - build
+      - -p
+      - beast-rs-mcmc
+  - id: prove
+    runner: cargo
+    args:
+      - creusot
+      - -p
+      - beast-rs-mcmc
+  - id: bridges
+    runner: cargo
+    args:
+      - test
+      - -p
+      - beast-rs-mcmc
+      - --test
+      - bridges
+  - id: callsites
+    runner: python
+    args:
+      - scripts/callsite_coverage.py
+      - --wp
+      - WP-MCMC-004
+  - id: realized
+    runner: python
+    args:
+      - scripts/extract_call_graph.py
+      - --check-against
+      - I
+
+failure_policy:
+  verifier_timeout: raise_change_request(kind=budget_or_assumption)
+  obligation_unprovable: raise_change_request(kind=contract_revision)
+  missing_callee_guarantee: raise_change_request(kind=missing_contract)
+  unintended_call_edge: raise_change_request(kind=interaction_revision)
+  unresolved_callsite: raise_change_request(kind=callsite_unresolved)
+  forbidden:
+    - weaken_or_delete_contract
+    - delete_or_stub_harness
+    - add_trusted_assumption
+    - edit_protected_paths
+    - modify_gate_implementation
+    - change_features_or_toolchain
+    - disable_test_registration
+
+report:
+  emit: ci/results/WP-MCMC-004.json
+  per_obligation_assurance_record: true
+```
+
+### 10.1 Validator rules
+
+- **Every owned function's source path is covered by `allowed_write_set`.** A package listing a callee in another crate without that crate in its write set is invalid.
+- `promotion_id` resolves; `artifact_set_hash` matches the current normative set.
+- Every `assumption_ref` resolves to a real boundary + tracking issue + hash.
+- **Every gate implementation hash matches before any gate runs** (G13 pre-flight).
+- Harness names are exact; no wildcards unless the runner explicitly supports them.
+- **Canonical manifest examples must pass their schema in CI.**
+
+---
+
+## 11. Evidence
+
+```json
+{ "id": "E-0143",
+  "kind": "requirement | source-artifact | observed-behavior | test | comment",
+  "claim": "pop_ready returns None only when no task has deadline <= now",
+  "origin": { "repository": "...", "commit": "a1b2c3d", "symbol": "TaskQueue::pop_ready",
+              "path": "src/queue.cpp", "content_hash": "sha256:...", "line_hint": "118-160" },
+  "semantic_disposition": "required | incidental | bug-compat | unspecified",
+  "lifecycle": "accepted | aspirational | deferred | rejected | out-of-scope",
+  "confidence": "high | medium | low", "mode": "P | R" }
+```
+
+The **`claim` field is required** — a hash and location identify bytes, not the proposition the analysis relies on. Splitting `semantic_disposition` from `lifecycle` stops `aspirational` acting as both authority and lifecycle state, and gives Mode R the `rejected` / `deferred` / `out-of-scope` states it needs.
+
+Conflict resolution:
+
+```yaml
+conflict_id: EC-004
+evidence: [E-0143, E-0201]
+status: resolved
+resolution:
+  selected_authority: E-0201
+  disposition_of_other: incidental
+  rationale: "compatibility policy: do not preserve the legacy defect"
+review:
+  reviewer: <human>
+  reviewed_at: 2026-08-2x
+```
+
+**G11 blocks unresolved conflicts only.**
+
+**Mode P authority:** compatibility policy → accepted dispositions → promoted contract model → C++ code/tests/oracle (evidence only). Differential testing finds counterexamples, never equivalence. **Mode P has a stronger falsifier than Mode R; its ledger does not close.** Governance profiles, not subtraction: Mode P adds a compatibility profile, Mode R a requirements-governance profile.
+
+---
+
+## 12. Feedback points — drift tabs
+
+| ID | Check | Stage | Severity |
+|---|---|---|---|
+| **G1a** | Full JSON Schema (draft-2020-12), incl. `additionalProperties: false` | 4 | hard error |
+| **G1b** | filename ↔ `boundary_id`; **computed eligibility mismatch**; tracking-issue uniqueness | 4 | hard error |
+| **G2** | Reference integrity — dangling `obligation_id` | 4 | hard error |
+| **G2+** | **Role safety only** — `A*` as guarantee, sentinel as guarantee, `applies_to` mismatch | 4 | hard error |
+| **G2++** | Declared assurance requirement present in I *(after §5.1 lands, not Prototype A)* | 4 | hard error |
+| **R2** | eligible I edge with no boundary and no reviewed exemption | 4 | block by edge class |
+| **R1** | realized call absent from I — risk-tiered (§9.1) | 8A | block / warn |
+| **G15** | non-pairwise protocol without artifact or valid debt record | 4 | block promotion |
+| **G16** | call-site coverage; unresolved risk-tiered | 8A | block / decide / accept |
+| **G4** | `required`/`bug-compat` evidence tracing to nothing | 4 | block |
+| **G5** | ungrounded obligation | 4 | warn on draft; **block at promotion attempt** |
+| **G11** | **unresolved** evidence conflict | 4 | block promotion |
+| **G6** | assumption lacking risk-tier-appropriate typed mitigations | 4, 8A | always visible |
+| **G12** | artifact consumed while unpromoted; manifest hash drift | 4.5→5 | hard error |
+| **G7** | achieved assurance written into a normative file; category mixing in an assurance field | 6, 8A | hard error |
+| **G8** | emitter fidelity — referenced guarantee not produced on that method (**no injection**) | 5 | hard error |
+| **G9** | obligation or mitigation regresses; bridge check fails | 8A / CI | block merge |
+| **G13** | protected path edited; **gate-implementation hash mismatch**; write-set/function mismatch; toolchain/feature drift | pre-gate, 8A/CI | hard error |
+| **G14** | `satisfies()` false anywhere in the **transitive** closure; **SCC without well-foundedness discharge** | 8C | block release |
+| **G17** | closure profile asserts `deductive` while owning verifier is Kani; profile bits inconsistent with degradation record | 8C | hard error |
+| **G10** | differential divergence unexplained by disposition *(Mode P)* | 8B | block |
+| **G10R** | property / metamorphic / model-based / mutation failures; stakeholder rejection *(Mode R)* | 8B | block |
+
+**Typed mitigations** (`test | monitor | proof | static-analysis | environment-control | human-risk-acceptance`), risk-tiered: critical → human approval + ≥1 technical mitigation; high → human approval + test/analysis/environment control; medium → issue + plan; low → issue + explicit acceptance. **Never force a test for an untestable assumption.**
+
+**Fixpoint:** zero mechanical findings is a false fixed point. Convergence needs schema clean, no dangling refs, no *unresolved* conflicts, eligible edges covered or exempted, roles valid, obligations grounded, **promotion receipt matching an explicit manifest**, realized calls matching within compatible configurations, coverage reported with scope, assurance records present, acceptance passed, **G14 transitive closure satisfied**, and **a closure profile or degradation record accepted**. Five iterations is a safety limit, not evidence of correctness.
+
+---
+
+## 13. Build order
+
+**Before Prototype A**
+1. Fix filenames (`__to__`, `boundary_id` == stem, flat).
+2. G1a/G1b split with a real draft-2020-12 validator.
+3. **G2+ = role safety only** (no assurance-target check yet).
+4. Publish `docs/reliance-policy.md`.
+5. Treat `PartitionedTreeLikelihood.A006` as an expected migration failure.
+
+**Prototype A** — G2+ against boundary v1.0.
+
+**Ship-early value track** (independent of closure)
+6. Work-package manifest + validator, **including gate-integrity hashing** and change-request routing. This is the write-set freeze and spec-weakening prohibition — the value that does not depend on bridges or closure.
+
+**Before I-schema**
+7. Detached receipt with explicit `artifact_manifest`.
+8. Computed eligibility + separate exemption objects with `review` blocks.
+9. Assurance requirement located in I (`reliances[].required_assurance`).
+10. `realization.requirement` + `config_scope`.
+11. Protocol classification and debt records.
+12. Evidence `claim`, `semantic_disposition` / `lifecycle` split, conflict resolution.
+
+**Then**
+13. Human gold-set prototype — precision, recall, **and omission analysis**.
+14. Typed bridge expression language + call-site fact semantics; harness generation from the typed form.
+15. Assurance type split in schemas; `satisfies()` mechanism; profile authorship as governed policy.
+16. Coarse `C_static` extractor with honest unresolved classes; R1/G16 risk tiers.
+17. Stage 8A; then G14 transitive closure + CG6 discharge; then closure profiles and degradation records.
+
+---
+
+## 14. First end-to-end target
+
+Pick a **single-verifier, pairwise, non-generic, enum-free** cluster. Ranked by deductive-closure value:
+
+| Rank | Cluster | Verifier | Concepts | Intra-edges | Why |
+|---|---|---|---|---|---|
+| **pilot** | **phylogenetic-tree** | Creusot | 7 | 5 | enum-free, smallest closable unit — fastest first closure |
+| **scale** | **mcmc-chain** | Creusot | 20 | 19 | 0 enum, 0 cross-verifier — **largest deductive-closure demonstration available** |
+| **generalize** | **felsenstein-pruning** | Verus | 9 | 5 | enum-free; proves the mechanism is verifier-agnostic across two deductive systems |
+
+**Avoid enum-bearing clusters for the first target** — `tree-prior`, `clock-model`, `site-rate-heterogeneity`, `molecular-evolution-likelihood`. `kind: enum` is the repo's dispatch mechanism and imports variant-composition semantics that do not belong in a first closure proof.
+
+**Order:** pilot on `phylogenetic-tree` → scale to `mcmc-chain` → port to `felsenstein-pruning`. The two live cross-verifier boundaries (Creusot→Kani, Creusot→Verus) and the analysis-configuration cluster's latent Creusot↔Kani edges receive an explicit `harness-tested` ceiling with a degradation record and a tracking issue.
+
+---
+
+## 15. Open items
+
+- Does the typed bridge expression language need a formal semantics document, or is "compiles to a harness the owning verifier checks" a sufficient definition within a single verifier system?
+- What is the concrete well-foundedness discharge format for an O-SCC (CG6) — a declared measure with a proof obligation, or a temporal stratification argument reviewed by a human?
+- At what cluster count does composite assumption identity fail and the registry become mandatory?
+- Does `analysis-configuration` warrant re-decomposition to eliminate its latent cross-verifier edges, or is a permanent degradation record the right answer there?

@@ -7,6 +7,7 @@
 - **Bridge semantics** — closable **within** a verifier system (bounded for Kani, deductive for Creusot/Verus); **capability-gapped across** systems, ceiling `harness-tested`.
 - **G14 SCC closure** — engineering **plus an explicit non-circularity / induction discharge**. The reachability is free; the cycle rule is not.
 - **Closure** — a **per-cluster property with a kind** (`deductive` | `bounded`) under a declared profile. Degraded clusters carry a degradation record. **Never a global pipeline guarantee.**
+- **Feature witnesses (§16)** — a deterministic ∃-witness layer for layer-2 pure queries: evidence, never assurance, never in `accepted_evidence_kinds`, **no effect on `closure_kind`**. Independent of the I/O/bridge/closure track; gated on the project descriptor only.
 
 **The value does not depend on closure.** It comes from the manifest freezing the write set, forbidding spec-weakening, and routing every shortfall to a change request. That is realizable at **Prototype A + the work-package manifest**, before any bridge or closure work.
 
@@ -18,6 +19,7 @@
 | Bridge implementation | **within-verifier only** | call-site fact semantics, typed bridge expression language |
 | Cross-verifier bridges | **capability-gapped** | no soundness theorem exists; `harness-tested` ceiling |
 | Release closure (G14) | **conceptually sound** | transitive closure + SCC well-foundedness discharge |
+| Feature witnesses (§16) | **yes**, after project descriptor | canonical numeric-artifact question (§16 open items), `witness_required` placement |
 
 ---
 
@@ -738,10 +740,13 @@ review:
 | **G17** | closure profile asserts `deductive` while owning verifier is Kani; profile bits inconsistent with degradation record | 8C | hard error |
 | **G10** | differential divergence unexplained by disposition *(Mode P)* | 8B | block |
 | **G10R** | property / metamorphic / model-based / mutation failures; stakeholder rejection *(Mode R)* | 8B | block |
+| **G18** | witness coverage — every `witness_required` query has a witness spec and a generated rendering | 4 | hard error |
+| **G19** | witness determinism — regenerate, compare `value_hash` (not the rendering) | 8A / CI | hard error |
+| **G20** | degenerate witness — renderer actual ≠ declared (**hard error at generation**, not this gate); declared-expectation mismatch (distribution/fixture/coverage_region) | 4.5 | warn; block at promotion if unresolved |
 
-**Typed mitigations** (`test | monitor | proof | static-analysis | environment-control | human-risk-acceptance`), risk-tiered: critical → human approval + ≥1 technical mitigation; high → human approval + test/analysis/environment control; medium → issue + plan; low → issue + explicit acceptance. **Never force a test for an untestable assumption.**
+**Typed mitigations** (`test | monitor | proof | static-analysis | environment-control | human-risk-acceptance | witness`), risk-tiered: critical → human approval + ≥1 technical mitigation; high → human approval + test/analysis/environment control; medium → issue + plan; low → issue + explicit acceptance. **Never force a test for an untestable assumption.** `witness` is acceptable at **`low` only** — it is an example, one fixture wide; order of strength is witness < example-test < property-test < proof.
 
-**Fixpoint:** zero mechanical findings is a false fixed point. Convergence needs schema clean, no dangling refs, no *unresolved* conflicts, eligible edges covered or exempted, roles valid, obligations grounded, **promotion receipt matching an explicit manifest**, realized calls matching within compatible configurations, coverage reported with scope, assurance records present, acceptance passed, **G14 transitive closure satisfied**, and **a closure profile or degradation record accepted**. Five iterations is a safety limit, not evidence of correctness.
+**Fixpoint:** zero mechanical findings is a false fixed point. Convergence needs schema clean, no dangling refs, no *unresolved* conflicts, eligible edges covered or exempted, roles valid, obligations grounded, **promotion receipt matching an explicit manifest**, realized calls matching within compatible configurations, coverage reported with scope, assurance records present, acceptance passed, **G14 transitive closure satisfied**, **a closure profile or degradation record accepted**, and — where a project declares feature witnesses — **witness coverage and determinism clean, with no witness ever read as a substitute for the assurance record beside it**. Five iterations is a safety limit, not evidence of correctness.
 
 ---
 
@@ -798,3 +803,106 @@ Pick a **single-verifier, pairwise, non-generic, enum-free** cluster. Ranked by 
 - What is the concrete well-foundedness discharge format for an O-SCC (CG6) — a declared measure with a proof obligation, or a temporal stratification argument reviewed by a human?
 - At what cluster count does composite assumption identity fail and the registry become mandatory?
 - Does `analysis-configuration` warrant re-decomposition to eliminate its latent cross-verifier edges, or is a permanent degradation record the right answer there?
+- Does the witness renderer emit a canonical numeric result artifact separate from the rendering, so `value_hash` (§16.1) is renderer-independent? If not, that is the first build step for §16, before any gate work.
+- `witness_required` (§16.1): a hand-set marker on a query, living where? Directly in the concept spec (a `concept-to-code` schema extension — its `query` `$def` is `additionalProperties: false`, so this is a real schema change, not a soft addition) or in a pipeline-owned feature-declaration list keyed by `crate::Concept::query` (consistent with keeping origin/provenance out of `concept-to-code`, per the modification report). Human-owned at promotion either way — the placement question is only about which repo owns the field.
+- Should the feature ledger's `implementation_observed` feed the orchestrator's work-package readiness check directly, or stay advisory? Advisory first; promote to a scheduling input only after the witness renderer itself is under `gate_integrity`.
+
+---
+
+## 16. Feature witnesses
+
+An ∃-witness layer for layer-2 **pure queries**: evaluate the query on a fixed fixture, render the result deterministically. Same epistemic status as a Gherkin scenario — it can *falsify* (a witness that renders all-constant or crashes is wrong) but never *establish* the ∀ over all inputs. **Evidence, never assurance; never in `accepted_evidence_kinds`; no effect on `closure_kind`.** A cluster with full witness coverage and zero verifier results is still `unsupported` — the feature ledger (§16.4) must show that plainly, never collapse it.
+
+It is stronger than an ordinary scenario in two ways that matter here: **deterministic** (hashable, pinnable in the promotion manifest) and **total over a declared feature set** (coverage becomes a mechanical check, not a by-eye read of a contact sheet).
+
+### 16.1 Witness spec
+
+```
+specs/_witnesses/<concept>.<query>.json     ← normative: fixture + determinism claim + expectation
+docs/witnesses/<concept>.<query>.svg        ← generated: the rendering
+docs/witnesses/_contact_sheet.svg            ← generated: the Stage 4.5 review projection
+```
+
+```yaml
+# specs/_witnesses/task_queue.load_factor.json
+witness_id: W-TQ-LOAD-FACTOR
+concept: TaskQueue
+query: load_factor                 # must resolve to a query with pure: true (G2-style ref check)
+fixture:
+  fixture_id: FX-QUEUE-BOTTOM-ROW
+  seed: 0
+  description: "8-slot queue, 3 ready tasks front-loaded"
+renderer: scalar_field_svg
+expectation:                       # §16's A2 correction: declare intent, don't infer it
+  renderer: scalar_field_svg
+  coverage_region: bottom-row      # full-grid | bottom-row | corridor | single-cell | project-defined
+  value_distribution: must-vary    # must-vary | constant-allowed
+  fixture_family: FX-BOTTOM-ROW
+determinism:                       # normative contract: the FEATURE VALUE is stable, not the rendering
+  value_hash: sha256:...           # hash of the canonical scalar/data-model result, renderer-independent
+  claim: byte-identical-across-runs
+  platforms: [x86_64-unknown-linux-gnu]
+output:                            # generated rendering; hashed for change-tracking only, never gates promotion
+  path: docs/witnesses/task_queue.load_factor.svg
+  render_hash: sha256:...
+  renderer_actual: scalar_field_svg   # what actually ran — G20 compares against `renderer` above
+review:
+  reviewer: <human>
+  reviewed_at: 2026-08-2x
+```
+
+**Why split `value_hash` from `render_hash`:** SVG serialization determinism is fragile — float-to-string formatting, locale, path-coordinate rounding, attribute ordering, font metrics, and renderer-library version all perturb the bytes with no change to the computed value. Pinning the picture would couple the promotion receipt to rendering incidentals; a contributor regenerating docs with a newer renderer would invalidate an unrelated receipt. `value_hash` is the normative determinism contract (G19); `render_hash` is change-tracking only and never gates anything. Same discipline as elsewhere in this plan: pin the data, not the projection.
+
+**`witness_required`** marks a query as a declared feature (open item, §15) — G18 checks coverage *relative to* the declared set, exactly as R2 proves coverage relative to accepted I and no further. A query nobody declared is invisible to G18; completeness of the feature set stays a human/promotion concern, same boundary as everywhere else in this plan.
+
+### 16.2 Gates — G18 / G19 / G20
+
+- **G18 — witness coverage.** Every query marked `witness_required` has a witness spec and a generated rendering. Stage 4, hard error.
+- **G19 — witness determinism.** Regenerate, compare `value_hash` — never `render_hash`. Stage 8A / CI, hard error. Cheap and worth its own gate: determinism is a real contract on the renderer, not a heuristic.
+- **G20 — degenerate witness, against the declared `expectation`, not a global heuristic.** "All-constant output" is correct for a single-cell fixture and a defect for a full-field one — a global anomaly detector both false-positives and false-negatives. Check instead: `renderer_actual` ≠ declared `renderer` → **hard error at generation time**, not this gate — a renderer must never silently fall back to a degraded rendering (e.g. a text/table strip standing in for a field plot); it must fail loudly the moment it cannot handle the declared shape. `value_distribution: must-vary` while output is constant → fail. `coverage_region` inconsistent with `fixture_family` → fail. Everything else here is Stage 4.5, warn, block at promotion if unresolved — this is what turns a by-eye contact-sheet catch into a mechanical one, and it is the only thing that distinguishes intentional partial coverage (a feature only defined along a path) from fixture drift.
+
+### 16.3 Contact sheet — Stage 4.5 review surface
+
+Same role as any other generated diagram: read-only, never editable, derived from normative inputs. It is what a human actually looks at at the moment of promotion — which is exactly why it needs two fixed controls, not because it is unreliable but because a grid of uniformly green panels reads as proof whether or not it is one:
+
+1. A fixed banner: **∃-witness evidence — not verification.**
+2. Each panel carries the owning obligation's `assurance_status` and the cluster's `closure_kind` beside it. A reviewer must see "witness green / assurance `unsupported`" side by side — coverage must never be readable as proof by omission.
+
+### 16.4 Feature ledger — the tracking artifact
+
+A **generated projection**, same tier as the contact sheet: read-only, never editable, derived from normative inputs. Not a new normative file — the normative requirement lives in policy (16.5), enforcement lives in G18–G20, this is visibility only.
+
+```yaml
+# ci/results/feature_ledger.json — GENERATED, READ-ONLY
+generated_from:
+  concept_specs_hash: sha256:...
+  witness_specs_hash: sha256:...
+  assurance_results_hash: sha256:...
+features:
+  - feature: TaskQueue.load_factor
+    witness_required: true
+    witness_present: true          # G18
+    implementation_observed: true  # a witness rendered without panic -> body executes on the fixture
+    determinism: pass              # G19 (value_hash)
+    degeneracy: ok                 # G20 disposition
+    assurance_status: unsupported  # from the obligation's assurance record
+    owning_cluster: scheduling
+    closure_kind: n/a
+```
+
+**The rule that keeps it honest — two columns, never merged:**
+
+- `implementation_observed` = the body **executes** on the fixture and yields a stable value. A weak liveness fact, genuinely useful: it distinguishes an implemented feature from an `unimplemented!()` stub, cheaply, because a stub cannot render a stable witness. Usable as an *orchestration signal* — a work package whose features lack a green witness are not yet implemented (§15's advisory-first open item).
+- `assurance_status` = the **contract** is established (`unsupported | tested | bounded | deductive`). A green witness proves the body runs on one fixture; it proves nothing about correctness, completeness over all inputs, or contract conformance.
+
+Never write `implementation_observed: true` as `implementation-proved` in an assurance record. Exactly the same discipline as `closure_kind` vs. coverage elsewhere in this plan: two dimensions, shown side by side, never collapsed into one bit.
+
+### 16.5 Consequences
+
+- **Promotion manifest.** Witness specs and `value_hash` join `artifact_manifest` (§7.1) — a fixture change or a value change invalidates the receipt, correctly, since the witness was part of what was reviewed. `render_hash` does **not** gate promotion.
+- **`protected_write_set` + `gate_integrity`.** The renderer is gate-adjacent code — hash-pin it (§10, §13). An implementing agent that can edit the renderer can make a wrong feature look right.
+- **Mitigation kind.** `witness` is a typed mitigation (§12) acceptable at risk tier **`low` only** — it is an example, one fixture wide. Prefer a property test where the feature is a pure scalar query; it is nearly as cheap and strictly stronger. Order: witness < example-test < property-test < proof.
+
+### 16.6 Boundary
+
+Not layer 3, not a bridge, no effect on `closure_kind`. This section adds an evidence source and two generated reports; it does not touch S/I/C/O, promotion authority, or the G14 closure mechanism. Keep the separation sharp, or the contact sheet starts reading as proof — the exact failure mode the rest of this plan is built to avoid.

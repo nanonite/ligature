@@ -78,3 +78,35 @@ An earlier draft of the reliance-graph plan hardcoded a crate-name regex
 is just a path there today — and the current plan drops it in favor of the
 project descriptor (gap #1) declaring each project's own convention. No
 concept-to-code change follows from this.
+
+### 5. `witness_required` marker on a query — open, pending your decision
+
+The new feature-witness layer (plan §16) needs a per-query marker recording
+"this is a declared feature and must have a witness." The natural spot is on
+the query itself, next to `pure: true`:
+
+```json
+{ "english": "...", "rust_sig": "fn load_factor(&self) -> f64",
+  "pure": true, "witness_required": true }
+```
+
+But `schemas/spec.schema.json`'s `query` `$def` has `additionalProperties:
+false` (confirmed by reading the schema directly), so this is a **real
+schema change** on your side, not something a consuming project can bolt on
+quietly the way `depends_on` was added at the top level. Two options:
+
+1. **Add `witness_required: boolean` (optional, default `false`) to the
+   `query` `$def` in concept-to-code.** Keeps the marker co-located with the
+   thing it describes; `emit_stubs.py`'s query handling (`emit_stubs.py:194`)
+   only reads `pure` today and wouldn't need to change.
+2. **Don't touch concept-to-code — keep the marker in a pipeline-owned
+   feature-declaration list** keyed by `crate::Concept::query`, the same
+   pattern used for evidence origin (gap #3): reference into concept-to-code
+   by name, don't extend its schema.
+
+Not resolved yet. Option 1 is lower-friction for consumers (no shadow list
+to keep in sync) but adds a field to your schema whose only reader lives in
+a different repo. Option 2 keeps concept-to-code untouched but reintroduces
+a parallel list that can drift from the concept specs it describes. Tracked
+as chainlink issue #33 in `ligature-workspace`; will report back once
+decided rather than guessing on a schema change.

@@ -19,7 +19,7 @@
 | Bridge implementation | **within-verifier only** | call-site fact semantics, typed bridge expression language |
 | Cross-verifier bridges | **capability-gapped** | no soundness theorem exists; `harness-tested` ceiling |
 | Release closure (G14) | **conceptually sound** | transitive closure + SCC well-foundedness discharge |
-| Feature witnesses (§16) | **yes**, after project descriptor | canonical numeric-artifact question (§16 open items), `witness_required` placement |
+| Feature witnesses (§16) | **yes**, after project descriptor | renderer canonical-numeric-result build-out (§16.1) — confirmed not yet built |
 
 ---
 
@@ -803,8 +803,8 @@ Pick a **single-verifier, pairwise, non-generic, enum-free** cluster. Ranked by 
 - What is the concrete well-foundedness discharge format for an O-SCC (CG6) — a declared measure with a proof obligation, or a temporal stratification argument reviewed by a human?
 - At what cluster count does composite assumption identity fail and the registry become mandatory?
 - Does `analysis-configuration` warrant re-decomposition to eliminate its latent cross-verifier edges, or is a permanent degradation record the right answer there?
-- Does the witness renderer emit a canonical numeric result artifact separate from the rendering, so `value_hash` (§16.1) is renderer-independent? If not, that is the first build step for §16, before any gate work.
-- `witness_required` (§16.1): a hand-set marker on a query, living where? Directly in the concept spec (a `concept-to-code` schema extension — its `query` `$def` is `additionalProperties: false`, so this is a real schema change, not a soft addition) or in a pipeline-owned feature-declaration list keyed by `crate::Concept::query` (consistent with keeping origin/provenance out of `concept-to-code`, per the modification report). Human-owned at promotion either way — the placement question is only about which repo owns the field.
+- **Resolved:** the witness renderer does not yet emit a canonical numeric result artifact separate from the rendering. Building that artifact is the first build step under W1 (§16.1), a prerequisite for `value_hash` — not open, just sequenced first.
+- **Resolved:** `witness_required` (§16.1) is added to `concept-to-code`'s `query` `$def` as an optional `boolean` (default `false`), co-located with `pure: true`. Reported upstream as gap #5 in `docs/concept-to-code-modifications.md`; not applied to the vendored submodule directly.
 - Should the feature ledger's `implementation_observed` feed the orchestrator's work-package readiness check directly, or stay advisory? Advisory first; promote to a scheduling input only after the witness renderer itself is under `gate_integrity`.
 
 ---

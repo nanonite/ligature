@@ -1,0 +1,7 @@
+{
+  "schema_version": "1.0",
+  "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+  "caller": { "concept": "Scheduler", "method": "dispatch" },
+  "callee": { "concept": "TaskQueue", "method": "pop_ready" },
+  "callee_guarantees": ["TaskQueue.C003"]
+}

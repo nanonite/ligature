@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/boundary-contract-schema.json",
+  "title": "Boundary contract (O) — v1.0",
+  "description": "plan.md §2/§5. One per crates/*/specs/_boundaries/<caller_concept>_<caller_method>__to__<callee_concept>_<callee_method>.json. Prototype A scope: role safety only (G2+) -- no assurance-target field yet, that lands with the I-schema (M3).",
+  "type": "object",
+  "required": ["schema_version", "boundary_id", "caller", "callee", "callee_guarantees", "review"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "boundary_id": {
+      "type": "string",
+      "description": "Must equal the filename stem exactly (G1b, enforced separately by scripts/validate_boundary_naming.py)."
+    },
+    "caller": { "$ref": "#/$defs/role" },
+    "callee": { "$ref": "#/$defs/role" },
+    "callee_guarantees": {
+      "type": "array",
+      "description": "Callee POSTCONDITION/INVARIANT relied on (docs/reliance-policy.md resolution rule). Never a callee precondition (-> bridge spec instead) and never an adversary case (-> evidence only, G2+ rejects it here).",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$",
+        "description": "<Concept>.<id>, e.g. TaskQueue.C003. Deliberately permissive at the schema layer (accepts the C-obligation shape and the A-adversary shape alike) -- G1a checks structure only. Whether the id names a real obligation, belongs to the right concept, and isn't an adversary case is G2+'s job (role safety), not this schema's -- see scripts/validate_boundary_contracts.py."
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/assumption_ref" }
+    },
+    "review": { "$ref": "#/$defs/review" }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "required": ["concept", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "concept": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*$",
+          "description": "PascalCase, matches the concept-to-code 'concept' field convention."
+        },
+        "method": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "snake_case Rust method name."
+        }
+      }
+    },
+    "assumption_ref": {
+      "type": "object",
+      "required": ["boundary_id", "tracking_issue", "assumption_hash"],
+      "additionalProperties": false,
+      "properties": {
+        "boundary_id": { "type": "string" },
+        "tracking_issue": { "type": "string" },
+        "assumption_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": { "type": "string" },
+        "reviewed_at": { "type": "string", "format": "date" }
+      }
+    }
+  }
+}

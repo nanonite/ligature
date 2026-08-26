@@ -1,0 +1,13 @@
+{
+  "_note": "Minimal concept-spec fixture simulating docs/concept-to-code-modifications.md gap #6 already applied (constraint.id present) -- current concept-to-code does not have this field yet.",
+  "concept": "TaskQueue",
+  "constraints": [
+    {
+      "id": "C003",
+      "english": "pop_ready returns None only when no task has deadline <= now",
+      "logic": "true",
+      "kind": "postcondition",
+      "applies_to": ["pop_ready"]
+    }
+  ]
+}

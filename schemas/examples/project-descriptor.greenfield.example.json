@@ -48,6 +48,7 @@
     { "path": "scripts/closure_gate.py" },
     { "path": "scripts/callsite_coverage.py" },
     { "path": "scripts/validate_boundary_contracts.py" },
+    { "path": "scripts/validate_boundary_naming.py" },
     { "path": "docs/boundary-contract-schema.json" },
     { "path": "docs/reliance-policy.md" }
   ],

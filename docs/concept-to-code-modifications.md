@@ -111,7 +111,7 @@ required in `emit_stubs.py` — its query handling only reads `pure` today
 request to apply in the concept-to-code repo. Tracked as chainlink issue #33
 in `ligature-workspace`.
 
-### 6. Stable obligation identifiers on `command`/`constraint` — open, blocking M0
+### 6. Stable obligation identifier on `constraint` — decided: add `id`
 
 Found while building the boundary-artifact schema (chainlink #9/#11): checked
 `schemas/spec.schema.json`'s `command` and `constraint` `$def`s directly
@@ -133,25 +133,20 @@ hashing, the whole `additionalProperties: false` discipline) — reordering
 constraints with zero semantic change would silently renumber every
 downstream reference.
 
-Two real options, not decided yet:
+Narrower than it first looked: `query` and `command` already have a de
+facto stable identifier — their `rust_sig` embeds the Rust function name
+(e.g. `fn load_factor(&self) -> f64`), which is already how §16.1's witness
+specs reference a query (`query: load_factor`) and is deterministic and
+stable without any schema change. **`constraint` is the only one of the
+three with nothing to extract** — no `rust_sig`, nothing but `english` text
+and array position.
 
-1. **Add `id: string` (required, pattern e.g. `^C\d{3}$`) to `constraint`,
-   and a parallel scheme to `command`.** Author-assigned at Step A time, like
-   every other id in this ecosystem (`boundary_id`, `witness_id`,
-   `promotion_id`). Stable under reordering by construction. Requires a
-   `concept-to-code` schema change (real, `additionalProperties: false`
-   again) plus updating `spec_workspace.py`/`emit_stubs.py` anywhere they
-   iterate constraints positionally, and every existing spec JSON in any
-   project already using concept-to-code needs backfilling.
-2. **Content-addressed id** — hash the `english` text (e.g. `C-a3f9e1`).
-   Stable across reordering, changes only when the wording changes (arguably
-   correct: a reworded precondition *is* a different obligation). No author
-   burden, no backfill script needed beyond a one-time hash pass. Loses the
-   readable `C001`/`C002` convention used throughout the plan's own worked
-   examples — every reference becomes a hash fragment.
-
-Recommend option 1 for readability alone, but this blocks real boundary/
-work-package schema work (#9, #11, and eventually the I-schema issues in
-M3) until decided — not something to guess silently given it means another
-concept-to-code schema change plus a backfill obligation for any project
-already using it. Tracked as a new chainlink issue.
+**Decided: add `id: string` (required, pattern `^C\d{3}$`) to `constraint`
+in `concept-to-code`.** Author-assigned at Step A time, like every other id
+in this ecosystem (`boundary_id`, `witness_id`, `promotion_id`). Stable
+under reordering by construction, unlike a positional scheme. This is a real
+schema change (`additionalProperties: false` on `constraint`) plus a
+backfill of `id` onto every existing constraint in any project already using
+concept-to-code — worth stating plainly to whoever applies it, not
+minimizing. `command`/`query` need no change. Tracked as chainlink issue #40
+in `ligature-workspace`.

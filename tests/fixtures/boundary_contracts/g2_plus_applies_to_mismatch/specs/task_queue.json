@@ -1,0 +1,12 @@
+{
+  "concept": "TaskQueue",
+  "constraints": [
+    {
+      "id": "C003",
+      "english": "peek_next never mutates queue state",
+      "logic": "true",
+      "kind": "postcondition",
+      "applies_to": ["peek_next"]
+    }
+  ]
+}

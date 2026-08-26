@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+  "caller": { "concept": "Scheduler", "method": "dispatch" },
+  "callee": { "concept": "TaskQueue", "method": "pop_ready" },
+  "callee_guarantees": ["TaskQueue.C003"],
+  "assumptions": [
+    {
+      "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+      "tracking_issue": "chainlink:713",
+      "assumption_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+      "tracking_issue": "chainlink:713",
+      "assumption_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "review": { "reviewer": "example-reviewer", "reviewed_at": "2026-08-25" }
+}

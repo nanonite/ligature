@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+  "caller": { "concept": "Scheduler", "method": "enqueue" },
+  "callee": { "concept": "TaskQueue", "method": "pop_ready" },
+  "callee_guarantees": ["TaskQueue.C003"],
+  "review": { "reviewer": "example-reviewer", "reviewed_at": "2026-08-25" }
+}

@@ -100,12 +100,14 @@ Fields, and why each exists:
 crates/*/specs/_boundaries/<caller_concept>_<caller_method>__to__<callee_concept>_<callee_method>.json
 ```
 
-- **Flat files.** `validate_boundary_contracts.py` uses `glob("*.json")` — no recursion. Nested layouts are silently ignored.
+- **Flat files.** An earlier tool this rule is inherited from used `glob("*.json")` — no recursion, so nested layouts were silently ignored rather than rejected. `scripts/validate_boundary_naming.py` (chainlink #8) fixes this the other way: it scans recursively and treats anything not directly inside a `_boundaries/` directory as a hard violation, so a nested file surfaces instead of vanishing.
 - **Doubled underscores on both sides of `to`.** Single underscores will not match.
 - **`boundary_id` == filename stem**, exactly.
 - Validate any generator against a live artifact byte-for-byte. Do not re-derive the rule.
 
-Concept schema `$defs` (8): `adversary_case`, `command`, `constraint`, `kani_f64_check`, `obligation_id`, `query`, `source_reference`, `structural_opt_out`. Crate names match `^beast-rs-[a-z]+`. Every canonical example is copied from a passing live artifact and generalized — hand-written examples are untrustworthy against `additionalProperties: false`.
+`scripts/validate_boundary_contracts.py` implements the full G1a/G1b/G2+ chain against `docs/boundary-contract-schema.json` (chainlink #9/#11); fixtures and the deliberate-failure regression case (chainlink #12) live under `tests/fixtures/boundary_contracts/`.
+
+concept-to-code's current concept schema `$defs` (6, checked directly against `vendor/concept-to-code/schemas/spec.schema.json`): `kani_f64_check`, `query`, `command`, `constraint`, `adversary_case`, `source_reference`. **Neither `command` nor `constraint` carries a stable id** — `query`/`command` have a de facto one via the function name embedded in `rust_sig`, but `constraint` has nothing beyond `english` text and array position, which the whole obligation-reference scheme (`callee_guarantees: [TaskQueue.C003]`, work-package `obligations`, `reliances[].obligation_id`) depends on. See `docs/concept-to-code-modifications.md` gap #6 — decided: add `id: string` to `constraint` upstream, not yet applied. Crate naming is never hardcoded by the pipeline; it's a per-project declaration in the project structure descriptor (§1.1). Every canonical example is copied from a passing live artifact and generalized — hand-written examples are untrustworthy against `additionalProperties: false`.
 
 **Semantic policy** (`docs/reliance-policy.md`), resolving the schema-prose vs. G2+ conflict:
 

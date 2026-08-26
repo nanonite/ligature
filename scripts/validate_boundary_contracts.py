@@ -38,6 +38,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from schema_utils import make_validator  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
 from validate_boundary_naming import check_file as check_naming  # noqa: E402
 
@@ -80,9 +81,13 @@ def _pascal_to_snake(name: str) -> str:
 
 
 def load_schema() -> dict:
-    schema = json.loads(SCHEMA_PATH.read_text())
-    Draft202012Validator.check_schema(schema)
-    return schema
+    return json.loads(SCHEMA_PATH.read_text())
+
+
+def load_validator() -> Draft202012Validator:
+    """Canonical entry point -- use this, not Draft202012Validator(load_schema())
+    directly, or format: date silently stops being enforced (see schema_utils.py)."""
+    return make_validator(load_schema())
 
 
 def gate_g1a(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
@@ -327,8 +332,7 @@ def validate_file(
 
 
 def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]:
-    schema = load_schema()
-    validator = Draft202012Validator(schema)
+    validator = load_validator()
     findings: list[Finding] = []
     for path in find_boundary_files(root):
         if path.suffix != ".json":
@@ -348,7 +352,12 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    findings = validate(args.root, args.specs_search_root)
+    try:
+        findings = validate(args.root, args.specs_search_root)
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
 

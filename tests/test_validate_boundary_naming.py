@@ -11,6 +11,10 @@ FIXTURES = ROOT / "tests" / "fixtures" / "boundaries"
 
 
 class ValidateBoundaryNamingTest(unittest.TestCase):
+    def test_missing_root_raises_instead_of_reporting_clean(self):
+        with self.assertRaises(FileNotFoundError):
+            validate(FIXTURES / "this_directory_does_not_exist")
+
     def test_valid_layout_has_no_violations(self):
         violations = validate(FIXTURES / "valid")
         self.assertEqual(violations, [], [str(v) for v in violations])

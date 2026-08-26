@@ -7,7 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import review_checkpoint  # noqa: E402
 from review_checkpoint import (  # noqa: E402
+    SKIP_VALIDATION,
     ApprovalRefused,
     approve,
     auto_promote_if_mechanical,
@@ -15,8 +17,7 @@ from review_checkpoint import (  # noqa: E402
     requires_human_checkpoint,
     stage_draft,
 )
-from validate_boundary_contracts import load_schema, validate_data  # noqa: E402
-from jsonschema import Draft202012Validator  # noqa: E402
+from validate_boundary_contracts import load_validator, validate_data  # noqa: E402
 
 
 class ReviewCheckpointTest(unittest.TestCase):
@@ -63,7 +64,10 @@ class ReviewCheckpointTest(unittest.TestCase):
 
     def test_approve_writes_target_and_removes_draft_and_logs(self):
         draft = stage_draft({"boundary_id": "a__to__b"}, self.target)
-        result = approve(draft, self.target, reviewer="alice", reviewed_at="2026-08-25", review_log=self.log)
+        result = approve(
+            draft, self.target, reviewer="alice", reviewed_at="2026-08-25",
+            review_log=self.log, validate_fn=SKIP_VALIDATION,
+        )
 
         self.assertFalse(draft.exists())
         self.assertTrue(self.target.exists())
@@ -75,6 +79,25 @@ class ReviewCheckpointTest(unittest.TestCase):
         self.assertEqual(len(log_lines), 1)
         entry = json.loads(log_lines[0])
         self.assertEqual(entry["reviewer"], "alice")
+
+    def test_approve_without_validate_fn_raises_instead_of_silently_skipping(self):
+        """Review finding D1 (round 2): validate_fn used to default to
+        None, which silently meant 'skip validation' -- any caller that
+        forgot to wire one in approved with no gate at all. Omitting it
+        entirely must now be a hard TypeError, not a silent bypass."""
+        draft = stage_draft({"boundary_id": "a__to__b"}, self.target)
+        with self.assertRaises(TypeError):
+            approve(draft, self.target, reviewer="alice", reviewed_at="2026-08-25", review_log=self.log)
+        self.assertFalse(self.target.exists())  # nothing was written
+
+    def test_auto_promote_without_validate_fn_raises(self):
+        draft = stage_draft({"boundary_id": "a__to__b"}, self.target)
+        approve(draft, self.target, reviewer="alice", reviewed_at="2026-08-01", review_log=self.log, validate_fn=SKIP_VALIDATION)
+        draft2 = stage_draft(
+            {"boundary_id": "a__to__b", "review": {"reviewer": "bot", "reviewed_at": "2026-08-02"}}, self.target
+        )
+        with self.assertRaises(TypeError):
+            auto_promote_if_mechanical(draft2, self.target, review_log=self.log)
 
     def test_approve_refuses_a_g2_plus_failing_draft(self):
         """Review finding D1: approve() used to promote a draft with no
@@ -89,8 +112,7 @@ class ReviewCheckpointTest(unittest.TestCase):
         }
         draft = stage_draft(bad_draft, target)
 
-        schema = load_schema()
-        validator = Draft202012Validator(schema)
+        validator = load_validator()
 
         def validate_fn(path, data):
             return validate_data(path, data, validator, specs_search_root=None)
@@ -106,24 +128,24 @@ class ReviewCheckpointTest(unittest.TestCase):
     def test_auto_promote_refuses_semantic_change(self):
         # Seed an approved target first.
         draft = stage_draft({"boundary_id": "a__to__b", "callee_guarantees": ["B.C001"]}, self.target)
-        approve(draft, self.target, reviewer="alice", reviewed_at="2026-08-01", review_log=self.log)
+        approve(draft, self.target, reviewer="alice", reviewed_at="2026-08-01", review_log=self.log, validate_fn=SKIP_VALIDATION)
 
         # Now stage a semantically different draft -- must not auto-promote.
         draft2 = stage_draft({"boundary_id": "a__to__b", "callee_guarantees": ["B.C002"]}, self.target)
-        result = auto_promote_if_mechanical(draft2, self.target, review_log=self.log)
+        result = auto_promote_if_mechanical(draft2, self.target, review_log=self.log, validate_fn=SKIP_VALIDATION)
         self.assertIsNone(result)
         self.assertTrue(draft2.exists())  # untouched, still needs a human
 
     def test_auto_promote_allows_mechanical_change_and_logs_it(self):
         draft = stage_draft({"boundary_id": "a__to__b", "callee_guarantees": ["B.C001"]}, self.target)
-        approve(draft, self.target, reviewer="alice", reviewed_at="2026-08-01", review_log=self.log)
+        approve(draft, self.target, reviewer="alice", reviewed_at="2026-08-01", review_log=self.log, validate_fn=SKIP_VALIDATION)
 
         # Identical except the review block -- purely mechanical.
         draft2 = stage_draft(
             {"boundary_id": "a__to__b", "callee_guarantees": ["B.C001"], "review": {"reviewer": "bot", "reviewed_at": "2026-08-02"}},
             self.target,
         )
-        result = auto_promote_if_mechanical(draft2, self.target, review_log=self.log)
+        result = auto_promote_if_mechanical(draft2, self.target, review_log=self.log, validate_fn=SKIP_VALIDATION)
         self.assertIsNotNone(result)
         self.assertEqual(result.classification, "mechanical")
         self.assertFalse(draft2.exists())
@@ -131,6 +153,36 @@ class ReviewCheckpointTest(unittest.TestCase):
         log_lines = self.log.read_text().strip().splitlines()
         self.assertEqual(len(log_lines), 2)  # original approval + auto-promote
         self.assertIn("auto-promoted", json.loads(log_lines[1])["reviewer"])
+
+
+class StandaloneCliRequiresExplicitSkipTest(unittest.TestCase):
+    """Review finding (round 2, high severity): 'the standalone approve
+    CLI calls it without validation' -- the bare CLI has no way to know
+    which validator applies to an arbitrary target, so it must require an
+    explicit --skip-validation rather than silently defaulting to none."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.target = self.root / "specs" / "_boundaries" / "a__to__b.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_approve_without_skip_validation_flag_is_refused(self):
+        draft = stage_draft({"boundary_id": "a__to__b"}, self.target)
+        rc = review_checkpoint.main(["approve", str(draft), str(self.target), "--reviewer", "alice"])
+        self.assertEqual(rc, 2)
+        self.assertFalse(self.target.exists())
+        self.assertTrue(draft.exists())
+
+    def test_approve_with_skip_validation_flag_proceeds(self):
+        draft = stage_draft({"boundary_id": "a__to__b"}, self.target)
+        rc = review_checkpoint.main(
+            ["approve", str(draft), str(self.target), "--reviewer", "alice", "--skip-validation"]
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.target.exists())
 
 
 if __name__ == "__main__":

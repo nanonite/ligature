@@ -15,9 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from review_checkpoint import approve, stage_draft  # noqa: E402
-from validate_boundary_contracts import validate_file, validate_data, load_schema  # noqa: E402
-from jsonschema import Draft202012Validator  # noqa: E402
+from review_checkpoint import SKIP_VALIDATION, approve, stage_draft  # noqa: E402
+from validate_boundary_contracts import validate_file, validate_data, load_validator  # noqa: E402
 
 PROMPTS = ROOT / "prompts"
 
@@ -71,8 +70,7 @@ class SimulatedCompliantOutputTest(unittest.TestCase):
         }
         self.assertNotIn("review", simulated_llm_output)
 
-        schema = load_schema()
-        validator = Draft202012Validator(schema)
+        validator = load_validator()
 
         def validate_fn(path, data):
             return validate_data(path, data, validator, specs_search_root=None)
@@ -103,10 +101,17 @@ class SimulatedCompliantOutputTest(unittest.TestCase):
             "callee_guarantees": ["TaskQueue.A006"],
         }
         draft = stage_draft(simulated_bad_output, self.target)
-        approve(draft, self.target, reviewer="test-reviewer", reviewed_at="2026-08-25", review_log=self.log)
+        # Deliberately SKIP_VALIDATION here -- this test is specifically
+        # about the downstream validator catching what an ungated approve()
+        # let through, i.e. defense in depth. #14 is where a bare approve()
+        # call like this becomes impossible in the real pipeline (always
+        # routed through pipeline.py's validate_fn wiring).
+        approve(
+            draft, self.target, reviewer="test-reviewer", reviewed_at="2026-08-25",
+            review_log=self.log, validate_fn=SKIP_VALIDATION,
+        )
 
-        schema = load_schema()
-        validator = Draft202012Validator(schema)
+        validator = load_validator()
         findings = validate_file(self.target, validator, specs_search_root=None)
         self.assertTrue(any(f.gate == "G2+" for f in findings))
 

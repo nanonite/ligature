@@ -5,12 +5,14 @@ pass their schema in CI, and hand-written examples are untrustworthy against
 additionalProperties: false unless actually checked.
 """
 import json
+import sys
 import unittest
 from pathlib import Path
 
-from jsonschema import Draft202012Validator
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+from schema_utils import make_validator  # noqa: E402
+
 SCHEMA_PATH = ROOT / "schemas" / "project-descriptor.schema.json"
 EXAMPLES_DIR = ROOT / "schemas" / "examples"
 
@@ -19,8 +21,7 @@ class ProjectDescriptorSchemaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.schema = json.loads(SCHEMA_PATH.read_text())
-        Draft202012Validator.check_schema(cls.schema)
-        cls.validator = Draft202012Validator(cls.schema)
+        cls.validator = make_validator(cls.schema)
 
     def test_greenfield_example_is_valid(self):
         instance = json.loads(
@@ -70,6 +71,31 @@ class ProjectDescriptorSchemaTest(unittest.TestCase):
         self.assertNotIn("port_source", instance)
         errors = list(self.validator.iter_errors(instance))
         self.assertEqual(errors, [])
+
+    def test_empty_reviewer_is_rejected(self):
+        """Review finding (round 2, medium severity): reviewer had no
+        minLength, so review: {reviewer: "", reviewed_at: ...} validated
+        -- an empty string is not a reviewer."""
+        instance = json.loads(
+            (EXAMPLES_DIR / "project-descriptor.greenfield.example.json").read_text()
+        )
+        instance["review"]["reviewer"] = ""
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema accepted an empty reviewer")
+
+    def test_malformed_reviewed_at_is_rejected(self):
+        """Review finding (round 2, medium severity): format: date is
+        annotation-only unless a format_checker is wired in, which no call
+        site did -- reviewed_at: "not-a-date" validated. Now enforced both
+        by an actual format checker (schema_utils.make_validator) and a
+        structural pattern, so this holds even if a future validator is
+        built by hand without the shared helper."""
+        instance = json.loads(
+            (EXAMPLES_DIR / "project-descriptor.greenfield.example.json").read_text()
+        )
+        instance["review"]["reviewed_at"] = "not-a-date"
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema accepted reviewed_at: 'not-a-date'")
 
     def test_greenfield_mode_forbids_port_source(self):
         """Review finding D6: the if/then required port_source in port

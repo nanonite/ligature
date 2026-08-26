@@ -188,5 +188,45 @@ class LoadProjectDescriptorTest(unittest.TestCase):
             path.unlink()
 
 
+class TargetContainmentTest(unittest.TestCase):
+    """Review finding (round 2, medium severity): draft/approve accepted
+    args.target verbatim, with no check it belonged to the workspace or
+    any declared crate at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "crate_a").mkdir()
+        self.descriptor = {
+            "crates": [
+                {"crate_dir": "crate_a", "contracts_crate": "contracts", "specs_search_root": "crate_a/specs"}
+            ]
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_target_inside_declared_crate_is_accepted(self):
+        target = self.workspace / "crate_a" / "specs" / "_boundaries" / "a__to__b.json"
+        pipeline._require_target_in_workspace(target, self.workspace, self.descriptor)  # no raise
+
+    def test_target_outside_any_declared_crate_is_refused(self):
+        target = self.workspace / "crate_b" / "specs" / "_boundaries" / "a__to__b.json"
+        with self.assertRaises(pipeline.PipelineError) as ctx:
+            pipeline._require_target_in_workspace(target, self.workspace, self.descriptor)
+        self.assertIn("does not belong to any crate", str(ctx.exception))
+
+    def test_target_outside_the_workspace_entirely_is_refused(self):
+        outside = self.workspace.parent / "definitely_not_the_workspace" / "x.json"
+        with self.assertRaises(pipeline.PipelineError) as ctx:
+            pipeline._require_target_in_workspace(outside, self.workspace, self.descriptor)
+        self.assertIn("outside the workspace", str(ctx.exception))
+
+    def test_path_traversal_out_of_workspace_is_refused(self):
+        traversal = self.workspace / "crate_a" / ".." / ".." / "etc" / "passwd"
+        with self.assertRaises(pipeline.PipelineError):
+            pipeline._require_target_in_workspace(traversal, self.workspace, self.descriptor)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -5,16 +6,56 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from validate_boundary_contracts import validate  # noqa: E402
+from validate_boundary_contracts import validate, load_validator  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "boundary_contracts"
+
+VALID_INSTANCE = {
+    "schema_version": "1.0",
+    "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+    "caller": {"concept": "Scheduler", "method": "dispatch"},
+    "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+    "callee_guarantees": ["TaskQueue.C003"],
+    "review": {"reviewer": "alice", "reviewed_at": "2026-08-25"},
+}
 
 
 def gates_hit(findings) -> set:
     return {f.gate for f in findings}
 
 
+class BoundaryContractSchemaReviewFieldTest(unittest.TestCase):
+    """Review finding (round 2, medium severity): review authority wasn't
+    schema-enforced -- reviewer: "" and reviewed_at: "not-a-date" both
+    validated."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.validator = load_validator()
+
+    def test_valid_instance_has_no_errors(self):
+        self.assertEqual(list(self.validator.iter_errors(VALID_INSTANCE)), [])
+
+    def test_empty_reviewer_is_rejected(self):
+        instance = json.loads(json.dumps(VALID_INSTANCE))
+        instance["review"]["reviewer"] = ""
+        self.assertTrue(list(self.validator.iter_errors(instance)))
+
+    def test_malformed_reviewed_at_is_rejected(self):
+        instance = json.loads(json.dumps(VALID_INSTANCE))
+        instance["review"]["reviewed_at"] = "not-a-date"
+        self.assertTrue(list(self.validator.iter_errors(instance)))
+
+
 class ValidateBoundaryContractsTest(unittest.TestCase):
+    def test_missing_root_raises_instead_of_reporting_clean(self):
+        """Review finding (round 2, high severity): Path.glob() on a
+        nonexistent directory returns [] with no error, so a typo'd
+        crate_dir used to produce 'OK: all boundary contracts pass' --
+        indistinguishable from a real, fully-clean scan."""
+        with self.assertRaises(FileNotFoundError):
+            validate(FIXTURES / "this_directory_does_not_exist")
+
     def test_valid_boundary_has_no_findings(self):
         findings = validate(
             FIXTURES / "valid_crate",

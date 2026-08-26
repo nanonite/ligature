@@ -44,7 +44,17 @@ class Violation:
 def find_boundary_files(root: Path) -> list[Path]:
     """Every file anywhere under a `_boundaries` directory, at any depth --
     deliberately over-broad so nested placements surface as violations
-    instead of being silently invisible to this check too."""
+    instead of being silently invisible to this check too.
+
+    Raises if `root` doesn't exist: Path.glob() on a missing directory
+    returns an empty iterator with no error, which used to mean a typo'd
+    crate_dir in a project descriptor produced "OK: 0 findings" -- silently
+    indistinguishable from a real, fully-clean scan (external review
+    finding, high severity). A root that exists and legitimately has no
+    _boundaries directories yet is fine and returns []; a root that doesn't
+    exist at all is a caller mistake, not a clean project."""
+    if not root.is_dir():
+        raise FileNotFoundError(f"boundary scan root does not exist or is not a directory: {root}")
     return [p for p in root.glob("**/_boundaries/**/*") if p.is_file()]
 
 
@@ -115,7 +125,12 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    violations = validate(args.root)
+    try:
+        violations = validate(args.root)
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
     if not violations:
         print("OK: no boundary naming/layout violations found")
         return 0

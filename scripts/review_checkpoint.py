@@ -55,6 +55,25 @@ REVIEW_LOG_DEFAULT = Path("ci/results/review_log.jsonl")
 ValidateFn = Callable[[Path, dict], list]
 
 
+class _Sentinel:
+    def __init__(self, label: str):
+        self._label = label
+
+    def __repr__(self) -> str:
+        return self._label
+
+
+# validate_fn used to default to None, which silently meant "skip
+# validation" -- any caller that forgot to wire one in (including the
+# standalone CLI below) approved drafts with no gate at all (external
+# review finding, high severity: "approval fails open"). There is no
+# default now: a caller must pass either a real validator or this sentinel,
+# explicitly, to skip validation on purpose. Forgetting is now a TypeError,
+# not a silent bypass.
+SKIP_VALIDATION = _Sentinel("SKIP_VALIDATION")
+_REQUIRED = _Sentinel("_REQUIRED (internal -- means 'not supplied')")
+
+
 class ApprovalRefused(Exception):
     """Raised by approve() when validate_fn reports an error-severity
     finding against the draft -- nothing was written."""
@@ -126,10 +145,16 @@ def approve(
     reviewer: str,
     reviewed_at: str | None = None,
     review_log: Path = REVIEW_LOG_DEFAULT,
-    validate_fn: ValidateFn | None = None,
+    validate_fn: ValidateFn | _Sentinel = _REQUIRED,
 ) -> ApprovalResult:
     if not reviewer:
         raise ValueError("approve() requires a non-empty reviewer -- no default, no LLM-supplied value")
+    if validate_fn is _REQUIRED:
+        raise TypeError(
+            "approve() requires validate_fn -- pass a real validator, or "
+            "review_checkpoint.SKIP_VALIDATION to explicitly skip it. "
+            "There is no default that silently skips validation."
+        )
 
     draft_data = json.loads(draft_path.read_text())
     old_data = _load(target_path)
@@ -138,7 +163,7 @@ def approve(
     reviewed_at = reviewed_at or datetime.now(timezone.utc).date().isoformat()
     draft_data["review"] = {"reviewer": reviewer, "reviewed_at": reviewed_at}
 
-    if validate_fn is not None:
+    if validate_fn is not SKIP_VALIDATION:
         findings = validate_fn(target_path, draft_data)
         errors = [f for f in findings if getattr(f, "severity", "error") == "error"]
         if errors:
@@ -173,21 +198,30 @@ def auto_promote_if_mechanical(
     draft_path: Path,
     target_path: Path,
     review_log: Path = REVIEW_LOG_DEFAULT,
-    validate_fn: ValidateFn | None = None,
+    validate_fn: ValidateFn | _Sentinel = _REQUIRED,
 ) -> ApprovalResult | None:
     """Only path allowed to write target_path without a human-supplied
     reviewer -- and only when classify() says the change is mechanical
     against an already-approved prior version. Still logged, never silent.
     Also gated on validate_fn (D1) for defense in depth, even though a
     mechanical change is byte-identical to an already-approved baseline --
-    that baseline could have been approved before validate_fn existed."""
+    that baseline could have been approved before validate_fn existed.
+    Same explicit-opt-out-only rule as approve(): pass a real validator or
+    SKIP_VALIDATION, never nothing."""
+    if validate_fn is _REQUIRED:
+        raise TypeError(
+            "auto_promote_if_mechanical() requires validate_fn -- pass a "
+            "real validator, or review_checkpoint.SKIP_VALIDATION to "
+            "explicitly skip it."
+        )
+
     draft_data = json.loads(draft_path.read_text())
     old_data = _load(target_path)
     classification = classify(old_data, draft_data)
     if classification != "mechanical":
         return None
 
-    if validate_fn is not None:
+    if validate_fn is not SKIP_VALIDATION:
         findings = validate_fn(target_path, draft_data)
         errors = [f for f in findings if getattr(f, "severity", "error") == "error"]
         if errors:
@@ -230,11 +264,25 @@ def main(argv: list[str]) -> int:
     diff_p.add_argument("draft", type=Path)
     diff_p.add_argument("target", type=Path)
 
-    approve_p = sub.add_parser("approve", help="Record human approval, promote draft to target")
+    approve_p = sub.add_parser(
+        "approve",
+        help="Record human approval, promote draft to target. "
+        "Prefer `pipeline.py approve` -- it wires in the right validator "
+        "for the artifact type automatically. This standalone command has "
+        "no artifact-type knowledge, so it can only skip validation "
+        "outright (--skip-validation, required) or refuse.",
+    )
     approve_p.add_argument("draft", type=Path)
     approve_p.add_argument("target", type=Path)
     approve_p.add_argument("--reviewer", required=True)
     approve_p.add_argument("--reviewed-at", default=None)
+    approve_p.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Required to proceed via this standalone command -- it cannot "
+        "know which validator applies to an arbitrary target path. There "
+        "is no other way to make this command promote a draft.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -253,7 +301,23 @@ def main(argv: list[str]) -> int:
         return 0
 
     if args.command == "approve":
-        result = approve(args.draft, args.target, args.reviewer, args.reviewed_at)
+        if not args.skip_validation:
+            print(
+                "error: this standalone command cannot select a validator for "
+                "an arbitrary target -- use `pipeline.py approve` (wires in the "
+                "right one automatically), or pass --skip-validation to promote "
+                "with no gate at all (not recommended)",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            result = approve(
+                args.draft, args.target, args.reviewer, args.reviewed_at,
+                validate_fn=SKIP_VALIDATION,
+            )
+        except ApprovalRefused as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
         print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
         return 0
 

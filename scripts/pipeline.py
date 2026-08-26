@@ -30,13 +30,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from jsonschema import Draft202012Validator
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from review_checkpoint import ApprovalRefused  # noqa: E402
+from review_checkpoint import SKIP_VALIDATION  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
-from validate_boundary_contracts import load_schema as load_boundary_schema  # noqa: E402
+from schema_utils import make_validator  # noqa: E402
+from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
 
@@ -63,8 +63,7 @@ class PipelineError(Exception):
 
 def load_project_descriptor(path: Path) -> dict:
     schema = json.loads(DESCRIPTOR_SCHEMA_PATH.read_text())
-    Draft202012Validator.check_schema(schema)
-    validator = Draft202012Validator(schema)
+    validator = make_validator(schema)
 
     data = json.loads(path.read_text())
     errors = list(validator.iter_errors(data))
@@ -167,7 +166,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
     for crate in descriptor["crates"]:
         crate_root = args.workspace / crate["crate_dir"]
         specs_search_root = args.workspace / crate["specs_search_root"]
-        findings_total.extend(validate_boundaries(crate_root, specs_search_root))
+        try:
+            findings_total.extend(validate_boundaries(crate_root, specs_search_root))
+        except FileNotFoundError as e:
+            # A crate_dir typo in the descriptor must be a loud failure,
+            # not a silent "0 boundaries found, all clean" (external
+            # review finding, high severity).
+            raise PipelineError(f"crate {crate['crate_dir']!r} in the project descriptor: {e}")
 
     errors = [f for f in findings_total if f.severity == "error"]
     infos = [f for f in findings_total if f.severity == "info"]
@@ -189,6 +194,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_draft(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
+    _require_target_in_workspace(args.target, args.workspace, descriptor)
     backend = descriptor.get("llm_backend", {"kind": "manual"})
 
     template_path = PROMPTS / f"stage-{args.stage}-{args.template_name}.md"
@@ -211,31 +217,57 @@ def cmd_draft(args: argparse.Namespace) -> int:
     return 0
 
 
-def _specs_search_root_for(target: Path, workspace: Path, descriptor: dict) -> Path | None:
+def _crate_for(target: Path, workspace: Path, descriptor: dict) -> dict | None:
     for crate in descriptor["crates"]:
         crate_root = (workspace / crate["crate_dir"]).resolve()
         try:
             target.resolve().relative_to(crate_root)
         except ValueError:
             continue
-        return workspace / crate["specs_search_root"]
+        return crate
     return None
 
 
-def _select_validate_fn(target: Path, workspace: Path, descriptor: dict) -> object | None:
+def _specs_search_root_for(target: Path, workspace: Path, descriptor: dict) -> Path | None:
+    crate = _crate_for(target, workspace, descriptor)
+    return workspace / crate["specs_search_root"] if crate else None
+
+
+def _require_target_in_workspace(target: Path, workspace: Path, descriptor: dict) -> None:
+    """Draft/approve targets used to be accepted verbatim -- args.target
+    with no check it belonged to the workspace or any declared crate at
+    all (external review finding, medium severity). A path outside the
+    project's own declared scope is refused outright, not just silently
+    processed."""
+    try:
+        target.resolve().relative_to(workspace.resolve())
+    except ValueError:
+        raise PipelineError(f"target {target} is outside the workspace {workspace} -- refusing")
+    if _crate_for(target, workspace, descriptor) is None:
+        raise PipelineError(
+            f"target {target} does not belong to any crate declared in the "
+            "project descriptor -- refusing to draft/approve outside a declared crate"
+        )
+
+
+def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     """Dispatch by the specs/_<kind>/ directory convention used throughout
     plan.md -- extensible to interaction/witness/etc. validators once M3/M4
-    give them schemas; only boundary contracts exist to validate today."""
+    give them schemas; only boundary contracts exist to validate today.
+    Returns SKIP_VALIDATION, never None, for an artifact type with no
+    validator yet -- approve()/auto_promote_if_mechanical() reject a bare
+    None as of the D1 fix, so this must make the "no validator" case
+    explicit too, not just pass a falsy value through."""
     if "_boundaries" in target.parts:
-        schema = load_boundary_schema()
-        validator = Draft202012Validator(schema)
+        validator = load_boundary_validator()
         specs_search_root = _specs_search_root_for(target, workspace, descriptor)
         return lambda path, data: validate_boundary_data(path, data, validator, specs_search_root)
-    return None
+    return SKIP_VALIDATION
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
+    _require_target_in_workspace(args.target, args.workspace, descriptor)
     validate_fn = _select_validate_fn(args.target, args.workspace, descriptor)
 
     draft_path = args.target.with_suffix(args.target.suffix + ".draft")

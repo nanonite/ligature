@@ -22,6 +22,9 @@
   "then": {
     "required": ["port_source"]
   },
+  "else": {
+    "not": { "required": ["port_source"] }
+  },
   "properties": {
     "schema_version": {
       "type": "string",

@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- Prototype A: G2+ role-safety live against boundary v1.0 (#13)
 - Pipeline CLI entrypoint: dispatch stages 0-8C from the project descriptor (#37)
 - Stage 0/3 one-shot prompt templates: structured-output contract for LLM-side stages (#38)
 - Human review/approval checkpoint mechanism (#39)

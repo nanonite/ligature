@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from review_checkpoint import approve, stage_draft  # noqa: E402
-from validate_boundary_contracts import validate_file, load_schema  # noqa: E402
+from validate_boundary_contracts import validate_file, validate_data, load_schema  # noqa: E402
 from jsonschema import Draft202012Validator  # noqa: E402
 
 PROMPTS = ROOT / "prompts"
@@ -71,14 +71,24 @@ class SimulatedCompliantOutputTest(unittest.TestCase):
         }
         self.assertNotIn("review", simulated_llm_output)
 
-        draft = stage_draft(simulated_llm_output, self.target)
-        result = approve(draft, self.target, reviewer="test-reviewer", reviewed_at="2026-08-25", review_log=self.log)
-        self.assertEqual(result.classification, "new")
-
         schema = load_schema()
         validator = Draft202012Validator(schema)
+
+        def validate_fn(path, data):
+            return validate_data(path, data, validator, specs_search_root=None)
+
+        draft = stage_draft(simulated_llm_output, self.target)
+        # (D1) approve() itself is now gated -- exercise the real path, not
+        # just a standalone validate_file call after the fact.
+        result = approve(
+            draft, self.target, reviewer="test-reviewer", reviewed_at="2026-08-25",
+            review_log=self.log, validate_fn=validate_fn,
+        )
+        self.assertEqual(result.classification, "new")
+
         findings = validate_file(self.target, validator, specs_search_root=None)
-        self.assertEqual(findings, [], [str(f) for f in findings])
+        errors = [f for f in findings if f.severity == "error"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
 
     def test_simulated_llm_output_that_violates_the_policy_rule_is_still_caught(self):
         """The template tells the model never to put an adversary case in

@@ -17,6 +17,16 @@ the pending/approved signal instead of inventing separate state:
     review.reviewer/review.reviewed_at, removes the draft, and appends an
     audit entry to ci/results/review_log.jsonl -- append-only, so a human's
     approval is traceable even if the artifact changes again later.
+  - approve() runs mechanical validation (a caller-supplied validate_fn,
+    e.g. validate_boundary_contracts.validate_data) against the draft
+    *before* writing anything, and refuses to promote on any error-severity
+    finding (review finding D1: an earlier version wrote straight through
+    with no gate at all -- a human could approve a schema-invalid or
+    role-unsafe draft straight into the tree, which breaks the plan's own
+    ordering, §4.5: mechanically-valid -> semantically-reviewed -> accepted).
+    validate_fn is optional and generic on purpose -- this module has no
+    business knowing boundary-contract-specific gate logic; the caller
+    wires in whichever validator matches the artifact type being approved.
 
 An LLM backend may recommend approval (plan.md §7.2: "An LLM critic may
 recommend; it is never the sole authority") but nothing in this module
@@ -33,11 +43,21 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 Classification = Literal["new", "mechanical", "semantic"]
 
 REVIEW_LOG_DEFAULT = Path("ci/results/review_log.jsonl")
+
+# Any object with .severity ("error" | "info") and a __str__ -- deliberately
+# not validate_boundary_contracts.Finding, to keep this module decoupled
+# from any one artifact type's gate logic.
+ValidateFn = Callable[[Path, dict], list]
+
+
+class ApprovalRefused(Exception):
+    """Raised by approve() when validate_fn reports an error-severity
+    finding against the draft -- nothing was written."""
 
 
 def _without_review(data: dict) -> dict:
@@ -106,6 +126,7 @@ def approve(
     reviewer: str,
     reviewed_at: str | None = None,
     review_log: Path = REVIEW_LOG_DEFAULT,
+    validate_fn: ValidateFn | None = None,
 ) -> ApprovalResult:
     if not reviewer:
         raise ValueError("approve() requires a non-empty reviewer -- no default, no LLM-supplied value")
@@ -116,6 +137,15 @@ def approve(
 
     reviewed_at = reviewed_at or datetime.now(timezone.utc).date().isoformat()
     draft_data["review"] = {"reviewer": reviewer, "reviewed_at": reviewed_at}
+
+    if validate_fn is not None:
+        findings = validate_fn(target_path, draft_data)
+        errors = [f for f in findings if getattr(f, "severity", "error") == "error"]
+        if errors:
+            raise ApprovalRefused(
+                f"{draft_path} fails validation, refusing to promote to {target_path}:\n"
+                + "\n".join(f"  - {f}" for f in errors)
+            )
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(json.dumps(draft_data, indent=2) + "\n")
@@ -140,16 +170,31 @@ def approve(
 
 
 def auto_promote_if_mechanical(
-    draft_path: Path, target_path: Path, review_log: Path = REVIEW_LOG_DEFAULT
+    draft_path: Path,
+    target_path: Path,
+    review_log: Path = REVIEW_LOG_DEFAULT,
+    validate_fn: ValidateFn | None = None,
 ) -> ApprovalResult | None:
     """Only path allowed to write target_path without a human-supplied
     reviewer -- and only when classify() says the change is mechanical
-    against an already-approved prior version. Still logged, never silent."""
+    against an already-approved prior version. Still logged, never silent.
+    Also gated on validate_fn (D1) for defense in depth, even though a
+    mechanical change is byte-identical to an already-approved baseline --
+    that baseline could have been approved before validate_fn existed."""
     draft_data = json.loads(draft_path.read_text())
     old_data = _load(target_path)
     classification = classify(old_data, draft_data)
     if classification != "mechanical":
         return None
+
+    if validate_fn is not None:
+        findings = validate_fn(target_path, draft_data)
+        errors = [f for f in findings if getattr(f, "severity", "error") == "error"]
+        if errors:
+            raise ApprovalRefused(
+                f"{draft_path} fails validation, refusing to auto-promote to {target_path}:\n"
+                + "\n".join(f"  - {f}" for f in errors)
+            )
 
     prior_review = old_data.get("review", {}) if old_data else {}
     target_path.write_text(json.dumps(draft_data, indent=2) + "\n")

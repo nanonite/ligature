@@ -71,6 +71,20 @@ class ProjectDescriptorSchemaTest(unittest.TestCase):
         errors = list(self.validator.iter_errors(instance))
         self.assertEqual(errors, [])
 
+    def test_greenfield_mode_forbids_port_source(self):
+        """Review finding D6: the if/then required port_source in port
+        mode but nothing forbade a stray port_source under greenfield."""
+        instance = json.loads(
+            (EXAMPLES_DIR / "project-descriptor.greenfield.example.json").read_text()
+        )
+        instance["port_source"] = {
+            "repository": "should not be here",
+            "language": "cpp",
+            "oracle_build_command": "make",
+        }
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema accepted port_source under mode: greenfield")
+
     def test_unknown_verifier_is_rejected(self):
         instance = json.loads(
             (EXAMPLES_DIR / "project-descriptor.greenfield.example.json").read_text()

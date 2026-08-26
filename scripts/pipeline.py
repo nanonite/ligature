@@ -33,9 +33,12 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
+from validate_boundary_contracts import load_schema as load_boundary_schema  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
+from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DESCRIPTOR_SCHEMA_PATH = ROOT / "schemas" / "project-descriptor.schema.json"
@@ -135,9 +138,16 @@ def invoke_llm_backend(backend: dict, prompt: str, runner=subprocess.run) -> str
 
 
 def parse_llm_json_output(raw: str) -> dict:
-    """The templates require JSON-only output, but tolerate a model
-    wrapping it in a markdown fence anyway -- strip one if present rather
-    than failing on the single most common way models violate this."""
+    """The templates require JSON-only output. Tolerates exactly one
+    deviation: the *entire* response wrapped in a single markdown fence
+    (```json ... ``` with nothing else before or after) -- the single most
+    common way models violate "JSON only" while still being unambiguous
+    about what to extract. Anything looser (prose before/after the fence,
+    multiple fences) is deliberately NOT unwrapped and hard-fails instead --
+    review finding D8: an earlier version of this docstring over-claimed
+    tolerance here. That failure is acceptable-by-design (retry/escalate,
+    plan.md §16.1's "no partial output if you are unsure" principle), not a
+    bug to paper over by guessing which fenced block was the real answer."""
     text = raw.strip()
     fence = re.match(r"^```(?:json)?\s*\n(.*)\n```$", text, re.DOTALL)
     if fence:
@@ -159,12 +169,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
         specs_search_root = args.workspace / crate["specs_search_root"]
         findings_total.extend(validate_boundaries(crate_root, specs_search_root))
 
-    if not findings_total:
+    errors = [f for f in findings_total if f.severity == "error"]
+    infos = [f for f in findings_total if f.severity == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if not errors:
         print("OK: all boundary contracts pass G1a/G1b/G2+")
         return 0
 
-    print(f"FAIL: {len(findings_total)} finding(s)")
-    for f in findings_total:
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
         print(f"  - {f}")
     return 1
 
@@ -193,9 +211,40 @@ def cmd_draft(args: argparse.Namespace) -> int:
     return 0
 
 
+def _specs_search_root_for(target: Path, workspace: Path, descriptor: dict) -> Path | None:
+    for crate in descriptor["crates"]:
+        crate_root = (workspace / crate["crate_dir"]).resolve()
+        try:
+            target.resolve().relative_to(crate_root)
+        except ValueError:
+            continue
+        return workspace / crate["specs_search_root"]
+    return None
+
+
+def _select_validate_fn(target: Path, workspace: Path, descriptor: dict) -> object | None:
+    """Dispatch by the specs/_<kind>/ directory convention used throughout
+    plan.md -- extensible to interaction/witness/etc. validators once M3/M4
+    give them schemas; only boundary contracts exist to validate today."""
+    if "_boundaries" in target.parts:
+        schema = load_boundary_schema()
+        validator = Draft202012Validator(schema)
+        specs_search_root = _specs_search_root_for(target, workspace, descriptor)
+        return lambda path, data: validate_boundary_data(path, data, validator, specs_search_root)
+    return None
+
+
 def cmd_approve(args: argparse.Namespace) -> int:
+    descriptor = load_project_descriptor(args.descriptor)
+    validate_fn = _select_validate_fn(args.target, args.workspace, descriptor)
+
     draft_path = args.target.with_suffix(args.target.suffix + ".draft")
-    result = checkpoint_approve(draft_path, args.target, reviewer=args.reviewer, reviewed_at=args.reviewed_at)
+    try:
+        result = checkpoint_approve(
+            draft_path, args.target, reviewer=args.reviewer, reviewed_at=args.reviewed_at, validate_fn=validate_fn
+        )
+    except ApprovalRefused as e:
+        raise PipelineError(str(e))
     print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
     return 0
 

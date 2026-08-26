@@ -43,7 +43,12 @@ from validate_boundary_naming import check_file as check_naming  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "boundary-contract-schema.json"
 
-OBLIGATION_RE = re.compile(r"^([A-Z][A-Za-z0-9]*)\.C([0-9]{3})$")
+# Symmetric digit-width grammar for both prefixes -- an earlier version
+# hardcoded exactly 3 digits for C but let A be any length, which would
+# misreport a legitimate C1234 as a sentinel/placeholder (review finding
+# D5). Neither prefix's width is normatively fixed anywhere upstream, so
+# there's no reason for them to disagree with each other.
+OBLIGATION_RE = re.compile(r"^([A-Z][A-Za-z0-9]*)\.C([0-9]+)$")
 ADVERSARY_SHAPED_RE = re.compile(r"^([A-Z][A-Za-z0-9]*)\.A[0-9]+$")
 
 
@@ -52,14 +57,26 @@ class Finding:
     gate: str
     path: Path
     reason: str
+    severity: str = "error"  # "error" (blocking) | "info" (visible, non-blocking)
 
     def __str__(self) -> str:
-        return f"[{self.gate}] {self.path}: {self.reason}"
+        return f"[{self.gate}/{self.severity}] {self.path}: {self.reason}"
 
 
 def _pascal_to_snake(name: str) -> str:
-    s = re.sub(r"(?<!^)(?=[A-Z])", "_", name)
-    return s.lower()
+    """Copied verbatim from vendor/concept-to-code/emit_stubs.py's
+    snake_case() (module_name = snake_case(concept) at emit_stubs.py:2090)
+    -- do not re-derive this. The naive "insert _ before every capital"
+    regex this used to be breaks on acronym concepts (review finding D2):
+    HTTPClient -> h_t_t_p_client instead of concept-to-code's own
+    httpclient. This only inserts an underscore at a lowercase-to-uppercase
+    transition, so a run of capitals stays joined."""
+    out: list[str] = []
+    for i, ch in enumerate(name):
+        if ch.isupper() and i and not name[i - 1].isupper():
+            out.append("_")
+        out.append(ch.lower())
+    return "".join(out).replace("-", "_")
 
 
 def load_schema() -> dict:
@@ -77,9 +94,11 @@ def gate_g1a(path: Path, data: dict, validator: Draft202012Validator) -> list[Fi
 def gate_g1b(path: Path, data: dict) -> list[Finding]:
     findings: list[Finding] = []
 
-    # Naming/layout, from #8's validator.
+    # Naming/layout, from #8's validator. Pass the already-loaded data
+    # through so this doesn't re-read path from disk (it also lets this
+    # run against a draft that hasn't been written to its target path yet).
     findings.extend(
-        Finding("G1b", v.path, v.reason) for v in check_naming(path)
+        Finding("G1b", v.path, v.reason) for v in check_naming(path, data)
     )
 
     # Filename <-> body consistency: the caller/callee encoded in the
@@ -129,16 +148,32 @@ def _resolve_constraint(
     """Best-effort resolution of <Concept>.<id> to a constraint dict in the
     callee's concept spec. Returns (status, constraint_or_none).
     status is one of: 'resolved', 'no_search_root', 'spec_not_found',
-    'no_ids_in_spec' (gap #6 not applied upstream yet), 'dangling' (G2, not
-    this gate's job to fail on, but reported for visibility)."""
+    'ambiguous' (review finding D3 -- more than one spec file declares this
+    concept), 'no_ids_in_spec' (gap #6 not applied upstream yet), 'dangling'
+    (G2, not this gate's job to fail on, but reported for visibility)."""
     if specs_search_root is None:
         return "no_search_root", None
 
-    candidates = list(specs_search_root.glob(f"**/{_pascal_to_snake(concept)}.json"))
-    if not candidates:
-        return "spec_not_found", None
+    # D3: match by the spec's own `concept` field, not by filename -- a
+    # file named task_queue.json is not proof its `concept` is TaskQueue
+    # (it could be a stale copy, or declare TaskQueueV2). Sort for
+    # determinism regardless (glob order is filesystem-dependent).
+    all_specs = sorted(specs_search_root.glob("**/*.json"))
+    matches = []
+    for spec_path in all_specs:
+        try:
+            spec = json.loads(spec_path.read_text())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(spec, dict) and spec.get("concept") == concept:
+            matches.append((spec_path, spec))
 
-    spec = json.loads(candidates[0].read_text())
+    if not matches:
+        return "spec_not_found", None
+    if len(matches) > 1:
+        return "ambiguous", None
+
+    _, spec = matches[0]
     constraints = spec.get("constraints", [])
     if constraints and not any("id" in c for c in constraints):
         return "no_ids_in_spec", None
@@ -157,10 +192,12 @@ def gate_g2_plus(
     callee_concept = callee.get("concept")
     callee_method = callee.get("method")
 
-    # callee_guarantees may contain raw (pre-G1a-filtered) strings -- this
-    # gate runs independently so it can give a specific diagnosis for the
-    # named regression case (an adversary case used as a guarantee) rather
-    # than a generic schema-pattern mismatch.
+    # G1a's own pattern is deliberately loose (accepts both the C-obligation
+    # and A-adversary shapes structurally, see docs/boundary-contract-schema.json)
+    # so it's still meaningful to check role safety here even though this
+    # only ever runs after G1a already passed -- the semantic distinction
+    # (must be C, never A; must belong to the callee) is this gate's job,
+    # not G1a's, which is why loosening G1a didn't make this gate redundant.
     for entry in data.get("callee_guarantees", []):
         if not isinstance(entry, str):
             continue
@@ -185,7 +222,7 @@ def gate_g2_plus(
                     "G2+",
                     path,
                     f"{entry!r} is not a recognizable obligation reference "
-                    "(expected <Concept>.C###) -- possible sentinel/placeholder "
+                    "(expected <Concept>.C<digits>) -- possible sentinel/placeholder "
                     "value left in callee_guarantees",
                 )
             )
@@ -217,12 +254,65 @@ def gate_g2_plus(
                         f"include this boundary's callee method {callee_method!r}",
                     )
                 )
-        # 'no_search_root' / 'spec_not_found' / 'no_ids_in_spec' / 'dangling'
-        # are all silently skipped here by design -- ref-integrity (dangling)
-        # is G2's job, and the others are honest "can't verify yet" states,
-        # not G2+ failures.
+        elif status == "ambiguous":
+            findings.append(
+                Finding(
+                    "G2+",
+                    path,
+                    f"{entry!r}: more than one spec file under specs_search_root "
+                    f"declares concept {ref_concept!r} -- cannot resolve unambiguously",
+                )
+            )
+        elif status == "dangling":
+            # Reference integrity (does the id exist at all) is G2's job,
+            # not this gate's -- but still worth a non-blocking note here
+            # since it's found in the course of the applies_to check anyway.
+            findings.append(
+                Finding(
+                    "G2+",
+                    path,
+                    f"{entry!r} does not match any constraint id in {ref_concept}'s "
+                    "resolved spec (dangling reference -- G2's concern, noted here for visibility)",
+                    severity="info",
+                )
+            )
+        elif status in ("no_search_root", "spec_not_found", "no_ids_in_spec"):
+            # D4: previously a silent skip -- "0 findings" was indistinguishable
+            # from "0 findings because nothing was checkable." Report it,
+            # non-blocking, so gap #6's upstream state is a measurable signal
+            # instead of invisible.
+            reason = {
+                "no_search_root": "no --specs-search-root given",
+                "spec_not_found": f"no spec file under specs_search_root declares concept {ref_concept!r}",
+                "no_ids_in_spec": f"{ref_concept}'s spec has constraints but none carry a stable id yet "
+                "(docs/concept-to-code-modifications.md gap #6, not applied upstream)",
+            }[status]
+            findings.append(
+                Finding(
+                    "G2+",
+                    path,
+                    f"{entry!r}: applies_to unverifiable -- {reason}",
+                    severity="info",
+                )
+            )
 
     return findings
+
+
+def validate_data(
+    path: Path, data: dict, validator: Draft202012Validator, specs_search_root: Path | None = None
+) -> list[Finding]:
+    """The full G1a/G1b/G2+ chain against in-memory data, positioned at
+    `path` for filename-based checks -- `path` need not exist on disk yet.
+    This is what review_checkpoint.approve() calls before promoting a draft
+    (review finding D1: approve() used to write straight through with no
+    gate at all)."""
+    g1a = gate_g1a(path, data, validator)
+    if g1a:
+        # G1b/G2+ need a structurally valid document to mean anything.
+        return g1a
+
+    return gate_g1b(path, data) + gate_g2_plus(path, data, specs_search_root)
 
 
 def validate_file(
@@ -233,12 +323,7 @@ def validate_file(
     except json.JSONDecodeError as e:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
 
-    g1a = gate_g1a(path, data, validator)
-    if g1a:
-        # G1b/G2+ need a structurally valid document to mean anything.
-        return g1a
-
-    return gate_g1b(path, data) + gate_g2_plus(path, data, specs_search_root)
+    return validate_data(path, data, validator, specs_search_root)
 
 
 def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]:
@@ -264,12 +349,20 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     findings = validate(args.root, args.specs_search_root)
-    if not findings:
+    errors = [f for f in findings if f.severity == "error"]
+    infos = [f for f in findings if f.severity == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if not errors:
         print("OK: all boundary contracts pass G1a/G1b/G2+")
         return 0
 
-    print(f"FAIL: {len(findings)} finding(s)")
-    for f in findings:
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
         print(f"  - {f}")
     return 1
 

@@ -1,0 +1,6 @@
+{
+  "concept": "TaskQueue",
+  "constraints": [
+    { "id": "C003", "english": "an unrelated crate accidentally reused the concept name TaskQueue", "logic": "true", "kind": "postcondition", "applies_to": ["pop_ready"] }
+  ]
+}

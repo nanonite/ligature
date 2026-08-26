@@ -59,10 +59,16 @@ class ValidateBoundaryContractsTest(unittest.TestCase):
 
     def test_g2_plus_applies_to_check_degrades_gracefully_without_search_root(self):
         """Without --specs-search-root, the applies_to mismatch is
-        unverifiable, not a false pass or a crash."""
+        unverifiable -- not a false pass, not a crash, and (D4) not silent
+        either: a visible, non-blocking info finding."""
         fixture = FIXTURES / "g2_plus_applies_to_mismatch"
         findings = validate(fixture, specs_search_root=None)
-        self.assertEqual(findings, [], [str(f) for f in findings])
+        errors = [f for f in findings if f.severity == "error"]
+        infos = [f for f in findings if f.severity == "info"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
+        self.assertEqual(len(infos), 1)
+        self.assertIn("unverifiable", infos[0].reason)
+        self.assertIn("no --specs-search-root given", infos[0].reason)
 
 
 if __name__ == "__main__":

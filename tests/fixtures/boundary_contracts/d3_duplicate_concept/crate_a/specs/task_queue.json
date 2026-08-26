@@ -1,0 +1,6 @@
+{
+  "concept": "TaskQueue",
+  "constraints": [
+    { "id": "C003", "english": "pop_ready returns None only when no task has deadline <= now", "logic": "true", "kind": "postcondition", "applies_to": ["pop_ready"] }
+  ]
+}

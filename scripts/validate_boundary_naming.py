@@ -48,7 +48,11 @@ def find_boundary_files(root: Path) -> list[Path]:
     return [p for p in root.glob("**/_boundaries/**/*") if p.is_file()]
 
 
-def check_file(path: Path) -> list[Violation]:
+def check_file(path: Path, data: dict | None = None) -> list[Violation]:
+    """`data`, if given, is used instead of re-reading `path` -- lets a
+    caller that already parsed the JSON (validate_boundary_contracts.py)
+    avoid a redundant disk read, and lets a not-yet-written draft be
+    checked against its intended target path before anything is written."""
     violations: list[Violation] = []
 
     if path.parent.name != "_boundaries":
@@ -75,11 +79,12 @@ def check_file(path: Path) -> list[Violation]:
             )
         )
 
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as e:
-        violations.append(Violation(path, f"invalid JSON: {e}"))
-        return violations
+    if data is None:
+        try:
+            data = json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            violations.append(Violation(path, f"invalid JSON: {e}"))
+            return violations
 
     if not isinstance(data, dict) or "boundary_id" not in data:
         violations.append(Violation(path, "missing required 'boundary_id' field"))

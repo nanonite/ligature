@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "boundary_id": "tcpconnection_send__to__httpclient_flush",
+  "caller": { "concept": "TCPConnection", "method": "send" },
+  "callee": { "concept": "HTTPClient", "method": "flush" },
+  "callee_guarantees": ["HTTPClient.C001"],
+  "review": { "reviewer": "example-reviewer", "reviewed_at": "2026-08-25" }
+}

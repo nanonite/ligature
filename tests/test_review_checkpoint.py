@@ -8,12 +8,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from review_checkpoint import (  # noqa: E402
+    ApprovalRefused,
     approve,
     auto_promote_if_mechanical,
     classify,
     requires_human_checkpoint,
     stage_draft,
 )
+from validate_boundary_contracts import load_schema, validate_data  # noqa: E402
+from jsonschema import Draft202012Validator  # noqa: E402
 
 
 class ReviewCheckpointTest(unittest.TestCase):
@@ -72,6 +75,33 @@ class ReviewCheckpointTest(unittest.TestCase):
         self.assertEqual(len(log_lines), 1)
         entry = json.loads(log_lines[0])
         self.assertEqual(entry["reviewer"], "alice")
+
+    def test_approve_refuses_a_g2_plus_failing_draft(self):
+        """Review finding D1: approve() used to promote a draft with no
+        gate at all. Now it must refuse before writing anything."""
+        target = self.root / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        bad_draft = {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.A006"],  # adversary case -- G2+ must reject
+        }
+        draft = stage_draft(bad_draft, target)
+
+        schema = load_schema()
+        validator = Draft202012Validator(schema)
+
+        def validate_fn(path, data):
+            return validate_data(path, data, validator, specs_search_root=None)
+
+        with self.assertRaises(ApprovalRefused) as ctx:
+            approve(draft, target, reviewer="alice", reviewed_at="2026-08-25", review_log=self.log, validate_fn=validate_fn)
+
+        self.assertIn("adversary case", str(ctx.exception))
+        self.assertFalse(target.exists())  # nothing was promoted
+        self.assertTrue(draft.exists())  # draft is untouched, still there to fix
+        self.assertFalse(self.log.exists())  # no log entry for a refused approval
 
     def test_auto_promote_refuses_semantic_change(self):
         # Seed an approved target first.

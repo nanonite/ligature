@@ -69,9 +69,13 @@ declare, however useful they seem.
 ## Filename and boundary_id
 
 `boundary_id` must equal the eventual filename stem exactly:
-`{{snake_case(caller_concept)}}_{{caller_method}}__to__{{snake_case(callee_concept)}}_{{callee_method}}`
-(doubled underscore around `to`). Get this right in the JSON body; the
-caller derives the filename from it, not the other way around.
+`{{caller_concept_snake}}_{{caller_method}}__to__{{callee_concept_snake}}_{{callee_method}}`
+(doubled underscore around `to`) — `{{caller_concept_snake}}` and
+`{{callee_concept_snake}}` are `{{caller_concept}}`/`{{callee_concept}}`
+lowercased with an underscore before each internal capital (`TaskQueue` ->
+`task_queue`), precomputed by the caller, not derived by you from prose.
+Get this right in the JSON body; the caller derives the filename from it,
+not the other way around.
 
 ## review block
 

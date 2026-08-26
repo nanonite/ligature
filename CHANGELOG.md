@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- Stage 0/3 one-shot prompt templates: structured-output contract for LLM-side stages (#38)
 - Human review/approval checkpoint mechanism (#39)
 - Deliberate-failure regression fixture convention (#12)
 - G2+ = role safety only for first gate pass (#11)

@@ -54,6 +54,44 @@ The skill covers layer 1 (concepts) and layer 2 (intra-concept contracts). Archi
 
 Cross-concept reliance is one major source of contract gaps; the reliance graph makes that class explicit. Local failures — frame conditions, overflow, hidden-state mutation, partial functions, panic paths, nontermination, aliasing — remain layer-2 and Stage-8A concerns.
 
+### 1.1 Project structure descriptor (Stage P0)
+
+The pipeline's one external input, and the concrete answer to "project structure as an input": one per project workspace, read by every later stage instead of any stage hardcoding project shape.
+
+```
+schemas/project-descriptor.schema.json   ← normative schema, draft-2020-12
+schemas/examples/*.example.json          ← canonical examples, checked against the schema in CI
+```
+
+```json
+{
+  "schema_version": "1.0",
+  "project": { "name": "example-greenfield", "crate_naming_convention": "^example-greenfield-[a-z]+" },
+  "mode": "greenfield",
+  "crates": [
+    { "crate_dir": "crates/example-greenfield-core", "contracts_crate": "contracts", "specs_search_root": "crates" }
+  ],
+  "verifier_policy": { "default": "creusot", "scheduling": "kani" },
+  "compatibility_policy": { "reliance_policy_path": "docs/reliance-policy.md" },
+  "write_set": { "allowed_roots": ["crates/*/src/"], "protected_roots": ["crates/*/specs/**"] },
+  "gate_integrity": [{ "path": "scripts/closure_gate.py" }],
+  "llm_backend": { "kind": "claude", "command": "claude -p" },
+  "review": { "reviewer": "<human>", "reviewed_at": "2026-08-2x" }
+}
+```
+
+Fields, and why each exists:
+
+- **`project`** — name and this project's own crate-naming convention. Never hardcoded by the pipeline itself (an earlier draft baked in a `^beast-rs-[a-z]+`-shaped regex; that was a modeling error, not a design requirement — see `docs/concept-to-code-modifications.md` gap #4).
+- **`mode`** — `greenfield` (Mode R, §11) or `port` (Mode P, §11, a foreign-language source port validated by differential testing). `mode: port` requires `port_source` (repository, origin language, oracle build command) — enforced by the schema's `if`/`then`, not left to convention. Origin-language provenance is recorded here, one layer above concept-to-code, never inside a concept spec (`docs/concept-to-code-modifications.md` gap #3).
+- **`crates[]`** — the concept-to-code binding per crate (`crate_dir` / `contracts_crate` / `specs_search_root`), replacing ad hoc CLI flags re-derived on every invocation (`docs/concept-to-code-modifications.md` gap #1).
+- **`verifier_policy`** — default verifier plus per-cluster overrides, feeding `closure_kind` (§4) and CG1 cross-verifier detection directly from `crates[].verifier` values concept-to-code already exposes.
+- **`compatibility_policy`** — where the governed policy docs live (`reliance-policy.md`, and `witness-policy.md` if §16 is in use).
+- **`write_set`** — default `allowed_roots` / `protected_roots` (§10); a starting point each work package narrows, never widens.
+- **`gate_integrity`** — gate-implementation paths to hash-pin; G13 validates every one before any gate runs (§10, §12).
+- **`llm_backend`** — §6.1's pluggable one-shot backend selection (`claude` / `codex` / `opencode` / `manual`) for stages 0, 3, and findings-driven re-entry.
+- **`review`** — same discipline as every other normative artifact in this plan: a human reviewer and date, required, `additionalProperties: false` throughout.
+
 ---
 
 ## 2. Local ground truth — fix before Prototype A

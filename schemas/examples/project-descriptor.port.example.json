@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "name": "example-port",
+    "crate_naming_convention": "^example-port-[a-z]+"
+  },
+  "mode": "port",
+  "port_source": {
+    "repository": "<path-to-cpp-source-repository>",
+    "language": "cpp",
+    "oracle_build_command": "cmake --build build --target oracle"
+  },
+  "crates": [
+    {
+      "crate_dir": "crates/example-port-core",
+      "contracts_crate": "contracts",
+      "specs_search_root": "crates"
+    }
+  ],
+  "verifier_policy": {
+    "default": "creusot"
+  },
+  "compatibility_policy": {
+    "reliance_policy_path": "docs/reliance-policy.md"
+  },
+  "write_set": {
+    "allowed_roots": [
+      "crates/*/src/",
+      "crates/*/tests/"
+    ],
+    "protected_roots": [
+      "crates/*/specs/**",
+      "ci/manifest/**",
+      "scripts/**",
+      "docs/*-schema.json",
+      "docs/reliance-policy.md",
+      "**/Cargo.toml",
+      "**/build.rs",
+      "tests/harnesses/**",
+      ".github/**",
+      "rust-toolchain.toml"
+    ]
+  },
+  "gate_integrity": [
+    { "path": "scripts/closure_gate.py" },
+    { "path": "scripts/validate_boundary_contracts.py" },
+    { "path": "docs/boundary-contract-schema.json" },
+    { "path": "docs/reliance-policy.md" }
+  ],
+  "llm_backend": {
+    "kind": "manual"
+  },
+  "review": {
+    "reviewer": "example-reviewer",
+    "reviewed_at": "2026-08-25"
+  }
+}

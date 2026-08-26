@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "name": "example-greenfield",
+    "crate_naming_convention": "^example-greenfield-[a-z]+"
+  },
+  "mode": "greenfield",
+  "crates": [
+    {
+      "crate_dir": "crates/example-greenfield-core",
+      "contracts_crate": "contracts",
+      "specs_search_root": "crates"
+    },
+    {
+      "crate_dir": "crates/example-greenfield-scheduler",
+      "contracts_crate": "contracts",
+      "specs_search_root": "crates"
+    }
+  ],
+  "verifier_policy": {
+    "default": "creusot",
+    "scheduling": "kani"
+  },
+  "compatibility_policy": {
+    "reliance_policy_path": "docs/reliance-policy.md",
+    "witness_policy_path": "docs/witness-policy.md"
+  },
+  "write_set": {
+    "allowed_roots": [
+      "crates/*/src/",
+      "crates/*/tests/"
+    ],
+    "protected_roots": [
+      "crates/*/specs/**",
+      "ci/manifest/**",
+      "scripts/**",
+      "docs/*-schema.json",
+      "docs/reliance-policy.md",
+      "**/Cargo.toml",
+      "**/build.rs",
+      "tests/harnesses/**",
+      ".github/**",
+      "rust-toolchain.toml",
+      "**/kani.toml"
+    ]
+  },
+  "gate_integrity": [
+    { "path": "scripts/closure_gate.py" },
+    { "path": "scripts/callsite_coverage.py" },
+    { "path": "scripts/validate_boundary_contracts.py" },
+    { "path": "docs/boundary-contract-schema.json" },
+    { "path": "docs/reliance-policy.md" }
+  ],
+  "llm_backend": {
+    "kind": "claude",
+    "command": "claude -p"
+  },
+  "review": {
+    "reviewer": "example-reviewer",
+    "reviewed_at": "2026-08-25"
+  }
+}

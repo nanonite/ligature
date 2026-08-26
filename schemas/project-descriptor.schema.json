@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/schemas/project-descriptor.schema.json",
+  "title": "Reliance-graph pipeline project structure descriptor",
+  "description": "Stage P0 input contract (plan.md §1.1). One per project workspace. Every later stage reads this instead of hardcoding project shape.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project",
+    "mode",
+    "crates",
+    "verifier_policy",
+    "compatibility_policy",
+    "write_set",
+    "gate_integrity",
+    "review"
+  ],
+  "additionalProperties": false,
+  "if": {
+    "properties": { "mode": { "const": "port" } }
+  },
+  "then": {
+    "required": ["port_source"]
+  },
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "project": {
+      "type": "object",
+      "required": ["name", "crate_naming_convention"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Project identifier, used as a namespace prefix in generated artifact paths."
+        },
+        "crate_naming_convention": {
+          "type": "string",
+          "description": "This project's own crate/package naming rule, prose or regex (e.g. '^myproj-[a-z]+'). Never hardcoded by the pipeline itself -- see docs/concept-to-code-modifications.md gap #4."
+        }
+      }
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["greenfield", "port"],
+      "description": "greenfield = Mode R, requirements-governed decomposition (plan.md §11). port = Mode P, a foreign-language source port validated by differential testing against an oracle."
+    },
+    "port_source": {
+      "type": "object",
+      "description": "Required when mode == 'port'; absent when mode == 'greenfield'.",
+      "required": ["repository", "language", "oracle_build_command"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "description": "Path or URL to the source-of-truth repository being ported (e.g. the C++ project)."
+        },
+        "language": {
+          "type": "string",
+          "description": "Origin language, e.g. 'cpp'. Recorded here, not in concept-to-code's schema -- see docs/concept-to-code-modifications.md gap #3."
+        },
+        "oracle_build_command": {
+          "type": "string",
+          "description": "Command that builds/runs the origin-language oracle used for Mode P differential testing (plan.md §11)."
+        }
+      }
+    },
+    "crates": {
+      "type": "array",
+      "minItems": 1,
+      "description": "concept-to-code binding per crate -- replaces ad hoc --crate-dir/--contracts-crate/--specs-search-root flags (docs/concept-to-code-modifications.md gap #1).",
+      "items": {
+        "type": "object",
+        "required": ["crate_dir", "contracts_crate", "specs_search_root"],
+        "additionalProperties": false,
+        "properties": {
+          "crate_dir": {
+            "type": "string",
+            "description": "Path (workspace-relative) to the crate root containing src/ and tests/."
+          },
+          "contracts_crate": {
+            "type": "string",
+            "default": "contracts",
+            "description": "Name of the verifier-contracts facade crate this crate's generated stubs depend on."
+          },
+          "specs_search_root": {
+            "type": "string",
+            "description": "Root directory searched for another crate's spec JSON when resolving implements/trait_ref/variants."
+          }
+        }
+      }
+    },
+    "verifier_policy": {
+      "type": "object",
+      "description": "Default verifier per cluster (plan.md §4). A cluster not listed as its own key uses 'default'.",
+      "required": ["default"],
+      "properties": {
+        "default": { "$ref": "#/$defs/verifier" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/verifier" }
+    },
+    "compatibility_policy": {
+      "type": "object",
+      "required": ["reliance_policy_path"],
+      "additionalProperties": false,
+      "properties": {
+        "reliance_policy_path": {
+          "type": "string",
+          "default": "docs/reliance-policy.md",
+          "description": "plan.md §2 semantic policy doc, versioned governance -- not a one-time artifact."
+        },
+        "witness_policy_path": {
+          "type": "string",
+          "description": "plan.md §16.5 -- optional, only if the project declares feature witnesses."
+        }
+      }
+    },
+    "write_set": {
+      "type": "object",
+      "required": ["allowed_roots", "protected_roots"],
+      "additionalProperties": false,
+      "properties": {
+        "allowed_roots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Default allowed_write_set roots (plan.md §10) -- a starting point each work package narrows, never widens."
+        },
+        "protected_roots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Default protected_write_set roots (plan.md §10) -- specs, CI manifests, gate scripts, schemas, policy docs, Cargo/build files, harnesses, toolchain pins."
+        }
+      }
+    },
+    "gate_integrity": {
+      "type": "array",
+      "description": "Gate-implementation paths to hash-pin (G13 validates before any gate runs, plan.md §10/§12).",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" }
+        }
+      }
+    },
+    "llm_backend": {
+      "type": "object",
+      "description": "plan.md §6.1 -- pluggable one-shot LLM backend for Stage 0/3 and findings-driven re-entry.",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["claude", "codex", "opencode", "manual"],
+          "description": "manual = print the constructed prompt and wait for the user to run it themselves and hand back the result."
+        },
+        "command": {
+          "type": "string",
+          "description": "Override the default invocation (e.g. a non-default claude -p flag set). Ignored when kind == 'manual'."
+        }
+      }
+    },
+    "review": {
+      "$ref": "#/$defs/review"
+    }
+  },
+  "$defs": {
+    "verifier": {
+      "type": "string",
+      "enum": ["kani", "creusot", "verus"]
+    },
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": { "type": "string" },
+        "reviewed_at": { "type": "string", "format": "date" }
+      }
+    }
+  }
+}

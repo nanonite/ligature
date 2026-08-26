@@ -110,3 +110,48 @@ required in `emit_stubs.py` — its query handling only reads `pure` today
 (`emit_stubs.py:194`) and the new field is inert to it. This is the concrete
 request to apply in the concept-to-code repo. Tracked as chainlink issue #33
 in `ligature-workspace`.
+
+### 6. Stable obligation identifiers on `command`/`constraint` — open, blocking M0
+
+Found while building the boundary-artifact schema (chainlink #9/#11): checked
+`schemas/spec.schema.json`'s `command` and `constraint` `$def`s directly
+(both `additionalProperties: false`) and confirmed neither has an `id` or
+`name` field. A constraint is identified by nothing but its `english` text
+and its position in the `constraints` array. Grepped `emit_stubs.py` and
+`spec_workspace.py` for any `C00N`-style id generation — none exists either.
+
+This matters because **the reliance-graph plan references obligations by a
+stable id everywhere** — `callee_guarantees: [TaskQueue.C003]` (boundary
+specs, §2), `obligations: [Chain.C002]` (work-package manifests, §10),
+`reliances[].obligation_id` (interaction specs, §5.1), promotion
+`artifact_manifest` entries. None of that is implementable against the
+current schema: there is nothing stable to put after the dot. Positional
+numbering (Nth constraint = `C00N`) is available without any concept-to-code
+change but is exactly the kind of fragility this plan works hard to avoid
+elsewhere (`spec_workspace.py check`'s drift detection, gate-implementation
+hashing, the whole `additionalProperties: false` discipline) — reordering
+constraints with zero semantic change would silently renumber every
+downstream reference.
+
+Two real options, not decided yet:
+
+1. **Add `id: string` (required, pattern e.g. `^C\d{3}$`) to `constraint`,
+   and a parallel scheme to `command`.** Author-assigned at Step A time, like
+   every other id in this ecosystem (`boundary_id`, `witness_id`,
+   `promotion_id`). Stable under reordering by construction. Requires a
+   `concept-to-code` schema change (real, `additionalProperties: false`
+   again) plus updating `spec_workspace.py`/`emit_stubs.py` anywhere they
+   iterate constraints positionally, and every existing spec JSON in any
+   project already using concept-to-code needs backfilling.
+2. **Content-addressed id** — hash the `english` text (e.g. `C-a3f9e1`).
+   Stable across reordering, changes only when the wording changes (arguably
+   correct: a reworded precondition *is* a different obligation). No author
+   burden, no backfill script needed beyond a one-time hash pass. Loses the
+   readable `C001`/`C002` convention used throughout the plan's own worked
+   examples — every reference becomes a hash fragment.
+
+Recommend option 1 for readability alone, but this blocks real boundary/
+work-package schema work (#9, #11, and eventually the I-schema issues in
+M3) until decided — not something to guess silently given it means another
+concept-to-code schema change plus a backfill obligation for any project
+already using it. Tracked as a new chainlink issue.

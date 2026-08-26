@@ -1,0 +1,4 @@
+{
+  "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+  "_note": "Naming/layout fixture only (chainlink #8) -- not validated against the full boundary contract schema, which is blocked pending docs/concept-to-code-modifications.md gap #6 (obligation identifiers)."
+}

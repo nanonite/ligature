@@ -79,6 +79,33 @@ class ReviewCheckpointTest(unittest.TestCase):
         self.assertEqual(len(log_lines), 1)
         entry = json.loads(log_lines[0])
         self.assertEqual(entry["reviewer"], "alice")
+        self.assertEqual(entry["validation"], "skipped")  # SKIP_VALIDATION was passed above
+
+    def test_audit_log_distinguishes_checked_from_skipped_validation(self):
+        """Third review pass: 'a skipped approval is indistinguishable
+        from a validated approval' in the persisted record. Both must be
+        visible in the log, not just gated in code."""
+        target_checked = self.root / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        draft_checked = stage_draft({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+        }, target_checked)
+        validator = load_validator()
+        approve(
+            draft_checked, target_checked, reviewer="alice", reviewed_at="2026-08-27",
+            review_log=self.log, validate_fn=lambda p, d: validate_data(p, d, validator, specs_search_root=None),
+        )
+
+        target_skipped = self.root / "other" / "x.json"
+        draft_skipped = stage_draft({"boundary_id": "a__to__b"}, target_skipped)
+        approve(draft_skipped, target_skipped, reviewer="bob", reviewed_at="2026-08-27", review_log=self.log, validate_fn=SKIP_VALIDATION)
+
+        entries = [json.loads(line) for line in self.log.read_text().strip().splitlines()]
+        self.assertEqual(entries[0]["validation"], "checked")
+        self.assertEqual(entries[1]["validation"], "skipped")
 
     def test_approve_without_validate_fn_raises_instead_of_silently_skipping(self):
         """Review finding D1 (round 2): validate_fn used to default to
@@ -155,11 +182,13 @@ class ReviewCheckpointTest(unittest.TestCase):
         self.assertIn("auto-promoted", json.loads(log_lines[1])["reviewer"])
 
 
-class StandaloneCliRequiresExplicitSkipTest(unittest.TestCase):
-    """Review finding (round 2, high severity): 'the standalone approve
-    CLI calls it without validation' -- the bare CLI has no way to know
-    which validator applies to an arbitrary target, so it must require an
-    explicit --skip-validation rather than silently defaulting to none."""
+class StandaloneCliCannotPromoteTest(unittest.TestCase):
+    """Third review pass (2026-08-27): --skip-validation on the standalone
+    CLI was itself the bypass -- explicit didn't make it safe, it just
+    made an unsafe path opt-in instead of the default. The standalone CLI
+    no longer offers `approve` at all; promotion only happens through
+    `pipeline.py approve`, which always resolves a real validator or
+    refuses. classify/diff remain -- they're read-only."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -169,20 +198,16 @@ class StandaloneCliRequiresExplicitSkipTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_approve_without_skip_validation_flag_is_refused(self):
+    def test_approve_is_not_a_recognized_subcommand(self):
         draft = stage_draft({"boundary_id": "a__to__b"}, self.target)
-        rc = review_checkpoint.main(["approve", str(draft), str(self.target), "--reviewer", "alice"])
-        self.assertEqual(rc, 2)
+        with self.assertRaises(SystemExit):
+            review_checkpoint.main(["approve", str(draft), str(self.target), "--reviewer", "alice"])
         self.assertFalse(self.target.exists())
-        self.assertTrue(draft.exists())
 
-    def test_approve_with_skip_validation_flag_proceeds(self):
+    def test_classify_still_works(self):
         draft = stage_draft({"boundary_id": "a__to__b"}, self.target)
-        rc = review_checkpoint.main(
-            ["approve", str(draft), str(self.target), "--reviewer", "alice", "--skip-validation"]
-        )
+        rc = review_checkpoint.main(["classify", str(draft), str(self.target)])
         self.assertEqual(rc, 0)
-        self.assertTrue(self.target.exists())
 
 
 if __name__ == "__main__":

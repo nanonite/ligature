@@ -188,6 +188,95 @@ class LoadProjectDescriptorTest(unittest.TestCase):
             path.unlink()
 
 
+VALID_DESCRIPTOR = {
+    "schema_version": "1.0",
+    "project": {"name": "repro", "crate_naming_convention": "^repro-[a-z]+"},
+    "mode": "greenfield",
+    "crates": [
+        {"crate_dir": "crate_a", "contracts_crate": "contracts", "specs_search_root": "crate_a/specs"}
+    ],
+    "verifier_policy": {"default": "creusot"},
+    "compatibility_policy": {"reliance_policy_path": "docs/reliance-policy.md"},
+    "write_set": {"allowed_roots": [], "protected_roots": []},
+    "gate_integrity": [],
+    "review": {"reviewer": "repro", "reviewed_at": "2026-08-27"},
+}
+
+
+class CmdApproveIntegrationTest(unittest.TestCase):
+    """Requested directly by the third review pass: real cmd_approve
+    integration tests for G1a failure, G2+ failure, and a mislocated
+    boundary -- the actual reproduction they used (a boundary under a
+    typo'd _boundary/ directory, singular, was approved with zero gating
+    because the dispatcher fell back to SKIP_VALIDATION for anything it
+    didn't recognize)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args):
+        return pipeline.main(
+            ["--workspace", str(self.workspace), "--descriptor", str(self.descriptor_path), *args]
+        )
+
+    def test_g1a_failure_is_refused_and_writes_nothing(self):
+        target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        target.with_suffix(".json.draft").write_text(
+            json.dumps({"boundary_id": "broken", "review": {"reviewer": "alice", "reviewed_at": "2026-08-26"}})
+        )
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_g2_plus_failure_is_refused_and_writes_nothing(self):
+        target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.A006"],
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_mislocated_boundary_under_typo_directory_is_refused_not_silently_approved(self):
+        """The actual reproduction: a boundary artifact placed under
+        _boundary/ (singular -- missing the trailing s) used to match
+        nothing in the dispatcher, fall back to SKIP_VALIDATION, and
+        promote successfully with zero gating. Must now be refused."""
+        typo_dir = self.workspace / "crate_a" / "specs" / "_boundary"
+        typo_dir.mkdir(parents=True)
+        target = typo_dir / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        target.with_suffix(".json.draft").write_text(
+            json.dumps({"boundary_id": "broken", "review": {"reviewer": "alice", "reviewed_at": "2026-08-26"}})
+        )
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists(), "mislocated boundary was promoted with no gate -- the exact bug reported")
+
+    def test_valid_draft_is_approved(self):
+        target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice", "--reviewed-at", "2026-08-27")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+
+
 class TargetContainmentTest(unittest.TestCase):
     """Review finding (round 2, medium severity): draft/approve accepted
     args.target verbatim, with no check it belonged to the workspace or

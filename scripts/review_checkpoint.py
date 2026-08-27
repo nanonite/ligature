@@ -24,9 +24,17 @@ the pending/approved signal instead of inventing separate state:
     with no gate at all -- a human could approve a schema-invalid or
     role-unsafe draft straight into the tree, which breaks the plan's own
     ordering, §4.5: mechanically-valid -> semantically-reviewed -> accepted).
-    validate_fn is optional and generic on purpose -- this module has no
-    business knowing boundary-contract-specific gate logic; the caller
-    wires in whichever validator matches the artifact type being approved.
+    validate_fn is generic on purpose -- this module has no business
+    knowing boundary-contract-specific gate logic; the caller wires in
+    whichever validator matches the artifact type being approved. It is
+    NOT optional: there is no default, only a real validator or the
+    explicit SKIP_VALIDATION sentinel (a second review pass, 2026-08-26,
+    found the original None default silently meant "skip" -- see
+    SKIP_VALIDATION's own docstring). A third pass (2026-08-27) further
+    found that pipeline.py's own dispatcher was defaulting to
+    SKIP_VALIDATION for any artifact type it didn't recognize, which was
+    the same bypass one level up -- fixed there by making the dispatcher
+    raise on an unrecognized target instead.
 
 An LLM backend may recommend approval (plan.md §7.2: "An LLM critic may
 recommend; it is never the sole authority") but nothing in this module
@@ -185,6 +193,10 @@ def approve(
                     "classification": result_classification,
                     "reviewer": reviewer,
                     "reviewed_at": reviewed_at,
+                    # Third review pass (2026-08-27): a skipped approval
+                    # used to be indistinguishable from a validated one in
+                    # the audit trail itself. Record which happened.
+                    "validation": "skipped" if validate_fn is SKIP_VALIDATION else "checked",
                     "logged_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -243,6 +255,7 @@ def auto_promote_if_mechanical(
                     "classification": "mechanical",
                     "reviewer": f"auto-promoted (carried forward from {prior_review.get('reviewer')!r})",
                     "reviewed_at": prior_review.get("reviewed_at"),
+                    "validation": "skipped" if validate_fn is SKIP_VALIDATION else "checked",
                     "logged_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -253,7 +266,16 @@ def auto_promote_if_mechanical(
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__ + "\n\nThis standalone CLI is read-only (classify/diff) on purpose -- "
+        "it has no artifact-type knowledge, so it cannot select a validator "
+        "for an arbitrary target. Promotion always goes through `pipeline.py "
+        "approve`, which dispatches to the right validator by artifact type "
+        "and refuses anything it doesn't recognize (a third review pass, "
+        "2026-08-27, found the previous version's --skip-validation escape "
+        "hatch here was itself the bypass).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     classify_p = sub.add_parser("classify", help="Show whether a draft needs a human checkpoint")
@@ -263,26 +285,6 @@ def main(argv: list[str]) -> int:
     diff_p = sub.add_parser("diff", help="Show the diff a reviewer would see")
     diff_p.add_argument("draft", type=Path)
     diff_p.add_argument("target", type=Path)
-
-    approve_p = sub.add_parser(
-        "approve",
-        help="Record human approval, promote draft to target. "
-        "Prefer `pipeline.py approve` -- it wires in the right validator "
-        "for the artifact type automatically. This standalone command has "
-        "no artifact-type knowledge, so it can only skip validation "
-        "outright (--skip-validation, required) or refuse.",
-    )
-    approve_p.add_argument("draft", type=Path)
-    approve_p.add_argument("target", type=Path)
-    approve_p.add_argument("--reviewer", required=True)
-    approve_p.add_argument("--reviewed-at", default=None)
-    approve_p.add_argument(
-        "--skip-validation",
-        action="store_true",
-        help="Required to proceed via this standalone command -- it cannot "
-        "know which validator applies to an arbitrary target path. There "
-        "is no other way to make this command promote a draft.",
-    )
 
     args = parser.parse_args(argv)
 
@@ -298,27 +300,6 @@ def main(argv: list[str]) -> int:
         draft_data = json.loads(args.draft.read_text())
         old_data = _load(args.target)
         print(diff_artifact(old_data, draft_data) or "(no prior version -- new artifact)")
-        return 0
-
-    if args.command == "approve":
-        if not args.skip_validation:
-            print(
-                "error: this standalone command cannot select a validator for "
-                "an arbitrary target -- use `pipeline.py approve` (wires in the "
-                "right one automatically), or pass --skip-validation to promote "
-                "with no gate at all (not recommended)",
-                file=sys.stderr,
-            )
-            return 2
-        try:
-            result = approve(
-                args.draft, args.target, args.reviewer, args.reviewed_at,
-                validate_fn=SKIP_VALIDATION,
-            )
-        except ApprovalRefused as e:
-            print(f"error: {e}", file=sys.stderr)
-            return 1
-        print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
         return 0
 
     return 1

@@ -32,7 +32,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from review_checkpoint import ApprovalRefused  # noqa: E402
-from review_checkpoint import SKIP_VALIDATION  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -254,15 +253,28 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     """Dispatch by the specs/_<kind>/ directory convention used throughout
     plan.md -- extensible to interaction/witness/etc. validators once M3/M4
     give them schemas; only boundary contracts exist to validate today.
-    Returns SKIP_VALIDATION, never None, for an artifact type with no
-    validator yet -- approve()/auto_promote_if_mechanical() reject a bare
-    None as of the D1 fix, so this must make the "no validator" case
-    explicit too, not just pass a falsy value through."""
+
+    Raises for anything this dispatcher doesn't recognize -- a third review
+    pass (2026-08-27) found the previous version returned SKIP_VALIDATION
+    for *any* unmatched path, which converted "unknown artifact type" into
+    a silent bypass: a boundary placed under a typo'd `_boundary/` (missing
+    the trailing s) matched nothing, got SKIP_VALIDATION, and was approved
+    with zero gating. Reproduced end to end. This dispatcher's job is to
+    recognize known artifact types and refuse everything else outright --
+    "no validator exists yet" must be a hard stop on the approval path, not
+    a reason to let it through. When M3/M4 add real validators for other
+    artifact types, they extend this if/elif chain; until then, this
+    pipeline simply cannot approve those artifact types, which is correct."""
     if "_boundaries" in target.parts:
         validator = load_boundary_validator()
         specs_search_root = _specs_search_root_for(target, workspace, descriptor)
         return lambda path, data: validate_boundary_data(path, data, validator, specs_search_root)
-    return SKIP_VALIDATION
+    raise PipelineError(
+        f"no validator recognizes target {target} -- this pipeline only "
+        "validates boundary contracts (specs/_boundaries/) today. Refusing "
+        "to draft/approve an artifact type it cannot mechanically gate, "
+        "rather than silently skipping validation for it."
+    )
 
 
 def cmd_approve(args: argparse.Namespace) -> int:

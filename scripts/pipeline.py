@@ -273,7 +273,7 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     artifact types, they extend this if/elif chain; until then, this
     pipeline simply cannot approve those artifact types, which is correct.
 
-    A FOURTH review pass (2026-08-27) found that "recognized" was still too
+    A FOURTH review pass (2026-08-30) found that "recognized" was still too
     loose: `"_boundaries" in target.parts` matches a `_boundaries` component
     ANYWHERE in the path, not the crate's actual declared layout --
     `crate_a/not_specs/_boundaries/x.json` and `crate_a/specs/nested/_boundaries/x.json`

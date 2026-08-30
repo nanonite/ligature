@@ -170,6 +170,41 @@ class CmdValidateIntegrationTest(unittest.TestCase):
             self.assertEqual(pipeline.cmd_validate(args), 1)
 
 
+WP_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "work_packages" / "valid"
+
+
+class CmdValidateWorkPackageIntegrationTest(unittest.TestCase):
+    """Exercised through pipeline.main() end to end, matching the pattern
+    used for validate/approve -- not just the underlying library call."""
+
+    def _run(self, *args):
+        return pipeline.main(["--workspace", str(WP_FIXTURE_ROOT), "validate-work-package", *args])
+
+    def test_valid_manifest_passes(self):
+        manifest = WP_FIXTURE_ROOT / "ci" / "manifest" / "WP-SCHED-001.json"
+        rc = self._run(
+            str(manifest), "--specs-search-root", str(WP_FIXTURE_ROOT / "crates" / "scheduler" / "specs")
+        )
+        self.assertEqual(rc, 0)
+
+    def test_valid_manifest_without_search_root_still_passes_with_info_findings(self):
+        manifest = WP_FIXTURE_ROOT / "ci" / "manifest" / "WP-SCHED-001.json"
+        rc = self._run(str(manifest))
+        self.assertEqual(rc, 0)
+
+    def test_manifest_with_bad_gate_hash_fails(self):
+        data = json.loads((WP_FIXTURE_ROOT / "ci" / "manifest" / "WP-SCHED-001.json").read_text())
+        data["gate_integrity"][0]["hash"] = "sha256:" + "0" * 64
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            bad_manifest = Path(f.name)
+        try:
+            rc = self._run(str(bad_manifest))
+            self.assertEqual(rc, 1)
+        finally:
+            bad_manifest.unlink()
+
+
 class LoadProjectDescriptorTest(unittest.TestCase):
     def test_valid_descriptor_loads(self):
         data = pipeline.load_project_descriptor(

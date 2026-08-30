@@ -725,6 +725,8 @@ report:
 - Harness names are exact; no wildcards unless the runner explicitly supports them.
 - **Canonical manifest examples must pass their schema in CI.**
 
+Implemented in `docs/work-package-manifest-schema.json` (G1a, draft-2020-12, matching the worked example above field-for-field) and `scripts/validate_work_package.py` (chainlink #14), plus `pipeline.py validate-work-package` — standalone, not routed through the draft/approve checkpoint, since a manifest is machine-generated at Stage 7 from already-promoted content rather than LLM-drafted and human-reviewed the way a boundary contract is. Of the five rules above, three are fully mechanical today and actually enforced (not just schema-shaped): gate-implementation hashes are computed from the real files on disk and compared (G13); `allowed_write_set`/`protected_write_set` are checked for literal overlap; every `assumption_ref` is resolved against a real boundary contract's own `assumptions[]` entry, not just pattern-matched. Two are honestly unimplemented and say so as a visible, non-blocking finding rather than silently passing or failing: `promotion_id` resolution (nothing to resolve against until #15 lands) and "every owned function's source path is covered by `allowed_write_set`" (no schema-computable mapping from a Rust module path to a file path without real crate source, which this workspace doesn't have).
+
 ---
 
 ## 11. Evidence

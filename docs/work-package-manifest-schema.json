@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/work-package-manifest-schema.json",
+  "title": "Work-package manifest — work-package-manifest/1.0",
+  "description": "plan.md §10. GENERATED, READ-ONLY. The artifact boundary between this pipeline and the orchestrator that implements the Rust code -- this schema IS the interface spec for 'outputs to pass to an orchestrator.' One issue -> one owner -> one worktree -> one PR.",
+  "type": "object",
+  "required": [
+    "schema", "work_package", "issue", "depends_on", "coupling_notes",
+    "scheduling_rule", "functions", "obligations", "provenance",
+    "gate_integrity", "write_policy", "definition_of_done", "gates",
+    "failure_policy", "report"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "work-package-manifest/1.0" },
+    "work_package": {
+      "type": "string",
+      "pattern": "^WP-[A-Z][A-Z0-9-]*$"
+    },
+    "issue": {
+      "type": "string",
+      "pattern": "^chainlink:[0-9]+$"
+    },
+    "depends_on": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^WP-[A-Z][A-Z0-9-]*$" }
+    },
+    "coupling_notes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "plan.md §10: SCC grouping is advisory -- a coupling warning and scheduling input, never a merge instruction."
+    },
+    "scheduling_rule": {
+      "type": "string",
+      "enum": ["reverse-dependency-order", "parallel-modular-assumptions"],
+      "description": "O edges point caller -> supplier; suppliers before callers unless modular assumptions permit parallel work (plan.md §10)."
+    },
+    "functions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*(::[a-zA-Z_][a-zA-Z0-9_]*)+$",
+        "description": "Rust path, e.g. scheduler::TaskQueue::pop_ready. Must be write-set consistent (§10.1) -- checked by scripts/validate_work_package.py, not this schema alone."
+      }
+    },
+    "obligations": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Flat index of obligation/bridge ids this package touches -- the detailed, per-id assurance requirement lives in definition_of_done."
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["base_commit", "promotion_id", "artifact_set_hash", "toolchain", "target", "features"],
+      "additionalProperties": false,
+      "properties": {
+        "base_commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "promotion_id": {
+          "type": "string",
+          "pattern": "^PROM-[A-Z][A-Z0-9-]*-[0-9]{3}$",
+          "description": "Resolved against a real promotion receipt (plan.md §7.1, chainlink #15) -- not yet implemented, so scripts/validate_work_package.py reports this as an info-severity gap, not a silent pass, until #15 lands."
+        },
+        "artifact_set_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "toolchain": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "features": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "gate_integrity": {
+      "type": "array",
+      "minItems": 1,
+      "description": "G13: validated BEFORE any gate runs (plan.md §5 of review, §10, §12).",
+      "items": {
+        "type": "object",
+        "required": ["runner", "hash"],
+        "additionalProperties": false,
+        "properties": {
+          "runner": { "type": "string", "minLength": 1 },
+          "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "write_policy": {
+      "type": "object",
+      "required": ["allowed_write_set", "protected_write_set", "on_conflict"],
+      "additionalProperties": false,
+      "properties": {
+        "allowed_write_set": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "protected_write_set": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "on_conflict": { "type": "string", "const": "raise_change_request" }
+      }
+    },
+    "definition_of_done": {
+      "type": "object",
+      "required": ["provided_guarantees", "required_preconditions_to_establish", "required_guarantees", "trusted_assumptions"],
+      "additionalProperties": false,
+      "properties": {
+        "provided_guarantees": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["obligation_id", "required_assurance", "harness"],
+            "additionalProperties": false,
+            "properties": {
+              "obligation_id": { "$ref": "#/$defs/obligation_id" },
+              "required_assurance": { "$ref": "#/$defs/required_assurance" },
+              "harness": { "$ref": "#/$defs/exact_harness_name" }
+            }
+          }
+        },
+        "required_preconditions_to_establish": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["bridge_id", "required_assurance", "callsite_requirement"],
+            "additionalProperties": false,
+            "properties": {
+              "bridge_id": { "type": "string", "pattern": "^BR-[A-Z][A-Z0-9-]*$" },
+              "required_assurance": { "$ref": "#/$defs/required_assurance" },
+              "callsite_requirement": {
+                "type": "string",
+                "enum": ["all-discovered-resolved"],
+                "description": "plan.md §9: 'all discovered call sites resolved,' never 'all call sites resolved.'"
+              }
+            }
+          }
+        },
+        "required_guarantees": {
+          "type": "array",
+          "description": "Assumed during this package's own check; enforced for real by G14 at 8C, not here (plan.md §8.5).",
+          "items": {
+            "type": "object",
+            "required": ["obligation_id", "assume_during_check", "required_assurance"],
+            "additionalProperties": false,
+            "properties": {
+              "obligation_id": { "$ref": "#/$defs/obligation_id" },
+              "assume_during_check": { "type": "boolean", "const": true },
+              "required_assurance": { "$ref": "#/$defs/required_assurance" }
+            }
+          }
+        },
+        "trusted_assumptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["assumption_ref", "risk", "mitigations"],
+            "additionalProperties": false,
+            "properties": {
+              "assumption_ref": {
+                "type": "object",
+                "required": ["boundary_id", "tracking_issue", "assumption_hash"],
+                "additionalProperties": false,
+                "description": "Same shape as docs/boundary-contract-schema.json's assumption_ref -- resolved against a real boundary contract's own assumptions[] entry by scripts/validate_work_package.py, not just structurally validated here.",
+                "properties": {
+                  "boundary_id": { "type": "string" },
+                  "tracking_issue": { "type": "string" },
+                  "assumption_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                }
+              },
+              "risk": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+              "mitigations": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["kind", "reference"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": ["test", "monitor", "proof", "static-analysis", "environment-control", "human-risk-acceptance", "witness"]
+                    },
+                    "reference": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "runner", "args"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+          "runner": { "type": "string", "minLength": 1 },
+          "args": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "failure_policy": {
+      "type": "object",
+      "required": [
+        "verifier_timeout", "obligation_unprovable", "missing_callee_guarantee",
+        "unintended_call_edge", "unresolved_callsite", "forbidden"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verifier_timeout": { "$ref": "#/$defs/change_request_action" },
+        "obligation_unprovable": { "$ref": "#/$defs/change_request_action" },
+        "missing_callee_guarantee": { "$ref": "#/$defs/change_request_action" },
+        "unintended_call_edge": { "$ref": "#/$defs/change_request_action" },
+        "unresolved_callsite": { "$ref": "#/$defs/change_request_action" },
+        "forbidden": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "weaken_or_delete_contract", "delete_or_stub_harness", "add_trusted_assumption",
+              "edit_protected_paths", "modify_gate_implementation", "change_features_or_toolchain",
+              "disable_test_registration"
+            ]
+          }
+        }
+      }
+    },
+    "report": {
+      "type": "object",
+      "required": ["emit", "per_obligation_assurance_record"],
+      "additionalProperties": false,
+      "properties": {
+        "emit": { "type": "string", "pattern": "^ci/results/.+\\.json$" },
+        "per_obligation_assurance_record": { "type": "boolean", "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "obligation_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]*\\.C[0-9]+$",
+      "description": "Same grammar as docs/boundary-contract-schema.json's callee_guarantees entries."
+    },
+    "exact_harness_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+      "description": "plan.md §10.1: harness names are exact, no wildcards unless the runner explicitly supports them. This schema never allows one."
+    },
+    "claim_kind": {
+      "type": "string",
+      "enum": ["callee-precondition-established", "postcondition-holds"]
+    },
+    "evidence_kind": {
+      "type": "string",
+      "enum": ["kani-bounded-model-check", "creusot-deductive-check", "verus-deductive-check"]
+    },
+    "required_assurance": {
+      "type": "object",
+      "required": ["required_claims", "accepted_evidence_kinds"],
+      "additionalProperties": false,
+      "properties": {
+        "required_claims": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/claim_kind" }
+        },
+        "accepted_evidence_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence_kind" }
+        },
+        "minimum_scope": {
+          "type": "object",
+          "description": "Open on purpose -- scope vocabulary (input_domain, feature_set, etc.) is domain-specific and not pinned down elsewhere in this pipeline either.",
+          "additionalProperties": { "type": "string" }
+        },
+        "trust_policy": {
+          "type": "object",
+          "required": ["assumptions_allowed"],
+          "additionalProperties": false,
+          "properties": {
+            "assumptions_allowed": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "change_request_action": {
+      "type": "string",
+      "pattern": "^raise_change_request\\(kind=[a-z_]+\\)$"
+    }
+  }
+}

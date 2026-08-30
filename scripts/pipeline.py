@@ -14,12 +14,20 @@ Implemented now, against schemas that actually exist:
             writes a draft to its target path.
   validate  Stage 4 (G1a/G1b/G2+) over boundary contracts (#9/#11) --
             fully deterministic, no LLM calls, by construction.
+  validate-work-package  Stage 7's own schema + §10.1 checks (#14) over a
+            work-package manifest. Standalone, not routed through
+            draft/approve -- a manifest is machine-generated at Stage 7
+            from already-promoted content, not LLM-drafted and
+            human-reviewed the way a boundary contract is.
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
   promotion (#15/#16/#17/#18/#19/#20, M3), emission, attach, manifest
-  (#14, M2), Stage 8A-8C (#22-#26, M4). `pipeline status` reports this
-  honestly instead of a stage silently no-op'ing.
+  *generation* (the manifest schema/validator exist as of #14; the
+  generator that reads promoted I/O and emits one doesn't, since it needs
+  the I-schema/promotion machinery M3 builds), Stage 8A-8C (#22-#26, M4).
+  `pipeline status` reports this honestly instead of a stage silently
+  no-op'ing.
 """
 from __future__ import annotations
 
@@ -38,6 +46,8 @@ from schema_utils import make_validator  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
+from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
+from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DESCRIPTOR_SCHEMA_PATH = ROOT / "schemas" / "project-descriptor.schema.json"
@@ -45,9 +55,10 @@ PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
     "promotion": "#15/#16/#17/#18/#19/#20 (M3 -- I-schema, evidence schema not built yet)",
-    "emission": "#14 dependency chain (M2/M3)",
-    "attach": "#14 dependency chain (M2/M3)",
-    "manifest": "#14 (M2 -- work-package manifest schema)",
+    "emission": "needs promotion (M3) first",
+    "attach": "needs promotion (M3) first",
+    "manifest generation": "#14's schema+validator exist (`validate-work-package`); the generator "
+    "that reads promoted I/O and emits a manifest needs promotion (M3) first, still not built",
     "8A": "#22-#26 (M4 -- bridge/closure track)",
     "8B": "#22-#26 (M4)",
     "8C": "#25 (M4 -- G14 transitive closure)",
@@ -191,6 +202,27 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_validate_work_package(args: argparse.Namespace) -> int:
+    validator = load_work_package_validator()
+    findings = validate_work_package_file(args.manifest, validator, args.workspace, args.specs_search_root)
+    errors = [f for f in findings if f.severity == "error"]
+    infos = [f for f in findings if f.severity == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if not errors:
+        print("OK: work package manifest passes G1a and §10.1 checks")
+        return 0
+
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
+        print(f"  - {f}")
+    return 1
+
+
 def cmd_draft(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
@@ -313,7 +345,10 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    print("Implemented: draft (Stage 0/3), approve (checkpoint), validate (Stage 4 G1a/G1b/G2+)")
+    print(
+        "Implemented: draft (Stage 0/3), approve (checkpoint), validate (Stage 4 G1a/G1b/G2+), "
+        "validate-work-package (Stage 7 schema + §10.1, standalone)"
+    )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
         print(f"  - {stage}: {ref}")
@@ -333,6 +368,18 @@ def main(argv: list[str]) -> int:
 
     validate_p = sub.add_parser("validate", help="Stage 4: G1a/G1b/G2+ over boundary contracts")
     validate_p.set_defaults(func=cmd_validate)
+
+    validate_wp_p = sub.add_parser(
+        "validate-work-package", help="Stage 7: schema + §10.1 checks over a work-package manifest"
+    )
+    validate_wp_p.add_argument("manifest", type=Path)
+    validate_wp_p.add_argument(
+        "--specs-search-root",
+        type=Path,
+        default=None,
+        help="Root to resolve trusted_assumptions[].assumption_ref against (optional).",
+    )
+    validate_wp_p.set_defaults(func=cmd_validate_work_package)
 
     draft_p = sub.add_parser("draft", help="Stage 0/3: one-shot LLM draft")
     draft_p.add_argument("stage", choices=["0", "3"])

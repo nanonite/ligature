@@ -232,6 +232,13 @@ def _specs_search_root_for(target: Path, workspace: Path, descriptor: dict) -> P
     return workspace / crate["specs_search_root"] if crate else None
 
 
+def _boundary_dir_for(crate: dict, workspace: Path) -> Path:
+    """plan.md's canonical layout, §2: crates/*/specs/_boundaries/*.json --
+    always this exact path relative to the crate root, not a separate
+    descriptor field."""
+    return (workspace / crate["crate_dir"] / "specs" / "_boundaries").resolve()
+
+
 def _require_target_in_workspace(target: Path, workspace: Path, descriptor: dict) -> None:
     """Draft/approve targets used to be accepted verbatim -- args.target
     with no check it belonged to the workspace or any declared crate at
@@ -264,16 +271,28 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     "no validator exists yet" must be a hard stop on the approval path, not
     a reason to let it through. When M3/M4 add real validators for other
     artifact types, they extend this if/elif chain; until then, this
-    pipeline simply cannot approve those artifact types, which is correct."""
-    if "_boundaries" in target.parts:
+    pipeline simply cannot approve those artifact types, which is correct.
+
+    A FOURTH review pass (2026-08-27) found that "recognized" was still too
+    loose: `"_boundaries" in target.parts` matches a `_boundaries` component
+    ANYWHERE in the path, not the crate's actual declared layout --
+    `crate_a/not_specs/_boundaries/x.json` and `crate_a/specs/nested/_boundaries/x.json`
+    both matched and promoted successfully. Neither is flagged by G1b's own
+    "flat" check either, since that only checks the file sits directly
+    inside a directory literally named `_boundaries` -- it has no opinion
+    on where `_boundaries` itself sits. Fixed by anchoring to the exact
+    expected path: target.parent must equal <crate_dir>/specs/_boundaries,
+    not merely contain that name somewhere upstream."""
+    crate = _crate_for(target, workspace, descriptor)
+    if crate is not None and target.resolve().parent == _boundary_dir_for(crate, workspace):
         validator = load_boundary_validator()
         specs_search_root = _specs_search_root_for(target, workspace, descriptor)
         return lambda path, data: validate_boundary_data(path, data, validator, specs_search_root)
     raise PipelineError(
         f"no validator recognizes target {target} -- this pipeline only "
-        "validates boundary contracts (specs/_boundaries/) today. Refusing "
-        "to draft/approve an artifact type it cannot mechanically gate, "
-        "rather than silently skipping validation for it."
+        "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json "
+        "today. Refusing to draft/approve an artifact type or location it "
+        "cannot mechanically gate, rather than silently skipping validation for it."
     )
 
 

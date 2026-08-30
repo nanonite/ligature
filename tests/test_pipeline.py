@@ -263,6 +263,40 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(target.exists(), "mislocated boundary was promoted with no gate -- the exact bug reported")
 
+    _VALID_PAYLOAD = {
+        "schema_version": "1.0",
+        "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+        "caller": {"concept": "Scheduler", "method": "dispatch"},
+        "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+        "callee_guarantees": ["TaskQueue.C003"],
+    }
+
+    def test_valid_boundary_under_wrong_parent_directory_is_refused(self):
+        """Fourth review pass: "_boundaries" in target.parts matched a
+        _boundaries component ANYWHERE in the path, not the crate's actual
+        declared layout -- crate_a/not_specs/_boundaries/x.json (not even
+        under specs/) matched and promoted a structurally valid boundary."""
+        wrong_root = self.workspace / "crate_a" / "not_specs" / "_boundaries"
+        wrong_root.mkdir(parents=True)
+        target = wrong_root / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        target.with_suffix(".json.draft").write_text(json.dumps(self._VALID_PAYLOAD))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists(), "boundary under the wrong parent directory was promoted")
+
+    def test_valid_boundary_under_nested_boundaries_directory_is_refused(self):
+        """specs/nested/_boundaries/ -- G1b's own 'flat' check doesn't
+        catch this either, since the file DOES sit directly inside a
+        directory literally named _boundaries; it has no opinion on where
+        that _boundaries directory itself sits relative to specs/."""
+        nested_root = self.workspace / "crate_a" / "specs" / "nested" / "_boundaries"
+        nested_root.mkdir(parents=True)
+        target = nested_root / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        target.with_suffix(".json.draft").write_text(json.dumps(self._VALID_PAYLOAD))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists(), "boundary under a nested _boundaries directory was promoted")
+
     def test_valid_draft_is_approved(self):
         target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
         target.with_suffix(".json.draft").write_text(json.dumps({

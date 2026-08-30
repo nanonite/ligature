@@ -187,10 +187,24 @@ class CmdValidateWorkPackageIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
 
-    def test_valid_manifest_without_search_root_still_passes_with_info_findings(self):
+    def test_omitting_search_root_defaults_to_workspace_and_still_resolves_assumptions(self):
+        """Not 'degrades to info and passes anyway' -- omitting
+        --specs-search-root defaults it to --workspace (external review,
+        high severity: the flag used to default to None, which let
+        assumption-ref resolution silently not run at all). The check
+        still genuinely executes and succeeds here because the fixture's
+        boundary really is reachable from the workspace root."""
         manifest = WP_FIXTURE_ROOT / "ci" / "manifest" / "WP-SCHED-001.json"
         rc = self._run(str(manifest))
         self.assertEqual(rc, 0)
+
+    def test_search_root_pointed_somewhere_the_boundary_cannot_be_found_fails(self):
+        """Proves the check actually runs rather than silently passing --
+        an empty directory can never contain the referenced boundary."""
+        manifest = WP_FIXTURE_ROOT / "ci" / "manifest" / "WP-SCHED-001.json"
+        with tempfile.TemporaryDirectory() as empty_dir:
+            rc = self._run(str(manifest), "--specs-search-root", empty_dir)
+            self.assertEqual(rc, 1)
 
     def test_manifest_with_bad_gate_hash_fails(self):
         data = json.loads((WP_FIXTURE_ROOT / "ci" / "manifest" / "WP-SCHED-001.json").read_text())

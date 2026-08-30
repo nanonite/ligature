@@ -1,0 +1,101 @@
+schema: work-package-manifest/1.0
+work_package: WP-SCHED-001
+issue: chainlink:901
+depends_on: []
+coupling_notes: []
+scheduling_rule: reverse-dependency-order
+functions:
+- scheduler::TaskQueue::pop_ready
+obligations:
+- TaskQueue.C003
+- BR-SCHED-TQ-001
+provenance:
+  base_commit: a1b2c3d
+  promotion_id: PROM-SCHED-001
+  artifact_set_hash: sha256:2222222222222222222222222222222222222222222222222222222222222222
+  toolchain: nightly-2026-05-01
+  target: x86_64-unknown-linux-gnu
+  features:
+  - default
+gate_integrity:
+- runner: scripts/dummy_gate.py
+  hash: sha256:197f698dddc62228b983ae82546c6d59eda35172edff0565a5b87ea614947a06
+write_policy:
+  allowed_write_set:
+  - crates/scheduler/src/
+  - crates/scheduler/tests/
+  protected_write_set:
+  - crates/*/specs/**
+  - ci/manifest/**
+  - scripts/**
+  on_conflict: raise_change_request
+definition_of_done:
+  provided_guarantees:
+  - obligation_id: TaskQueue.C003
+    required_assurance:
+      required_claims:
+      - postcondition-holds
+      accepted_evidence_kinds:
+      - creusot-deductive-check
+      minimum_scope:
+        feature_set: default
+      trust_policy:
+        assumptions_allowed: []
+    harness: task_queue_pop_ready_C003
+  required_preconditions_to_establish:
+  - bridge_id: BR-SCHED-TQ-001
+    required_assurance:
+      required_claims:
+      - callee-precondition-established
+      accepted_evidence_kinds:
+      - creusot-deductive-check
+    callsite_requirement: all-discovered-resolved
+  required_guarantees:
+  - obligation_id: Scheduler.C001
+    assume_during_check: true
+    required_assurance:
+      required_claims:
+      - postcondition-holds
+      accepted_evidence_kinds:
+      - creusot-deductive-check
+  trusted_assumptions:
+  - assumption_ref:
+      boundary_id: scheduler_dispatch__to__task_queue_pop_ready
+      tracking_issue: chainlink:713
+      assumption_hash: sha256:1111111111111111111111111111111111111111111111111111111111111111
+    risk: high
+    mitigations:
+    - kind: test
+      reference: tests/scheduler_dispatch_order.rs
+    - kind: human-risk-acceptance
+      reference: PROM-SCHED-001
+gates:
+- id: build
+  runner: cargo
+  args:
+  - build
+  - -p
+  - scheduler
+- id: prove
+  runner: cargo
+  args:
+  - creusot
+  - -p
+  - scheduler
+failure_policy:
+  verifier_timeout: raise_change_request(kind=budget_or_assumption)
+  obligation_unprovable: raise_change_request(kind=contract_revision)
+  missing_callee_guarantee: raise_change_request(kind=missing_contract)
+  unintended_call_edge: raise_change_request(kind=interaction_revision)
+  unresolved_callsite: raise_change_request(kind=callsite_unresolved)
+  forbidden:
+  - weaken_or_delete_contract
+  - delete_or_stub_harness
+  - add_trusted_assumption
+  - edit_protected_paths
+  - modify_gate_implementation
+  - change_features_or_toolchain
+  - disable_test_registration
+report:
+  emit: ci/results/WP-SCHED-001.json
+  per_obligation_assurance_record: true

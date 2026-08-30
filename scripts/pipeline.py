@@ -203,8 +203,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_work_package(args: argparse.Namespace) -> int:
+    # Default to the workspace root, never None -- omitting --specs-search-root
+    # must not silently disable assumption-ref resolution (external review,
+    # high severity: a real manifest with trusted_assumptions printed OK
+    # via this exact code path without the check ever running).
+    specs_search_root = args.specs_search_root if args.specs_search_root is not None else args.workspace
+
     validator = load_work_package_validator()
-    findings = validate_work_package_file(args.manifest, validator, args.workspace, args.specs_search_root)
+    findings = validate_work_package_file(args.manifest, validator, args.workspace, specs_search_root)
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
 

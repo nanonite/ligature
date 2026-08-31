@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "interaction_id": "I-SCHED-TQ-001",
+  "caller": { "concept": "Scheduler", "method": "dispatch" },
+  "callee": { "concept": "TaskQueue", "method": "pop_ready" },
+  "edge_class": ["stateful", "cross-verifier"],
+  "eligibility": "boundary-required",
+  "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
+  "evidence_links": ["E-0143"],
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-08-30"
+  }
+}

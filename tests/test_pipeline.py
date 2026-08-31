@@ -170,6 +170,57 @@ class CmdValidateIntegrationTest(unittest.TestCase):
             self.assertEqual(pipeline.cmd_validate(args), 1)
 
 
+INTERACTION_FIXTURES = ROOT / "tests" / "fixtures" / "interactions"
+EXEMPTION_FIXTURES = ROOT / "tests" / "fixtures" / "exemptions"
+
+
+def _single_crate_descriptor_path(tmp: str) -> Path:
+    """Same greenfield-example-plus-single-dot-crate pattern used by
+    CmdValidateIntegrationTest, factored out since both the interaction
+    and exemption integration tests below need it too."""
+    descriptor = json.loads(
+        (ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text()
+    )
+    descriptor["crates"] = [{"crate_dir": ".", "contracts_crate": "contracts", "specs_search_root": "specs"}]
+    descriptor_path = Path(tmp) / "project-descriptor.json"
+    descriptor_path.write_text(json.dumps(descriptor))
+    return descriptor_path
+
+
+class CmdValidateInteractionIntegrationTest(unittest.TestCase):
+    """Exercised through pipeline.main() end to end from the start, real
+    argv included -- an untested CLI entrypoint is exactly how a wiring
+    gap ships invisibly regardless of library-level coverage."""
+
+    def _run(self, workspace: Path) -> int:
+        with tempfile.TemporaryDirectory() as tmp:
+            descriptor_path = _single_crate_descriptor_path(tmp)
+            return pipeline.main(
+                ["--workspace", str(workspace), "--descriptor", str(descriptor_path), "validate-interaction"]
+            )
+
+    def test_valid_fixture_crate_passes(self):
+        self.assertEqual(self._run(INTERACTION_FIXTURES / "valid"), 0)
+
+    def test_computed_eligibility_mismatch_fails(self):
+        self.assertEqual(self._run(INTERACTION_FIXTURES / "invalid_mismatch"), 1)
+
+
+class CmdValidateExemptionIntegrationTest(unittest.TestCase):
+    def _run(self, workspace: Path) -> int:
+        with tempfile.TemporaryDirectory() as tmp:
+            descriptor_path = _single_crate_descriptor_path(tmp)
+            return pipeline.main(
+                ["--workspace", str(workspace), "--descriptor", str(descriptor_path), "validate-exemption"]
+            )
+
+    def test_valid_fixture_crate_passes(self):
+        self.assertEqual(self._run(EXEMPTION_FIXTURES / "valid"), 0)
+
+    def test_naming_mismatch_fails(self):
+        self.assertEqual(self._run(EXEMPTION_FIXTURES / "invalid_naming"), 1)
+
+
 WP_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "work_packages" / "valid"
 PROMOTION_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "promotions" / "valid"
 
@@ -297,6 +348,8 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self.tmp.name)
         (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
+        (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
+        (self.workspace / "crate_a" / "specs" / "_exemptions").mkdir(parents=True)
         self.descriptor_path = self.workspace / "project-descriptor.json"
         self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
 
@@ -389,6 +442,51 @@ class CmdApproveIntegrationTest(unittest.TestCase):
             "callee_guarantees": ["TaskQueue.C003"],
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice", "--reviewed-at", "2026-08-27")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+
+    def test_approve_valid_interaction_succeeds(self):
+        """#16: _select_validate_fn's dispatcher extended to recognize
+        interaction targets too, not just boundary contracts -- exercised
+        end to end through approve, not just validate_interaction.py directly."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+
+    def test_approve_interaction_with_wrong_computed_eligibility_is_refused(self):
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "ignore",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_approve_valid_exemption_succeeds(self):
+        """#16: same dispatcher extension, for exemption targets."""
+        target = self.workspace / "crate_a" / "specs" / "_exemptions" / "I-SCHED-TQ-002.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-002",
+            "rationale": "Prototype scaffolding boundary, tracked for removal (chainlink:#41)",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
         self.assertTrue(target.exists())
 

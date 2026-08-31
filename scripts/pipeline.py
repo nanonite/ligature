@@ -30,6 +30,14 @@ Implemented now, against schemas that actually exist:
             *generation* (reading a promoted artifact set and computing
             this) is separate, not-yet-built work, same boundary as
             validate-work-package's own manifest generator.
+  validate-interaction  Stage 4's G1a/G1b over interaction (I) specs (#16):
+            schema plus COMPUTED eligibility (plan.md §5.2) -- eligibility
+            is derived from edge_class, never hand-set, and disagreement
+            between the derived and stored value is rejected.
+  validate-exemption  Stage 4's G1a/G1b over boundary-required exemption
+            objects (#16): schema plus naming (interaction_id == filename
+            stem). Does not yet cross-reference that the named interaction
+            is real or actually eligible -- that is R2's job (#21).
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
@@ -53,6 +61,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import boundary_dir_for as _boundary_dir_for  # noqa: E402
 from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
+from project_descriptor import exemption_dir_for as _exemption_dir_for  # noqa: E402
+from project_descriptor import interaction_dir_for as _interaction_dir_for  # noqa: E402
 from project_descriptor import load_project_descriptor as _load_project_descriptor  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
@@ -60,6 +70,12 @@ from review_checkpoint import stage_draft  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
+from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
+from validate_exemption import validate as validate_exemptions  # noqa: E402
+from validate_exemption import validate_data as validate_exemption_data  # noqa: E402
+from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
+from validate_interaction import validate as validate_interactions  # noqa: E402
+from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
 from validate_promotion_receipt import load_validator as load_promotion_validator  # noqa: E402
 from validate_promotion_receipt import validate_file as validate_promotion_file  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
@@ -69,7 +85,11 @@ ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
-    "I-schema": "#16/#17/#18/#19/#20 (M3 -- interaction/evidence schema not built yet)",
+    "I-schema (remaining)": "#17/#18/#19/#20 (M3 -- assurance requirement, realization/config_scope, "
+    "protocol classification, and evidence schema still pending; #16's interaction_id/edge_class/"
+    "computed-eligibility base and exemption objects have landed as `validate-interaction`/`validate-exemption`)",
+    "R2 coverage": "#21 (M3 -- every eligible I edge covered by an O artifact or a reviewed exemption; "
+    "needs #16's interaction/exemption validators, which exist, cross-referenced against each other, which doesn't yet)",
     "emission": "needs the I-schema (M3) first",
     "attach": "needs the I-schema (M3) first",
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); the generator "
@@ -270,6 +290,46 @@ def cmd_validate_promotion(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_validate_interaction(args: argparse.Namespace) -> int:
+    descriptor = load_project_descriptor(args.descriptor)
+    findings_total = []
+    for crate in descriptor["crates"]:
+        crate_root = args.workspace / crate["crate_dir"]
+        try:
+            findings_total.extend(validate_interactions(crate_root))
+        except FileNotFoundError as e:
+            raise PipelineError(f"crate {crate['crate_dir']!r} in the project descriptor: {e}")
+
+    if not findings_total:
+        print("OK: all interactions pass G1a/G1b (incl. computed eligibility)")
+        return 0
+
+    print(f"FAIL: {len(findings_total)} finding(s)")
+    for f in findings_total:
+        print(f"  - {f}")
+    return 1
+
+
+def cmd_validate_exemption(args: argparse.Namespace) -> int:
+    descriptor = load_project_descriptor(args.descriptor)
+    findings_total = []
+    for crate in descriptor["crates"]:
+        crate_root = args.workspace / crate["crate_dir"]
+        try:
+            findings_total.extend(validate_exemptions(crate_root))
+        except FileNotFoundError as e:
+            raise PipelineError(f"crate {crate['crate_dir']!r} in the project descriptor: {e}")
+
+    if not findings_total:
+        print("OK: all exemptions pass G1a/G1b")
+        return 0
+
+    print(f"FAIL: {len(findings_total)} finding(s)")
+    for f in findings_total:
+        print(f"  - {f}")
+    return 1
+
+
 def cmd_draft(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
@@ -356,15 +416,25 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     expected path: target.parent must equal <crate_dir>/specs/_boundaries,
     not merely contain that name somewhere upstream."""
     crate = _crate_for(target, workspace, descriptor)
-    if crate is not None and target.resolve().parent == _boundary_dir_for(crate, workspace):
-        validator = load_boundary_validator()
-        specs_search_root = _specs_search_root_for(target, workspace, descriptor)
-        return lambda path, data: validate_boundary_data(path, data, validator, specs_search_root)
+    if crate is not None:
+        resolved_parent = target.resolve().parent
+        if resolved_parent == _boundary_dir_for(crate, workspace):
+            validator = load_boundary_validator()
+            specs_search_root = _specs_search_root_for(target, workspace, descriptor)
+            return lambda path, data: validate_boundary_data(path, data, validator, specs_search_root)
+        if resolved_parent == _interaction_dir_for(crate, workspace):
+            validator = load_interaction_validator()
+            return lambda path, data: validate_interaction_data(path, data, validator)
+        if resolved_parent == _exemption_dir_for(crate, workspace):
+            validator = load_exemption_validator()
+            return lambda path, data: validate_exemption_data(path, data, validator)
     raise PipelineError(
         f"no validator recognizes target {target} -- this pipeline only "
-        "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json "
-        "today. Refusing to draft/approve an artifact type or location it "
-        "cannot mechanically gate, rather than silently skipping validation for it."
+        "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
+        "interactions at <crate_dir>/specs/_interactions/*.json, and exemptions "
+        "at <crate_dir>/specs/_exemptions/*.json today. Refusing to draft/approve "
+        "an artifact type or location it cannot mechanically gate, rather than "
+        "silently skipping validation for it."
     )
 
 
@@ -387,6 +457,8 @@ def cmd_approve(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     print(
         "Implemented: draft (Stage 0/3), approve (checkpoint), validate (Stage 4 G1a/G1b/G2+), "
+        "validate-interaction (Stage 4 G1a/G1b + computed eligibility), "
+        "validate-exemption (Stage 4 G1a/G1b naming), "
         "validate-work-package (Stage 7 schema + §10.1, standalone), "
         "validate-promotion (Stage 4.5 schema + §7.1, standalone)"
     )
@@ -409,6 +481,16 @@ def main(argv: list[str]) -> int:
 
     validate_p = sub.add_parser("validate", help="Stage 4: G1a/G1b/G2+ over boundary contracts")
     validate_p.set_defaults(func=cmd_validate)
+
+    validate_interaction_p = sub.add_parser(
+        "validate-interaction", help="Stage 4: G1a/G1b + computed eligibility over interaction (I) specs"
+    )
+    validate_interaction_p.set_defaults(func=cmd_validate_interaction)
+
+    validate_exemption_p = sub.add_parser(
+        "validate-exemption", help="Stage 4: G1a/G1b over boundary-required exemption objects"
+    )
+    validate_exemption_p.set_defaults(func=cmd_validate_exemption)
 
     validate_wp_p = sub.add_parser(
         "validate-work-package", help="Stage 7: schema + §10.1 checks over a work-package manifest"

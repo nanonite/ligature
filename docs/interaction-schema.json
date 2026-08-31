@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/interaction-schema.json",
+  "title": "Interaction (I) — v1.0",
+  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. Chainlink #16 scope only: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. Deliberately does not yet include reliances[].required_assurance (#17), realization/config_scope (#18), or protocol_class (#19) -- those extend this same schema when their milestones land.",
+  "type": "object",
+  "required": ["schema_version", "interaction_id", "caller", "callee", "edge_class", "eligibility", "rationale", "review"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "interaction_id": {
+      "type": "string",
+      "description": "Must equal the filename stem exactly (G1b, enforced by scripts/validate_interaction.py), same discipline as boundary_id."
+    },
+    "caller": { "$ref": "#/$defs/role" },
+    "callee": { "$ref": "#/$defs/role" },
+    "edge_class": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "cross-verifier",
+          "cross-crate-public-api",
+          "stateful",
+          "error-panic-boundary",
+          "ownership-transfer",
+          "numeric-domain-boundary",
+          "pure-data-type-reference",
+          "import-only",
+          "marker-type",
+          "phantom-type"
+        ]
+      }
+    },
+    "eligibility": {
+      "type": "string",
+      "enum": ["boundary-required", "inform", "ignore"],
+      "description": "COMPUTED from edge_class (plan.md §5.2) -- G1b recomputes and rejects disagreement with the stored value. Never hand-set the deciding value; a proposing model cannot mark a stateful cross-verifier edge ignore."
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_links": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "review": { "$ref": "#/$defs/review" }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "required": ["concept", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "concept": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*$",
+          "description": "PascalCase, matches the concept-to-code 'concept' field convention."
+        },
+        "method": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "snake_case Rust method name."
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

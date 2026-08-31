@@ -46,3 +46,23 @@ def boundary_dir_for(crate: dict, workspace: Path) -> Path:
 
 def boundary_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
     return [boundary_dir_for(crate, workspace) for crate in descriptor["crates"]]
+
+
+def interaction_dir_for(crate: dict, workspace: Path) -> Path:
+    """plan.md §5.1's canonical layout: crates/*/specs/_interactions/*.json,
+    the same discipline as boundary_dir_for."""
+    return (workspace / crate["crate_dir"] / "specs" / "_interactions").resolve()
+
+
+def interaction_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
+    return [interaction_dir_for(crate, workspace) for crate in descriptor["crates"]]
+
+
+def exemption_dir_for(crate: dict, workspace: Path) -> Path:
+    """plan.md §5.2's canonical layout: crates/*/specs/_exemptions/*.json,
+    the same discipline as boundary_dir_for."""
+    return (workspace / crate["crate_dir"] / "specs" / "_exemptions").resolve()
+
+
+def exemption_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
+    return [exemption_dir_for(crate, workspace) for crate in descriptor["crates"]]

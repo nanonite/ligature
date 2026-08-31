@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/exemption-schema.json",
+  "title": "Boundary-required exemption — v1.0",
+  "description": "plan.md §5.2/§7.2, gate table row R2. A reviewed exemption stands in for a boundary artifact when R2 checks that every eligible I edge is covered -- but only for a non-temporal, boundary-required edge (plan.md §5.3: a normal boundary exemption is never sufficient for a temporal/protocol obligation, which needs a protocol artifact or protocol-debt record instead, #19). One per crates/*/specs/_exemptions/<interaction_id>.json, naming the I edge it exempts. Carries its own review block -- an exemption is a human authority decision (plan.md §7.2: 'protocol exemptions and scope cuts' require sign-off), never a promotion_id (references are one-way, plan.md §7.1). Chainlink #16 scope: schema + naming (G1a/G1b) only -- cross-referencing that interaction_id actually names a real, eligible I edge is R2's job (#21), not this validator's.",
+  "type": "object",
+  "required": ["schema_version", "interaction_id", "rationale", "review"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "interaction_id": {
+      "type": "string",
+      "description": "The I edge this exemption covers. Must equal the filename stem exactly (G1b, enforced by scripts/validate_exemption.py) -- one exemption per interaction, same discipline as boundary_id."
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "review": { "$ref": "#/$defs/review" }
+  },
+  "$defs": {
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

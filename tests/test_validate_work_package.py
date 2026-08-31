@@ -334,7 +334,14 @@ class StandaloneCliBoundaryDirChoiceTest(unittest.TestCase):
     descriptor-derived boundary directories, but validate_work_package.py's
     own standalone main() always passed allowed_boundary_dirs=None,
     reintroducing the 'trusts any schema-valid boundary anywhere' gap
-    outside pipeline.py. No prior test exercised main() at all -- these do."""
+    outside pipeline.py. No prior test exercised main() at all -- these do.
+
+    A first fix added a third, named opt-out flag, --allow-any-crate-boundary.
+    A second review round found that flag was the identical trust gap
+    behind an explicit switch and it was removed rather than kept as a
+    documented escape hatch -- there is no way to skip canonical-crate
+    restriction from this CLI, only --descriptor or --allowed-boundary-dir
+    to supply it."""
 
     def _args(self, *extra):
         return [
@@ -344,15 +351,48 @@ class StandaloneCliBoundaryDirChoiceTest(unittest.TestCase):
             *extra,
         ]
 
-    def test_none_of_the_three_flags_is_refused(self):
+    def test_neither_flag_is_refused(self):
         import validate_work_package
         rc = validate_work_package.main(self._args())
         self.assertEqual(rc, 2)
 
-    def test_allow_any_crate_boundary_opts_into_the_weaker_check_and_passes(self):
+    def test_allow_any_crate_boundary_flag_no_longer_exists(self):
+        """Confirms the removal, not just that it's undocumented --
+        argparse itself must reject it."""
         import validate_work_package
-        rc = validate_work_package.main(self._args("--allow-any-crate-boundary"))
-        self.assertEqual(rc, 0)
+        with self.assertRaises(SystemExit):
+            validate_work_package.main(self._args("--allow-any-crate-boundary"))
+
+    def test_junk_boundary_is_rejected_no_matter_what_flags_are_passed(self):
+        """The actual end-to-end reproduction: a fully valid, correctly-
+        named boundary under a non-crate path must be refused regardless
+        of which of the two remaining (legitimate) flag choices is used --
+        there is no longer a third choice that would let it through."""
+        import validate_work_package
+        with tempfile.TemporaryDirectory() as tmp:
+            junk_dir = Path(tmp) / "junk" / "not-a-crate" / "_boundaries"
+            junk_dir.mkdir(parents=True)
+            (junk_dir / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps({
+                "schema_version": "1.0",
+                "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                "caller": {"concept": "Scheduler", "method": "dispatch"},
+                "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+                "callee_guarantees": ["TaskQueue.C003"],
+                "assumptions": [{
+                    "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                    "tracking_issue": "chainlink:713",
+                    "assumption_hash": "sha256:" + "1" * 64,
+                }],
+                "review": {"reviewer": "x", "reviewed_at": "2026-08-31"},
+            }))
+            args = [
+                str(MANIFEST_PATH),
+                "--workspace-root", str(FIXTURE_ROOT),
+                "--specs-search-root", str(tmp),
+                "--allowed-boundary-dir", str(SPECS_SEARCH_ROOT / "_boundaries"),
+            ]
+            rc = validate_work_package.main(args)
+            self.assertEqual(rc, 1)
 
     def test_explicit_allowed_boundary_dir_passes(self):
         import validate_work_package

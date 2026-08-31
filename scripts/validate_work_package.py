@@ -39,12 +39,19 @@ implements the Rust code -- this schema IS the interface spec for
     the canonical crate boundary directories the caller supplies. This is
     always enforced from pipeline.py (which derives the directories from
     the project descriptor automatically); the standalone CLI below
-    requires the invoker to explicitly choose --descriptor,
-    --allowed-boundary-dir, or the named opt-out --allow-any-crate-boundary
-    -- an external review found this file's own main() always passed
-    allowed_boundary_dirs=None, silently reintroducing the "any directory
-    named _boundaries, anywhere" gap outside pipeline.py even after the
-    library-level fix landed. Missing specs_search_root entirely when
+    requires the invoker to explicitly choose --descriptor or
+    --allowed-boundary-dir -- an external review found this file's own
+    main() always passed allowed_boundary_dirs=None, silently
+    reintroducing the "any directory named _boundaries, anywhere" gap
+    outside pipeline.py even after the library-level fix landed. A first
+    attempt at fixing that added a third, named opt-out flag
+    (--allow-any-crate-boundary); a second review round found that flag
+    was the identical trust gap behind an explicit switch (reproduced end
+    to end) and it was removed rather than kept as a documented escape
+    hatch -- the same call already made for review_checkpoint.py's
+    standalone `approve` (#39: removed outright, not offered with
+    --skip-validation). There is no way to skip this restriction from the
+    standalone CLI, only ways to supply it. Missing specs_search_root entirely when
     trusted_assumptions is non-empty is a hard error, not an optional
     enrichment that degrades to a footnote -- this is one of this
     validator's three claimed mechanical guarantees.
@@ -538,15 +545,6 @@ def main(argv: list[str]) -> int:
         help="A canonical boundary directory to trust for assumption-ref resolution "
         "(repeatable). Mutually exclusive with --descriptor.",
     )
-    parser.add_argument(
-        "--allow-any-crate-boundary",
-        action="store_true",
-        help="Explicit opt-out: trust any naming/schema-valid boundary contract found "
-        "under --specs-search-root, regardless of which crate it belongs to. This is "
-        "the pre-fix behavior (an external review found it let a garbage-but-schema-shaped "
-        "file at an arbitrary non-crate path resolve successfully) -- pass this only if "
-        "you specifically want that weaker guarantee, never as a default.",
-    )
     args = parser.parse_args(argv)
 
     if args.descriptor is not None and args.allowed_boundary_dir:
@@ -562,15 +560,21 @@ def main(argv: list[str]) -> int:
         allowed_boundary_dirs = boundary_dirs_for_descriptor(descriptor, args.workspace_root)
     elif args.allowed_boundary_dir:
         allowed_boundary_dirs = [Path(d) for d in args.allowed_boundary_dir]
-    elif args.allow_any_crate_boundary:
-        allowed_boundary_dirs = None
     else:
+        # No --allow-any-crate-boundary escape hatch here on purpose: a
+        # second review round found the first version's opt-out was the
+        # same trust gap behind a flag, reproduced it end to end, and
+        # invoked the same call already made for review_checkpoint.py's
+        # standalone `approve` (removed outright, not offered with
+        # --skip-validation) -- an explicit bypass is still a bypass.
+        # --descriptor and --allowed-boundary-dir cover every legitimate
+        # standalone use; there is no third option.
         print(
-            "error: one of --descriptor, --allowed-boundary-dir (repeatable), or "
-            "--allow-any-crate-boundary (explicit opt-out) is required -- omitting all "
-            "three used to silently trust any naming/schema-valid boundary contract found "
-            "anywhere under --specs-search-root, not just a declared crate's own boundaries "
-            "(external review, medium severity)",
+            "error: one of --descriptor or --allowed-boundary-dir (repeatable) is "
+            "required -- there is no way to skip canonical-crate restriction from this "
+            "CLI, only a way to supply it (external review, medium severity: an earlier "
+            "--allow-any-crate-boundary opt-out was found to be the same trust gap behind "
+            "an explicit flag, and was removed rather than hardened)",
             file=sys.stderr,
         )
         return 2

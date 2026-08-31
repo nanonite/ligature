@@ -12,15 +12,26 @@ implements the Rust code -- this schema IS the interface spec for
     external review found gate_integrity accepted an absolute path or a
     ../ traversal that escaped the workspace entirely).
   - allowed_write_set and protected_write_set don't overlap, using real
-    glob-pattern intersection -- an external review found the original
-    version only checked literal string equality, so "scripts/dummy_gate.py"
-    (allowed) against "scripts/**" (protected) reported zero findings.
+    glob-pattern intersection (_glob_language_overlap): a product-automaton
+    BFS reachability check, exact for the literal/*/** grammar this schema
+    uses, applied at both the path-segment level ("**") and, within one
+    segment, the character level ("*"/"?", so "docs/*-schema.json" is
+    handled correctly too, not just whole-segment wildcards). Two review
+    rounds found real gaps here: literal-string-only comparison first
+    (allowed=scripts/dummy_gate.py vs protected=scripts/** reported clean),
+    then a missing "consume a token while remaining on the star" transition
+    in the very first fix (scripts/subdir/tool.py vs scripts/** still
+    reported clean, since ** only ever matched zero or exactly one segment).
   - every trusted_assumptions[].assumption_ref resolves to EXACTLY one
-    real boundary contract, matched by that contract's own declared
-    boundary_id field (not a filename glob built from untrusted input --
-    an external review changed a boundary_id to "*" and it resolved
-    successfully), with an assumptions[] entry matching the declared
-    tracking_issue and assumption_hash. Missing entirely when
+    real, CANONICAL boundary contract: matched by that contract's own
+    declared boundary_id field (not a filename glob built from untrusted
+    input -- an earlier version let boundary_id: "*" resolve successfully),
+    required to pass both naming/layout (#8's check) and full G1a schema
+    validation (an earlier version trusted any JSON file with a matching
+    field anywhere under a directory named _boundaries -- reproduced with
+    junk/not-a-crate/_boundaries/anything.json), and, when the caller
+    supplies the project descriptor's declared crate boundary directories,
+    restricted to exactly those. Missing specs_search_root entirely when
     trusted_assumptions is non-empty is a hard error, not an optional
     enrichment that degrades to a footnote -- this is one of this
     validator's three claimed mechanical guarantees.
@@ -55,7 +66,9 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_utils import make_validator  # noqa: E402
+from validate_boundary_naming import check_file as check_boundary_naming  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
+from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "work-package-manifest-schema.json"
 
@@ -84,18 +97,79 @@ def gate_g1a(path: Path, data: dict, validator: Draft202012Validator) -> list[Fi
 
 
 # ---------------------------------------------------------------------------
-# Glob-pattern intersection for write-set overlap (finding 1).
+# Glob-pattern intersection for write-set overlap (finding 1, and its
+# follow-up review round).
 #
 # A naive "does A match B" check is wrong in both directions: literal
 # strings need to be tested against the OTHER side's pattern, and two
 # wildcarded patterns need real intersection, not a substring/prefix
 # guess -- a plain "shared static prefix" heuristic would falsely flag
 # "crates/*/src/**" against "crates/*/specs/**" as overlapping (same
-# prefix "crates/", genuinely disjoint subtrees). This is a small
-# segment-by-segment product-automaton check over the restricted glob
-# grammar this schema actually uses (literal segments, "*" for one
-# segment, "**" for zero or more), which is exact for that grammar.
+# prefix "crates/", genuinely disjoint subtrees).
+#
+# _glob_language_overlap is BFS reachability over the product automaton of
+# two simple glob patterns: `star` matches zero or more arbitrary tokens
+# (a Kleene star with a self-loop AND an epsilon exit -- the first review
+# round's recursion only modeled the epsilon exit, so "scripts/**" never
+# matched more than one segment past "scripts/"; a second, unrelated-looking
+# review round caught the same missing self-loop transition), `any_one`
+# matches exactly one arbitrary token, anything else must match exactly.
+# This one function is reused at two levels of the same restricted glob
+# grammar: path segments (star="**", any_one=None -- a bare "*" segment is
+# just delegated to the character level below, where its meaning as "any
+# run of characters" falls out naturally) and, within a single segment,
+# characters (star="*", any_one="?"), so "docs/*-schema.json" -- an inline
+# wildcard mixed with literal text inside one segment, not a whole-segment
+# "*" -- is handled by the exact same mechanism instead of a second,
+# separately-buggy special case.
 # ---------------------------------------------------------------------------
+
+
+def _glob_language_overlap(a_tokens: list, b_tokens: list, star, any_one=None) -> bool:
+    from collections import deque
+
+    target = (len(a_tokens), len(b_tokens))
+    if target == (0, 0):
+        return True
+
+    def compatible(x, y) -> bool:
+        if x == star or y == star or x == any_one or y == any_one:
+            return True
+        return x == y
+
+    seen = {(0, 0)}
+    queue = deque([(0, 0)])
+    while queue:
+        i, j = queue.popleft()
+        successors = []
+        if i < len(a_tokens) and a_tokens[i] == star:
+            successors.append((i + 1, j))  # ** matches zero segments -- skip it
+        if j < len(b_tokens) and b_tokens[j] == star:
+            successors.append((i, j + 1))
+        if i < len(a_tokens) and j < len(b_tokens) and compatible(a_tokens[i], b_tokens[j]):
+            # One shared token consumed. A `star` token consumes via its
+            # self-loop and stays put (it may consume more later); anything
+            # else consumes exactly once and advances.
+            a_next = i if a_tokens[i] == star else i + 1
+            b_next = j if b_tokens[j] == star else j + 1
+            successors.append((a_next, b_next))
+        for s in successors:
+            if s == target:
+                return True
+            if s not in seen:
+                seen.add(s)
+                queue.append(s)
+    return False
+
+
+def _segments_overlap(seg_a: str, seg_b: str) -> bool:
+    """Character-level intersection within a single path segment -- "*"
+    here means "any run of characters" (including zero, so a bare "*"
+    segment correctly reduces to "matches any segment content" with no
+    special-casing needed), "?" means exactly one arbitrary character."""
+    if seg_a == seg_b:
+        return True
+    return _glob_language_overlap(list(seg_a), list(seg_b), star="*", any_one="?")
 
 
 def _segments(pattern: str) -> list[str]:
@@ -109,36 +183,42 @@ def _segments(pattern: str) -> list[str]:
     return segs
 
 
-def _segment_compatible(x: str, y: str) -> bool:
-    if x in ("*", "**") or y in ("*", "**"):
-        return True
-    return x == y
-
-
 def _patterns_can_overlap(a: str, b: str) -> bool:
     a_segs, b_segs = _segments(a), _segments(b)
-    memo: dict[tuple[int, int], bool] = {}
 
-    def rec(i: int, j: int) -> bool:
-        key = (i, j)
-        if key in memo:
-            return memo[key]
-        if i == len(a_segs) and j == len(b_segs):
-            result = True
-        elif i == len(a_segs):
-            result = all(s == "**" for s in b_segs[j:])
-        elif j == len(b_segs):
-            result = all(s == "**" for s in a_segs[i:])
-        else:
-            result = (
-                (_segment_compatible(a_segs[i], b_segs[j]) and rec(i + 1, j + 1))
-                or (a_segs[i] == "**" and rec(i + 1, j))
-                or (b_segs[j] == "**" and rec(i, j + 1))
-            )
-        memo[key] = result
-        return result
+    def path_level_compatible(seg_a: str, seg_b: str) -> bool:
+        if seg_a == "**" or seg_b == "**":
+            return True
+        return _segments_overlap(seg_a, seg_b)
 
-    return rec(0, 0)
+    # Path-segment level reuses the same automaton, with "**" as the
+    # segment-level star and per-segment compatibility delegated to the
+    # character-level check above instead of a fixed any_one token.
+    target = (len(a_segs), len(b_segs))
+    if target == (0, 0):
+        return True
+    from collections import deque
+
+    seen = {(0, 0)}
+    queue = deque([(0, 0)])
+    while queue:
+        i, j = queue.popleft()
+        successors = []
+        if i < len(a_segs) and a_segs[i] == "**":
+            successors.append((i + 1, j))
+        if j < len(b_segs) and b_segs[j] == "**":
+            successors.append((i, j + 1))
+        if i < len(a_segs) and j < len(b_segs) and path_level_compatible(a_segs[i], b_segs[j]):
+            a_next = i if a_segs[i] == "**" else i + 1
+            b_next = j if b_segs[j] == "**" else j + 1
+            successors.append((a_next, b_next))
+        for s in successors:
+            if s == target:
+                return True
+            if s not in seen:
+                seen.add(s)
+                queue.append(s)
+    return False
 
 
 def check_write_set_disjointness(path: Path, data: dict) -> list[Finding]:
@@ -199,7 +279,12 @@ def check_gate_integrity(path: Path, data: dict, workspace_root: Path) -> list[F
     return findings
 
 
-def check_trusted_assumptions(path: Path, data: dict, specs_search_root: Path | None) -> list[Finding]:
+def check_trusted_assumptions(
+    path: Path,
+    data: dict,
+    specs_search_root: Path | None,
+    allowed_boundary_dirs: list[Path] | None = None,
+) -> list[Finding]:
     """§10.1: every assumption_ref resolves to a real boundary + tracking
     issue + hash. Resolution is by the boundary contract's own declared
     boundary_id field, matched exactly -- never by interpolating
@@ -207,6 +292,21 @@ def check_trusted_assumptions(path: Path, data: dict, specs_search_root: Path | 
     did exactly that; a boundary_id of "*" matched every boundary file in
     the tree). Requires exactly one match: zero is dangling, more than
     one is ambiguous, neither is a pass.
+
+    A candidate file only counts as "a real boundary contract" if it
+    passes naming/layout (#8's check_boundary_naming: flat, __to__,
+    boundary_id == filename stem) AND full G1a schema validation -- an
+    external review placed a schema-shaped-enough JSON file at
+    junk/not-a-crate/_boundaries/anything.json and it resolved
+    successfully, because the only prior requirement was "some JSON file
+    under some directory literally named _boundaries, anywhere in the
+    tree" (deliberately broad for #8's own naming-violation-detection
+    purpose, but wrong to inherit here where the goal is trusting the
+    content). When allowed_boundary_dirs is given (pipeline.py supplies
+    the project descriptor's declared <crate_dir>/specs/_boundaries
+    directories), candidates are further restricted to exactly those
+    directories -- the same anchoring discipline as the boundary-contract
+    approval dispatcher.
 
     Missing specs_search_root while trusted_assumptions is non-empty is a
     hard error, not an info-severity footnote -- this check is one of
@@ -234,13 +334,24 @@ def check_trusted_assumptions(path: Path, data: dict, specs_search_root: Path | 
     except FileNotFoundError as e:
         return [Finding("10.1", path, f"specs_search_root: {e}")]
 
+    allowed_dirs_resolved = (
+        {d.resolve() for d in allowed_boundary_dirs} if allowed_boundary_dirs is not None else None
+    )
+    boundary_validator = load_boundary_validator()
+
     boundaries_by_id: dict[str, list[Path]] = {}
     for bpath in boundary_files:
         if bpath.suffix != ".json":
             continue
+        if allowed_dirs_resolved is not None and bpath.resolve().parent not in allowed_dirs_resolved:
+            continue
+        if check_boundary_naming(bpath):  # non-empty violations -> not canonical
+            continue
         try:
             bdata = json.loads(bpath.read_text())
         except json.JSONDecodeError:
+            continue
+        if list(boundary_validator.iter_errors(bdata)):  # fails G1a -> not trustworthy content
             continue
         bid = bdata.get("boundary_id")
         if isinstance(bid, str):
@@ -322,6 +433,7 @@ def validate_data(
     validator: Draft202012Validator,
     workspace_root: Path,
     specs_search_root: Path | None = None,
+    allowed_boundary_dirs: list[Path] | None = None,
 ) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
@@ -330,7 +442,7 @@ def validate_data(
     findings: list[Finding] = []
     findings.extend(check_write_set_disjointness(path, data))
     findings.extend(check_gate_integrity(path, data, workspace_root))
-    findings.extend(check_trusted_assumptions(path, data, specs_search_root))
+    findings.extend(check_trusted_assumptions(path, data, specs_search_root, allowed_boundary_dirs))
     findings.extend(check_promotion_reference(path, data))
     findings.extend(check_write_set_coverage_of_functions(path, data))
     return findings
@@ -344,13 +456,17 @@ def _load_manifest(path: Path) -> dict:
 
 
 def validate_file(
-    path: Path, validator: Draft202012Validator, workspace_root: Path, specs_search_root: Path | None = None
+    path: Path,
+    validator: Draft202012Validator,
+    workspace_root: Path,
+    specs_search_root: Path | None = None,
+    allowed_boundary_dirs: list[Path] | None = None,
 ) -> list[Finding]:
     try:
         data = _load_manifest(path)
     except (json.JSONDecodeError, yaml.YAMLError) as e:
         return [Finding("G1a", path, f"invalid {path.suffix or 'JSON'}: {e}")]
-    return validate_data(path, data, validator, workspace_root, specs_search_root)
+    return validate_data(path, data, validator, workspace_root, specs_search_root, allowed_boundary_dirs)
 
 
 def main(argv: list[str]) -> int:

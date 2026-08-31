@@ -1,0 +1,10 @@
+# Runtime dependencies for scripts/*.py.
+#
+# Neither was declared anywhere before this file (external review, medium
+# severity): a clean environment without ambient PyYAML/jsonschema cannot
+# import scripts/pipeline.py or scripts/validate_work_package.py. Pinned to
+# the major version actually exercised by this project's test suite;
+# tighten further if a real regression from a version bump ever shows up.
+
+jsonschema>=4.10,<5
+PyYAML>=6.0,<7

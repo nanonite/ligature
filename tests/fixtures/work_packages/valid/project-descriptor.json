@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "project": { "name": "example-wp-fixture", "crate_naming_convention": "^scheduler$" },
+  "mode": "greenfield",
+  "crates": [
+    { "crate_dir": "crates/scheduler", "contracts_crate": "contracts", "specs_search_root": "crates/scheduler/specs" }
+  ],
+  "verifier_policy": { "default": "creusot" },
+  "compatibility_policy": { "reliance_policy_path": "docs/reliance-policy.md" },
+  "write_set": { "allowed_roots": ["crates/scheduler/src/"], "protected_roots": ["crates/scheduler/specs/**"] },
+  "gate_integrity": [],
+  "review": { "reviewer": "example-reviewer", "reviewed_at": "2026-08-30" }
+}

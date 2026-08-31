@@ -209,8 +209,18 @@ def cmd_validate_work_package(args: argparse.Namespace) -> int:
     # via this exact code path without the check ever running).
     specs_search_root = args.specs_search_root if args.specs_search_root is not None else args.workspace
 
+    # Restrict trusted-assumption resolution to the project descriptor's
+    # own declared <crate_dir>/specs/_boundaries directories -- otherwise
+    # a schema-shaped JSON file dropped anywhere under a directory named
+    # _boundaries counts as "a real boundary contract" (external review:
+    # reproduced with junk/not-a-crate/_boundaries/anything.json).
+    descriptor = load_project_descriptor(args.descriptor)
+    allowed_boundary_dirs = [_boundary_dir_for(c, args.workspace) for c in descriptor["crates"]]
+
     validator = load_work_package_validator()
-    findings = validate_work_package_file(args.manifest, validator, args.workspace, specs_search_root)
+    findings = validate_work_package_file(
+        args.manifest, validator, args.workspace, specs_search_root, allowed_boundary_dirs
+    )
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
 

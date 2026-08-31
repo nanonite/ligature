@@ -20,9 +20,14 @@ def load_valid() -> dict:
     return json.loads(MANIFEST_PATH.read_text())
 
 
-def run(data: dict, workspace_root: Path = FIXTURE_ROOT, specs_search_root: Path | None = SPECS_SEARCH_ROOT):
+def run(
+    data: dict,
+    workspace_root: Path = FIXTURE_ROOT,
+    specs_search_root: Path | None = SPECS_SEARCH_ROOT,
+    allowed_boundary_dirs: list[Path] | None = None,
+):
     validator = load_validator()
-    return validate_data(MANIFEST_PATH, data, validator, workspace_root, specs_search_root)
+    return validate_data(MANIFEST_PATH, data, validator, workspace_root, specs_search_root, allowed_boundary_dirs)
 
 
 def errors_of(findings):
@@ -208,22 +213,67 @@ class TrustedAssumptionResolutionTest(unittest.TestCase):
         self.assertTrue(any("no assumption in it matches" in f.reason for f in errors))
 
     def test_ambiguous_boundary_id_across_two_files_is_rejected(self):
+        """Both candidates must be genuinely canonical (correct filename,
+        flat layout, full G1a validity) to reach the ambiguity check at
+        all -- otherwise this would test 'two garbage files' rejection,
+        not 'two real, competing boundary contracts' rejection."""
         with tempfile.TemporaryDirectory() as tmp:
             search_root = Path(tmp)
             for sub in ("crate_a", "crate_b"):
                 bdir = search_root / sub / "specs" / "_boundaries"
                 bdir.mkdir(parents=True)
-                (bdir / "x.json").write_text(json.dumps({
+                (bdir / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps({
+                    "schema_version": "1.0",
                     "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                    "caller": {"concept": "Scheduler", "method": "dispatch"},
+                    "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+                    "callee_guarantees": ["TaskQueue.C003"],
                     "assumptions": [{
                         "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
                         "tracking_issue": "chainlink:713",
                         "assumption_hash": "sha256:" + "1" * 64,
                     }],
+                    "review": {"reviewer": "example-reviewer", "reviewed_at": "2026-08-30"},
                 }))
             findings = run(load_valid(), specs_search_root=search_root)
             errors = errors_of(findings)
-            self.assertTrue(any("ambiguously" in f.reason for f in errors))
+            self.assertTrue(any("ambiguously" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_noncanonical_boundary_placement_is_not_trusted(self):
+        """External review, medium severity: a schema-shaped-enough JSON
+        file dropped anywhere under a directory literally named
+        _boundaries used to resolve successfully -- reproduced with
+        junk/not-a-crate/_boundaries/anything.json (wrong filename, and
+        missing every other schema-required field)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            search_root = Path(tmp)
+            bdir = search_root / "junk" / "not-a-crate" / "_boundaries"
+            bdir.mkdir(parents=True)
+            (bdir / "anything.json").write_text(json.dumps({
+                "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                "assumptions": [{
+                    "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                    "tracking_issue": "chainlink:713",
+                    "assumption_hash": "sha256:" + "1" * 64,
+                }],
+            }))
+            findings = run(load_valid(), specs_search_root=search_root)
+            errors = errors_of(findings)
+            self.assertTrue(any("does not resolve" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_allowed_boundary_dirs_restricts_resolution_to_declared_crates(self):
+        """The canonical fixture boundary is genuinely valid and correctly
+        placed, but if it's not one of the *declared* crate boundary
+        directories, it must not be trusted -- same anchoring discipline
+        as pipeline.py's own dispatch fix."""
+        elsewhere = SPECS_SEARCH_ROOT.parent.parent.parent / "not_the_declared_crate" / "specs" / "_boundaries"
+        findings = run(load_valid(), allowed_boundary_dirs=[elsewhere])
+        errors = errors_of(findings)
+        self.assertTrue(any("does not resolve" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_allowed_boundary_dirs_including_the_real_one_still_resolves(self):
+        findings = run(load_valid(), allowed_boundary_dirs=[SPECS_SEARCH_ROOT / "_boundaries"])
+        self.assertEqual(errors_of(findings), [])
 
     def test_no_search_root_is_a_hard_error_not_a_silent_pass(self):
         """External review, high severity: this used to degrade to a

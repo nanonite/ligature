@@ -19,15 +19,26 @@ Implemented now, against schemas that actually exist:
             draft/approve -- a manifest is machine-generated at Stage 7
             from already-promoted content, not LLM-drafted and
             human-reviewed the way a boundary contract is.
+  validate-promotion  Stage 4.5's schema + §7.1 checks (#15) over a
+            promotion receipt: every artifact_manifest path is workspace-
+            anchored, every declared hash is verified against the real
+            file, the receipt is never in its own manifest, and no listed
+            artifact carries a promotion_id back (references are
+            one-way). Standalone, not routed through draft/approve --
+            the receipt's reviewer/accepted_at fields are top-level, not
+            the nested review: {} shape approve() writes, and receipt
+            *generation* (reading a promoted artifact set and computing
+            this) is separate, not-yet-built work, same boundary as
+            validate-work-package's own manifest generator.
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
-  promotion (#15/#16/#17/#18/#19/#20, M3), emission, attach, manifest
-  *generation* (the manifest schema/validator exist as of #14; the
-  generator that reads promoted I/O and emits one doesn't, since it needs
-  the I-schema/promotion machinery M3 builds), Stage 8A-8C (#22-#26, M4).
-  `pipeline status` reports this honestly instead of a stage silently
-  no-op'ing.
+  I-schema (#16/#17/#18/#19/#20, M3), emission, attach, manifest and
+  promotion-receipt *generation* (the schemas/validators exist as of
+  #14/#15; the generators that read promoted I/O and emit these don't,
+  since they need the rest of the I-schema machinery M3 builds),
+  Stage 8A-8C (#22-#26, M4). `pipeline status` reports this honestly
+  instead of a stage silently no-op'ing.
 """
 from __future__ import annotations
 
@@ -49,6 +60,8 @@ from review_checkpoint import stage_draft  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
+from validate_promotion_receipt import load_validator as load_promotion_validator  # noqa: E402
+from validate_promotion_receipt import validate_file as validate_promotion_file  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
 
@@ -56,11 +69,14 @@ ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
-    "promotion": "#15/#16/#17/#18/#19/#20 (M3 -- I-schema, evidence schema not built yet)",
-    "emission": "needs promotion (M3) first",
-    "attach": "needs promotion (M3) first",
+    "I-schema": "#16/#17/#18/#19/#20 (M3 -- interaction/evidence schema not built yet)",
+    "emission": "needs the I-schema (M3) first",
+    "attach": "needs the I-schema (M3) first",
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); the generator "
-    "that reads promoted I/O and emits a manifest needs promotion (M3) first, still not built",
+    "that reads promoted I/O and emits a manifest needs the I-schema (M3) first, still not built",
+    "promotion-receipt generation": "#15's schema+validator exist (`validate-promotion`); the "
+    "generator that reads an accepted artifact set and computes a receipt needs the I-schema "
+    "(M3) first, still not built",
     "8A": "#22-#26 (M4 -- bridge/closure track)",
     "8B": "#22-#26 (M4)",
     "8C": "#25 (M4 -- G14 transitive closure)",
@@ -240,6 +256,20 @@ def cmd_validate_work_package(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_validate_promotion(args: argparse.Namespace) -> int:
+    validator = load_promotion_validator()
+    findings = validate_promotion_file(args.receipt, validator, args.workspace)
+
+    if not findings:
+        print("OK: promotion receipt passes G1a and §7.1 checks")
+        return 0
+
+    print(f"FAIL: {len(findings)} finding(s)")
+    for f in findings:
+        print(f"  - {f}")
+    return 1
+
+
 def cmd_draft(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
@@ -357,7 +387,8 @@ def cmd_approve(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     print(
         "Implemented: draft (Stage 0/3), approve (checkpoint), validate (Stage 4 G1a/G1b/G2+), "
-        "validate-work-package (Stage 7 schema + §10.1, standalone)"
+        "validate-work-package (Stage 7 schema + §10.1, standalone), "
+        "validate-promotion (Stage 4.5 schema + §7.1, standalone)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -390,6 +421,12 @@ def main(argv: list[str]) -> int:
         help="Root to resolve trusted_assumptions[].assumption_ref against (optional).",
     )
     validate_wp_p.set_defaults(func=cmd_validate_work_package)
+
+    validate_promo_p = sub.add_parser(
+        "validate-promotion", help="Stage 4.5: schema + §7.1 checks over a promotion receipt"
+    )
+    validate_promo_p.add_argument("receipt", type=Path)
+    validate_promo_p.set_defaults(func=cmd_validate_promotion)
 
     draft_p = sub.add_parser("draft", help="Stage 0/3: one-shot LLM draft")
     draft_p.add_argument("stage", choices=["0", "3"])

@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- Detached promotion receipt with explicit artifact_manifest (#15)
 - Work-package manifest schema + validator (orchestrator handoff contract) (#14)
 - Prototype A: G2+ role-safety live against boundary v1.0 (#13)
 - Pipeline CLI entrypoint: dispatch stages 0-8C from the project descriptor (#37)

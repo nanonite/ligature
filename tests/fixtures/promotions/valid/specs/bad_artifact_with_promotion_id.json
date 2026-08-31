@@ -1,0 +1,4 @@
+{
+  "note": "Fixture for the one-way-reference check: a normative artifact must never cite promotion_id back (plan.md §7.1).",
+  "promotion_id": "PROM-SCHED-001"
+}

@@ -1,0 +1,19 @@
+{
+  "schema": "promotion-receipt/1.0",
+  "promotion_id": "PROM-SCHED-001",
+  "cluster": "scheduling",
+  "reviewer": "example-reviewer",
+  "policy_version": "reliance-policy@0.1",
+  "schema_versions": { "boundary": "1.0" },
+  "accepted_at": "2026-08-31",
+  "artifact_manifest": [
+    {
+      "path": "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+      "hash": "sha256:51d599d5976c3a4d1147b3494b22e3cd50229fa30a42e4e20274ef8686683123"
+    },
+    {
+      "path": "docs/reliance-policy.md",
+      "hash": "sha256:845b7e00cbd86eb69cfa337511e26d2c4df6e3f2b3a28a54f4145369f5885626"
+    }
+  ]
+}

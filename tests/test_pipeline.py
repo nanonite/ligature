@@ -171,6 +171,39 @@ class CmdValidateIntegrationTest(unittest.TestCase):
 
 
 WP_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "work_packages" / "valid"
+PROMOTION_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "promotions" / "valid"
+
+
+class CmdValidatePromotionIntegrationTest(unittest.TestCase):
+    """Exercised through pipeline.main() end to end from the start --
+    the review chain on validate-work-package found that an untested CLI
+    entrypoint is exactly how a wiring gap ships invisibly regardless of
+    how well-tested the underlying library functions are."""
+
+    def _run(self, *args):
+        return pipeline.main(["--workspace", str(PROMOTION_FIXTURE_ROOT), "validate-promotion", *args])
+
+    def test_valid_receipt_passes(self):
+        receipt = PROMOTION_FIXTURE_ROOT / "specs" / "_promotions" / "scheduling.json"
+        rc = self._run(str(receipt))
+        self.assertEqual(rc, 0)
+
+    def test_yaml_receipt_passes(self):
+        receipt = PROMOTION_FIXTURE_ROOT / "specs" / "_promotions" / "scheduling.yaml"
+        rc = self._run(str(receipt))
+        self.assertEqual(rc, 0)
+
+    def test_hash_mismatch_fails(self):
+        data = json.loads((PROMOTION_FIXTURE_ROOT / "specs" / "_promotions" / "scheduling.json").read_text())
+        data["artifact_manifest"][0]["hash"] = "sha256:" + "0" * 64
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            bad_receipt = Path(f.name)
+        try:
+            rc = self._run(str(bad_receipt))
+            self.assertEqual(rc, 1)
+        finally:
+            bad_receipt.unlink()
 
 
 class CmdValidateWorkPackageIntegrationTest(unittest.TestCase):

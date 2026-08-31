@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/promotion-receipt-schema.json",
+  "title": "Promotion receipt — promotion-receipt/1.0",
+  "description": "plan.md §7.1. specs/_promotions/<cluster>.json (or .yaml). Detached: the receipt is never listed in its own artifact_manifest. States the exact accepted artifact set -- no implicit globs. Any listed file changing invalidates the receipt (acceptance revoked). References are one-way: normative artifacts carry review blocks and never a promotion_id; only generated reports cite promotion_id -- this schema does not require or expect the artifacts it lists to reference it back.",
+  "type": "object",
+  "required": [
+    "schema", "promotion_id", "cluster", "reviewer", "policy_version",
+    "schema_versions", "accepted_at", "artifact_manifest"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "promotion-receipt/1.0" },
+    "promotion_id": {
+      "type": "string",
+      "pattern": "^PROM-[A-Z][A-Z0-9-]*-[0-9]{3}$",
+      "description": "Same grammar as the work-package manifest's provenance.promotion_id (docs/work-package-manifest-schema.json) -- one promotion_id format across the pipeline."
+    },
+    "cluster": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Must equal the filename stem -- one promotion receipt per cluster, same discipline as boundary_id==stem for boundary contracts (plan.md §2)."
+    },
+    "reviewer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Top-level, not nested under a review: block -- plan.md §7.1's own worked example shapes it this way, unlike boundary contracts and the project descriptor. Promotion IS the human-sign-off event (§7.2); this field records who performed it."
+    },
+    "policy_version": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*@[0-9]+(\\.[0-9]+)*$",
+      "description": "e.g. reliance-policy@1.2 -- ties to docs/reliance-policy.md's own change-history version (docs/reliance-policy.template.md)."
+    },
+    "schema_versions": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string" },
+      "description": "Open -- which schema kinds exist depends on which stages have landed (boundary, work-package-manifest today; interaction, bridge, witness as M3/M4/M6 build them)."
+    },
+    "accepted_at": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "artifact_manifest": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "hash"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

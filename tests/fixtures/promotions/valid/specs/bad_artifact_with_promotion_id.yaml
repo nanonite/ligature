@@ -1,0 +1,5 @@
+note: >
+  Fixture for the one-way-reference check, YAML variant: a normative
+  artifact must never cite promotion_id back (plan.md §7.1), regardless
+  of serialization format.
+promotion_id: PROM-SCHED-001

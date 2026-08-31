@@ -69,21 +69,51 @@ def gate_g1a(path: Path, data: dict, validator: Draft202012Validator) -> list[Fi
     return [Finding("G1a", path, e.message) for e in validator.iter_errors(data)]
 
 
-def check_naming(path: Path, data: dict) -> list[Finding]:
-    """One promotion receipt per cluster -- filename stem must equal
-    cluster, the same discipline as boundary_id==stem for boundary
-    contracts (plan.md §2), applied here as this pipeline's own
-    convention rather than a directly-quoted plan.md rule (the plan's
-    worked example names the file this way but doesn't spell out the
-    rule in prose the way it does for boundaries)."""
+def check_naming(path: Path, data: dict, workspace_root: Path) -> list[Finding]:
+    """One promotion receipt per cluster, living at the canonical
+    specs/_promotions/<cluster>.json|yaml -- the same discipline as
+    boundary_id==stem plus the boundary-directory anchoring pipeline.py
+    applies to boundary contracts (plan.md §2), established here as this
+    pipeline's own convention rather than a directly-quoted plan.md rule
+    (the worked example names and places the file this way but doesn't
+    spell out the rule in prose the way it does for boundaries).
+
+    A prior version only checked the filename stem against cluster,
+    without checking the receipt itself resolves inside the workspace or
+    lives under the canonical directory -- a receipt at an arbitrary path
+    like /tmp/scheduling.json validated cleanly against a fixture
+    workspace it wasn't even part of."""
+    findings: list[Finding] = []
+
     if path.stem != data["cluster"]:
-        return [
+        findings.append(
             Finding(
                 "G1b", path,
                 f"filename stem {path.stem!r} does not match cluster {data['cluster']!r}",
             )
-        ]
-    return []
+        )
+
+    resolved = path.resolve()
+    workspace_resolved = workspace_root.resolve()
+    try:
+        resolved.relative_to(workspace_resolved)
+    except ValueError:
+        findings.append(
+            Finding("G1b", path, f"receipt does not resolve inside the workspace {workspace_resolved}")
+        )
+        return findings  # canonical-directory check below is meaningless if this failed
+
+    canonical_dir = (workspace_root / "specs" / "_promotions").resolve()
+    if resolved.parent != canonical_dir:
+        findings.append(
+            Finding(
+                "G1b", path,
+                f"receipt is not directly under the canonical specs/_promotions/ directory "
+                f"({canonical_dir}) -- found at {resolved.parent}",
+            )
+        )
+
+    return findings
 
 
 def _pattern_escapes_workspace(pattern: str) -> bool:
@@ -96,10 +126,33 @@ def _sha256(file_path: Path) -> str:
     return "sha256:" + hashlib.sha256(file_path.read_bytes()).hexdigest()
 
 
+def _load_structured_artifact(resolved: Path) -> dict | None:
+    """Best-effort load for the one-way-reference check below -- returns
+    None (not an error) for anything that isn't a dict-shaped JSON/YAML
+    document, since e.g. a .rs source file or a .md policy doc is a
+    legitimate artifact_manifest entry with nothing to check here.
+    Deliberately covers .yaml/.yml, not just .json: a review round found
+    the original version only ever inspected .json artifacts, so a
+    correctly-hashed YAML artifact with its own promotion_id field
+    passed with zero findings -- the §7.1 rule is about the artifact
+    being normative, not about which serialization it happens to use."""
+    try:
+        if resolved.suffix == ".json":
+            data = json.loads(resolved.read_text())
+        elif resolved.suffix in (".yaml", ".yml"):
+            data = yaml.safe_load(resolved.read_text())
+        else:
+            return None
+    except (json.JSONDecodeError, yaml.YAMLError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def check_artifact_manifest(path: Path, data: dict, workspace_root: Path) -> list[Finding]:
     findings: list[Finding] = []
     workspace_resolved = workspace_root.resolve()
     receipt_resolved = path.resolve()
+    seen_resolved: dict[Path, str] = {}  # resolved path -> the first entry_path that named it
 
     for entry in data["artifact_manifest"]:
         entry_path = entry["path"]
@@ -122,6 +175,24 @@ def check_artifact_manifest(path: Path, data: dict, workspace_root: Path) -> lis
                 Finding("7.1", path, f"artifact_manifest path {entry_path!r} resolves outside the workspace")
             )
             continue
+
+        if resolved in seen_resolved:
+            # The manifest "states the exact set" (plan.md §7.1) -- a
+            # repeated entry, or two different path strings that resolve
+            # to the same real file (e.g. a symlink alias), isn't a
+            # second artifact. Checked by resolved identity, not string
+            # equality, since schema-level uniqueItems on the path string
+            # wouldn't catch an alias.
+            findings.append(
+                Finding(
+                    "7.1", path,
+                    f"artifact_manifest lists {entry_path!r} and {seen_resolved[resolved]!r}, which "
+                    "resolve to the same file -- the manifest states the exact artifact set, not a "
+                    "set with duplicates or aliases",
+                )
+            )
+            continue
+        seen_resolved[resolved] = entry_path
 
         if resolved == receipt_resolved:
             findings.append(
@@ -150,20 +221,16 @@ def check_artifact_manifest(path: Path, data: dict, workspace_root: Path) -> lis
             )
             continue
 
-        if resolved.suffix == ".json":
-            try:
-                artifact_data = json.loads(resolved.read_text())
-            except json.JSONDecodeError:
-                artifact_data = None
-            if isinstance(artifact_data, dict) and "promotion_id" in artifact_data:
-                findings.append(
-                    Finding(
-                        "7.1", path,
-                        f"{entry_path!r} carries a promotion_id field -- references are one-way "
-                        "(plan.md §7.1: normative artifacts carry review blocks and never a "
-                        "promotion_id; only generated reports cite one)",
-                    )
+        artifact_data = _load_structured_artifact(resolved)
+        if artifact_data is not None and "promotion_id" in artifact_data:
+            findings.append(
+                Finding(
+                    "7.1", path,
+                    f"{entry_path!r} carries a promotion_id field -- references are one-way "
+                    "(plan.md §7.1: normative artifacts carry review blocks and never a "
+                    "promotion_id; only generated reports cite one)",
                 )
+            )
 
     return findings
 
@@ -174,7 +241,7 @@ def validate_data(path: Path, data: dict, validator: Draft202012Validator, works
         return g1a
 
     findings: list[Finding] = []
-    findings.extend(check_naming(path, data))
+    findings.extend(check_naming(path, data, workspace_root))
     findings.extend(check_artifact_manifest(path, data, workspace_root))
     return findings
 

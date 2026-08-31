@@ -156,6 +156,44 @@ class GlobOverlapUnitTest(unittest.TestCase):
         self.assertTrue(_patterns_can_overlap("Cargo.toml", "Cargo.toml"))
 
 
+class WriteSetAnchoringTest(unittest.TestCase):
+    """External review, high severity: write-set patterns were never
+    checked for escaping the workspace -- the write-policy equivalent of
+    the gate_integrity path escape fixed in the previous round."""
+
+    def test_traversal_in_allowed_write_set_is_rejected(self):
+        data = load_valid()
+        data["write_policy"]["allowed_write_set"] = ["../outside-worktree/**"]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("not workspace-relative" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_absolute_path_in_allowed_write_set_is_rejected(self):
+        data = load_valid()
+        data["write_policy"]["allowed_write_set"] = ["/etc/**"]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("not workspace-relative" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_traversal_in_protected_write_set_is_also_rejected(self):
+        data = load_valid()
+        data["write_policy"]["protected_write_set"].append("../elsewhere/**")
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("not workspace-relative" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_traversal_deeper_in_the_pattern_is_still_rejected(self):
+        data = load_valid()
+        data["write_policy"]["allowed_write_set"] = ["crates/../../outside/**"]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("not workspace-relative" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_ordinary_workspace_relative_patterns_pass(self):
+        findings = run(load_valid())
+        self.assertFalse(any("not workspace-relative" in f.reason for f in errors_of(findings)))
+
+
 class WriteSetDisjointnessTest(unittest.TestCase):
     def test_the_exact_reported_bypass_is_now_rejected(self):
         """External review: allowed=scripts/dummy_gate.py, protected=scripts/**
@@ -289,6 +327,63 @@ class TrustedAssumptionResolutionTest(unittest.TestCase):
         data["definition_of_done"]["trusted_assumptions"] = []
         findings = run(data, specs_search_root=None)
         self.assertEqual(errors_of(findings), [])
+
+
+class StandaloneCliBoundaryDirChoiceTest(unittest.TestCase):
+    """External review, medium severity: pipeline.py correctly supplies
+    descriptor-derived boundary directories, but validate_work_package.py's
+    own standalone main() always passed allowed_boundary_dirs=None,
+    reintroducing the 'trusts any schema-valid boundary anywhere' gap
+    outside pipeline.py. No prior test exercised main() at all -- these do."""
+
+    def _args(self, *extra):
+        return [
+            str(MANIFEST_PATH),
+            "--workspace-root", str(FIXTURE_ROOT),
+            "--specs-search-root", str(SPECS_SEARCH_ROOT),
+            *extra,
+        ]
+
+    def test_none_of_the_three_flags_is_refused(self):
+        import validate_work_package
+        rc = validate_work_package.main(self._args())
+        self.assertEqual(rc, 2)
+
+    def test_allow_any_crate_boundary_opts_into_the_weaker_check_and_passes(self):
+        import validate_work_package
+        rc = validate_work_package.main(self._args("--allow-any-crate-boundary"))
+        self.assertEqual(rc, 0)
+
+    def test_explicit_allowed_boundary_dir_passes(self):
+        import validate_work_package
+        rc = validate_work_package.main(
+            self._args("--allowed-boundary-dir", str(SPECS_SEARCH_ROOT / "_boundaries"))
+        )
+        self.assertEqual(rc, 0)
+
+    def test_explicit_allowed_boundary_dir_excluding_the_real_one_fails(self):
+        import validate_work_package
+        with tempfile.TemporaryDirectory() as elsewhere:
+            rc = validate_work_package.main(self._args("--allowed-boundary-dir", elsewhere))
+            self.assertEqual(rc, 1)
+
+    def test_descriptor_flag_derives_dirs_and_passes(self):
+        import validate_work_package
+        rc = validate_work_package.main(
+            self._args("--descriptor", str(FIXTURE_ROOT / "project-descriptor.json"))
+        )
+        self.assertEqual(rc, 0)
+
+    def test_descriptor_and_allowed_boundary_dir_together_is_refused(self):
+        import validate_work_package
+        rc = validate_work_package.main(
+            self._args(
+                "--descriptor", str(FIXTURE_ROOT / "project-descriptor.json"),
+                "--allowed-boundary-dir", str(SPECS_SEARCH_ROOT / "_boundaries"),
+            )
+        )
+        self.assertEqual(rc, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

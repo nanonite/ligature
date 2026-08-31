@@ -11,17 +11,23 @@ implements the Rust code -- this schema IS the interface spec for
     shaped, and the resolved path must stay inside workspace_root (an
     external review found gate_integrity accepted an absolute path or a
     ../ traversal that escaped the workspace entirely).
-  - allowed_write_set and protected_write_set don't overlap, using real
-    glob-pattern intersection (_glob_language_overlap): a product-automaton
-    BFS reachability check, exact for the literal/*/** grammar this schema
+  - allowed_write_set and protected_write_set patterns are workspace-
+    relative (check_write_set_anchoring rejects an absolute pattern or a
+    literal ".." segment anywhere -- an external review found
+    allowed_write_set: ["../outside-worktree/**"] passed with zero errors,
+    the write-policy equivalent of the gate_integrity path escape fixed
+    below) and don't overlap with each other, using real glob-pattern
+    intersection (_glob_language_overlap): a product-automaton BFS
+    reachability check, exact for the literal/*/** grammar this schema
     uses, applied at both the path-segment level ("**") and, within one
     segment, the character level ("*"/"?", so "docs/*-schema.json" is
     handled correctly too, not just whole-segment wildcards). Two review
-    rounds found real gaps here: literal-string-only comparison first
-    (allowed=scripts/dummy_gate.py vs protected=scripts/** reported clean),
-    then a missing "consume a token while remaining on the star" transition
-    in the very first fix (scripts/subdir/tool.py vs scripts/** still
-    reported clean, since ** only ever matched zero or exactly one segment).
+    rounds found real gaps in the overlap check itself: literal-string-only
+    comparison first (allowed=scripts/dummy_gate.py vs protected=scripts/**
+    reported clean), then a missing "consume a token while remaining on
+    the star" transition in the very first fix (scripts/subdir/tool.py vs
+    scripts/** still reported clean, since ** only ever matched zero or
+    exactly one segment).
   - every trusted_assumptions[].assumption_ref resolves to EXACTLY one
     real, CANONICAL boundary contract: matched by that contract's own
     declared boundary_id field (not a filename glob built from untrusted
@@ -29,9 +35,16 @@ implements the Rust code -- this schema IS the interface spec for
     required to pass both naming/layout (#8's check) and full G1a schema
     validation (an earlier version trusted any JSON file with a matching
     field anywhere under a directory named _boundaries -- reproduced with
-    junk/not-a-crate/_boundaries/anything.json), and, when the caller
-    supplies the project descriptor's declared crate boundary directories,
-    restricted to exactly those. Missing specs_search_root entirely when
+    junk/not-a-crate/_boundaries/anything.json), and restricted to exactly
+    the canonical crate boundary directories the caller supplies. This is
+    always enforced from pipeline.py (which derives the directories from
+    the project descriptor automatically); the standalone CLI below
+    requires the invoker to explicitly choose --descriptor,
+    --allowed-boundary-dir, or the named opt-out --allow-any-crate-boundary
+    -- an external review found this file's own main() always passed
+    allowed_boundary_dirs=None, silently reintroducing the "any directory
+    named _boundaries, anywhere" gap outside pipeline.py even after the
+    library-level fix landed. Missing specs_search_root entirely when
     trusted_assumptions is non-empty is a hard error, not an optional
     enrichment that degrades to a footnote -- this is one of this
     validator's three claimed mechanical guarantees.
@@ -65,6 +78,9 @@ import yaml
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from project_descriptor import ProjectDescriptorError  # noqa: E402
+from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
+from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from validate_boundary_naming import check_file as check_boundary_naming  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
@@ -219,6 +235,33 @@ def _patterns_can_overlap(a: str, b: str) -> bool:
                 seen.add(s)
                 queue.append(s)
     return False
+
+
+def _pattern_escapes_workspace(pattern: str) -> bool:
+    """Syntactic, not filesystem resolution -- these are glob patterns
+    (may contain */**), so Path.resolve() doesn't mean anything useful
+    for one. An absolute pattern or a literal ".." segment anywhere is
+    the write-set-pattern equivalent of the gate_integrity path escape
+    (external review, high severity): "../outside-worktree/**" in
+    allowed_write_set reported zero findings before this check existed."""
+    if pattern.startswith("/"):
+        return True
+    return ".." in pattern.split("/")
+
+
+def check_write_set_anchoring(path: Path, data: dict) -> list[Finding]:
+    findings: list[Finding] = []
+    for field in ("allowed_write_set", "protected_write_set"):
+        for pattern in data["write_policy"][field]:
+            if _pattern_escapes_workspace(pattern):
+                findings.append(
+                    Finding(
+                        "G13", path,
+                        f"{field}: {pattern!r} is not workspace-relative -- absolute paths "
+                        "and .. segments are refused, not resolved",
+                    )
+                )
+    return findings
 
 
 def check_write_set_disjointness(path: Path, data: dict) -> list[Finding]:
@@ -440,6 +483,7 @@ def validate_data(
         return g1a
 
     findings: list[Finding] = []
+    findings.extend(check_write_set_anchoring(path, data))
     findings.extend(check_write_set_disjointness(path, data))
     findings.extend(check_gate_integrity(path, data, workspace_root))
     findings.extend(check_trusted_assumptions(path, data, specs_search_root, allowed_boundary_dirs))
@@ -480,12 +524,61 @@ def main(argv: list[str]) -> int:
         help="Defaults to --workspace-root if not given -- omitting this never silently "
         "disables assumption-ref resolution when trusted_assumptions is non-empty.",
     )
+    parser.add_argument(
+        "--descriptor",
+        type=Path,
+        default=None,
+        help="Project descriptor to derive canonical <crate_dir>/specs/_boundaries "
+        "directories from -- mutually exclusive with --allowed-boundary-dir.",
+    )
+    parser.add_argument(
+        "--allowed-boundary-dir",
+        action="append",
+        default=[],
+        help="A canonical boundary directory to trust for assumption-ref resolution "
+        "(repeatable). Mutually exclusive with --descriptor.",
+    )
+    parser.add_argument(
+        "--allow-any-crate-boundary",
+        action="store_true",
+        help="Explicit opt-out: trust any naming/schema-valid boundary contract found "
+        "under --specs-search-root, regardless of which crate it belongs to. This is "
+        "the pre-fix behavior (an external review found it let a garbage-but-schema-shaped "
+        "file at an arbitrary non-crate path resolve successfully) -- pass this only if "
+        "you specifically want that weaker guarantee, never as a default.",
+    )
     args = parser.parse_args(argv)
+
+    if args.descriptor is not None and args.allowed_boundary_dir:
+        print("error: --descriptor and --allowed-boundary-dir are mutually exclusive", file=sys.stderr)
+        return 2
+
+    if args.descriptor is not None:
+        try:
+            descriptor = load_project_descriptor(args.descriptor)
+        except ProjectDescriptorError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        allowed_boundary_dirs = boundary_dirs_for_descriptor(descriptor, args.workspace_root)
+    elif args.allowed_boundary_dir:
+        allowed_boundary_dirs = [Path(d) for d in args.allowed_boundary_dir]
+    elif args.allow_any_crate_boundary:
+        allowed_boundary_dirs = None
+    else:
+        print(
+            "error: one of --descriptor, --allowed-boundary-dir (repeatable), or "
+            "--allow-any-crate-boundary (explicit opt-out) is required -- omitting all "
+            "three used to silently trust any naming/schema-valid boundary contract found "
+            "anywhere under --specs-search-root, not just a declared crate's own boundaries "
+            "(external review, medium severity)",
+            file=sys.stderr,
+        )
+        return 2
 
     specs_search_root = args.specs_search_root if args.specs_search_root is not None else args.workspace_root
 
     validator = load_validator()
-    findings = validate_file(args.manifest, validator, args.workspace_root, specs_search_root)
+    findings = validate_file(args.manifest, validator, args.workspace_root, specs_search_root, allowed_boundary_dirs)
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
 

@@ -39,10 +39,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from project_descriptor import ProjectDescriptorError  # noqa: E402
+from project_descriptor import boundary_dir_for as _boundary_dir_for  # noqa: E402
+from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
+from project_descriptor import load_project_descriptor as _load_project_descriptor  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
-from schema_utils import make_validator  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
@@ -50,7 +53,6 @@ from validate_work_package import load_validator as load_work_package_validator 
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DESCRIPTOR_SCHEMA_PATH = ROOT / "schemas" / "project-descriptor.schema.json"
 PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
@@ -72,17 +74,16 @@ class PipelineError(Exception):
 
 
 def load_project_descriptor(path: Path) -> dict:
-    schema = json.loads(DESCRIPTOR_SCHEMA_PATH.read_text())
-    validator = make_validator(schema)
-
-    data = json.loads(path.read_text())
-    errors = list(validator.iter_errors(data))
-    if errors:
-        raise PipelineError(
-            f"project descriptor {path} is invalid:\n"
-            + "\n".join(f"  - {e.message}" for e in errors)
-        )
-    return data
+    """Thin wrapper: the real logic lives in project_descriptor.py, shared
+    with validate_work_package.py (which can't import this module back --
+    pipeline.py already imports from validate_work_package.py, so the
+    reverse would be circular). Re-raises as PipelineError so main()'s
+    existing exception handling doesn't need to know about a second
+    exception type."""
+    try:
+        return _load_project_descriptor(path)
+    except ProjectDescriptorError as e:
+        raise PipelineError(str(e))
 
 
 def render_prompt(template_path: Path, variables: dict[str, str]) -> str:
@@ -215,7 +216,7 @@ def cmd_validate_work_package(args: argparse.Namespace) -> int:
     # _boundaries counts as "a real boundary contract" (external review:
     # reproduced with junk/not-a-crate/_boundaries/anything.json).
     descriptor = load_project_descriptor(args.descriptor)
-    allowed_boundary_dirs = [_boundary_dir_for(c, args.workspace) for c in descriptor["crates"]]
+    allowed_boundary_dirs = boundary_dirs_for_descriptor(descriptor, args.workspace)
 
     validator = load_work_package_validator()
     findings = validate_work_package_file(
@@ -278,13 +279,6 @@ def _crate_for(target: Path, workspace: Path, descriptor: dict) -> dict | None:
 def _specs_search_root_for(target: Path, workspace: Path, descriptor: dict) -> Path | None:
     crate = _crate_for(target, workspace, descriptor)
     return workspace / crate["specs_search_root"] if crate else None
-
-
-def _boundary_dir_for(crate: dict, workspace: Path) -> Path:
-    """plan.md's canonical layout, §2: crates/*/specs/_boundaries/*.json --
-    always this exact path relative to the crate root, not a separate
-    descriptor field."""
-    return (workspace / crate["crate_dir"] / "specs" / "_boundaries").resolve()
 
 
 def _require_target_in_workspace(target: Path, workspace: Path, descriptor: dict) -> None:

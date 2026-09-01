@@ -38,6 +38,18 @@ def run(data: dict, path: Path = INTERACTION_PATH):
     return validate_data(path, data, load_validator())
 
 
+def load_valid_reliance() -> dict:
+    return {
+        "obligation_id": "TaskQueue.C003",
+        "required_assurance": {
+            "required_claims": ["postcondition-holds"],
+            "accepted_evidence_kinds": ["creusot-deductive-check"],
+            "minimum_scope": {"input_domain": "queue_len_le_8", "feature_set": "default"},
+            "trust_policy": {"assumptions_allowed": []},
+        },
+    }
+
+
 class ComputeEligibilityTest(unittest.TestCase):
     """plan.md §5.2's table, checked directly: boundary-required wins over
     inform, which wins over ignore, when an edge carries more than one class."""
@@ -157,6 +169,117 @@ class ComputedEligibilityMismatchTest(unittest.TestCase):
         self.assertTrue(
             any("does not match the value computed" in f.reason for f in findings), [str(f) for f in findings]
         )
+
+
+class RelianceRequiredAssuranceTest(unittest.TestCase):
+    """#17: reliances[].required_assurance, applying plan.md §8.1's
+    claim / evidence-method / scope / trust type split."""
+
+    def test_reliances_is_optional(self):
+        """An inform/ignore-eligible edge has nothing to declare a
+        reliance on -- omitting the field entirely must still validate."""
+        data = load_valid()
+        self.assertNotIn("reliances", data)
+        findings = run(data)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_valid_reliance_has_no_findings(self):
+        data = load_valid()
+        data["reliances"] = [load_valid_reliance()]
+        findings = run(data)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_bad_obligation_id_pattern_is_rejected(self):
+        data = load_valid()
+        reliance = load_valid_reliance()
+        reliance["obligation_id"] = "not-a-real-obligation-id"
+        data["reliances"] = [reliance]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_empty_required_claims_is_rejected(self):
+        data = load_valid()
+        reliance = load_valid_reliance()
+        reliance["required_assurance"]["required_claims"] = []
+        data["reliances"] = [reliance]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_empty_accepted_evidence_kinds_is_rejected(self):
+        data = load_valid()
+        reliance = load_valid_reliance()
+        reliance["required_assurance"]["accepted_evidence_kinds"] = []
+        data["reliances"] = [reliance]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_missing_minimum_scope_is_rejected(self):
+        data = load_valid()
+        reliance = load_valid_reliance()
+        del reliance["required_assurance"]["minimum_scope"]
+        data["reliances"] = [reliance]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_missing_trust_policy_is_rejected(self):
+        data = load_valid()
+        reliance = load_valid_reliance()
+        del reliance["required_assurance"]["trust_policy"]
+        data["reliances"] = [reliance]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_evidence_method_value_in_required_claims_is_rejected(self):
+        """The core type-split proof: a verification-method value
+        (kani-bounded-model-check) is not a member of required_claims'
+        enum, so it can never land in the claim field."""
+        data = load_valid()
+        reliance = load_valid_reliance()
+        reliance["required_assurance"]["required_claims"] = ["kani-bounded-model-check"]
+        data["reliances"] = [reliance]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_claim_value_in_accepted_evidence_kinds_is_rejected(self):
+        """Mirror of the above, the other direction: a claim value
+        (postcondition-holds) is not a member of accepted_evidence_kinds'
+        enum, so bridge-checked/bounded-model-check-style values can
+        never share a field with claim values."""
+        data = load_valid()
+        reliance = load_valid_reliance()
+        reliance["required_assurance"]["accepted_evidence_kinds"] = ["postcondition-holds"]
+        data["reliances"] = [reliance]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_retired_bridge_checked_value_is_rejected_everywhere(self):
+        """plan.md §8.1: bridge-checked is retired -- it must not appear
+        in either enum, not just be excluded from one of them."""
+        data = load_valid()
+        claims_reliance = load_valid_reliance()
+        claims_reliance["required_assurance"]["required_claims"] = ["bridge-checked"]
+        evidence_reliance = load_valid_reliance()
+        evidence_reliance["obligation_id"] = "TaskQueue.C004"
+        evidence_reliance["required_assurance"]["accepted_evidence_kinds"] = ["bridge-checked"]
+        data["reliances"] = [claims_reliance, evidence_reliance]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_duplicate_obligation_id_across_reliances_is_rejected(self):
+        data = load_valid()
+        data["reliances"] = [load_valid_reliance(), load_valid_reliance()]
+        findings = run(data)
+        self.assertTrue(
+            any("appears in 2 reliances" in f.reason for f in findings), [str(f) for f in findings]
+        )
+
+    def test_different_obligation_ids_are_not_flagged(self):
+        data = load_valid()
+        second = load_valid_reliance()
+        second["obligation_id"] = "TaskQueue.C004"
+        data["reliances"] = [load_valid_reliance(), second]
+        findings = run(data)
+        self.assertEqual(findings, [], [str(f) for f in findings])
 
 
 class FindInteractionFilesTest(unittest.TestCase):

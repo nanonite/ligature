@@ -498,6 +498,62 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(target.exists())
 
+    def test_approve_interaction_with_reliances_succeeds(self):
+        """#17: reliances[].required_assurance, exercised end to end
+        through approve, not just the schema/G1b unit tests."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["postcondition-holds"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+
+    def test_approve_interaction_with_type_split_violation_is_refused(self):
+        """A verification-method value in required_claims must be
+        refused by approve, not just by the standalone validator."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["kani-bounded-model-check"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
     def test_approve_valid_exemption_succeeds(self):
         """#16: same dispatcher extension, for exemption targets."""
         target = self.workspace / "crate_a" / "specs" / "_exemptions" / "I-SCHED-TQ-002.json"

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/docs/interaction-schema.json",
   "title": "Interaction (I) — v1.0",
-  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. Chainlink #16 scope only: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. Deliberately does not yet include reliances[].required_assurance (#17), realization/config_scope (#18), or protocol_class (#19) -- those extend this same schema when their milestones land.",
+  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. #16: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. #17: reliances[].required_assurance, applying §8.1's claim / evidence-method / scope / trust type split -- required_claims and accepted_evidence_kinds are separate enums with no shared values, so a bridge-checked-style value can never land in a bounded-model-check-style field. reliances is optional: an eligibility of inform/ignore has nothing to declare a reliance on, so it is never forced to an empty array. Deliberately does not yet include realization/config_scope (#18) or protocol_class (#19) -- those extend this same schema when their milestones land.",
   "type": "object",
   "required": ["schema_version", "interaction_id", "caller", "callee", "edge_class", "eligibility", "rationale", "review"],
   "additionalProperties": false,
@@ -50,9 +50,70 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1 }
     },
+    "reliances": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/reliance" },
+      "description": "What this interaction relies on from the callee, and the assurance required for each obligation (plan.md §8.1). Optional -- an inform/ignore-eligible edge has nothing to declare a reliance on."
+    },
     "review": { "$ref": "#/$defs/review" }
   },
   "$defs": {
+    "reliance": {
+      "type": "object",
+      "required": ["obligation_id", "required_assurance"],
+      "additionalProperties": false,
+      "properties": {
+        "obligation_id": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$",
+          "description": "<Concept>.<id>, the same shape as a boundary contract's callee_guarantees entries (e.g. TaskQueue.C003)."
+        },
+        "required_assurance": { "$ref": "#/$defs/required_assurance" }
+      }
+    },
+    "required_assurance": {
+      "type": "object",
+      "required": ["required_claims", "accepted_evidence_kinds", "minimum_scope", "trust_policy"],
+      "additionalProperties": false,
+      "description": "plan.md §8.1's type split, enforced structurally: required_claims and accepted_evidence_kinds are disjoint enums, so a claim-category value (e.g. postcondition-holds) can never be written where a verification-method value (e.g. kani-bounded-model-check) is expected, or vice versa -- bridge-checked and bounded-model-check-style values can never share a field because neither field's enum contains the other's vocabulary.",
+      "properties": {
+        "required_claims": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["callee-precondition-established", "postcondition-holds"]
+          }
+        },
+        "accepted_evidence_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["kani-bounded-model-check", "creusot-deductive-check", "verus-deductive-check"]
+          }
+        },
+        "minimum_scope": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string" },
+          "description": "Verifier-specific scope keys (e.g. input_domain, feature_set) -- deliberately open, since the vocabulary is not fixed across verifiers (mirrors promotion-receipt-schema.json's schema_versions)."
+        },
+        "trust_policy": {
+          "type": "object",
+          "required": ["assumptions_allowed"],
+          "additionalProperties": false,
+          "properties": {
+            "assumptions_allowed": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
     "role": {
       "type": "object",
       "required": ["concept", "method"],

@@ -134,6 +134,32 @@ def check_computed_eligibility(path: Path, data: dict) -> list[Finding]:
     return []
 
 
+def check_reliance_obligation_uniqueness(path: Path, data: dict) -> list[Finding]:
+    """plan.md §8.1 (#17): one required_assurance per obligation_id within
+    a single interaction -- two reliance entries for the same obligation
+    could otherwise carry conflicting requirements with no way to tell
+    which one governs. Mirrors validate_boundary_contracts.py's
+    tracking_issue-uniqueness check."""
+    seen: dict[str, int] = {}
+    for reliance in data.get("reliances", []):
+        obligation_id = reliance.get("obligation_id")
+        if obligation_id is None:
+            continue
+        seen[obligation_id] = seen.get(obligation_id, 0) + 1
+
+    findings: list[Finding] = []
+    for obligation_id, count in seen.items():
+        if count > 1:
+            findings.append(
+                Finding(
+                    "G1b", path,
+                    f"obligation_id {obligation_id!r} appears in {count} reliances -- "
+                    "one required_assurance per obligation per interaction",
+                )
+            )
+    return findings
+
+
 def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
@@ -142,6 +168,7 @@ def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> li
     findings: list[Finding] = []
     findings.extend(check_naming(path, data))
     findings.extend(check_computed_eligibility(path, data))
+    findings.extend(check_reliance_obligation_uniqueness(path, data))
     return findings
 
 

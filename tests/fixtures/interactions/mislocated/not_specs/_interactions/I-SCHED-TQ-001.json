@@ -7,6 +7,25 @@
   "eligibility": "boundary-required",
   "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
   "evidence_links": ["E-0143"],
+  "reliances": [
+    {
+      "obligation_id": "TaskQueue.C003",
+      "required_assurance": {
+        "required_claims": ["postcondition-holds"],
+        "accepted_evidence_kinds": ["creusot-deductive-check"],
+        "minimum_scope": { "input_domain": "queue_len_le_8", "feature_set": "default" },
+        "trust_policy": { "assumptions_allowed": [] }
+      }
+    }
+  ],
+  "realization": {
+    "requirement": "required",
+    "config_scope": {
+      "target": "x86_64-unknown-linux-gnu",
+      "features": ["default"],
+      "cfg": []
+    }
+  },
   "review": {
     "reviewer": "alice",
     "reviewed_at": "2026-08-30"

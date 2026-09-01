@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- realization.requirement + config_scope on I edges (#18)
 - Assurance requirement located in I: reliances[].required_assurance (#17)
 - Computed eligibility + separate exemption objects with review blocks (#16)
 - Detached promotion receipt with explicit artifact_manifest (#15)

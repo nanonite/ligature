@@ -48,6 +48,14 @@ def load_valid() -> dict:
         "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
         "evidence_links": ["E-0143"],
         "reliances": [load_valid_reliance()],
+        "realization": {
+            "requirement": "required",
+            "config_scope": {
+                "target": "x86_64-unknown-linux-gnu",
+                "features": ["default"],
+                "cfg": [],
+            },
+        },
         "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
     }
 
@@ -175,6 +183,93 @@ class ComputedEligibilityMismatchTest(unittest.TestCase):
         self.assertTrue(
             any("does not match the value computed" in f.reason for f in findings), [str(f) for f in findings]
         )
+
+
+class RealizationTest(unittest.TestCase):
+    """#18: realization.requirement + config_scope, required on every
+    interaction regardless of eligibility."""
+
+    def test_valid_realization_has_no_findings(self):
+        findings = run(load_valid())
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_missing_realization_is_rejected(self):
+        data = load_valid()
+        del data["realization"]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_missing_realization_is_rejected_for_inform_edges_too(self):
+        """Unlike reliances, realization is not conditioned on
+        eligibility -- plan.md's issue text is 'each interaction edge
+        declares', not exempted for inform/ignore."""
+        data = load_valid()
+        del data["realization"]
+        data["edge_class"] = ["pure-data-type-reference"]
+        data["eligibility"] = "inform"
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_each_requirement_enum_value_is_individually_valid(self):
+        for value in ["required", "optional", "feature-gated", "platform-gated", "test-only", "fallback-only"]:
+            data = load_valid()
+            data["realization"]["requirement"] = value
+            findings = run(data)
+            self.assertEqual(findings, [], f"{value}: {[str(f) for f in findings]}")
+
+    def test_bad_requirement_enum_value_is_rejected(self):
+        data = load_valid()
+        data["realization"]["requirement"] = "sometimes"
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_missing_config_scope_is_rejected(self):
+        data = load_valid()
+        del data["realization"]["config_scope"]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_missing_target_is_rejected(self):
+        data = load_valid()
+        del data["realization"]["config_scope"]["target"]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_bad_target_pattern_is_rejected(self):
+        data = load_valid()
+        data["realization"]["config_scope"]["target"] = "not_a_target_triple"
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_missing_features_is_rejected(self):
+        data = load_valid()
+        del data["realization"]["config_scope"]["features"]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_missing_cfg_is_rejected(self):
+        data = load_valid()
+        del data["realization"]["config_scope"]["cfg"]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_empty_features_and_cfg_are_both_valid(self):
+        """Unlike edge_class/required_claims, features and cfg have no
+        minItems -- an edge can legitimately be gated by nothing (always
+        compiled, no extra cfg predicate), matching the worked example's
+        own cfg: []."""
+        data = load_valid()
+        data["realization"]["config_scope"]["features"] = []
+        data["realization"]["config_scope"]["cfg"] = []
+        findings = run(data)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_multi_segment_target_triples_are_accepted(self):
+        for target in ["wasm32-unknown-unknown", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"]:
+            data = load_valid()
+            data["realization"]["config_scope"]["target"] = target
+            findings = run(data)
+            self.assertEqual(findings, [], f"{target}: {[str(f) for f in findings]}")
 
 
 class RelianceRequiredAssuranceTest(unittest.TestCase):

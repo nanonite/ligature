@@ -18,6 +18,14 @@
       }
     }
   ],
+  "realization": {
+    "requirement": "required",
+    "config_scope": {
+      "target": "x86_64-unknown-linux-gnu",
+      "features": ["default"],
+      "cfg": []
+    }
+  },
   "review": {
     "reviewer": "alice",
     "reviewed_at": "2026-08-30"

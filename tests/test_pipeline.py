@@ -355,6 +355,11 @@ VALID_DESCRIPTOR = {
     "review": {"reviewer": "repro", "reviewed_at": "2026-08-27"},
 }
 
+REALIZATION = {
+    "requirement": "required",
+    "config_scope": {"target": "x86_64-unknown-linux-gnu", "features": ["default"], "cfg": []},
+}
+
 
 class CmdApproveIntegrationTest(unittest.TestCase):
     """Requested directly by the third review pass: real cmd_approve
@@ -491,6 +496,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
                     },
                 }
             ],
+            "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
@@ -499,7 +505,9 @@ class CmdApproveIntegrationTest(unittest.TestCase):
     def test_approve_boundary_required_interaction_without_reliances_is_refused(self):
         """G2++ (#17), exercised end to end through approve: a
         boundary-required interaction declaring no reliances must be
-        refused, not silently promoted."""
+        refused, not silently promoted. realization is present so the
+        refusal is unambiguously attributable to the missing reliance,
+        not an incidental #18 schema violation."""
         target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
         target.with_suffix(".json.draft").write_text(json.dumps({
             "schema_version": "1.0",
@@ -509,6 +517,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
             "edge_class": ["stateful"],
             "eligibility": "boundary-required",
             "rationale": "dispatch relies on pop_ready's return discipline",
+            "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 1)
@@ -524,6 +533,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
             "edge_class": ["stateful"],
             "eligibility": "ignore",
             "rationale": "dispatch relies on pop_ready's return discipline",
+            "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 1)
@@ -552,6 +562,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
                     },
                 }
             ],
+            "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
@@ -580,6 +591,26 @@ class CmdApproveIntegrationTest(unittest.TestCase):
                     },
                 }
             ],
+            "realization": REALIZATION,
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_approve_interaction_without_realization_is_refused(self):
+        """#18: realization.requirement + config_scope is required on
+        every interaction (unlike reliances, unconditionally -- plan.md's
+        issue text is 'each interaction edge declares', not conditioned
+        on eligibility). Exercised end to end through approve."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["pure-data-type-reference"],
+            "eligibility": "inform",
+            "rationale": "dispatch relies on pop_ready's return discipline",
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 1)

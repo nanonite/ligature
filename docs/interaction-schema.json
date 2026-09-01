@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/docs/interaction-schema.json",
   "title": "Interaction (I) — v1.0",
-  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. #16: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. #17: reliances[].required_assurance, applying §8.1's claim / evidence-method / scope / trust type split -- required_claims and accepted_evidence_kinds are separate enums with no shared values, so a bridge-checked-style value can never land in a bounded-model-check-style field. reliances is optional: an eligibility of inform/ignore has nothing to declare a reliance on, so it is never forced to an empty array. Deliberately does not yet include realization/config_scope (#18) or protocol_class (#19) -- those extend this same schema when their milestones land.",
+  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. #16: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. #17: reliances[].required_assurance, applying §8.1's claim / evidence-method / scope / trust type split -- required_claims and accepted_evidence_kinds are separate enums with no shared values, so a bridge-checked-style value can never land in a bounded-model-check-style field. reliances is optional: an eligibility of inform/ignore has nothing to declare a reliance on, so it is never forced to an empty array. #18: realization.requirement + config_scope -- required on every interaction (unlike reliances, this applies uniformly regardless of eligibility: the issue text is 'each interaction edge declares', not conditioned on boundary-required). Deliberately does not yet include protocol_class (#19) -- extends this same schema when its milestone lands.",
   "type": "object",
-  "required": ["schema_version", "interaction_id", "caller", "callee", "edge_class", "eligibility", "rationale", "review"],
+  "required": ["schema_version", "interaction_id", "caller", "callee", "edge_class", "eligibility", "rationale", "realization", "review"],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -55,9 +55,44 @@
       "items": { "$ref": "#/$defs/reliance" },
       "description": "What this interaction relies on from the callee, and the assurance required for each obligation (plan.md §8.1). Optional -- an inform/ignore-eligible edge has nothing to declare a reliance on."
     },
+    "realization": { "$ref": "#/$defs/realization" },
     "review": { "$ref": "#/$defs/review" }
   },
   "$defs": {
+    "realization": {
+      "type": "object",
+      "required": ["requirement", "config_scope"],
+      "additionalProperties": false,
+      "description": "plan.md §5.1: whether this edge is compiled/realized unconditionally, and the configuration it was analyzed under.",
+      "properties": {
+        "requirement": {
+          "type": "string",
+          "enum": ["required", "optional", "feature-gated", "platform-gated", "test-only", "fallback-only"]
+        },
+        "config_scope": {
+          "type": "object",
+          "required": ["target", "features", "cfg"],
+          "additionalProperties": false,
+          "properties": {
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]+(-[a-z0-9_]+){1,3}$",
+              "description": "Rust target triple, e.g. x86_64-unknown-linux-gnu. Loosely shaped (2-4 hyphen-separated lowercase segments) rather than an exhaustive target list, which changes over time."
+            },
+            "features": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "cfg": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
     "reliance": {
       "type": "object",
       "required": ["obligation_id", "required_assurance"],

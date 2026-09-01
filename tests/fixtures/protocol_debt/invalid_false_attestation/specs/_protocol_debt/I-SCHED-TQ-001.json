@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "interaction_id": "I-SCHED-TQ-001",
+  "rationale": "Multi-step handshake protocol, not yet modeled",
+  "no_promoted_obligation_depends_on_protocol": true,
+  "no_work_package_touches_its_path": false,
+  "no_release_claim_includes_it": true,
+  "tracking_issue": "chainlink:#99",
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-08-30"
+  }
+}

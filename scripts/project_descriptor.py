@@ -66,3 +66,13 @@ def exemption_dir_for(crate: dict, workspace: Path) -> Path:
 
 def exemption_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
     return [exemption_dir_for(crate, workspace) for crate in descriptor["crates"]]
+
+
+def protocol_debt_dir_for(crate: dict, workspace: Path) -> Path:
+    """plan.md §5.3's canonical layout: crates/*/specs/_protocol_debt/*.json,
+    the same discipline as boundary_dir_for."""
+    return (workspace / crate["crate_dir"] / "specs" / "_protocol_debt").resolve()
+
+
+def protocol_debt_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
+    return [protocol_debt_dir_for(crate, workspace) for crate in descriptor["crates"]]

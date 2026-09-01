@@ -241,6 +241,27 @@ class CmdValidateExemptionIntegrationTest(unittest.TestCase):
         self.assertEqual(self._run(EXEMPTION_FIXTURES / "mislocated"), 1)
 
 
+PROTOCOL_DEBT_FIXTURES = ROOT / "tests" / "fixtures" / "protocol_debt"
+
+
+class CmdValidateProtocolDebtIntegrationTest(unittest.TestCase):
+    def _run(self, workspace: Path) -> int:
+        with tempfile.TemporaryDirectory() as tmp:
+            descriptor_path = _single_crate_descriptor_path(tmp)
+            return pipeline.main(
+                ["--workspace", str(workspace), "--descriptor", str(descriptor_path), "validate-protocol-debt"]
+            )
+
+    def test_valid_fixture_crate_passes(self):
+        self.assertEqual(self._run(PROTOCOL_DEBT_FIXTURES / "valid"), 0)
+
+    def test_false_attestation_fails(self):
+        self.assertEqual(self._run(PROTOCOL_DEBT_FIXTURES / "invalid_false_attestation"), 1)
+
+    def test_artifact_under_mislocated_directory_is_rejected(self):
+        self.assertEqual(self._run(PROTOCOL_DEBT_FIXTURES / "mislocated"), 1)
+
+
 WP_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "work_packages" / "valid"
 PROMOTION_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "promotions" / "valid"
 
@@ -375,6 +396,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_exemptions").mkdir(parents=True)
+        (self.workspace / "crate_a" / "specs" / "_protocol_debt").mkdir(parents=True)
         self.descriptor_path = self.workspace / "project-descriptor.json"
         self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
 
@@ -496,6 +518,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
                     },
                 }
             ],
+            "protocol_class": "pairwise",
             "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
@@ -517,6 +540,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
             "edge_class": ["stateful"],
             "eligibility": "boundary-required",
             "rationale": "dispatch relies on pop_ready's return discipline",
+            "protocol_class": "pairwise",
             "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
@@ -533,6 +557,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
             "edge_class": ["stateful"],
             "eligibility": "ignore",
             "rationale": "dispatch relies on pop_ready's return discipline",
+            "protocol_class": "pairwise",
             "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
@@ -562,6 +587,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
                     },
                 }
             ],
+            "protocol_class": "pairwise",
             "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
@@ -591,6 +617,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
                     },
                 }
             ],
+            "protocol_class": "pairwise",
             "realization": REALIZATION,
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
@@ -627,6 +654,38 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
         self.assertTrue(target.exists())
+
+    def test_approve_valid_protocol_debt_succeeds(self):
+        """#19: _select_validate_fn's dispatcher extended to recognize
+        protocol-debt targets too, exercised end to end through approve."""
+        target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-SCHED-TQ-003.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-003",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+
+    def test_approve_protocol_debt_with_false_attestation_is_refused(self):
+        target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-SCHED-TQ-003.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-003",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": False,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
 
     def test_approve_refuses_non_json_interaction_target(self):
         """Fifth review pass: a schema-valid interaction approved as

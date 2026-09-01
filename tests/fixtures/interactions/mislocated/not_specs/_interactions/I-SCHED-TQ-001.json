@@ -18,6 +18,7 @@
       }
     }
   ],
+  "protocol_class": "pairwise",
   "realization": {
     "requirement": "required",
     "config_scope": {

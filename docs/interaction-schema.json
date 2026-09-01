@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/docs/interaction-schema.json",
   "title": "Interaction (I) — v1.0",
-  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. #16: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. #17: reliances[].required_assurance, applying §8.1's claim / evidence-method / scope / trust type split -- required_claims and accepted_evidence_kinds are separate enums with no shared values, so a bridge-checked-style value can never land in a bounded-model-check-style field. reliances is optional: an eligibility of inform/ignore has nothing to declare a reliance on, so it is never forced to an empty array. #18: realization.requirement + config_scope -- required on every interaction (unlike reliances, this applies uniformly regardless of eligibility: the issue text is 'each interaction edge declares', not conditioned on boundary-required). Deliberately does not yet include protocol_class (#19) -- extends this same schema when its milestone lands.",
+  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. #16: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. #17: reliances[].required_assurance, applying §8.1's claim / evidence-method / scope / trust type split -- required_claims and accepted_evidence_kinds are separate enums with no shared values, so a bridge-checked-style value can never land in a bounded-model-check-style field. reliances is optional: an eligibility of inform/ignore has nothing to declare a reliance on, so it is never forced to an empty array. #18: realization.requirement + config_scope -- required on every interaction (unlike reliances, this applies uniformly regardless of eligibility: the issue text is 'each interaction edge declares', not conditioned on boundary-required). #19: protocol_class (plan.md §5.3) -- required on every interaction, same reasoning as realization. A non-pairwise classification requires an external protocol artifact or a reviewed protocol-debt record (docs/protocol-debt-schema.json); cross-referencing that coverage exists is G15's job, out of scope for this schema, the same boundary #16 drew for R2/exemptions.",
   "type": "object",
-  "required": ["schema_version", "interaction_id", "caller", "callee", "edge_class", "eligibility", "rationale", "realization", "review"],
+  "required": ["schema_version", "interaction_id", "caller", "callee", "edge_class", "eligibility", "rationale", "protocol_class", "realization", "review"],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -54,6 +54,11 @@
       "type": "array",
       "items": { "$ref": "#/$defs/reliance" },
       "description": "What this interaction relies on from the callee, and the assurance required for each obligation (plan.md §8.1). Optional -- an inform/ignore-eligible edge has nothing to declare a reliance on."
+    },
+    "protocol_class": {
+      "type": "string",
+      "enum": ["pairwise", "non-pairwise"],
+      "description": "plan.md §5.3. A non-pairwise edge is temporal/multi-step, not a simple caller-to-callee call -- it requires an external protocol artifact or a protocol-debt record (docs/protocol-debt-schema.json); a normal boundary exemption is never sufficient for it. Whether that coverage actually exists for this interaction (G15) is checked elsewhere, not here."
     },
     "realization": { "$ref": "#/$defs/realization" },
     "review": { "$ref": "#/$defs/review" }

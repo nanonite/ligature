@@ -38,10 +38,15 @@ Implemented now, against schemas that actually exist:
             objects (#16): schema plus naming (interaction_id == filename
             stem). Does not yet cross-reference that the named interaction
             is real or actually eligible -- that is R2's job (#21).
+  validate-protocol-debt  Stage 4's G1a/G1b over protocol-debt records
+            (#19): schema plus naming. Does not yet cross-reference that
+            the named interaction is real or actually non-pairwise, or
+            that G15's coverage requirement (protocol artifact OR debt
+            record) is satisfied -- that is G15's job, out of scope here.
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
-  I-schema (#16/#17/#18/#19/#20, M3), emission, attach, manifest and
+  I-schema (#20 -- evidence schema still pending), emission, attach, manifest and
   promotion-receipt *generation* (the schemas/validators exist as of
   #14/#15; the generators that read promoted I/O and emit these don't,
   since they need the rest of the I-schema machinery M3 builds),
@@ -64,6 +69,7 @@ from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
 from project_descriptor import exemption_dir_for as _exemption_dir_for  # noqa: E402
 from project_descriptor import interaction_dir_for as _interaction_dir_for  # noqa: E402
 from project_descriptor import load_project_descriptor as _load_project_descriptor  # noqa: E402
+from project_descriptor import protocol_debt_dir_for as _protocol_debt_dir_for  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
@@ -77,6 +83,9 @@ from validate_interaction import load_validator as load_interaction_validator  #
 from validate_interaction import validate_crate as validate_interaction_crate  # noqa: E402
 from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
 from validate_promotion_receipt import load_validator as load_promotion_validator  # noqa: E402
+from validate_protocol_debt import load_validator as load_protocol_debt_validator  # noqa: E402
+from validate_protocol_debt import validate_crate as validate_protocol_debt_crate  # noqa: E402
+from validate_protocol_debt import validate_data as validate_protocol_debt_data  # noqa: E402
 from validate_promotion_receipt import validate_file as validate_promotion_file  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
@@ -85,11 +94,15 @@ ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
-    "I-schema (remaining)": "#17/#18/#19/#20 (M3 -- assurance requirement, realization/config_scope, "
-    "protocol classification, and evidence schema still pending; #16's interaction_id/edge_class/"
-    "computed-eligibility base and exemption objects have landed as `validate-interaction`/`validate-exemption`)",
+    "I-schema (remaining)": "#20 (M3 -- evidence schema still pending; #16/#17/#18/#19's interaction_id/"
+    "edge_class/computed-eligibility base, reliances/required_assurance, realization/config_scope, "
+    "protocol_class, exemption objects, and protocol-debt records have landed as `validate-interaction`/"
+    "`validate-exemption`/`validate-protocol-debt`)",
     "R2 coverage": "#21 (M3 -- every eligible I edge covered by an O artifact or a reviewed exemption; "
     "needs #16's interaction/exemption validators, which exist, cross-referenced against each other, which doesn't yet)",
+    "G15 protocol coverage": "#21 (M3 -- every non-pairwise I edge covered by a protocol artifact or a "
+    "protocol-debt record; needs #19's interaction/protocol-debt validators, which exist, cross-referenced "
+    "against each other, which doesn't yet)",
     "emission": "needs the I-schema (M3) first",
     "attach": "needs the I-schema (M3) first",
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); the generator "
@@ -347,6 +360,28 @@ def cmd_validate_exemption(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_validate_protocol_debt(args: argparse.Namespace) -> int:
+    # Same discover-then-reject-by-location scan as
+    # cmd_validate_interaction/cmd_validate_exemption, for
+    # <crate_dir>/specs/_protocol_debt.
+    descriptor = load_project_descriptor(args.descriptor)
+    findings_total = []
+    for crate in descriptor["crates"]:
+        crate_root = _require_crate_root_exists(crate, args.workspace)
+        findings_total.extend(
+            validate_protocol_debt_crate(crate_root, _protocol_debt_dir_for(crate, args.workspace))
+        )
+
+    if not findings_total:
+        print("OK: all protocol-debt records pass G1a/G1b")
+        return 0
+
+    print(f"FAIL: {len(findings_total)} finding(s)")
+    for f in findings_total:
+        print(f"  - {f}")
+    return 1
+
+
 def cmd_draft(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
@@ -460,11 +495,15 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         if resolved_parent == _exemption_dir_for(crate, workspace):
             validator = load_exemption_validator()
             return lambda path, data: validate_exemption_data(path, data, validator)
+        if resolved_parent == _protocol_debt_dir_for(crate, workspace):
+            validator = load_protocol_debt_validator()
+            return lambda path, data: validate_protocol_debt_data(path, data, validator)
     raise PipelineError(
         f"no validator recognizes target {target} -- this pipeline only "
         "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
-        "interactions at <crate_dir>/specs/_interactions/*.json, and exemptions "
-        "at <crate_dir>/specs/_exemptions/*.json today. Refusing to draft/approve "
+        "interactions at <crate_dir>/specs/_interactions/*.json, exemptions "
+        "at <crate_dir>/specs/_exemptions/*.json, and protocol-debt records at "
+        "<crate_dir>/specs/_protocol_debt/*.json today. Refusing to draft/approve "
         "an artifact type or location it cannot mechanically gate, rather than "
         "silently skipping validation for it."
     )
@@ -491,6 +530,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "Implemented: draft (Stage 0/3), approve (checkpoint), validate (Stage 4 G1a/G1b/G2+), "
         "validate-interaction (Stage 4 G1a/G1b + computed eligibility), "
         "validate-exemption (Stage 4 G1a/G1b naming), "
+        "validate-protocol-debt (Stage 4 G1a/G1b naming), "
         "validate-work-package (Stage 7 schema + §10.1, standalone), "
         "validate-promotion (Stage 4.5 schema + §7.1, standalone)"
     )
@@ -523,6 +563,11 @@ def main(argv: list[str]) -> int:
         "validate-exemption", help="Stage 4: G1a/G1b over boundary-required exemption objects"
     )
     validate_exemption_p.set_defaults(func=cmd_validate_exemption)
+
+    validate_protocol_debt_p = sub.add_parser(
+        "validate-protocol-debt", help="Stage 4: G1a/G1b over protocol-debt records"
+    )
+    validate_protocol_debt_p.set_defaults(func=cmd_validate_protocol_debt)
 
     validate_wp_p = sub.add_parser(
         "validate-work-package", help="Stage 7: schema + §10.1 checks over a work-package manifest"

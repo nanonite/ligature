@@ -48,6 +48,7 @@ def load_valid() -> dict:
         "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
         "evidence_links": ["E-0143"],
         "reliances": [load_valid_reliance()],
+        "protocol_class": "pairwise",
         "realization": {
             "requirement": "required",
             "config_scope": {
@@ -183,6 +184,42 @@ class ComputedEligibilityMismatchTest(unittest.TestCase):
         self.assertTrue(
             any("does not match the value computed" in f.reason for f in findings), [str(f) for f in findings]
         )
+
+
+class ProtocolClassTest(unittest.TestCase):
+    """#19: protocol_class (plan.md §5.3), required on every interaction
+    like realization -- 'non-pairwise classes require...' presupposes
+    every interaction always has a protocol_class to check."""
+
+    def test_valid_protocol_class_has_no_findings(self):
+        findings = run(load_valid())
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_missing_protocol_class_is_rejected(self):
+        data = load_valid()
+        del data["protocol_class"]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_missing_protocol_class_is_rejected_for_inform_edges_too(self):
+        data = load_valid()
+        del data["protocol_class"]
+        data["edge_class"] = ["pure-data-type-reference"]
+        data["eligibility"] = "inform"
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+    def test_non_pairwise_is_a_valid_value(self):
+        data = load_valid()
+        data["protocol_class"] = "non-pairwise"
+        findings = run(data)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_bad_protocol_class_enum_value_is_rejected(self):
+        data = load_valid()
+        data["protocol_class"] = "sometimes"
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
 
 
 class RealizationTest(unittest.TestCase):

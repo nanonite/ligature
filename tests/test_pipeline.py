@@ -655,9 +655,42 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(target.exists())
 
+    def _write_real_interaction(self, interaction_id: str, protocol_class: str) -> None:
+        """A real, already-promoted interaction file -- not a .draft --
+        for protocol-debt cross-reference tests to resolve against.
+        Mirrors how a debt record is normally filed against an
+        interaction that already exists on disk."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / f"{interaction_id}.json"
+        target.write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": interaction_id,
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["postcondition-holds"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+            "protocol_class": protocol_class,
+            "realization": REALIZATION,
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }))
+
     def test_approve_valid_protocol_debt_succeeds(self):
         """#19: _select_validate_fn's dispatcher extended to recognize
-        protocol-debt targets too, exercised end to end through approve."""
+        protocol-debt targets too, exercised end to end through approve.
+        A real, already-promoted non-pairwise interaction exists for it
+        to resolve against."""
+        self._write_real_interaction("I-SCHED-TQ-003", "non-pairwise")
         target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-SCHED-TQ-003.json"
         target.with_suffix(".json.draft").write_text(json.dumps({
             "schema_version": "1.0",
@@ -671,6 +704,75 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
         self.assertTrue(target.exists())
+
+    def test_approve_protocol_debt_for_nonexistent_interaction_is_refused(self):
+        """External review, high severity: a debt record naming a
+        nonexistent interaction previously approved with zero findings.
+        No interaction file is written here at all."""
+        target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-DOES-NOT-EXIST.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-DOES-NOT-EXIST",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_approve_protocol_debt_for_pairwise_interaction_is_refused(self):
+        """External review, high severity: a debt record for what is
+        actually a pairwise interaction previously approved with zero
+        findings."""
+        self._write_real_interaction("I-SCHED-TQ-004", "pairwise")
+        target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-SCHED-TQ-004.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-004",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_approve_non_pairwise_interaction_with_no_debt_record_is_refused(self):
+        """G15, the interaction side of the same cross-reference: a
+        non-pairwise interaction with no valid protocol-debt record
+        anywhere in the crate must be refused at approve time, not
+        silently promoted."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-005.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-005",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["postcondition-holds"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+            "protocol_class": "non-pairwise",
+            "realization": REALIZATION,
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
 
     def test_approve_protocol_debt_with_false_attestation_is_refused(self):
         target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-SCHED-TQ-003.json"

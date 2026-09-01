@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/docs/protocol-debt-schema.json",
   "title": "Protocol-debt record — v1.0",
-  "description": "plan.md §5.3, gate table row G15. A non-pairwise interaction (protocol_class: non-pairwise) requires an external protocol artifact or a protocol-debt record -- this is the latter: a reviewed out-of-scope declaration. plan.md is explicit it 'suffices only when all five hold': no promoted obligation depends on the protocol, no work package touches its path, no release claim includes it, a human signed the scope cut, and a tracking issue records the missing support. The first three are facts about promoted/external state this schema cannot itself verify (that cross-reference is G15's job, out of scope here, the same boundary chainlink #16 drew for R2/exemptions) -- they are represented as const:true attestation fields so a record can never be filed admitting one is false; the last two are directly enforced (review, tracking_issue). One per crates/*/specs/_protocol_debt/<interaction_id>.json, naming the non-pairwise interaction it covers. Carries its own review block and never a promotion_id (references are one-way, plan.md §7.1) -- mirrors docs/exemption-schema.json's shape, but a normal boundary exemption is never sufficient for a temporal/protocol obligation (plan.md §5.3), so this is a distinct artifact type, not a reuse of exemptions.",
+  "description": "plan.md §5.3, gate table row G15. A non-pairwise interaction (protocol_class: non-pairwise) requires an external protocol artifact or a protocol-debt record -- this is the latter: a reviewed out-of-scope declaration. plan.md is explicit it 'suffices only when all five hold': no promoted obligation depends on the protocol, no work package touches its path, no release claim includes it, a human signed the scope cut, and a tracking issue records the missing support. AUTHORITY MODEL (normative, not a gap): conditions 1-3 are facts about promoted/external state that no schema can mechanically re-derive without first defining what code path or module a protocol covers, which no artifact in this codebase captures. Rather than half-verify one of the three while leaving the other two as unchecked prose -- which would imply more rigor than exists -- this schema treats a human reviewer's explicit, signed attestation as the authoritative mechanism for all three, exactly as plan.md §7.2 already establishes review as the terminal authority for every other human checkpoint in this system (boundary contracts, exemptions, promotions: none of those are independently re-derived by their validators either). The const:true constraint enforces that a record can never be FILED admitting one of the three is false; it does not, and is not intended to, mechanically prove the claim -- that burden is on the named reviewer. Conditions 4-5 (review, tracking_issue) are directly and fully enforced. One per crates/*/specs/_protocol_debt/<interaction_id>.json, naming the non-pairwise interaction it covers -- that naming itself IS cross-referenced (scripts/validate_protocol_debt.py's G2 check: the named interaction must exist and actually be non-pairwise). Carries its own review block and never a promotion_id (references are one-way, plan.md §7.1) -- mirrors docs/exemption-schema.json's shape, but a normal boundary exemption is never sufficient for a temporal/protocol obligation (plan.md §5.3), so this is a distinct artifact type, not a reuse of exemptions.",
   "type": "object",
   "required": [
     "schema_version",
@@ -31,17 +31,17 @@
     "no_promoted_obligation_depends_on_protocol": {
       "type": "boolean",
       "const": true,
-      "description": "plan.md §5.3, condition 1. Attestation only -- not independently re-verified against promoted state by this schema."
+      "description": "plan.md §5.3, condition 1. A human-signed attestation, authoritative upon review (see this schema's top-level description) -- not independently re-derived against promoted state by this schema."
     },
     "no_work_package_touches_its_path": {
       "type": "boolean",
       "const": true,
-      "description": "plan.md §5.3, condition 2. Attestation only -- not independently re-verified against work-package manifests by this schema."
+      "description": "plan.md §5.3, condition 2. A human-signed attestation, authoritative upon review (see this schema's top-level description) -- not independently re-derived against work-package manifests by this schema."
     },
     "no_release_claim_includes_it": {
       "type": "boolean",
       "const": true,
-      "description": "plan.md §5.3, condition 3. Attestation only -- not independently re-verified by this schema (no release-claim artifact exists yet in this codebase)."
+      "description": "plan.md §5.3, condition 3. A human-signed attestation, authoritative upon review (see this schema's top-level description) -- no release-claim artifact exists yet in this codebase to re-derive it against."
     },
     "tracking_issue": {
       "type": "string",

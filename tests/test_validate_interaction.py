@@ -61,8 +61,8 @@ def load_valid() -> dict:
     }
 
 
-def run(data: dict, path: Path = INTERACTION_PATH):
-    return validate_data(path, data, load_validator())
+def run(data: dict, path: Path = INTERACTION_PATH, valid_debt_interaction_ids: set[str] | None = None):
+    return validate_data(path, data, load_validator(), valid_debt_interaction_ids)
 
 
 class ComputeEligibilityTest(unittest.TestCase):
@@ -210,9 +210,13 @@ class ProtocolClassTest(unittest.TestCase):
         self.assertTrue(any(f.gate == "G1a" for f in findings))
 
     def test_non_pairwise_is_a_valid_value(self):
+        """Decoupled from G15 coverage: supplies a covering
+        valid_debt_interaction_ids set so this test proves the enum value
+        itself is schema-valid, not incidentally exercising G15 (see
+        G15ProtocolCoverageTest below for that)."""
         data = load_valid()
         data["protocol_class"] = "non-pairwise"
-        findings = run(data)
+        findings = run(data, valid_debt_interaction_ids={data["interaction_id"]})
         self.assertEqual(findings, [], [str(f) for f in findings])
 
     def test_bad_protocol_class_enum_value_is_rejected(self):
@@ -220,6 +224,56 @@ class ProtocolClassTest(unittest.TestCase):
         data["protocol_class"] = "sometimes"
         findings = run(data)
         self.assertTrue(any(f.gate == "G1a" for f in findings))
+
+
+class G15ProtocolCoverageTest(unittest.TestCase):
+    """plan.md gate table §12: G15 -- 'non-pairwise protocol without
+    artifact or valid debt record' blocks promotion. External review,
+    high severity: this was previously deferred entirely (assigned to
+    chainlink #21, which is only the I-schema milestone gate, not an
+    implementer) -- a non-pairwise interaction with zero coverage
+    produced zero findings. Reproduced directly then fixed."""
+
+    def test_non_pairwise_with_no_coverage_set_supplied_is_an_info_note_not_a_failure(self):
+        """valid_debt_interaction_ids=None (the default) means 'not
+        checked in this context' -- a visible info note, not a silent
+        pass and not an incorrect hard failure."""
+        data = load_valid()
+        data["protocol_class"] = "non-pairwise"
+        findings = run(data)
+        self.assertFalse(any(f.gate == "G15" and f.severity == "error" for f in findings))
+        self.assertTrue(any(f.gate == "G15" and f.severity == "info" for f in findings))
+
+    def test_non_pairwise_with_empty_coverage_set_is_rejected(self):
+        """The fail-closed case: a real (non-None) but empty coverage
+        set -- e.g. a crate with no protocol-debt records at all --
+        rejects every non-pairwise interaction."""
+        data = load_valid()
+        data["protocol_class"] = "non-pairwise"
+        findings = run(data, valid_debt_interaction_ids=set())
+        self.assertTrue(
+            any(f.gate == "G15" and f.severity == "error" for f in findings), [str(f) for f in findings]
+        )
+
+    def test_non_pairwise_with_a_different_covered_id_is_rejected(self):
+        """A coverage set that's non-empty but doesn't include THIS
+        interaction's own id still rejects it."""
+        data = load_valid()
+        data["protocol_class"] = "non-pairwise"
+        findings = run(data, valid_debt_interaction_ids={"I-SOME-OTHER-INTERACTION"})
+        self.assertTrue(any(f.gate == "G15" and f.severity == "error" for f in findings))
+
+    def test_non_pairwise_with_matching_coverage_is_accepted(self):
+        data = load_valid()
+        data["protocol_class"] = "non-pairwise"
+        findings = run(data, valid_debt_interaction_ids={data["interaction_id"]})
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_pairwise_is_exempt_regardless_of_coverage(self):
+        data = load_valid()
+        self.assertEqual(data["protocol_class"], "pairwise")
+        findings = run(data, valid_debt_interaction_ids=set())
+        self.assertFalse(any(f.gate == "G15" for f in findings))
 
 
 class RealizationTest(unittest.TestCase):
@@ -555,7 +609,7 @@ class ValidateCrateTest(unittest.TestCase):
 
     def test_missing_crate_root_raises(self):
         with self.assertRaises(FileNotFoundError):
-            validate_crate(Path("/nonexistent"), Path("/nonexistent/specs/_interactions"))
+            validate_crate(Path("/nonexistent"), Path("/nonexistent/specs/_interactions"), set())
 
     def test_finds_and_validates_files_in_the_canonical_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -563,7 +617,7 @@ class ValidateCrateTest(unittest.TestCase):
             canonical = crate_root / "specs" / "_interactions"
             canonical.mkdir(parents=True)
             (canonical / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
-            findings = validate_crate(crate_root, canonical)
+            findings = validate_crate(crate_root, canonical, set())
         self.assertEqual(findings, [], [str(f) for f in findings])
 
     def test_mislocated_but_otherwise_valid_artifact_is_rejected_by_location_alone(self):
@@ -581,7 +635,7 @@ class ValidateCrateTest(unittest.TestCase):
             stray.mkdir(parents=True)
             (stray / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
             canonical = crate_root / "specs" / "_interactions"  # never created
-            findings = validate_crate(crate_root, canonical)
+            findings = validate_crate(crate_root, canonical, set())
         self.assertTrue(
             any("not directly under the canonical directory" in f.reason for f in findings),
             [str(f) for f in findings],
@@ -601,7 +655,7 @@ class ValidateCrateTest(unittest.TestCase):
             data["interaction_id"] = "I-SCHED-TQ-002"
             data["eligibility"] = "ignore"
             (stray / "I-SCHED-TQ-002.json").write_text(json.dumps(data))
-            findings = validate_crate(crate_root, canonical)
+            findings = validate_crate(crate_root, canonical, set())
         self.assertTrue(any("not directly under the canonical directory" in f.reason for f in findings))
         self.assertFalse(any(f.path.name == "I-SCHED-TQ-001.json" for f in findings))
 

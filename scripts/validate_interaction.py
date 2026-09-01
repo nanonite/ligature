@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Interaction (I) validation: G1a (schema), G1b (naming + COMPUTED
 eligibility + reliance-obligation uniqueness), G2++ (declared assurance
-requirement present).
+requirement present), G15 (non-pairwise protocol coverage).
 
-plan.md §5.1/§5.2/§8.1, gate table §12, chainlink #16/#17. Phases run in
-order -- G1b/G2++ on a schema-invalid document isn't meaningful.
+plan.md §5.1/§5.2/§5.3/§8.1, gate table §12, chainlink #16/#17/#19.
+Phases run in order -- G1b/G2++/G15 on a schema-invalid document isn't
+meaningful.
 
   G1a   -- draft-2020-12 JSON Schema validation against
            docs/interaction-schema.json, including §8.1's claim /
@@ -25,13 +26,29 @@ order -- G1b/G2++ on a schema-invalid document isn't meaningful.
            that it has. `inform`/`ignore` edges have nothing to declare
            and are exempt (reliances is schema-optional precisely for
            that case).
+  G15   -- non-pairwise protocol without artifact or valid debt record
+           blocks promotion (plan.md gate table, §12). A "protocol
+           artifact" has no schema yet (docs/protocol-debt-schema.json's
+           own description explains why), so the only checkable coverage
+           mechanism today is a valid protocol-debt record naming this
+           interaction. Fail-closed cross-crate check: the caller (see
+           `validate_crate`, always required there) supplies the set of
+           interaction_ids covered by a fully valid debt record; a
+           `non-pairwise` interaction whose own id isn't in that set is
+           rejected. `validate_data`/`validate_file`/`validate` default
+           this to `None`, which is NOT the same as "covered" -- it
+           degrades to a visible info-severity note ("not checked"), not
+           a silent pass, since the single-directory standalone CLI
+           genuinely cannot see a sibling `_protocol_debt/` directory
+           unless told to.
 
 Deliberately out of scope here (later M3 issues): realization/config_scope
-(#18), protocol_class (#19), and R2's cross-reference check that an
+(#18, already landed) is implemented; R2's cross-reference check that an
 eligible edge is actually covered by a boundary or a reviewed exemption
-(#21, needs scripts/validate_exemption.py too) -- G2++ only checks that
-an assurance requirement is *declared*, not that it resolves to a real
-boundary or obligation, which is R2's and G2's job respectively.
+remains deferred (needs scripts/validate_exemption.py too, same shape as
+G15 above but not yet wired in) -- G2++ only checks that an assurance
+requirement is *declared*, not that it resolves to a real boundary or
+obligation, which is R2's and G2's job respectively.
 """
 from __future__ import annotations
 
@@ -203,7 +220,80 @@ def check_g2_plus_plus(path: Path, data: dict) -> list[Finding]:
     return []
 
 
-def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+def check_g15_protocol_coverage(
+    path: Path, data: dict, valid_debt_interaction_ids: set[str] | None
+) -> list[Finding]:
+    """plan.md gate table §12: G15 -- 'non-pairwise protocol without
+    artifact or valid debt record' blocks promotion. External review,
+    high severity: this was previously deferred entirely (assigned to
+    chainlink #21 in NOT_YET_IMPLEMENTED), but #21 is only the I-schema
+    milestone gate, not an issue that itself implements gates -- #19's
+    own title is 'protocol classification + protocol-debt records, FAIL
+    CLOSED', so the gate belongs here. Reproduced directly before fixing:
+    a valid interaction switched to protocol_class: non-pairwise produced
+    zero findings with no coverage artifact at all.
+
+    `valid_debt_interaction_ids=None` means the caller couldn't determine
+    coverage (e.g. the standalone single-directory CLI, which has no
+    sibling `_protocol_debt/` directory to consult) -- reported as a
+    visible info note, not a silent pass. `validate_crate` (the
+    descriptor-driven crate scan pipeline.py uses) always supplies a real
+    set, so the crate-wide and approve-time checks are genuinely fail
+    closed: an empty set correctly rejects every non-pairwise interaction
+    in a crate with no debt records at all, and a set missing this
+    specific interaction_id correctly rejects just this one."""
+    if data["protocol_class"] != "non-pairwise":
+        return []
+    if valid_debt_interaction_ids is None:
+        return [
+            Finding(
+                "G15", path,
+                "protocol_class is non-pairwise but protocol-debt coverage was not "
+                "checked -- no protocol-debt context was supplied to this validator run",
+                severity="info",
+            )
+        ]
+    if data["interaction_id"] not in valid_debt_interaction_ids:
+        return [
+            Finding(
+                "G15", path,
+                f"protocol_class is non-pairwise but no valid protocol-debt record covers "
+                f"interaction_id {data['interaction_id']!r} (plan.md gate table §12: G15 -- "
+                "non-pairwise protocol without artifact or valid debt record blocks promotion)",
+            )
+        ]
+    return []
+
+
+def load_interactions_by_id(interactions_dir: Path) -> dict[str, dict]:
+    """Best-effort load of every interaction directly under
+    `interactions_dir`, keyed by `interaction_id` -- used to build the
+    protocol-debt cross-reference (G15, and validate_protocol_debt.py's
+    symmetric check) in both directions. Silently skips anything that
+    isn't valid JSON or lacks a string `interaction_id`: full G1a/G1b/
+    G2++ validation of these is `validate_crate`'s own job, not this
+    loader's -- a schema-invalid interaction can't be a valid coverage
+    target either way, so it's simply absent from the lookup rather than
+    raising here."""
+    result: dict[str, dict] = {}
+    if not interactions_dir.is_dir():
+        return result
+    for path in sorted(interactions_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("interaction_id"), str):
+            result[data["interaction_id"]] = data
+    return result
+
+
+def validate_data(
+    path: Path,
+    data: dict,
+    validator: Draft202012Validator,
+    valid_debt_interaction_ids: set[str] | None = None,
+) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
         return g1a
@@ -213,10 +303,13 @@ def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> li
     findings.extend(check_computed_eligibility(path, data))
     findings.extend(check_reliance_obligation_uniqueness(path, data))
     findings.extend(check_g2_plus_plus(path, data))
+    findings.extend(check_g15_protocol_coverage(path, data, valid_debt_interaction_ids))
     return findings
 
 
-def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
+def validate_file(
+    path: Path, validator: Draft202012Validator, valid_debt_interaction_ids: set[str] | None = None
+) -> list[Finding]:
     try:
         text = path.read_text()
     except UnicodeDecodeError as e:
@@ -225,7 +318,7 @@ def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
         data = json.loads(text)
     except json.JSONDecodeError as e:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
-    return validate_data(path, data, validator)
+    return validate_data(path, data, validator, valid_debt_interaction_ids)
 
 
 def find_interaction_files(root: Path) -> list[Path]:
@@ -242,7 +335,7 @@ def find_interaction_files(root: Path) -> list[Path]:
     return [p for p in root.glob("**/_interactions/**/*") if p.is_file()]
 
 
-def validate(root: Path) -> list[Finding]:
+def validate(root: Path, valid_debt_interaction_ids: set[str] | None = None) -> list[Finding]:
     """Recursive, unanchored scan for the standalone CLI: finds every
     `_interactions` directory anywhere under `root`. External review,
     high severity: this used to silently `continue` past any non-.json
@@ -251,15 +344,21 @@ def validate(root: Path) -> list[Finding]:
     OK with zero findings -- every file found is now validated (and
     check_naming's own suffix check, above, catches the well-formed-JSON-
     but-wrong-extension case that would otherwise slip past validate_file's
-    JSON-parse step)."""
+    JSON-parse step).
+
+    `valid_debt_interaction_ids` defaults to None -- this single-root scan
+    has no sibling `_protocol_debt/` directory concept, so G15 degrades to
+    a visible info note rather than either a silent pass or an incorrect
+    hard failure. Only the descriptor-driven `validate_crate` (pipeline.py)
+    makes G15 a real fail-closed check."""
     validator = load_validator()
     findings: list[Finding] = []
     for path in find_interaction_files(root):
-        findings.extend(validate_file(path, validator))
+        findings.extend(validate_file(path, validator, valid_debt_interaction_ids))
     return findings
 
 
-def validate_crate(crate_root: Path, canonical_dir: Path) -> list[Finding]:
+def validate_crate(crate_root: Path, canonical_dir: Path, valid_debt_interaction_ids: set[str]) -> list[Finding]:
     """The descriptor-driven scan pipeline.py's cmd_validate_interaction
     uses: discovers every interaction-shaped candidate anywhere under
     `crate_root` (same crate-wide `find_interaction_files` discovery the
@@ -294,7 +393,7 @@ def validate_crate(crate_root: Path, canonical_dir: Path) -> list[Finding]:
                 )
             )
             continue
-        findings.extend(validate_file(path, validator))
+        findings.extend(validate_file(path, validator, valid_debt_interaction_ids))
     return findings
 
 
@@ -309,12 +408,25 @@ def main(argv: list[str]) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    if not findings:
+    # G15 degrades to an info-severity note here (this single-root scan has
+    # no sibling _protocol_debt/ directory concept) -- it must never count
+    # as a failure, only a visible non-blocking note, same discipline
+    # validate_boundary_contracts.py's main() already uses for its own
+    # info-severity findings.
+    errors = [f for f in findings if f.severity == "error"]
+    infos = [f for f in findings if f.severity == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if not errors:
         print("OK: all interactions pass G1a/G1b (incl. computed eligibility)")
         return 0
 
-    print(f"FAIL: {len(findings)} finding(s)")
-    for f in findings:
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
         print(f"  - {f}")
     return 1
 

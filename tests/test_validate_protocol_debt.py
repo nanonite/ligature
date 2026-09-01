@@ -32,8 +32,21 @@ def load_valid() -> dict:
     }
 
 
-def run(data: dict, path: Path = PROTOCOL_DEBT_PATH):
-    return validate_data(path, data, load_validator())
+def default_interactions_by_id() -> dict:
+    """The interaction load_valid()'s debt record covers, matching by
+    id -- used as run()'s default so G1a/G1b-focused tests aren't
+    incidentally polluted by the cross-reference check; tests of the
+    cross-reference itself override this explicitly."""
+    return {"I-SCHED-TQ-001": {"protocol_class": "non-pairwise"}}
+
+
+_UNSET = object()
+
+
+def run(data: dict, path: Path = PROTOCOL_DEBT_PATH, interactions_by_id=_UNSET):
+    if interactions_by_id is _UNSET:
+        interactions_by_id = default_interactions_by_id()
+    return validate_data(path, data, load_validator(), interactions_by_id)
 
 
 class ValidProtocolDebtTest(unittest.TestCase):
@@ -127,6 +140,40 @@ class NamingTest(unittest.TestCase):
         self.assertTrue(any("must be a .json file" in f.reason for f in findings), [str(f) for f in findings])
 
 
+class InteractionCrossReferenceTest(unittest.TestCase):
+    """External review, high severity: nothing previously checked that
+    interaction_id names a real interaction, or that the interaction it
+    names is actually non-pairwise. Both reproduced as passing with zero
+    findings before this check was added."""
+
+    def test_no_context_supplied_is_an_info_note_not_a_failure(self):
+        findings = run(load_valid(), interactions_by_id=None)
+        self.assertFalse(any(f.gate == "G2" and f.severity == "error" for f in findings))
+        self.assertTrue(any(f.gate == "G2" and f.severity == "info" for f in findings))
+
+    def test_dangling_interaction_id_is_rejected(self):
+        findings = run(load_valid(), interactions_by_id={})
+        self.assertTrue(
+            any("does not resolve to any real interaction" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_debt_record_for_a_pairwise_interaction_is_rejected(self):
+        """A debt record only applies to a non-pairwise interaction --
+        one filed for what's actually pairwise is meaningless."""
+        findings = run(load_valid(), interactions_by_id={"I-SCHED-TQ-001": {"protocol_class": "pairwise"}})
+        self.assertTrue(
+            any("only applies to a non-pairwise interaction" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_matching_non_pairwise_interaction_is_accepted(self):
+        findings = run(
+            load_valid(), interactions_by_id={"I-SCHED-TQ-001": {"protocol_class": "non-pairwise"}}
+        )
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+
 class FindProtocolDebtFilesTest(unittest.TestCase):
     def test_missing_root_raises(self):
         with self.assertRaises(FileNotFoundError):
@@ -167,7 +214,7 @@ class ValidateCrateTest(unittest.TestCase):
 
     def test_missing_crate_root_raises(self):
         with self.assertRaises(FileNotFoundError):
-            validate_crate(Path("/nonexistent"), Path("/nonexistent/specs/_protocol_debt"))
+            validate_crate(Path("/nonexistent"), Path("/nonexistent/specs/_protocol_debt"), {})
 
     def test_finds_and_validates_files_in_the_canonical_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,7 +222,7 @@ class ValidateCrateTest(unittest.TestCase):
             canonical = crate_root / "specs" / "_protocol_debt"
             canonical.mkdir(parents=True)
             (canonical / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
-            findings = validate_crate(crate_root, canonical)
+            findings = validate_crate(crate_root, canonical, default_interactions_by_id())
         self.assertEqual(findings, [], [str(f) for f in findings])
 
     def test_mislocated_but_otherwise_valid_artifact_is_rejected_by_location_alone(self):
@@ -185,7 +232,7 @@ class ValidateCrateTest(unittest.TestCase):
             stray.mkdir(parents=True)
             (stray / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
             canonical = crate_root / "specs" / "_protocol_debt"  # never created
-            findings = validate_crate(crate_root, canonical)
+            findings = validate_crate(crate_root, canonical, default_interactions_by_id())
         self.assertTrue(
             any("not directly under the canonical directory" in f.reason for f in findings),
             [str(f) for f in findings],
@@ -200,7 +247,7 @@ class ValidateCrateTest(unittest.TestCase):
             stray = crate_root / "not_specs" / "_protocol_debt"
             stray.mkdir(parents=True)
             (stray / "wrong-name.json").write_text(json.dumps(load_valid()))
-            findings = validate_crate(crate_root, canonical)
+            findings = validate_crate(crate_root, canonical, default_interactions_by_id())
         self.assertTrue(any("not directly under the canonical directory" in f.reason for f in findings))
         self.assertFalse(any(f.path.name == "I-SCHED-TQ-001.json" for f in findings))
 

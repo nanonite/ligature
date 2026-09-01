@@ -30,19 +30,24 @@ Implemented now, against schemas that actually exist:
             *generation* (reading a promoted artifact set and computing
             this) is separate, not-yet-built work, same boundary as
             validate-work-package's own manifest generator.
-  validate-interaction  Stage 4's G1a/G1b over interaction (I) specs (#16):
-            schema plus COMPUTED eligibility (plan.md §5.2) -- eligibility
-            is derived from edge_class, never hand-set, and disagreement
-            between the derived and stored value is rejected.
+  validate-interaction  Stage 4's G1a/G1b/G2++/G15 over interaction (I)
+            specs (#16/#17/#19): schema plus COMPUTED eligibility (plan.md
+            §5.2) -- eligibility is derived from edge_class, never
+            hand-set, and disagreement between the derived and stored
+            value is rejected -- plus G15 (fail closed): a non-pairwise
+            interaction with no valid protocol-debt record covering it is
+            rejected, cross-referenced live against the crate's
+            _protocol_debt/ directory.
   validate-exemption  Stage 4's G1a/G1b over boundary-required exemption
             objects (#16): schema plus naming (interaction_id == filename
             stem). Does not yet cross-reference that the named interaction
-            is real or actually eligible -- that is R2's job (#21).
+            is real or actually eligible -- that is R2's job, still
+            deferred (see NOT_YET_IMPLEMENTED).
   validate-protocol-debt  Stage 4's G1a/G1b over protocol-debt records
-            (#19): schema plus naming. Does not yet cross-reference that
-            the named interaction is real or actually non-pairwise, or
-            that G15's coverage requirement (protocol artifact OR debt
-            record) is satisfied -- that is G15's job, out of scope here.
+            (#19): schema plus naming plus interaction cross-reference --
+            a debt record naming a nonexistent interaction, or one whose
+            protocol_class is actually pairwise, is rejected, cross-
+            referenced live against the crate's _interactions/ directory.
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
@@ -79,11 +84,13 @@ from validate_boundary_contracts import validate_data as validate_boundary_data 
 from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
 from validate_exemption import validate_crate as validate_exemption_crate  # noqa: E402
 from validate_exemption import validate_data as validate_exemption_data  # noqa: E402
+from validate_interaction import load_interactions_by_id  # noqa: E402
 from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
 from validate_interaction import validate_crate as validate_interaction_crate  # noqa: E402
 from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
 from validate_promotion_receipt import load_validator as load_promotion_validator  # noqa: E402
 from validate_protocol_debt import load_validator as load_protocol_debt_validator  # noqa: E402
+from validate_protocol_debt import valid_interaction_ids_from_crate  # noqa: E402
 from validate_protocol_debt import validate_crate as validate_protocol_debt_crate  # noqa: E402
 from validate_protocol_debt import validate_data as validate_protocol_debt_data  # noqa: E402
 from validate_promotion_receipt import validate_file as validate_promotion_file  # noqa: E402
@@ -98,11 +105,10 @@ NOT_YET_IMPLEMENTED = {
     "edge_class/computed-eligibility base, reliances/required_assurance, realization/config_scope, "
     "protocol_class, exemption objects, and protocol-debt records have landed as `validate-interaction`/"
     "`validate-exemption`/`validate-protocol-debt`)",
-    "R2 coverage": "#21 (M3 -- every eligible I edge covered by an O artifact or a reviewed exemption; "
-    "needs #16's interaction/exemption validators, which exist, cross-referenced against each other, which doesn't yet)",
-    "G15 protocol coverage": "#21 (M3 -- every non-pairwise I edge covered by a protocol artifact or a "
-    "protocol-debt record; needs #19's interaction/protocol-debt validators, which exist, cross-referenced "
-    "against each other, which doesn't yet)",
+    "R2 coverage": "not yet implemented -- every eligible I edge covered by an O artifact or a reviewed "
+    "exemption; needs #16's interaction/exemption validators, which exist, cross-referenced against each "
+    "other, which doesn't yet. (G15's own coverage check, the structurally identical case for non-pairwise "
+    "protocol classification, IS implemented -- see cmd_validate_interaction/cmd_validate_protocol_debt.)",
     "emission": "needs the I-schema (M3) first",
     "attach": "needs the I-schema (M3) first",
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); the generator "
@@ -325,14 +331,32 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
     # false acceptance. validate_interaction_crate() discovers first, then
     # rejects by location, so a mislocated artifact is neither accepted
     # nor invisible.
+    # G15 (non-pairwise protocol coverage) is fail-closed here, not
+    # deferred: for each crate, load its real interactions, use them to
+    # find which protocol-debt records are themselves fully valid (their
+    # own cross-reference to a real, non-pairwise interaction checked),
+    # and pass that coverage set into the interaction scan so a
+    # non-pairwise interaction with no valid debt record is rejected --
+    # external review, high severity: this was previously assigned to
+    # chainlink #21 in NOT_YET_IMPLEMENTED, but #21 is only the I-schema
+    # milestone gate (all of #15-#20 landed), not an issue that itself
+    # implements gates; #19's own title says "fail closed."
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
-        findings_total.extend(validate_interaction_crate(crate_root, _interaction_dir_for(crate, args.workspace)))
+        interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
+        valid_debt_interaction_ids = valid_interaction_ids_from_crate(
+            crate_root, _protocol_debt_dir_for(crate, args.workspace), interactions_by_id
+        )
+        findings_total.extend(
+            validate_interaction_crate(
+                crate_root, _interaction_dir_for(crate, args.workspace), valid_debt_interaction_ids
+            )
+        )
 
     if not findings_total:
-        print("OK: all interactions pass G1a/G1b (incl. computed eligibility)")
+        print("OK: all interactions pass G1a/G1b (incl. computed eligibility) and G15 protocol coverage")
         return 0
 
     print(f"FAIL: {len(findings_total)} finding(s)")
@@ -363,17 +387,21 @@ def cmd_validate_exemption(args: argparse.Namespace) -> int:
 def cmd_validate_protocol_debt(args: argparse.Namespace) -> int:
     # Same discover-then-reject-by-location scan as
     # cmd_validate_interaction/cmd_validate_exemption, for
-    # <crate_dir>/specs/_protocol_debt.
+    # <crate_dir>/specs/_protocol_debt, plus the same interaction
+    # cross-reference cmd_validate_interaction's G15 check relies on.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
+        interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
         findings_total.extend(
-            validate_protocol_debt_crate(crate_root, _protocol_debt_dir_for(crate, args.workspace))
+            validate_protocol_debt_crate(
+                crate_root, _protocol_debt_dir_for(crate, args.workspace), interactions_by_id
+            )
         )
 
     if not findings_total:
-        print("OK: all protocol-debt records pass G1a/G1b")
+        print("OK: all protocol-debt records pass G1a/G1b (incl. interaction cross-reference)")
         return 0
 
     print(f"FAIL: {len(findings_total)} finding(s)")
@@ -491,13 +519,19 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
             return lambda path, data: validate_boundary_data(path, data, validator, specs_search_root)
         if resolved_parent == _interaction_dir_for(crate, workspace):
             validator = load_interaction_validator()
-            return lambda path, data: validate_interaction_data(path, data, validator)
+            crate_root = (workspace / crate["crate_dir"]).resolve()
+            interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
+            valid_debt_interaction_ids = valid_interaction_ids_from_crate(
+                crate_root, _protocol_debt_dir_for(crate, workspace), interactions_by_id
+            )
+            return lambda path, data: validate_interaction_data(path, data, validator, valid_debt_interaction_ids)
         if resolved_parent == _exemption_dir_for(crate, workspace):
             validator = load_exemption_validator()
             return lambda path, data: validate_exemption_data(path, data, validator)
         if resolved_parent == _protocol_debt_dir_for(crate, workspace):
             validator = load_protocol_debt_validator()
-            return lambda path, data: validate_protocol_debt_data(path, data, validator)
+            interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
+            return lambda path, data: validate_protocol_debt_data(path, data, validator, interactions_by_id)
     raise PipelineError(
         f"no validator recognizes target {target} -- this pipeline only "
         "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json, "

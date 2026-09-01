@@ -10,16 +10,30 @@ boundary exemption (docs/exemption-schema.json) is never sufficient for
 a temporal/protocol obligation (plan.md §5.3), so this is a distinct
 artifact type, not a reuse of exemptions.
 
-Deliberately out of scope here: cross-referencing that interaction_id
-names a real, non-pairwise I edge, and that G15's coverage requirement
-(protocol artifact OR protocol-debt record) is actually satisfied --
-that needs scripts/validate_interaction.py and this module together and
-belongs to the G15 gate, not this one. Also deliberately out of scope:
-independently re-verifying the record's three attestation fields
-(no_promoted_obligation_depends_on_protocol,
+Cross-referencing that interaction_id names a real, non-pairwise I edge
+is checked here too (a G2-labeled finding, mirroring boundary contracts'
+own G2 dangling-reference gate): a debt record naming a nonexistent
+interaction, or one whose protocol_class is actually pairwise, is
+rejected. `validate_data`/`validate_file`/`validate` take an optional
+`interactions_by_id` lookup (default None, degrading to a visible info
+note rather than a silent pass); `validate_crate` (the descriptor-driven
+scan) always requires a real one. G15 itself -- whether a *given*
+non-pairwise interaction actually has this coverage -- is checked from
+the other direction, in scripts/validate_interaction.py, since that's
+where the gate table attributes the finding.
+
+Deliberately still out of scope: independently re-verifying the record's
+three attestation fields (no_promoted_obligation_depends_on_protocol,
 no_work_package_touches_its_path, no_release_claim_includes_it) against
-real promoted state -- this schema only enforces they were explicitly
-attested true (const: true), the same boundary #16 drew for R2/exemptions.
+real promoted state. plan.md's own governance model treats a reviewed,
+explicit attestation as authoritative throughout -- the same way boundary
+contract review, exemption review, and promotion review are never
+independently re-derived by their validators either (plan.md §7.2: human
+sign-off is the terminal authority mechanism, not a mechanical proxy for
+one). This schema enforces the attestations were explicitly made true
+(const: true) and reviewed; it does not attempt partial mechanical
+re-verification of some but not all three, which would imply more rigor
+than actually exists.
 """
 from __future__ import annotations
 
@@ -88,14 +102,71 @@ def check_naming(path: Path, data: dict) -> list[Finding]:
     return findings
 
 
-def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+def check_interaction_cross_reference(
+    path: Path, data: dict, interactions_by_id: dict[str, dict] | None
+) -> list[Finding]:
+    """External review, high severity: previously nothing checked that
+    `interaction_id` names a real interaction, or that the interaction it
+    names is actually non-pairwise. A debt record naming a nonexistent
+    interaction, and one filed for what is actually a pairwise
+    interaction, both reproduced as passing with zero findings before
+    this was added.
+
+    `interactions_by_id=None` means the caller couldn't determine which
+    interactions exist (mirrors G15's own None-means-unchecked handling
+    in scripts/validate_interaction.py) -- a visible info note, not a
+    silent pass. `validate_crate` always supplies a real lookup."""
+    if interactions_by_id is None:
+        return [
+            Finding(
+                "G2", path,
+                "interaction cross-reference was not checked -- no interaction context "
+                "was supplied to this validator run",
+                severity="info",
+            )
+        ]
+
+    interaction_id = data["interaction_id"]
+    interaction = interactions_by_id.get(interaction_id)
+    if interaction is None:
+        return [
+            Finding(
+                "G2", path,
+                f"interaction_id {interaction_id!r} does not resolve to any real "
+                "interaction -- dangling reference",
+            )
+        ]
+
+    protocol_class = interaction.get("protocol_class")
+    if protocol_class != "non-pairwise":
+        return [
+            Finding(
+                "G2", path,
+                f"interaction_id {interaction_id!r} has protocol_class {protocol_class!r} -- "
+                "a protocol-debt record only applies to a non-pairwise interaction",
+            )
+        ]
+    return []
+
+
+def validate_data(
+    path: Path,
+    data: dict,
+    validator: Draft202012Validator,
+    interactions_by_id: dict[str, dict] | None = None,
+) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
         return g1a
-    return check_naming(path, data)
+    findings: list[Finding] = []
+    findings.extend(check_naming(path, data))
+    findings.extend(check_interaction_cross_reference(path, data, interactions_by_id))
+    return findings
 
 
-def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
+def validate_file(
+    path: Path, validator: Draft202012Validator, interactions_by_id: dict[str, dict] | None = None
+) -> list[Finding]:
     try:
         text = path.read_text()
     except UnicodeDecodeError as e:
@@ -104,7 +175,7 @@ def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
         data = json.loads(text)
     except json.JSONDecodeError as e:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
-    return validate_data(path, data, validator)
+    return validate_data(path, data, validator, interactions_by_id)
 
 
 def find_protocol_debt_files(root: Path) -> list[Path]:
@@ -117,20 +188,25 @@ def find_protocol_debt_files(root: Path) -> list[Path]:
     return [p for p in root.glob("**/_protocol_debt/**/*") if p.is_file()]
 
 
-def validate(root: Path) -> list[Finding]:
+def validate(root: Path, interactions_by_id: dict[str, dict] | None = None) -> list[Finding]:
     """Recursive, unanchored scan for the standalone CLI. Every file
     found is validated -- a malformed or wrong-extension artifact under a
     real `_protocol_debt` directory is reported, not silently skipped
     (check_naming's own suffix check catches the well-formed-JSON-but-
-    wrong-extension case)."""
+    wrong-extension case).
+
+    `interactions_by_id` defaults to None -- this single-root scan has no
+    sibling `_interactions/` directory concept, so the cross-reference
+    check degrades to a visible info note. Only the descriptor-driven
+    `validate_crate` (pipeline.py) makes it a real fail-closed check."""
     validator = load_validator()
     findings: list[Finding] = []
     for path in find_protocol_debt_files(root):
-        findings.extend(validate_file(path, validator))
+        findings.extend(validate_file(path, validator, interactions_by_id))
     return findings
 
 
-def validate_crate(crate_root: Path, canonical_dir: Path) -> list[Finding]:
+def validate_crate(crate_root: Path, canonical_dir: Path, interactions_by_id: dict[str, dict]) -> list[Finding]:
     """The descriptor-driven scan pipeline.py's cmd_validate_protocol_debt
     uses: discovers every protocol-debt-shaped candidate anywhere under
     `crate_root` (same crate-wide find_protocol_debt_files discovery the
@@ -158,8 +234,33 @@ def validate_crate(crate_root: Path, canonical_dir: Path) -> list[Finding]:
                 )
             )
             continue
-        findings.extend(validate_file(path, validator))
+        findings.extend(validate_file(path, validator, interactions_by_id))
     return findings
+
+
+def valid_interaction_ids_from_crate(
+    crate_root: Path, canonical_dir: Path, interactions_by_id: dict[str, dict]
+) -> set[str]:
+    """The set of interaction_ids covered by a fully valid (zero-finding)
+    protocol-debt record in this crate -- what
+    scripts/validate_interaction.py's G15 check treats as 'covered'. Runs
+    the same discover-then-validate logic as validate_crate() but returns
+    coverage, not findings; used by pipeline.py to wire the two validator
+    modules together without making either import the other (mirrors why
+    project_descriptor.py exists: pipeline.py already imports both
+    validate_interaction.py and this module, so it's the natural place to
+    combine them, rather than creating a circular import between the two)."""
+    canonical_resolved = canonical_dir.resolve()
+    validator = load_validator()
+    covered: set[str] = set()
+    for path in sorted(find_protocol_debt_files(crate_root)):
+        if path.resolve().parent != canonical_resolved:
+            continue
+        findings = validate_file(path, validator, interactions_by_id)
+        if not findings:
+            data = json.loads(path.read_text())
+            covered.add(data["interaction_id"])
+    return covered
 
 
 def main(argv: list[str]) -> int:
@@ -173,12 +274,23 @@ def main(argv: list[str]) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    if not findings:
+    # The interaction cross-reference degrades to an info-severity note
+    # here (no sibling _interactions/ directory concept in this single-root
+    # scan) -- never a failure, only a visible non-blocking note.
+    errors = [f for f in findings if f.severity == "error"]
+    infos = [f for f in findings if f.severity == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if not errors:
         print("OK: all protocol-debt records pass G1a/G1b")
         return 0
 
-    print(f"FAIL: {len(findings)} finding(s)")
-    for f in findings:
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
         print(f"  - {f}")
     return 1
 

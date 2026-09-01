@@ -20,24 +20,6 @@ from validate_interaction import (  # noqa: E402
 INTERACTION_PATH = Path("crates/scheduler/specs/_interactions/I-SCHED-TQ-001.json")
 
 
-def load_valid() -> dict:
-    return {
-        "schema_version": "1.0",
-        "interaction_id": "I-SCHED-TQ-001",
-        "caller": {"concept": "Scheduler", "method": "dispatch"},
-        "callee": {"concept": "TaskQueue", "method": "pop_ready"},
-        "edge_class": ["stateful", "cross-verifier"],
-        "eligibility": "boundary-required",
-        "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
-        "evidence_links": ["E-0143"],
-        "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
-    }
-
-
-def run(data: dict, path: Path = INTERACTION_PATH):
-    return validate_data(path, data, load_validator())
-
-
 def load_valid_reliance() -> dict:
     return {
         "obligation_id": "TaskQueue.C003",
@@ -48,6 +30,30 @@ def load_valid_reliance() -> dict:
             "trust_policy": {"assumptions_allowed": []},
         },
     }
+
+
+def load_valid() -> dict:
+    """A complete, boundary-required interaction -- includes a reliance
+    since G2++ (plan.md gate table §12) requires at least one for any
+    boundary-required edge. Tests that specifically need eligibility
+    inform/ignore or an omitted/empty reliances set override those
+    fields explicitly."""
+    return {
+        "schema_version": "1.0",
+        "interaction_id": "I-SCHED-TQ-001",
+        "caller": {"concept": "Scheduler", "method": "dispatch"},
+        "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+        "edge_class": ["stateful", "cross-verifier"],
+        "eligibility": "boundary-required",
+        "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
+        "evidence_links": ["E-0143"],
+        "reliances": [load_valid_reliance()],
+        "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+    }
+
+
+def run(data: dict, path: Path = INTERACTION_PATH):
+    return validate_data(path, data, load_validator())
 
 
 class ComputeEligibilityTest(unittest.TestCase):
@@ -175,10 +181,15 @@ class RelianceRequiredAssuranceTest(unittest.TestCase):
     """#17: reliances[].required_assurance, applying plan.md §8.1's
     claim / evidence-method / scope / trust type split."""
 
-    def test_reliances_is_optional(self):
+    def test_reliances_is_optional_for_an_inform_eligible_edge(self):
         """An inform/ignore-eligible edge has nothing to declare a
-        reliance on -- omitting the field entirely must still validate."""
+        reliance on -- omitting the field entirely must still validate.
+        G2++ only applies to boundary-required edges (see
+        RelianceRequiredG2PlusPlusTest below for that case)."""
         data = load_valid()
+        del data["reliances"]
+        data["edge_class"] = ["pure-data-type-reference"]
+        data["eligibility"] = "inform"
         self.assertNotIn("reliances", data)
         findings = run(data)
         self.assertEqual(findings, [], [str(f) for f in findings])
@@ -280,6 +291,59 @@ class RelianceRequiredAssuranceTest(unittest.TestCase):
         data["reliances"] = [load_valid_reliance(), second]
         findings = run(data)
         self.assertEqual(findings, [], [str(f) for f in findings])
+
+
+class G2PlusPlusTest(unittest.TestCase):
+    """plan.md gate table §12: G2++ -- 'declared assurance requirement
+    present in I' (after §5.1 lands, not Prototype A). Chainlink #11
+    explicitly deferred this check until #17's reliances[].required_assurance
+    landed. External review found #17's initial delivery left it
+    unimplemented -- reliances remained schema-optional with no
+    conditional requirement, so a boundary-required interaction with
+    reliances omitted, or reliances: [], passed with zero findings.
+    Reproduced directly before fixing."""
+
+    def test_boundary_required_with_reliances_omitted_is_rejected(self):
+        data = load_valid()
+        del data["reliances"]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G2++" for f in findings), [str(f) for f in findings])
+
+    def test_boundary_required_with_empty_reliances_is_rejected(self):
+        data = load_valid()
+        data["reliances"] = []
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G2++" for f in findings), [str(f) for f in findings])
+
+    def test_boundary_required_with_a_real_reliance_passes(self):
+        data = load_valid()
+        self.assertIn("reliances", data)
+        findings = run(data)
+        self.assertFalse(any(f.gate == "G2++" for f in findings), [str(f) for f in findings])
+
+    def test_inform_eligible_edge_with_reliances_omitted_is_exempt(self):
+        data = load_valid()
+        del data["reliances"]
+        data["edge_class"] = ["pure-data-type-reference"]
+        data["eligibility"] = "inform"
+        findings = run(data)
+        self.assertFalse(any(f.gate == "G2++" for f in findings), [str(f) for f in findings])
+
+    def test_ignore_eligible_edge_with_reliances_omitted_is_exempt(self):
+        data = load_valid()
+        del data["reliances"]
+        data["edge_class"] = ["marker-type"]
+        data["eligibility"] = "ignore"
+        findings = run(data)
+        self.assertFalse(any(f.gate == "G2++" for f in findings), [str(f) for f in findings])
+
+    def test_inform_eligible_edge_with_empty_reliances_is_exempt(self):
+        data = load_valid()
+        data["reliances"] = []
+        data["edge_class"] = ["pure-data-type-reference"]
+        data["eligibility"] = "inform"
+        findings = run(data)
+        self.assertFalse(any(f.gate == "G2++" for f in findings), [str(f) for f in findings])
 
 
 class FindInteractionFilesTest(unittest.TestCase):

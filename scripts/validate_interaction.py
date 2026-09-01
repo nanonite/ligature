@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
-"""Interaction (I) validation: G1a (schema), G1b (naming + COMPUTED eligibility).
+"""Interaction (I) validation: G1a (schema), G1b (naming + COMPUTED
+eligibility + reliance-obligation uniqueness), G2++ (declared assurance
+requirement present).
 
-plan.md §5.1/§5.2, chainlink #16. Two phases, run in order -- G1b on a
-schema-invalid document isn't meaningful.
+plan.md §5.1/§5.2/§8.1, gate table §12, chainlink #16/#17. Phases run in
+order -- G1b/G2++ on a schema-invalid document isn't meaningful.
 
-  G1a  -- draft-2020-12 JSON Schema validation against
-          docs/interaction-schema.json.
-  G1b  -- repo-semantic checks: filename/layout (flat inside a
-          _interactions/ directory, interaction_id == filename stem, same
-          discipline as boundary_id) plus the COMPUTED-eligibility check:
-          eligibility is derived from edge_class per plan.md §5.2's table,
-          never hand-set, and disagreement between the derived value and
-          the stored one is rejected. A proposing model cannot mark a
-          stateful cross-verifier edge ignore.
+  G1a   -- draft-2020-12 JSON Schema validation against
+           docs/interaction-schema.json, including §8.1's claim /
+           evidence-method / scope / trust type split on
+           reliances[].required_assurance (enforced structurally via
+           disjoint enums, not custom code).
+  G1b   -- repo-semantic checks: filename/layout (flat inside a
+           _interactions/ directory, interaction_id == filename stem,
+           same discipline as boundary_id), the COMPUTED-eligibility
+           check (eligibility is derived from edge_class per plan.md
+           §5.2's table, never hand-set, disagreement rejected in both
+           directions), and reliance-obligation uniqueness (no two
+           reliances in one interaction may name the same obligation_id).
+  G2++  -- declared assurance requirement present in I (plan.md's gate
+           table, §12): a `boundary-required` interaction must declare
+           at least one reliance -- deferred by chainlink #11 until #17's
+           reliances[].required_assurance landed, and enforced here now
+           that it has. `inform`/`ignore` edges have nothing to declare
+           and are exempt (reliances is schema-optional precisely for
+           that case).
 
-Deliberately out of scope here (later M3 issues): reliances[].required_assurance
-(#17), realization/config_scope (#18), protocol_class (#19), and R2's
-cross-reference check that an eligible edge is actually covered by a
-boundary or a reviewed exemption (#21, needs scripts/validate_exemption.py
-too).
+Deliberately out of scope here (later M3 issues): realization/config_scope
+(#18), protocol_class (#19), and R2's cross-reference check that an
+eligible edge is actually covered by a boundary or a reviewed exemption
+(#21, needs scripts/validate_exemption.py too) -- G2++ only checks that
+an assurance requirement is *declared*, not that it resolves to a real
+boundary or obligation, which is R2's and G2's job respectively.
 """
 from __future__ import annotations
 
@@ -160,6 +173,36 @@ def check_reliance_obligation_uniqueness(path: Path, data: dict) -> list[Finding
     return findings
 
 
+def check_g2_plus_plus(path: Path, data: dict) -> list[Finding]:
+    """plan.md's gate table (§12): G2++ -- 'declared assurance requirement
+    present in I' (after §5.1 lands, not Prototype A). Chainlink #11
+    shipped G2+ scoped to role safety only and explicitly deferred this
+    check until #17's reliances[].required_assurance landed; enforced
+    here now that it has.
+
+    Only `boundary-required` edges are obligated: `inform`/`ignore` edges
+    have nothing to declare a reliance on, which is exactly why
+    `reliances` is schema-optional (plan.md §5.1) rather than always
+    required. This is not R2's job (#21) -- R2 checks whether an
+    eligible interaction is *covered* by a boundary artifact or reviewed
+    exemption; G2++ checks, independently, that the interaction itself
+    *declares* an assurance requirement at all. An empty `reliances: []`
+    is treated the same as an entirely omitted field -- both declare
+    nothing."""
+    if data["eligibility"] != "boundary-required":
+        return []
+    if not data.get("reliances"):
+        return [
+            Finding(
+                "G2++", path,
+                "eligibility is boundary-required but reliances declares no "
+                "required_assurance (plan.md gate table §12: G2++, declared "
+                "assurance requirement present in I)",
+            )
+        ]
+    return []
+
+
 def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
@@ -169,6 +212,7 @@ def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> li
     findings.extend(check_naming(path, data))
     findings.extend(check_computed_eligibility(path, data))
     findings.extend(check_reliance_obligation_uniqueness(path, data))
+    findings.extend(check_g2_plus_plus(path, data))
     return findings
 
 

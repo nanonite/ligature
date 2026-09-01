@@ -468,7 +468,38 @@ class CmdApproveIntegrationTest(unittest.TestCase):
     def test_approve_valid_interaction_succeeds(self):
         """#16: _select_validate_fn's dispatcher extended to recognize
         interaction targets too, not just boundary contracts -- exercised
-        end to end through approve, not just validate_interaction.py directly."""
+        end to end through approve, not just validate_interaction.py
+        directly. Includes a reliance since G2++ (#17) requires at least
+        one for a boundary-required edge."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["postcondition-holds"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+
+    def test_approve_boundary_required_interaction_without_reliances_is_refused(self):
+        """G2++ (#17), exercised end to end through approve: a
+        boundary-required interaction declaring no reliances must be
+        refused, not silently promoted."""
         target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
         target.with_suffix(".json.draft").write_text(json.dumps({
             "schema_version": "1.0",
@@ -480,8 +511,8 @@ class CmdApproveIntegrationTest(unittest.TestCase):
             "rationale": "dispatch relies on pop_ready's return discipline",
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
-        self.assertEqual(rc, 0)
-        self.assertTrue(target.exists())
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
 
     def test_approve_interaction_with_wrong_computed_eligibility_is_refused(self):
         target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"

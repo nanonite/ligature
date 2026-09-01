@@ -283,6 +283,25 @@ class RealizationTest(unittest.TestCase):
             findings = run(data)
             self.assertEqual(findings, [], f"{target}: {[str(f) for f in findings]}")
 
+    def test_malformed_dot_placement_in_target_is_rejected(self):
+        """External review, second pass: the fix for the dotted-target
+        gap above (allowing '.' anywhere in [a-z0-9_.]) was itself too
+        loose -- it accepted a leading dot, a trailing dot, consecutive
+        dots, and a dot directly adjacent to a hyphen. A dot must sit
+        strictly between two non-empty alphanumeric/underscore
+        components. Reproduced directly before fixing."""
+        for target in [
+            ".-none-eabi",
+            "thumbv8m.-none-eabi",
+            "thumbv8m..main-none-eabi",
+            "thumbv8m.main.-none-eabi",
+            "foo-.-bar",
+        ]:
+            data = load_valid()
+            data["realization"]["config_scope"]["target"] = target
+            findings = run(data)
+            self.assertTrue(any(f.gate == "G1a" for f in findings), f"{target}: expected rejection")
+
 
 class RelianceRequiredAssuranceTest(unittest.TestCase):
     """#17: reliances[].required_assurance, applying plan.md §8.1's

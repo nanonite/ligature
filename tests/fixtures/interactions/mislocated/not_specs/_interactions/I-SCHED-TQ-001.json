@@ -4,7 +4,7 @@
   "caller": { "concept": "Scheduler", "method": "dispatch" },
   "callee": { "concept": "TaskQueue", "method": "pop_ready" },
   "edge_class": ["stateful", "cross-verifier"],
-  "eligibility": "ignore",
+  "eligibility": "boundary-required",
   "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
   "evidence_links": ["E-0143"],
   "review": {

@@ -205,15 +205,18 @@ class CmdValidateInteractionIntegrationTest(unittest.TestCase):
     def test_computed_eligibility_mismatch_fails(self):
         self.assertEqual(self._run(INTERACTION_FIXTURES / "invalid_mismatch"), 1)
 
-    def test_artifact_under_mislocated_directory_is_not_scanned(self):
-        """External review, medium severity: the scan used to search for
-        any directory named _interactions anywhere in the crate, not just
-        <crate_dir>/specs/_interactions. The fixture here has NO
-        specs/_interactions at all -- only a computed-eligibility-broken
-        artifact under not_specs/_interactions/. Before the fix this was
-        found and failed; anchored to the exact canonical directory, it's
-        never examined, and a crate with no interactions yet is OK."""
-        self.assertEqual(self._run(INTERACTION_FIXTURES / "mislocated"), 0)
+    def test_artifact_under_mislocated_directory_is_rejected(self):
+        """External review, medium severity, SECOND pass: an earlier fix
+        anchored the scan to ONLY the canonical directory, which stopped
+        a mislocated artifact from being wrongly validated but also
+        stopped it from being examined at all -- a crate with no
+        specs/_interactions and a fully schema-valid artifact under
+        not_specs/_interactions/ still reported OK, reproducing the same
+        zero-findings outcome by omission instead of false acceptance.
+        The fixture artifact here is otherwise completely valid (correct
+        schema, correct computed eligibility, correct filename) -- only
+        its location is wrong, proving location alone causes rejection."""
+        self.assertEqual(self._run(INTERACTION_FIXTURES / "mislocated"), 1)
 
 
 class CmdValidateExemptionIntegrationTest(unittest.TestCase):
@@ -230,11 +233,12 @@ class CmdValidateExemptionIntegrationTest(unittest.TestCase):
     def test_naming_mismatch_fails(self):
         self.assertEqual(self._run(EXEMPTION_FIXTURES / "invalid_naming"), 1)
 
-    def test_artifact_under_mislocated_directory_is_not_scanned(self):
+    def test_artifact_under_mislocated_directory_is_rejected(self):
         """Mirrors CmdValidateInteractionIntegrationTest's equivalent --
-        the fixture has no specs/_exemptions at all, only a
-        naming-mismatched artifact under not_specs/_exemptions/."""
-        self.assertEqual(self._run(EXEMPTION_FIXTURES / "mislocated"), 0)
+        the fixture artifact under not_specs/_exemptions/ is otherwise
+        fully valid (correct schema, correct filename); only its
+        location is wrong."""
+        self.assertEqual(self._run(EXEMPTION_FIXTURES / "mislocated"), 1)
 
 
 WP_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "work_packages" / "valid"

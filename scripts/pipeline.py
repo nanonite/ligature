@@ -71,11 +71,11 @@ from validate_boundary_contracts import load_validator as load_boundary_validato
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
 from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
+from validate_exemption import validate_crate as validate_exemption_crate  # noqa: E402
 from validate_exemption import validate_data as validate_exemption_data  # noqa: E402
-from validate_exemption import validate_dir as validate_exemption_dir  # noqa: E402
 from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
+from validate_interaction import validate_crate as validate_interaction_crate  # noqa: E402
 from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
-from validate_interaction import validate_dir as validate_interaction_dir  # noqa: E402
 from validate_promotion_receipt import load_validator as load_promotion_validator  # noqa: E402
 from validate_promotion_receipt import validate_file as validate_promotion_file  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
@@ -301,18 +301,22 @@ def _require_crate_root_exists(crate: dict, workspace: Path) -> Path:
 
 
 def cmd_validate_interaction(args: argparse.Namespace) -> int:
-    # Anchored to each crate's exact <crate_dir>/specs/_interactions
-    # directory (project_descriptor.interaction_dir_for), not a recursive
-    # search for a directory named _interactions anywhere in the crate --
-    # external review, medium severity: the unanchored scan let a
-    # schema-valid artifact under <crate>/not_specs/_interactions/ pass
-    # with zero findings, the same class of gap the approve dispatcher
-    # (_select_validate_fn) was already anchored against.
+    # Discovers candidates crate-wide (any directory literally named
+    # _interactions, at any depth) and rejects any that don't sit
+    # directly under the crate's exact <crate_dir>/specs/_interactions
+    # directory (project_descriptor.interaction_dir_for) -- external
+    # review, medium severity, SECOND pass: an earlier anchored-only-the-
+    # canonical-directory fix stopped a mislocated artifact from being
+    # wrongly validated, but also stopped it from ever being looked at,
+    # reproducing the same "zero findings" outcome by omission instead of
+    # false acceptance. validate_interaction_crate() discovers first, then
+    # rejects by location, so a mislocated artifact is neither accepted
+    # nor invisible.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     for crate in descriptor["crates"]:
-        _require_crate_root_exists(crate, args.workspace)
-        findings_total.extend(validate_interaction_dir(_interaction_dir_for(crate, args.workspace)))
+        crate_root = _require_crate_root_exists(crate, args.workspace)
+        findings_total.extend(validate_interaction_crate(crate_root, _interaction_dir_for(crate, args.workspace)))
 
     if not findings_total:
         print("OK: all interactions pass G1a/G1b (incl. computed eligibility)")
@@ -325,13 +329,13 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_exemption(args: argparse.Namespace) -> int:
-    # Same anchoring as cmd_validate_interaction, for
-    # <crate_dir>/specs/_exemptions.
+    # Same discover-then-reject-by-location scan as
+    # cmd_validate_interaction, for <crate_dir>/specs/_exemptions.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     for crate in descriptor["crates"]:
-        _require_crate_root_exists(crate, args.workspace)
-        findings_total.extend(validate_exemption_dir(_exemption_dir_for(crate, args.workspace)))
+        crate_root = _require_crate_root_exists(crate, args.workspace)
+        findings_total.extend(validate_exemption_crate(crate_root, _exemption_dir_for(crate, args.workspace)))
 
     if not findings_total:
         print("OK: all exemptions pass G1a/G1b")

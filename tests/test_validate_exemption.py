@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from validate_exemption import find_exemption_files, load_validator, main, validate, validate_data, validate_dir  # noqa: E402
+from validate_exemption import find_exemption_files, load_validator, main, validate, validate_crate, validate_data  # noqa: E402
 
 EXEMPTION_PATH = Path("crates/scheduler/specs/_exemptions/I-SCHED-TQ-001.json")
 
@@ -117,33 +117,57 @@ class ValidateReportsNonJsonFilesTest(unittest.TestCase):
         self.assertTrue(any("must be a .json file" in f.reason for f in findings), [str(f) for f in findings])
 
 
-class ValidateDirTest(unittest.TestCase):
-    """validate_dir(): the anchored scan pipeline.py's cmd_validate_exemption
-    uses -- given a crate's exact canonical directory, not a crate-wide
-    recursive search for anything named _exemptions."""
+class ValidateCrateTest(unittest.TestCase):
+    """validate_crate(): the descriptor-driven scan pipeline.py's
+    cmd_validate_exemption uses -- discovers candidates crate-wide, then
+    rejects any that don't sit directly under the crate's exact canonical
+    directory."""
 
-    def test_missing_directory_returns_no_findings(self):
-        self.assertEqual(validate_dir(Path("/nonexistent/specs/_exemptions")), [])
+    def test_missing_crate_root_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            validate_crate(Path("/nonexistent"), Path("/nonexistent/specs/_exemptions"))
 
-    def test_finds_and_validates_files_directly_in_the_given_directory(self):
+    def test_finds_and_validates_files_in_the_canonical_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp) / "_exemptions"
-            d.mkdir()
-            (d / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
-            findings = validate_dir(d)
+            crate_root = Path(tmp)
+            canonical = crate_root / "specs" / "_exemptions"
+            canonical.mkdir(parents=True)
+            (canonical / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
+            findings = validate_crate(crate_root, canonical)
         self.assertEqual(findings, [], [str(f) for f in findings])
 
-    def test_does_not_search_outside_the_given_directory(self):
-        """External review, medium severity, the exact anchoring
-        guarantee: a sibling _exemptions directory elsewhere in the
-        crate is never consulted, unlike validate()'s crate-wide search."""
+    def test_mislocated_but_otherwise_valid_artifact_is_rejected_by_location_alone(self):
+        """External review, medium severity, SECOND pass: a first fix
+        (validate_dir(), now removed) only scanned the canonical
+        directory, so a mislocated artifact was never looked at and the
+        scan reported OK -- reproducing the same zero-findings outcome by
+        omission instead of false acceptance. This artifact is fully
+        schema-valid with a correct filename -- only its directory is
+        wrong, proving location alone causes rejection."""
         with tempfile.TemporaryDirectory() as tmp:
-            stray = Path(tmp) / "not_specs" / "_exemptions"
+            crate_root = Path(tmp)
+            stray = crate_root / "not_specs" / "_exemptions"
             stray.mkdir(parents=True)
-            (stray / "wrong-name.json").write_text(json.dumps(load_valid()))  # would fail G1b if examined
-            canonical = Path(tmp) / "specs" / "_exemptions"
-            findings = validate_dir(canonical)
-        self.assertEqual(findings, [])
+            (stray / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
+            canonical = crate_root / "specs" / "_exemptions"  # never created
+            findings = validate_crate(crate_root, canonical)
+        self.assertTrue(
+            any("not directly under the canonical directory" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_correctly_located_artifact_is_not_flagged_by_a_stray_sibling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root = Path(tmp)
+            canonical = crate_root / "specs" / "_exemptions"
+            canonical.mkdir(parents=True)
+            (canonical / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
+            stray = crate_root / "not_specs" / "_exemptions"
+            stray.mkdir(parents=True)
+            (stray / "wrong-name.json").write_text(json.dumps(load_valid()))
+            findings = validate_crate(crate_root, canonical)
+        self.assertTrue(any("not directly under the canonical directory" in f.reason for f in findings))
+        self.assertFalse(any(f.path.name == "I-SCHED-TQ-001.json" for f in findings))
 
 
 class StandaloneCliMainTest(unittest.TestCase):

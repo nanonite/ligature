@@ -121,24 +121,36 @@ def validate(root: Path) -> list[Finding]:
     return findings
 
 
-def validate_dir(exemptions_dir: Path) -> list[Finding]:
-    """Validate every file under a crate's *exact*, already-known
-    canonical `_exemptions` directory -- no search for a directory
-    literally named `_exemptions` anywhere in the crate. Used by
-    pipeline.py's descriptor-driven scan (project_descriptor.exemption_dir_for()).
-    External review, medium severity: the crate-wide recursive scan above
-    only ever checked a found file's IMMEDIATE parent name, never where
-    that `_exemptions` directory itself sat relative to the crate root --
-    a schema-valid artifact under `<crate>/not_specs/_exemptions/` matched
-    and passed with zero findings. Mirrors validate_interaction.py's
-    validate_dir(): a crate legitimately having no exemptions yet is not
-    an error and returns []; only a missing crate root, checked by the
-    caller, is a config mistake worth failing loud on."""
-    if not exemptions_dir.is_dir():
-        return []
+def validate_crate(crate_root: Path, canonical_dir: Path) -> list[Finding]:
+    """The descriptor-driven scan pipeline.py's cmd_validate_exemption
+    uses: discovers every exemption-shaped candidate anywhere under
+    `crate_root` (same crate-wide find_exemption_files discovery the
+    standalone CLI uses), then only fully validates the ones that sit
+    directly in the crate's *exact* canonical directory
+    (project_descriptor.exemption_dir_for()). Anything else is reported
+    as mislocated by an explicit G1b finding.
+
+    Mirrors validate_interaction.py's validate_crate() exactly, including
+    its second-review-pass history: an earlier fix (validate_dir(), now
+    removed) anchored the scan to only the canonical directory, which
+    stopped a mislocated artifact from being wrongly accepted but also
+    stopped it from ever being examined at all -- a schema-valid artifact
+    under `<crate>/not_specs/_exemptions/` still produced an overall OK.
+    This discovers crate-wide precisely so a mislocated one is actually
+    found, then rejects it by location alone."""
+    canonical_resolved = canonical_dir.resolve()
     validator = load_validator()
     findings: list[Finding] = []
-    for path in sorted(p for p in exemptions_dir.glob("**/*") if p.is_file()):
+    for path in sorted(find_exemption_files(crate_root)):
+        if path.resolve().parent != canonical_resolved:
+            findings.append(
+                Finding(
+                    "G1b", path,
+                    f"exemption artifact is not directly under the canonical directory "
+                    f"{canonical_resolved} -- found under {path.resolve().parent}",
+                )
+            )
+            continue
         findings.extend(validate_file(path, validator))
     return findings
 

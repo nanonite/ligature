@@ -188,28 +188,41 @@ def validate(root: Path) -> list[Finding]:
     return findings
 
 
-def validate_dir(interactions_dir: Path) -> list[Finding]:
-    """Validate every file under a crate's *exact*, already-known
-    canonical `_interactions` directory -- no search for a directory
-    literally named `_interactions` anywhere in the crate. Used by
-    pipeline.py's descriptor-driven scan, which knows each crate's real
-    layout via project_descriptor.interaction_dir_for() and passes that
-    directly. External review, medium severity: the crate-wide recursive
-    `validate()`/`find_interaction_files()` above only ever checked a
-    found file's IMMEDIATE parent name, never where that `_interactions`
-    directory itself sat relative to the crate root -- a schema-valid
-    artifact under `<crate>/not_specs/_interactions/` matched and passed
-    with zero findings. This is the scan-side equivalent of the anchoring
-    already applied to pipeline.py's approve dispatcher (_select_validate_fn).
+def validate_crate(crate_root: Path, canonical_dir: Path) -> list[Finding]:
+    """The descriptor-driven scan pipeline.py's cmd_validate_interaction
+    uses: discovers every interaction-shaped candidate anywhere under
+    `crate_root` (same crate-wide `find_interaction_files` discovery the
+    standalone CLI uses -- any directory literally named `_interactions`,
+    at any depth), then only fully validates the ones that sit directly
+    in the crate's *exact* canonical directory (project_descriptor's
+    interaction_dir_for()). Anything else is reported as mislocated, by
+    an explicit G1b finding -- not silently accepted as if it were real,
+    and not silently invisible either.
 
-    A crate legitimately having no interactions declared yet is not an
-    error and returns [] -- only a missing *crate* root (checked by the
-    caller before this is invoked) is a config mistake worth failing loud on."""
-    if not interactions_dir.is_dir():
-        return []
+    External review, medium severity, SECOND pass: a first fix
+    (validate_dir(), now removed) anchored the scan to ONLY the canonical
+    directory and stopped scanning anywhere else. That stopped a
+    mislocated artifact from being wrongly VALIDATED, but it also meant
+    the scan simply never looked at `<crate>/not_specs/_interactions/`
+    at all -- a schema-valid artifact placed there still produced an
+    overall OK, reproducing the exact 'zero findings' outcome the
+    original review objected to, just via omission instead of false
+    acceptance. This discovers candidates crate-wide precisely so a
+    mislocated one is actually found, then rejects it by location alone,
+    regardless of whether its own content would otherwise be valid."""
+    canonical_resolved = canonical_dir.resolve()
     validator = load_validator()
     findings: list[Finding] = []
-    for path in sorted(p for p in interactions_dir.glob("**/*") if p.is_file()):
+    for path in sorted(find_interaction_files(crate_root)):
+        if path.resolve().parent != canonical_resolved:
+            findings.append(
+                Finding(
+                    "G1b", path,
+                    f"interaction artifact is not directly under the canonical directory "
+                    f"{canonical_resolved} -- found under {path.resolve().parent}",
+                )
+            )
+            continue
         findings.extend(validate_file(path, validator))
     return findings
 

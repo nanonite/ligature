@@ -71,11 +71,11 @@ from validate_boundary_contracts import load_validator as load_boundary_validato
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
 from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
-from validate_exemption import validate as validate_exemptions  # noqa: E402
 from validate_exemption import validate_data as validate_exemption_data  # noqa: E402
+from validate_exemption import validate_dir as validate_exemption_dir  # noqa: E402
 from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
-from validate_interaction import validate as validate_interactions  # noqa: E402
 from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
+from validate_interaction import validate_dir as validate_interaction_dir  # noqa: E402
 from validate_promotion_receipt import load_validator as load_promotion_validator  # noqa: E402
 from validate_promotion_receipt import validate_file as validate_promotion_file  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
@@ -290,15 +290,29 @@ def cmd_validate_promotion(args: argparse.Namespace) -> int:
     return 1
 
 
+def _require_crate_root_exists(crate: dict, workspace: Path) -> Path:
+    crate_root = workspace / crate["crate_dir"]
+    if not crate_root.is_dir():
+        raise PipelineError(
+            f"crate {crate['crate_dir']!r} in the project descriptor: crate root does not "
+            f"exist or is not a directory: {crate_root}"
+        )
+    return crate_root
+
+
 def cmd_validate_interaction(args: argparse.Namespace) -> int:
+    # Anchored to each crate's exact <crate_dir>/specs/_interactions
+    # directory (project_descriptor.interaction_dir_for), not a recursive
+    # search for a directory named _interactions anywhere in the crate --
+    # external review, medium severity: the unanchored scan let a
+    # schema-valid artifact under <crate>/not_specs/_interactions/ pass
+    # with zero findings, the same class of gap the approve dispatcher
+    # (_select_validate_fn) was already anchored against.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     for crate in descriptor["crates"]:
-        crate_root = args.workspace / crate["crate_dir"]
-        try:
-            findings_total.extend(validate_interactions(crate_root))
-        except FileNotFoundError as e:
-            raise PipelineError(f"crate {crate['crate_dir']!r} in the project descriptor: {e}")
+        _require_crate_root_exists(crate, args.workspace)
+        findings_total.extend(validate_interaction_dir(_interaction_dir_for(crate, args.workspace)))
 
     if not findings_total:
         print("OK: all interactions pass G1a/G1b (incl. computed eligibility)")
@@ -311,14 +325,13 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_exemption(args: argparse.Namespace) -> int:
+    # Same anchoring as cmd_validate_interaction, for
+    # <crate_dir>/specs/_exemptions.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     for crate in descriptor["crates"]:
-        crate_root = args.workspace / crate["crate_dir"]
-        try:
-            findings_total.extend(validate_exemptions(crate_root))
-        except FileNotFoundError as e:
-            raise PipelineError(f"crate {crate['crate_dir']!r} in the project descriptor: {e}")
+        _require_crate_root_exists(crate, args.workspace)
+        findings_total.extend(validate_exemption_dir(_exemption_dir_for(crate, args.workspace)))
 
     if not findings_total:
         print("OK: all exemptions pass G1a/G1b")
@@ -414,7 +427,22 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     inside a directory literally named `_boundaries` -- it has no opinion
     on where `_boundaries` itself sits. Fixed by anchoring to the exact
     expected path: target.parent must equal <crate_dir>/specs/_boundaries,
-    not merely contain that name somewhere upstream."""
+    not merely contain that name somewhere upstream.
+
+    A FIFTH review pass (2026-09-01) found this directory-anchoring check
+    never looked at the target's own suffix: a schema-valid interaction or
+    exemption approved as e.g. `_interactions/I-X-001.yaml` matched by
+    directory alone, got a real validator, and was written straight
+    through to a `.yaml` path -- despite every schema/docstring in this
+    codebase documenting `*.json` as the canonical extension for all three
+    artifact types. Reproduced end to end via `approve`. Fixed by refusing
+    any non-.json target up front, before the directory match even runs."""
+    if target.suffix != ".json":
+        raise PipelineError(
+            f"target {target} is not a .json file -- this pipeline only "
+            "recognizes .json artifacts for boundary contracts, interactions, "
+            "and exemptions"
+        )
     crate = _crate_for(target, workspace, descriptor)
     if crate is not None:
         resolved_parent = target.resolve().parent

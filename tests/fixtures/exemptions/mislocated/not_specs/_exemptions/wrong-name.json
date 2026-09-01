@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "interaction_id": "I-SCHED-TQ-001",
+  "rationale": "Prototype scaffolding boundary, tracked for removal before release (chainlink:#41)",
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-08-30"
+  }
+}

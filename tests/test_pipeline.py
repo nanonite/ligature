@@ -205,6 +205,16 @@ class CmdValidateInteractionIntegrationTest(unittest.TestCase):
     def test_computed_eligibility_mismatch_fails(self):
         self.assertEqual(self._run(INTERACTION_FIXTURES / "invalid_mismatch"), 1)
 
+    def test_artifact_under_mislocated_directory_is_not_scanned(self):
+        """External review, medium severity: the scan used to search for
+        any directory named _interactions anywhere in the crate, not just
+        <crate_dir>/specs/_interactions. The fixture here has NO
+        specs/_interactions at all -- only a computed-eligibility-broken
+        artifact under not_specs/_interactions/. Before the fix this was
+        found and failed; anchored to the exact canonical directory, it's
+        never examined, and a crate with no interactions yet is OK."""
+        self.assertEqual(self._run(INTERACTION_FIXTURES / "mislocated"), 0)
+
 
 class CmdValidateExemptionIntegrationTest(unittest.TestCase):
     def _run(self, workspace: Path) -> int:
@@ -219,6 +229,12 @@ class CmdValidateExemptionIntegrationTest(unittest.TestCase):
 
     def test_naming_mismatch_fails(self):
         self.assertEqual(self._run(EXEMPTION_FIXTURES / "invalid_naming"), 1)
+
+    def test_artifact_under_mislocated_directory_is_not_scanned(self):
+        """Mirrors CmdValidateInteractionIntegrationTest's equivalent --
+        the fixture has no specs/_exemptions at all, only a
+        naming-mismatched artifact under not_specs/_exemptions/."""
+        self.assertEqual(self._run(EXEMPTION_FIXTURES / "mislocated"), 0)
 
 
 WP_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "work_packages" / "valid"
@@ -489,6 +505,25 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
         self.assertTrue(target.exists())
+
+    def test_approve_refuses_non_json_interaction_target(self):
+        """Fifth review pass: a schema-valid interaction approved as
+        *.yaml matched the dispatcher by directory alone and was written
+        straight through to a non-.json path. Reproduced directly with
+        real JSON content saved under a .yaml-suffixed target."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.yaml"
+        target.with_suffix(".yaml.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists(), "a non-.json target was approved and written through")
 
 
 class TargetContainmentTest(unittest.TestCase):

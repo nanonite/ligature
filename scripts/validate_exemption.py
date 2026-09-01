@@ -63,6 +63,11 @@ def check_naming(path: Path, data: dict) -> list[Finding]:
             )
         )
 
+    if path.suffix != ".json":
+        findings.append(
+            Finding("G1b", path, f"must be a .json file, found suffix {path.suffix!r}")
+        )
+
     if path.stem != data["interaction_id"]:
         findings.append(
             Finding(
@@ -83,7 +88,11 @@ def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> li
 
 def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
     try:
-        data = json.loads(path.read_text())
+        text = path.read_text()
+    except UnicodeDecodeError as e:
+        return [Finding("G1a", path, f"not readable as UTF-8 text: {e}")]
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError as e:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
     return validate_data(path, data, validator)
@@ -99,11 +108,37 @@ def find_exemption_files(root: Path) -> list[Path]:
 
 
 def validate(root: Path) -> list[Finding]:
+    """Recursive, unanchored scan for the standalone CLI. External review,
+    high severity: this used to silently `continue` past any non-.json
+    file, so a malformed or wrong-extension artifact under a real
+    `_exemptions` directory produced an overall OK -- every file found is
+    now validated (check_naming's own suffix check, above, catches the
+    well-formed-JSON-but-wrong-extension case)."""
     validator = load_validator()
     findings: list[Finding] = []
     for path in find_exemption_files(root):
-        if path.suffix != ".json":
-            continue
+        findings.extend(validate_file(path, validator))
+    return findings
+
+
+def validate_dir(exemptions_dir: Path) -> list[Finding]:
+    """Validate every file under a crate's *exact*, already-known
+    canonical `_exemptions` directory -- no search for a directory
+    literally named `_exemptions` anywhere in the crate. Used by
+    pipeline.py's descriptor-driven scan (project_descriptor.exemption_dir_for()).
+    External review, medium severity: the crate-wide recursive scan above
+    only ever checked a found file's IMMEDIATE parent name, never where
+    that `_exemptions` directory itself sat relative to the crate root --
+    a schema-valid artifact under `<crate>/not_specs/_exemptions/` matched
+    and passed with zero findings. Mirrors validate_interaction.py's
+    validate_dir(): a crate legitimately having no exemptions yet is not
+    an error and returns []; only a missing crate root, checked by the
+    caller, is a config mistake worth failing loud on."""
+    if not exemptions_dir.is_dir():
+        return []
+    validator = load_validator()
+    findings: list[Finding] = []
+    for path in sorted(p for p in exemptions_dir.glob("**/*") if p.is_file()):
         findings.extend(validate_file(path, validator))
     return findings
 

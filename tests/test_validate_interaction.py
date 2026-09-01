@@ -12,7 +12,9 @@ from validate_interaction import (  # noqa: E402
     find_interaction_files,
     load_validator,
     main,
+    validate,
     validate_data,
+    validate_dir,
 )
 
 INTERACTION_PATH = Path("crates/scheduler/specs/_interactions/I-SCHED-TQ-001.json")
@@ -126,6 +128,14 @@ class NamingTest(unittest.TestCase):
         findings = run(data, path=Path("crates/scheduler/specs/_interactions/nested/I-SCHED-TQ-001.json"))
         self.assertTrue(any("not flat" in f.reason for f in findings), [str(f) for f in findings])
 
+    def test_non_json_suffix_is_rejected(self):
+        """External review, high severity: check_naming never checked the
+        file suffix, so a schema-valid interaction at I-SCHED-TQ-001.yaml
+        produced zero findings."""
+        data = load_valid()
+        findings = run(data, path=Path("crates/scheduler/specs/_interactions/I-SCHED-TQ-001.yaml"))
+        self.assertTrue(any("must be a .json file" in f.reason for f in findings), [str(f) for f in findings])
+
 
 class ComputedEligibilityMismatchTest(unittest.TestCase):
     def test_understated_eligibility_is_rejected(self):
@@ -161,6 +171,61 @@ class FindInteractionFilesTest(unittest.TestCase):
             (d / "I-X-001.json").write_text("{}")
             found = find_interaction_files(Path(tmp))
             self.assertEqual(len(found), 1)
+
+
+class ValidateReportsNonJsonFilesTest(unittest.TestCase):
+    """External review, high severity: validate() (the recursive,
+    unanchored scan behind the standalone CLI) used to silently `continue`
+    past any non-.json file under a real _interactions directory -- a
+    malformed or wrong-extension artifact produced an overall OK with
+    zero findings instead of being reported."""
+
+    def test_recursive_scan_reports_unparseable_non_json_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_interactions"
+            d.mkdir(parents=True)
+            (d / "I-X-001.yaml").write_text("not: valid: json: [[[")
+            findings = validate(Path(tmp))
+        self.assertTrue(findings, "a malformed non-.json artifact must be reported, not silently skipped")
+
+    def test_recursive_scan_reports_well_formed_json_with_wrong_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_interactions"
+            d.mkdir(parents=True)
+            (d / "I-SCHED-TQ-001.yaml").write_text(json.dumps(load_valid()))
+            findings = validate(Path(tmp))
+        self.assertTrue(any("must be a .json file" in f.reason for f in findings), [str(f) for f in findings])
+
+
+class ValidateDirTest(unittest.TestCase):
+    """validate_dir(): the anchored scan pipeline.py's cmd_validate_interaction
+    uses -- given a crate's exact canonical directory, not a crate-wide
+    recursive search for anything named _interactions."""
+
+    def test_missing_directory_returns_no_findings(self):
+        self.assertEqual(validate_dir(Path("/nonexistent/specs/_interactions")), [])
+
+    def test_finds_and_validates_files_directly_in_the_given_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "_interactions"
+            d.mkdir()
+            (d / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
+            findings = validate_dir(d)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_does_not_search_outside_the_given_directory(self):
+        """External review, medium severity, the exact anchoring
+        guarantee: a sibling _interactions directory elsewhere in the
+        crate is never consulted, unlike validate()'s crate-wide search."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stray = Path(tmp) / "not_specs" / "_interactions"
+            stray.mkdir(parents=True)
+            data = load_valid()
+            data["eligibility"] = "ignore"  # would fail G1b if it were ever examined
+            (stray / "I-SCHED-TQ-001.json").write_text(json.dumps(data))
+            canonical = Path(tmp) / "specs" / "_interactions"
+            findings = validate_dir(canonical)
+        self.assertEqual(findings, [])
 
 
 class StandaloneCliMainTest(unittest.TestCase):

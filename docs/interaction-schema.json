@@ -76,8 +76,8 @@
           "properties": {
             "target": {
               "type": "string",
-              "pattern": "^[a-z0-9_]+(-[a-z0-9_]+){1,3}$",
-              "description": "Rust target triple, e.g. x86_64-unknown-linux-gnu. Loosely shaped (2-4 hyphen-separated lowercase segments) rather than an exhaustive target list, which changes over time."
+              "pattern": "^[a-z0-9_.]+(-[a-z0-9_.]+){1,3}$",
+              "description": "Rust target triple, e.g. x86_64-unknown-linux-gnu. Loosely shaped (2-4 hyphen-separated lowercase segments, each allowing dots for targets like thumbv8m.main-none-eabi) rather than an exhaustive target list, which changes over time."
             },
             "features": {
               "type": "array",

@@ -271,6 +271,18 @@ class RealizationTest(unittest.TestCase):
             findings = run(data)
             self.assertEqual(findings, [], f"{target}: {[str(f) for f in findings]}")
 
+    def test_dotted_target_triples_are_accepted(self):
+        """External review: real Rust targets like thumbv8m.main-none-eabi
+        and thumbv8m.base-none-eabi (Cortex-M33/M23 with/without the
+        Main/Base architecture profile) use a dot within a segment --
+        the original pattern only allowed [a-z0-9_], rejecting both.
+        Reproduced directly before fixing."""
+        for target in ["thumbv8m.main-none-eabi", "thumbv8m.base-none-eabi"]:
+            data = load_valid()
+            data["realization"]["config_scope"]["target"] = target
+            findings = run(data)
+            self.assertEqual(findings, [], f"{target}: {[str(f) for f in findings]}")
+
 
 class RelianceRequiredAssuranceTest(unittest.TestCase):
     """#17: reliances[].required_assurance, applying plan.md §8.1's

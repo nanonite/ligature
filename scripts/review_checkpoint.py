@@ -13,10 +13,11 @@ the pending/approved signal instead of inventing separate state:
     assurance-target decrease, no new assumption, all hashes still bound)
     or needs a human checkpoint. First-time creation is never mechanical --
     there is nothing to diff a first version against.
-  - approve() is the only path that writes to the target path. It fills in
-    review.reviewer/review.reviewed_at, removes the draft, and appends an
-    audit entry to ci/results/review_log.jsonl -- append-only, so a human's
-    approval is traceable even if the artifact changes again later.
+  - approve() writes one target, while approve_pair() writes a mutually
+    dependent pair as one transaction. Both fill in
+    review.reviewer/review.reviewed_at, remove their drafts, and append audit
+    entries to ci/results/review_log.jsonl -- append-only, so a human's
+    approval is traceable even if an artifact changes again later.
   - approve() runs mechanical validation (a caller-supplied validate_fn,
     e.g. validate_boundary_contracts.validate_data) against the draft
     *before* writing anything, and refuses to promote on any error-severity
@@ -47,7 +48,9 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +64,7 @@ REVIEW_LOG_DEFAULT = Path("ci/results/review_log.jsonl")
 # not validate_boundary_contracts.Finding, to keep this module decoupled
 # from any one artifact type's gate logic.
 ValidateFn = Callable[[Path, dict], list]
+ValidatePairFn = Callable[[dict[Path, dict]], dict[Path, list]]
 
 
 class _Sentinel:
@@ -85,6 +89,10 @@ _REQUIRED = _Sentinel("_REQUIRED (internal -- means 'not supplied')")
 class ApprovalRefused(Exception):
     """Raised by approve() when validate_fn reports an error-severity
     finding against the draft -- nothing was written."""
+
+
+def _error_findings(findings: list) -> list:
+    return [finding for finding in findings if getattr(finding, "severity", "error") == "error"]
 
 
 def _without_review(data: dict) -> dict:
@@ -204,6 +212,176 @@ def approve(
         )
 
     return ApprovalResult(target_path, result_classification, reviewer, reviewed_at)
+
+
+def _rollback_audit_log(review_log: Path, existed: bool, original_size: int) -> None:
+    """Undo a prepared audit append while preserving the prior log."""
+    if existed:
+        with review_log.open("r+b") as stream:
+            stream.truncate(original_size)
+            stream.flush()
+            os.fsync(stream.fileno())
+    else:
+        review_log.unlink(missing_ok=True)
+
+
+def approve_pair(
+    draft_paths: tuple[Path, Path],
+    target_paths: tuple[Path, Path],
+    reviewer: str,
+    reviewed_at: str | None = None,
+    review_log: Path = REVIEW_LOG_DEFAULT,
+    validate_fn: ValidatePairFn | _Sentinel = _REQUIRED,
+) -> tuple[ApprovalResult, ApprovalResult]:
+    """Approve two mutually dependent drafts as one reviewed transaction.
+
+    Both drafts receive the same human review, both are validated against
+    the caller's combined in-memory view, and neither target is written
+    until validation for both succeeds.  The target files are then replaced
+    from prepared temporary files; a failed replacement rolls back any
+    target already replaced, preserving the all-or-none contract for normal
+    filesystem failures.
+
+    This is intentionally separate from ``approve``.  A single-artifact
+    approval must continue to require all cross-references to already be
+    approved, while an explicit pair is the only bootstrap path for two
+    artifacts whose validity depends on each other.
+    """
+    if not reviewer:
+        raise ValueError("approve_pair() requires a non-empty reviewer")
+    if validate_fn is _REQUIRED:
+        raise TypeError("approve_pair() requires a real pair validator")
+    if validate_fn is SKIP_VALIDATION:
+        raise ValueError("approve_pair() does not permit skipped validation")
+    if (
+        len(draft_paths) != 2
+        or len(target_paths) != 2
+        or len(set(target_paths)) != 2
+        or len(set(draft_paths)) != 2
+    ):
+        raise ValueError("approve_pair() requires two distinct draft and target paths")
+
+    draft_data_by_target: dict[Path, dict] = {}
+    old_data_by_target: dict[Path, dict | None] = {}
+    draft_bytes: dict[Path, bytes] = {}
+    for draft_path, target_path in zip(draft_paths, target_paths):
+        draft_bytes[draft_path] = draft_path.read_bytes()
+        draft_data = json.loads(draft_bytes[draft_path].decode("utf-8"))
+        if not isinstance(draft_data, dict):
+            raise ApprovalRefused(f"{draft_path} does not contain a JSON object")
+        draft_data_by_target[target_path] = draft_data
+        old_data_by_target[target_path] = _load(target_path)
+
+    classifications = {
+        target_path: classify(old_data_by_target[target_path], draft_data_by_target[target_path])
+        for target_path in target_paths
+    }
+    reviewed_at = reviewed_at or datetime.now(timezone.utc).date().isoformat()
+    for draft_data in draft_data_by_target.values():
+        draft_data["review"] = {"reviewer": reviewer, "reviewed_at": reviewed_at}
+
+    findings_by_target = validate_fn(draft_data_by_target)
+    if set(findings_by_target) != set(target_paths):
+        raise ApprovalRefused(
+            "paired approval validator did not return findings for exactly both target paths; refusing to promote"
+        )
+    errors: list[tuple[Path, list]] = []
+    for target_path in target_paths:
+        target_errors = _error_findings(findings_by_target[target_path])
+        if target_errors:
+            errors.append((target_path, target_errors))
+    if errors:
+        details = "\n".join(
+            f"  - {finding}" for _, target_findings in errors for finding in target_findings
+        )
+        raise ApprovalRefused(f"paired drafts fail validation, refusing to promote either target:\n{details}")
+
+    payloads = {
+        target_path: json.dumps(draft_data_by_target[target_path], indent=2) + "\n"
+        for target_path in target_paths
+    }
+
+    audit_text = "".join(
+        json.dumps(
+            {
+                "target_path": str(target_path),
+                "classification": classifications[target_path],
+                "reviewer": reviewer,
+                "reviewed_at": reviewed_at,
+                "validation": "checked",
+                "paired": True,
+                "logged_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        + "\n"
+        for target_path in target_paths
+    )
+
+    for target_path in target_paths:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Prepare the audit append before touching either target.  This catches
+    # invalid/unwritable log paths while the drafts are still intact.  If a
+    # later target or draft operation fails, the append is truncated back to
+    # its original length in the rollback below.
+    log_existed = review_log.exists()
+    original_log_size = review_log.stat().st_size if log_existed else 0
+    audit_touched = False
+    try:
+        review_log.parent.mkdir(parents=True, exist_ok=True)
+        with review_log.open("a") as stream:
+            audit_touched = True
+            stream.write(audit_text)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        if audit_touched:
+            _rollback_audit_log(review_log, log_existed, original_log_size)
+        raise
+
+    temporary_paths: dict[Path, Path] = {}
+    original_bytes: dict[Path, bytes | None] = {}
+    replaced: list[Path] = []
+    deleted_drafts: list[Path] = []
+    try:
+        for target_path in target_paths:
+            original_bytes[target_path] = target_path.read_bytes() if target_path.exists() else None
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{target_path.name}.", suffix=".pending", dir=target_path.parent
+            )
+            temporary_path = Path(temporary_name)
+            temporary_paths[target_path] = temporary_path
+            with os.fdopen(fd, "w") as stream:
+                stream.write(payloads[target_path])
+                stream.flush()
+                os.fsync(stream.fileno())
+
+        for target_path in target_paths:
+            os.replace(temporary_paths[target_path], target_path)
+            replaced.append(target_path)
+
+        for draft_path in draft_paths:
+            draft_path.unlink()
+            deleted_drafts.append(draft_path)
+    except Exception:
+        for target_path in reversed(replaced):
+            prior = original_bytes[target_path]
+            if prior is None:
+                target_path.unlink(missing_ok=True)
+            else:
+                target_path.write_bytes(prior)
+        for draft_path in deleted_drafts:
+            draft_path.write_bytes(draft_bytes[draft_path])
+        _rollback_audit_log(review_log, log_existed, original_log_size)
+        raise
+    finally:
+        for temporary_path in temporary_paths.values():
+            temporary_path.unlink(missing_ok=True)
+
+    return (
+        ApprovalResult(target_paths[0], classifications[target_paths[0]], reviewer, reviewed_at),
+        ApprovalResult(target_paths[1], classifications[target_paths[1]], reviewer, reviewed_at),
+    )
 
 
 def auto_promote_if_mechanical(

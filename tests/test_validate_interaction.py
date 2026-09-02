@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from validate_interaction import (  # noqa: E402
     compute_eligibility,
     find_interaction_files,
+    load_interactions_by_id,
     load_validator,
     main,
     validate,
@@ -274,6 +275,46 @@ class G15ProtocolCoverageTest(unittest.TestCase):
         self.assertEqual(data["protocol_class"], "pairwise")
         findings = run(data, valid_debt_interaction_ids=set())
         self.assertFalse(any(f.gate == "G15" for f in findings))
+
+
+class StrictInteractionLookupTest(unittest.TestCase):
+    """Protocol-debt references may resolve only to approved, complete,
+    canonical interaction artifacts."""
+
+    def test_schema_invalid_interaction_is_not_real(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "_interactions"
+            directory.mkdir()
+            invalid = {"interaction_id": "I-X-001", "protocol_class": "non-pairwise"}
+            (directory / "I-X-001.json").write_text(json.dumps(invalid))
+            self.assertEqual(load_interactions_by_id(directory), {})
+
+    def test_unapproved_interaction_is_not_real(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "_interactions"
+            directory.mkdir()
+            data = load_valid()
+            data.pop("review")
+            (directory / "I-SCHED-TQ-001.json").write_text(json.dumps(data))
+            self.assertEqual(load_interactions_by_id(directory), {})
+
+    def test_misnamed_interaction_is_not_real(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "_interactions"
+            directory.mkdir()
+            (directory / "wrong-name.json").write_text(json.dumps(load_valid()))
+            self.assertEqual(load_interactions_by_id(directory), {})
+
+    def test_duplicate_interaction_ids_are_not_real(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "_interactions"
+            directory.mkdir()
+            data = load_valid()
+            (directory / "I-SCHED-TQ-001.json").write_text(json.dumps(data))
+            (directory / "duplicate.json").write_text(json.dumps(data))
+            lookup = load_interactions_by_id(directory)
+            self.assertEqual(lookup, {})
+            self.assertEqual(lookup.duplicate_ids, {"I-SCHED-TQ-001"})
 
 
 class RealizationTest(unittest.TestCase):
@@ -682,6 +723,72 @@ class StandaloneCliMainTest(unittest.TestCase):
             (d / "I-SCHED-TQ-001.json").write_text(json.dumps(data))
             rc = main([tmp])
         self.assertEqual(rc, 1)
+
+    def test_main_fails_for_uncovered_non_pairwise_interaction(self):
+        data = load_valid()
+        data["protocol_class"] = "non-pairwise"
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_interactions"
+            d.mkdir(parents=True)
+            (d / "I-SCHED-TQ-001.json").write_text(json.dumps(data))
+            rc = main([tmp])
+        self.assertEqual(rc, 1)
+
+    def test_main_discovers_and_accepts_a_valid_sibling_protocol_debt_record(self):
+        interaction = load_valid()
+        interaction["protocol_class"] = "non-pairwise"
+        debt = {
+            "schema_version": "1.0",
+            "interaction_id": interaction["interaction_id"],
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            specs = Path(tmp) / "specs"
+            (specs / "_interactions").mkdir(parents=True)
+            (specs / "_protocol_debt").mkdir()
+            (specs / "_interactions" / "I-SCHED-TQ-001.json").write_text(json.dumps(interaction))
+            (specs / "_protocol_debt" / "I-SCHED-TQ-001.json").write_text(json.dumps(debt))
+            rc = main([tmp])
+        self.assertEqual(rc, 0)
+
+    def test_main_keeps_protocol_debt_coverage_scoped_to_each_crate(self):
+        interaction_a = load_valid()
+        interaction_a["protocol_class"] = "non-pairwise"
+        interaction_b = json.loads(json.dumps(interaction_a))
+        debt = {
+            "schema_version": "1.0",
+            "interaction_id": interaction_a["interaction_id"],
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for crate, interaction in [("crate_a", interaction_a), ("crate_b", interaction_b)]:
+                interaction_dir = root / crate / "specs" / "_interactions"
+                interaction_dir.mkdir(parents=True)
+                (interaction_dir / "I-SCHED-TQ-001.json").write_text(json.dumps(interaction))
+            debt_dir = root / "crate_a" / "specs" / "_protocol_debt"
+            debt_dir.mkdir()
+            (debt_dir / "I-SCHED-TQ-001.json").write_text(json.dumps(debt))
+
+            findings = validate(root)
+
+        self.assertTrue(
+            any(
+                finding.gate == "G15" and finding.path.parts[-4:-1] == ("crate_b", "specs", "_interactions")
+                for finding in findings
+            ),
+            [str(finding) for finding in findings],
+        )
 
 
 if __name__ == "__main__":

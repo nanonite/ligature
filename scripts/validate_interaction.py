@@ -31,16 +31,15 @@ meaningful.
            artifact" has no schema yet (docs/protocol-debt-schema.json's
            own description explains why), so the only checkable coverage
            mechanism today is a valid protocol-debt record naming this
-           interaction. Fail-closed cross-crate check: the caller (see
-           `validate_crate`, always required there) supplies the set of
-           interaction_ids covered by a fully valid debt record; a
-           `non-pairwise` interaction whose own id isn't in that set is
-           rejected. `validate_data`/`validate_file`/`validate` default
-           this to `None`, which is NOT the same as "covered" -- it
-           degrades to a visible info-severity note ("not checked"), not
-           a silent pass, since the single-directory standalone CLI
-           genuinely cannot see a sibling `_protocol_debt/` directory
-           unless told to.
+           interaction. Fail-closed cross-crate check: the caller supplies
+           the set of interaction_ids covered by a fully valid debt record;
+           a `non-pairwise` interaction whose own id isn't in that set is
+           rejected. The standalone CLI derives that set recursively from
+           the root's sibling `_protocol_debt/` directories, so it also
+           rejects uncovered non-pairwise interactions. Lower-level
+           `validate_data` calls may still omit context and receive a
+           visible info-severity note ("not checked") for composition by
+           callers that have not supplied a workspace/crate root.
 
 Deliberately out of scope here (later M3 issues): realization/config_scope
 (#18, already landed) is implemented; R2's cross-reference check that an
@@ -265,26 +264,63 @@ def check_g15_protocol_coverage(
     return []
 
 
-def load_interactions_by_id(interactions_dir: Path) -> dict[str, dict]:
-    """Best-effort load of every interaction directly under
-    `interactions_dir`, keyed by `interaction_id` -- used to build the
-    protocol-debt cross-reference (G15, and validate_protocol_debt.py's
-    symmetric check) in both directions. Silently skips anything that
-    isn't valid JSON or lacks a string `interaction_id`: full G1a/G1b/
-    G2++ validation of these is `validate_crate`'s own job, not this
-    loader's -- a schema-invalid interaction can't be a valid coverage
-    target either way, so it's simply absent from the lookup rather than
-    raising here."""
-    result: dict[str, dict] = {}
+class InteractionLookup(dict[str, dict]):
+    """A lookup plus the IDs invalidated by duplicate candidates.
+
+    The mapping intentionally contains *only* approved, schema-valid,
+    canonically named interactions.  ``duplicate_ids`` is retained for
+    callers that need to explain or preserve fail-closed behavior while the
+    public mapping remains an ordinary ``dict`` for existing callers.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.duplicate_ids: set[str] = set()
+
+
+def load_interactions_by_id(interactions_dir: Path) -> InteractionLookup:
+    """Load only approved, fully valid canonical interactions.
+
+    This lookup is used for the protocol-debt cross-reference in both
+    directions.  JSON parsing alone is not sufficient: a debt record must
+    never be able to treat a schema-invalid, misnamed, unreviewed, or
+    duplicate interaction as real.  Invalid candidates are omitted and an
+    ID appearing in more than one direct child is omitted even when one of
+    those candidates would otherwise validate.
+    """
+    result = InteractionLookup()
     if not interactions_dir.is_dir():
         return result
-    for path in sorted(interactions_dir.glob("*.json")):
+
+    validator = load_validator()
+    candidates: dict[str, list[tuple[Path, dict]]] = {}
+    for path in sorted(
+        p for p in interactions_dir.iterdir() if p.is_file() and p.suffix != ".draft"
+    ):
         try:
             data = json.loads(path.read_text())
         except (json.JSONDecodeError, UnicodeDecodeError):
             continue
         if isinstance(data, dict) and isinstance(data.get("interaction_id"), str):
-            result[data["interaction_id"]] = data
+            candidates.setdefault(data["interaction_id"], []).append((path, data))
+
+    result.duplicate_ids = {interaction_id for interaction_id, entries in candidates.items() if len(entries) > 1}
+
+    for interaction_id, entries in candidates.items():
+        if interaction_id in result.duplicate_ids:
+            continue
+        path, data = entries[0]
+        # Supplying this interaction's own ID only suppresses G15.  G15 is
+        # the cross-file coverage gate; the loader is establishing the
+        # intrinsic validity of a target before another artifact may refer
+        # to it.
+        findings = validate_data(path, data, validator, {interaction_id})
+        if any(getattr(finding, "severity", "error") == "error" for finding in findings):
+            continue
+        review = data.get("review")
+        if not isinstance(review, dict) or not review.get("reviewer") or not review.get("reviewed_at"):
+            continue
+        result[interaction_id] = data
     return result
 
 
@@ -335,6 +371,41 @@ def find_interaction_files(root: Path) -> list[Path]:
     return [p for p in root.glob("**/_interactions/**/*") if p.is_file()]
 
 
+def _standalone_debt_coverage(root: Path) -> dict[Path, set[str]]:
+    """Resolve G15 coverage from canonical sibling directories below root.
+
+    The standalone command receives a workspace or crate root, not an
+    individual file directory.  Its recursive discovery can therefore see
+    ``specs/_interactions`` and the sibling ``specs/_protocol_debt``.  A
+    missing sibling is an empty coverage set, not an unknown context: an
+    uncovered non-pairwise interaction must fail closed.  The result is
+    keyed by resolved `_interactions` directory, so equal IDs in separate
+    crates cannot borrow one another's coverage.
+    """
+    from validate_protocol_debt import valid_interaction_ids_from_crate
+
+    coverage_by_interaction_dir: dict[Path, set[str]] = {}
+    interaction_dirs = sorted(path for path in root.glob("**/_interactions") if path.is_dir())
+    for interactions_dir in interaction_dirs:
+        resolved_interactions_dir = interactions_dir.resolve()
+        coverage_by_interaction_dir[resolved_interactions_dir] = set()
+        interactions_by_id = load_interactions_by_id(interactions_dir)
+        debt_dir = interactions_dir.parent / "_protocol_debt"
+        if debt_dir.is_dir():
+            coverage_by_interaction_dir[resolved_interactions_dir].update(
+                valid_interaction_ids_from_crate(root, debt_dir, interactions_by_id)
+            )
+    return coverage_by_interaction_dir
+
+
+def _interaction_dir_for_path(path: Path) -> Path | None:
+    """Return the nearest `_interactions` ancestor for a discovered file."""
+    for parent in (path.parent, *path.parents):
+        if parent.name == "_interactions":
+            return parent.resolve()
+    return None
+
+
 def validate(root: Path, valid_debt_interaction_ids: set[str] | None = None) -> list[Finding]:
     """Recursive, unanchored scan for the standalone CLI: finds every
     `_interactions` directory anywhere under `root`. External review,
@@ -346,15 +417,24 @@ def validate(root: Path, valid_debt_interaction_ids: set[str] | None = None) -> 
     but-wrong-extension case that would otherwise slip past validate_file's
     JSON-parse step).
 
-    `valid_debt_interaction_ids` defaults to None -- this single-root scan
-    has no sibling `_protocol_debt/` directory concept, so G15 degrades to
-    a visible info note rather than either a silent pass or an incorrect
-    hard failure. Only the descriptor-driven `validate_crate` (pipeline.py)
-    makes G15 a real fail-closed check."""
+    If no explicit coverage set is supplied, this root-level scan derives
+    per-directory coverage from sibling `_protocol_debt/` directories
+    recursively.  The lower-level `validate_data` API retains its
+    optional-context info note, but this CLI entrypoint is given enough
+    context to fail closed.
+    """
     validator = load_validator()
+    coverage_by_interaction_dir = None
+    if valid_debt_interaction_ids is None:
+        coverage_by_interaction_dir = _standalone_debt_coverage(root)
     findings: list[Finding] = []
     for path in find_interaction_files(root):
-        findings.extend(validate_file(path, validator, valid_debt_interaction_ids))
+        if coverage_by_interaction_dir is None:
+            coverage = valid_debt_interaction_ids
+        else:
+            interaction_dir = _interaction_dir_for_path(path)
+            coverage = coverage_by_interaction_dir.get(interaction_dir, set())
+        findings.extend(validate_file(path, validator, coverage))
     return findings
 
 
@@ -408,11 +488,9 @@ def main(argv: list[str]) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    # G15 degrades to an info-severity note here (this single-root scan has
-    # no sibling _protocol_debt/ directory concept) -- it must never count
-    # as a failure, only a visible non-blocking note, same discipline
-    # validate_boundary_contracts.py's main() already uses for its own
-    # info-severity findings.
+    # Keep the severity split for callers that explicitly supplied a
+    # lower-level context, while the normal root-level path above is
+    # fail-closed for G15.
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
 
@@ -422,7 +500,7 @@ def main(argv: list[str]) -> int:
             print(f"  - {f}")
 
     if not errors:
-        print("OK: all interactions pass G1a/G1b (incl. computed eligibility)")
+        print("OK: all interactions pass G1a/G1b (incl. computed eligibility) and G15 protocol coverage")
         return 0
 
     print(f"FAIL: {len(errors)} finding(s)")

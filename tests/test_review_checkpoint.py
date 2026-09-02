@@ -12,6 +12,7 @@ from review_checkpoint import (  # noqa: E402
     SKIP_VALIDATION,
     ApprovalRefused,
     approve,
+    approve_pair,
     auto_promote_if_mechanical,
     classify,
     requires_human_checkpoint,
@@ -180,6 +181,29 @@ class ReviewCheckpointTest(unittest.TestCase):
         log_lines = self.log.read_text().strip().splitlines()
         self.assertEqual(len(log_lines), 2)  # original approval + auto-promote
         self.assertIn("auto-promoted", json.loads(log_lines[1])["reviewer"])
+
+    def test_approve_pair_refuses_before_commit_when_audit_log_cannot_be_prepared(self):
+        target_a = self.root / "specs" / "_interactions" / "I-A.json"
+        target_b = self.root / "specs" / "_protocol_debt" / "I-A.json"
+        draft_a = stage_draft({"interaction_id": "I-A"}, target_a)
+        draft_b = stage_draft({"interaction_id": "I-A"}, target_b)
+        blocked_parent = self.root / "blocked-log-parent"
+        blocked_parent.write_text("not a directory")
+        review_log = blocked_parent / "review.jsonl"
+
+        with self.assertRaises(FileExistsError):
+            approve_pair(
+                (draft_a, draft_b),
+                (target_a, target_b),
+                reviewer="alice",
+                review_log=review_log,
+                validate_fn=lambda candidates: {target_a: [], target_b: []},
+            )
+
+        self.assertFalse(target_a.exists())
+        self.assertFalse(target_b.exists())
+        self.assertTrue(draft_a.exists())
+        self.assertTrue(draft_b.exists())
 
 
 class StandaloneCliCannotPromoteTest(unittest.TestCase):

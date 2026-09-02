@@ -685,6 +685,101 @@ class CmdApproveIntegrationTest(unittest.TestCase):
             "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
         }))
 
+    def _stage_non_pairwise_pair(self, interaction_id: str = "I-SCHED-TQ-006") -> tuple[Path, Path]:
+        interaction_target = self.workspace / "crate_a" / "specs" / "_interactions" / f"{interaction_id}.json"
+        debt_target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / f"{interaction_id}.json"
+        interaction_target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": interaction_id,
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["postcondition-holds"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+            "protocol_class": "non-pairwise",
+            "realization": REALIZATION,
+        }))
+        debt_target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": interaction_id,
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }))
+        return interaction_target, debt_target
+
+    def test_approve_pair_bootstraps_non_pairwise_interaction_and_debt_atomically(self):
+        """The two new artifacts validate against each other in one
+        transaction; neither side must already be approved."""
+        interaction_target, debt_target = self._stage_non_pairwise_pair()
+        rc = self._run(
+            "approve-pair",
+            str(interaction_target),
+            str(debt_target),
+            "--reviewer",
+            "alice",
+            "--reviewed-at",
+            "2026-09-01",
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue(interaction_target.exists())
+        self.assertTrue(debt_target.exists())
+        self.assertFalse(interaction_target.with_suffix(".json.draft").exists())
+        self.assertFalse(debt_target.with_suffix(".json.draft").exists())
+        self.assertEqual(json.loads(interaction_target.read_text())["review"]["reviewer"], "alice")
+        self.assertEqual(json.loads(debt_target.read_text())["review"]["reviewer"], "alice")
+
+    def test_approve_pair_refuses_the_whole_pair_when_one_draft_is_invalid(self):
+        interaction_target, debt_target = self._stage_non_pairwise_pair()
+        debt_draft = debt_target.with_suffix(".json.draft")
+        debt_data = json.loads(debt_draft.read_text())
+        debt_data["no_work_package_touches_its_path"] = False
+        debt_draft.write_text(json.dumps(debt_data))
+
+        rc = self._run("approve-pair", str(interaction_target), str(debt_target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(interaction_target.exists())
+        self.assertFalse(debt_target.exists())
+        self.assertTrue(interaction_target.with_suffix(".json.draft").exists())
+        self.assertTrue(debt_target.with_suffix(".json.draft").exists())
+
+    def test_approve_pair_refuses_mismatched_body_ids_before_granting_coverage(self):
+        """A debt record for an existing I-B must not be able to cover a
+        new I-A merely because both are supplied to the pair command."""
+        self._write_real_interaction("I-B", "non-pairwise")
+        interaction_target, unused_debt_target = self._stage_non_pairwise_pair("I-A")
+        unused_debt_target.with_suffix(".json.draft").unlink()
+        debt_target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-B.json"
+        debt_target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-B",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }))
+
+        rc = self._run("approve-pair", str(interaction_target), str(debt_target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(interaction_target.exists())
+        self.assertFalse(debt_target.exists())
+        self.assertTrue(interaction_target.with_suffix(".json.draft").exists())
+        self.assertTrue(debt_target.with_suffix(".json.draft").exists())
+
     def test_approve_valid_protocol_debt_succeeds(self):
         """#19: _select_validate_fn's dispatcher extended to recognize
         protocol-debt targets too, exercised end to end through approve.
@@ -713,6 +808,26 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         target.with_suffix(".json.draft").write_text(json.dumps({
             "schema_version": "1.0",
             "interaction_id": "I-DOES-NOT-EXIST",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_approve_protocol_debt_for_schema_invalid_interaction_is_refused(self):
+        """A JSON file with an interaction_id is not enough to satisfy the
+        debt cross-reference; the referenced interaction must pass its full
+        schema and approval-state checks."""
+        interaction = self.workspace / "crate_a" / "specs" / "_interactions" / "I-X-001.json"
+        interaction.write_text(json.dumps({"interaction_id": "I-X-001", "protocol_class": "non-pairwise"}))
+        target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-X-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-X-001",
             "rationale": "Multi-step handshake protocol, not yet modeled",
             "no_promoted_obligation_depends_on_protocol": True,
             "no_work_package_touches_its_path": True,

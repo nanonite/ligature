@@ -10,8 +10,11 @@ Implemented now, against schemas that actually exist:
   draft     Stage 0/3 -- render a prompt template, dispatch to the
             configured one-shot LLM backend, stage the result as a draft.
             Never calls a backend for anything past this command.
-  approve   The review/approval checkpoint (#39) -- the only path that
-            writes a draft to its target path.
+  approve   The review/approval checkpoint (#39) -- the path that writes a
+            single draft to its target path.
+  approve-pair  The explicit transactional checkpoint for a new non-pairwise
+            interaction and its protocol-debt record, whose cross-references
+            require both artifacts to be accepted together.
   validate  Stage 4 (G1a/G1b/G2+) over boundary contracts (#9/#11) --
             fully deterministic, no LLM calls, by construction.
   validate-work-package  Stage 7's own schema + §10.1 checks (#14) over a
@@ -77,6 +80,7 @@ from project_descriptor import load_project_descriptor as _load_project_descript
 from project_descriptor import protocol_debt_dir_for as _protocol_debt_dir_for  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
+from review_checkpoint import approve_pair as checkpoint_approve_pair  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
@@ -543,6 +547,103 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     )
 
 
+def _select_pair_validate_fn(
+    interaction_target: Path,
+    protocol_debt_target: Path,
+    workspace: Path,
+    descriptor: dict,
+):
+    """Build the transaction validator for a new non-pairwise I + debt pair.
+
+    Single-artifact validators intentionally consult only promoted sibling
+    artifacts.  This callback is the explicit bootstrap path: it validates
+    both drafts against a combined view containing the candidate interaction
+    and candidate debt record, while still requiring each side's own full
+    schema/naming/review gates.
+    """
+    interaction_crate = _crate_for(interaction_target, workspace, descriptor)
+    debt_crate = _crate_for(protocol_debt_target, workspace, descriptor)
+    if interaction_crate is None or debt_crate is None:
+        raise PipelineError("paired approval targets must belong to declared crates")
+    if interaction_crate["crate_dir"] != debt_crate["crate_dir"]:
+        raise PipelineError("paired interaction and protocol-debt targets must belong to the same crate")
+
+    interaction_dir = _interaction_dir_for(interaction_crate, workspace)
+    debt_dir = _protocol_debt_dir_for(interaction_crate, workspace)
+    if interaction_target.suffix != ".json" or interaction_target.resolve().parent != interaction_dir:
+        raise PipelineError(
+            f"paired approval interaction target must be exactly under {interaction_dir} as a .json file"
+        )
+    if protocol_debt_target.suffix != ".json" or protocol_debt_target.resolve().parent != debt_dir:
+        raise PipelineError(
+            f"paired approval protocol-debt target must be exactly under {debt_dir} as a .json file"
+        )
+
+    crate_root = (workspace / interaction_crate["crate_dir"]).resolve()
+    interaction_validator = load_interaction_validator()
+    debt_validator = load_protocol_debt_validator()
+
+    def validate_pair(candidates: dict[Path, dict]) -> dict[Path, list]:
+        candidate_interaction = candidates[interaction_target]
+        candidate_debt = candidates[protocol_debt_target]
+
+        interaction_id = candidate_interaction.get("interaction_id")
+        debt_interaction_id = candidate_debt.get("interaction_id")
+        if not (
+            isinstance(interaction_id, str)
+            and interaction_id == debt_interaction_id
+            and interaction_target.stem == interaction_id
+            and protocol_debt_target.stem == interaction_id
+        ):
+            raise ApprovalRefused(
+                "paired approval requires the interaction and protocol-debt body IDs "
+                "and filename stems to match; refusing to grant candidate G15 coverage"
+            )
+
+        interactions_by_id = load_interactions_by_id(interaction_dir)
+
+        candidate_id = interaction_id
+        if isinstance(candidate_id, str) and candidate_id in interactions_by_id.duplicate_ids:
+            raise ApprovalRefused(
+                f"interaction_id {candidate_id!r} has duplicate canonical candidates; refusing paired approval"
+            )
+
+        # If this is an update, replace the old promoted version in the
+        # transaction view.  A new pair has no entry to replace.
+        transaction_interactions = dict(interactions_by_id)
+        if isinstance(candidate_id, str):
+            transaction_interactions.pop(candidate_id, None)
+
+        existing_coverage = valid_interaction_ids_from_crate(crate_root, debt_dir, interactions_by_id)
+        interaction_coverage = set(existing_coverage)
+        if isinstance(candidate_id, str):
+            # The debt draft is validated below in the same transaction.  It
+            # is safe to let G15 see this candidate ID here because the pair
+            # is not committed unless the debt draft also passes.
+            interaction_coverage.add(candidate_id)
+
+        interaction_findings = validate_interaction_data(
+            interaction_target, candidate_interaction, interaction_validator, interaction_coverage
+        )
+        interaction_errors = [
+            finding for finding in interaction_findings if getattr(finding, "severity", "error") == "error"
+        ]
+
+        debt_findings: list = []
+        if not interaction_errors and isinstance(candidate_id, str):
+            transaction_interactions[candidate_id] = candidate_interaction
+            debt_findings = validate_protocol_debt_data(
+                protocol_debt_target, candidate_debt, debt_validator, transaction_interactions
+            )
+
+        return {
+            interaction_target: interaction_findings,
+            protocol_debt_target: debt_findings,
+        }
+
+    return validate_pair
+
+
 def cmd_approve(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
@@ -559,12 +660,39 @@ def cmd_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_approve_pair(args: argparse.Namespace) -> int:
+    descriptor = load_project_descriptor(args.descriptor)
+    _require_target_in_workspace(args.interaction_target, args.workspace, descriptor)
+    _require_target_in_workspace(args.protocol_debt_target, args.workspace, descriptor)
+    validate_fn = _select_pair_validate_fn(
+        args.interaction_target, args.protocol_debt_target, args.workspace, descriptor
+    )
+
+    targets = (args.interaction_target, args.protocol_debt_target)
+    drafts = tuple(target.with_suffix(target.suffix + ".draft") for target in targets)
+    try:
+        results = checkpoint_approve_pair(
+            drafts,
+            targets,
+            reviewer=args.reviewer,
+            reviewed_at=args.reviewed_at,
+            validate_fn=validate_fn,
+        )
+    except ApprovalRefused as e:
+        raise PipelineError(str(e))
+    for result in results:
+        print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     print(
-        "Implemented: draft (Stage 0/3), approve (checkpoint), validate (Stage 4 G1a/G1b/G2+), "
-        "validate-interaction (Stage 4 G1a/G1b + computed eligibility), "
+        "Implemented: draft (Stage 0/3), approve (checkpoint), "
+        "approve-pair (transactional interaction + protocol-debt checkpoint), "
+        "validate (Stage 4 G1a/G1b/G2+), "
+        "validate-interaction (Stage 4 G1a/G1b + computed eligibility + G15), "
         "validate-exemption (Stage 4 G1a/G1b naming), "
-        "validate-protocol-debt (Stage 4 G1a/G1b naming), "
+        "validate-protocol-debt (Stage 4 G1a/G1b + interaction cross-reference), "
         "validate-work-package (Stage 7 schema + §10.1, standalone), "
         "validate-promotion (Stage 4.5 schema + §7.1, standalone)"
     )
@@ -633,6 +761,16 @@ def main(argv: list[str]) -> int:
     approve_p.add_argument("--reviewer", required=True)
     approve_p.add_argument("--reviewed-at", default=None)
     approve_p.set_defaults(func=cmd_approve)
+
+    approve_pair_p = sub.add_parser(
+        "approve-pair",
+        help="Review and atomically promote a new non-pairwise interaction plus its protocol-debt record",
+    )
+    approve_pair_p.add_argument("interaction_target", type=Path)
+    approve_pair_p.add_argument("protocol_debt_target", type=Path)
+    approve_pair_p.add_argument("--reviewer", required=True)
+    approve_pair_p.add_argument("--reviewed-at", default=None)
+    approve_pair_p.set_defaults(func=cmd_approve_pair)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

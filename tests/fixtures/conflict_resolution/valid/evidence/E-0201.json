@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "id": "E-0201",
+  "kind": "requirement",
+  "claim": "pop_ready may return a task with deadline in the past for backward compatibility",
+  "origin": {
+    "repository": "https://example.com/beast-rs",
+    "commit": "d4e5f6a",
+    "symbol": "requirements/legacy-scheduling.md",
+    "path": "docs/requirements/legacy-scheduling.md",
+    "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "line_hint": "42"
+  },
+  "semantic_disposition": "incidental",
+  "lifecycle": "accepted",
+  "confidence": "medium",
+  "mode": "R"
+}

@@ -76,3 +76,19 @@ def protocol_debt_dir_for(crate: dict, workspace: Path) -> Path:
 
 def protocol_debt_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
     return [protocol_debt_dir_for(crate, workspace) for crate in descriptor["crates"]]
+
+
+def evidence_dir_for(workspace: Path) -> Path:
+    """plan.md §11's canonical layout: evidence/*.json. Unlike every dir
+    helper above, this takes no `crate` -- evidence is workspace-level,
+    not crate-scoped (plan.md §7's own artifact_manifest worked example
+    lists evidence/E-0143.json with no crate prefix, alongside
+    docs/reliance-policy.md, also workspace-level)."""
+    return (workspace / "evidence").resolve()
+
+
+def conflict_dir_for(workspace: Path) -> Path:
+    """plan.md §11's canonical layout: specs/_conflicts/*.json. Also
+    workspace-level, matching evidence_dir_for's own scope -- see that
+    function's docstring."""
+    return (workspace / "specs" / "_conflicts").resolve()

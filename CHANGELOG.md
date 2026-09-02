@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- Evidence schema: claim field, semantic_disposition/lifecycle split, conflict resolution (#20)
 - Protocol classification + protocol-debt records, fail closed (#19)
 - realization.requirement + config_scope on I edges (#18)
 - Assurance requirement located in I: reliances[].required_assurance (#17)

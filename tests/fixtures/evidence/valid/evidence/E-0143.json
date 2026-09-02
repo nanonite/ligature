@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "id": "E-0143",
+  "kind": "source-artifact",
+  "claim": "pop_ready returns None only when no task has deadline <= now",
+  "origin": {
+    "repository": "https://example.com/beast-rs",
+    "commit": "a1b2c3d",
+    "symbol": "TaskQueue::pop_ready",
+    "path": "src/queue.cpp",
+    "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "line_hint": "118-160"
+  },
+  "semantic_disposition": "required",
+  "lifecycle": "accepted",
+  "confidence": "high",
+  "mode": "P"
+}

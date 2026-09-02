@@ -51,15 +51,29 @@ Implemented now, against schemas that actually exist:
             a debt record naming a nonexistent interaction, or one whose
             protocol_class is actually pairwise, is rejected, cross-
             referenced live against the crate's _interactions/ directory.
+  validate-evidence  Stage 4's G1a/G1b over evidence records (#20):
+            schema plus naming. Workspace-level, not crate-scoped (one
+            evidence/ directory per workspace, not per crate). Never
+            routed through draft/approve -- evidence carries no review
+            block (plan.md §7.2's human-checkpoint list names
+            "evidence-conflict resolution", not evidence itself).
+  validate-conflict-resolution  Stage 4's G1a/G1b/G11 over evidence
+            conflict-resolution records (#20): schema (incl. the
+            status == resolved => resolution + review requirement),
+            selected-authority membership in the record's own evidence
+            list, a live dangling-evidence-reference check, and G11 --
+            "only unresolved conflicts block" (plan.md §11's own words) --
+            enforced directly, not deferred. Also workspace-level; IS
+            routed through draft/approve, since it does carry a review
+            block and is in §7.2's checkpoint list.
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
-  I-schema (#20 -- evidence schema still pending), emission, attach, manifest and
-  promotion-receipt *generation* (the schemas/validators exist as of
-  #14/#15; the generators that read promoted I/O and emit these don't,
-  since they need the rest of the I-schema machinery M3 builds),
-  Stage 8A-8C (#22-#26, M4). `pipeline status` reports this honestly
-  instead of a stage silently no-op'ing.
+  emission, attach, manifest and promotion-receipt *generation* (the
+  schemas/validators exist as of #14/#15; the generators that read
+  promoted I/O and emit these don't, since they need the rest of the
+  I-schema machinery M3 builds), Stage 8A-8C (#22-#26, M4). `pipeline
+  status` reports this honestly instead of a stage silently no-op'ing.
 """
 from __future__ import annotations
 
@@ -74,6 +88,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import boundary_dir_for as _boundary_dir_for  # noqa: E402
 from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
+from project_descriptor import conflict_dir_for as _conflict_dir_for  # noqa: E402
+from project_descriptor import evidence_dir_for as _evidence_dir_for  # noqa: E402
 from project_descriptor import exemption_dir_for as _exemption_dir_for  # noqa: E402
 from project_descriptor import interaction_dir_for as _interaction_dir_for  # noqa: E402
 from project_descriptor import load_project_descriptor as _load_project_descriptor  # noqa: E402
@@ -85,6 +101,11 @@ from review_checkpoint import stage_draft  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
+from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
+from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
+from validate_conflict_resolution import validate_workspace as validate_conflict_resolution_workspace  # noqa: E402
+from validate_evidence import load_evidence_ids  # noqa: E402
+from validate_evidence import validate_workspace as validate_evidence_workspace  # noqa: E402
 from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
 from validate_exemption import validate_crate as validate_exemption_crate  # noqa: E402
 from validate_exemption import validate_data as validate_exemption_data  # noqa: E402
@@ -105,21 +126,20 @@ ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
-    "I-schema (remaining)": "#20 (M3 -- evidence schema still pending; #16/#17/#18/#19's interaction_id/"
-    "edge_class/computed-eligibility base, reliances/required_assurance, realization/config_scope, "
-    "protocol_class, exemption objects, and protocol-debt records have landed as `validate-interaction`/"
-    "`validate-exemption`/`validate-protocol-debt`)",
     "R2 coverage": "not yet implemented -- every eligible I edge covered by an O artifact or a reviewed "
     "exemption; needs #16's interaction/exemption validators, which exist, cross-referenced against each "
     "other, which doesn't yet. (G15's own coverage check, the structurally identical case for non-pairwise "
     "protocol classification, IS implemented -- see cmd_validate_interaction/cmd_validate_protocol_debt.)",
-    "emission": "needs the I-schema (M3) first",
-    "attach": "needs the I-schema (M3) first",
-    "manifest generation": "#14's schema+validator exist (`validate-work-package`); the generator "
-    "that reads promoted I/O and emits a manifest needs the I-schema (M3) first, still not built",
-    "promotion-receipt generation": "#15's schema+validator exist (`validate-promotion`); the "
-    "generator that reads an accepted artifact set and computes a receipt needs the I-schema "
-    "(M3) first, still not built",
+    "G4/G5 evidence tracing/grounding": "not yet implemented -- required/bug-compat evidence tracing to "
+    "nothing (G4) and ungrounded obligations (G5) both need cross-referencing interaction evidence_links "
+    "(#16) to evidence ids (#20), which exist individually but aren't cross-referenced against each other yet",
+    "emission": "M3's I-schema is now complete (#16-#20); emission (Stage 5) itself is still not built",
+    "attach": "M3's I-schema is now complete (#16-#20); attach (Stage 6) itself is still not built",
+    "manifest generation": "#14's schema+validator exist (`validate-work-package`); M3's I-schema is now "
+    "complete (#16-#20), but the generator that reads promoted I/O and emits a manifest from it is still not built",
+    "promotion-receipt generation": "#15's schema+validator exist (`validate-promotion`); M3's I-schema is "
+    "now complete (#16-#20), but the generator that reads an accepted artifact set and computes a receipt "
+    "from it is still not built",
     "8A": "#22-#26 (M4 -- bridge/closure track)",
     "8B": "#22-#26 (M4)",
     "8C": "#25 (M4 -- G14 transitive closure)",
@@ -414,6 +434,60 @@ def cmd_validate_protocol_debt(args: argparse.Namespace) -> int:
     return 1
 
 
+def _require_workspace_root_exists(workspace: Path) -> Path:
+    if not workspace.is_dir():
+        raise PipelineError(f"workspace root does not exist or is not a directory: {workspace}")
+    return workspace
+
+
+def cmd_validate_evidence(args: argparse.Namespace) -> int:
+    # Evidence is workspace-level, not crate-scoped (see
+    # project_descriptor.evidence_dir_for's own docstring) -- one scan,
+    # not a per-crate loop the way validate-interaction/-exemption/
+    # -protocol-debt work. No project descriptor is needed at all: there
+    # is nothing crate-specific to resolve.
+    workspace_root = _require_workspace_root_exists(args.workspace)
+    findings = validate_evidence_workspace(workspace_root, _evidence_dir_for(workspace_root))
+
+    if not findings:
+        print("OK: all evidence records pass G1a/G1b")
+        return 0
+
+    print(f"FAIL: {len(findings)} finding(s)")
+    for f in findings:
+        print(f"  - {f}")
+    return 1
+
+
+def cmd_validate_conflict_resolution(args: argparse.Namespace) -> int:
+    # Same workspace-level scope as cmd_validate_evidence. G11 (unresolved
+    # conflicts block) and the evidence cross-reference are both real,
+    # fail-closed checks here -- not deferred the way #19's G15 initially
+    # (and wrongly) was.
+    workspace_root = _require_workspace_root_exists(args.workspace)
+    evidence_ids = load_evidence_ids(_evidence_dir_for(workspace_root))
+    findings = validate_conflict_resolution_workspace(
+        workspace_root, _conflict_dir_for(workspace_root), evidence_ids
+    )
+
+    errors = [f for f in findings if f.severity == "error"]
+    infos = [f for f in findings if f.severity == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if not errors:
+        print("OK: all conflict-resolution records pass G1a/G1b/G11")
+        return 0
+
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
+        print(f"  - {f}")
+    return 1
+
+
 def cmd_draft(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
@@ -460,16 +534,29 @@ def _require_target_in_workspace(target: Path, workspace: Path, descriptor: dict
     with no check it belonged to the workspace or any declared crate at
     all (external review finding, medium severity). A path outside the
     project's own declared scope is refused outright, not just silently
-    processed."""
+    processed.
+
+    Chainlink #20: conflict-resolution records are workspace-level, not
+    crate-scoped (project_descriptor.conflict_dir_for's own docstring --
+    plan.md §7's artifact_manifest worked example places
+    specs/_conflicts/EC-004.json with no crate prefix). The crate-only
+    check below would incorrectly refuse a legitimate conflict-resolution
+    target in any project whose crate_dir isn't literally "." -- fixed by
+    also accepting the one recognized workspace-level artifact location,
+    not just crate membership."""
     try:
         target.resolve().relative_to(workspace.resolve())
     except ValueError:
         raise PipelineError(f"target {target} is outside the workspace {workspace} -- refusing")
-    if _crate_for(target, workspace, descriptor) is None:
-        raise PipelineError(
-            f"target {target} does not belong to any crate declared in the "
-            "project descriptor -- refusing to draft/approve outside a declared crate"
-        )
+    if _crate_for(target, workspace, descriptor) is not None:
+        return
+    if target.resolve().parent == _conflict_dir_for(workspace):
+        return
+    raise PipelineError(
+        f"target {target} does not belong to any crate declared in the project "
+        "descriptor, and is not a recognized workspace-level artifact location "
+        "either -- refusing to draft/approve outside a declared scope"
+    )
 
 
 def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
@@ -512,8 +599,16 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         raise PipelineError(
             f"target {target} is not a .json file -- this pipeline only "
             "recognizes .json artifacts for boundary contracts, interactions, "
-            "and exemptions"
+            "exemptions, protocol-debt records, and conflict-resolution records"
         )
+    # Chainlink #20: conflict-resolution records are workspace-level, not
+    # crate-scoped -- checked before the crate-anchored block below, not
+    # nested inside it, since a target here need not belong to any crate
+    # at all (see _require_target_in_workspace's own note on the same gap).
+    if target.resolve().parent == _conflict_dir_for(workspace):
+        validator = load_conflict_resolution_validator()
+        evidence_ids = load_evidence_ids(_evidence_dir_for(workspace))
+        return lambda path, data: validate_conflict_resolution_data(path, data, validator, evidence_ids)
     crate = _crate_for(target, workspace, descriptor)
     if crate is not None:
         resolved_parent = target.resolve().parent
@@ -540,10 +635,11 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         f"no validator recognizes target {target} -- this pipeline only "
         "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
         "interactions at <crate_dir>/specs/_interactions/*.json, exemptions "
-        "at <crate_dir>/specs/_exemptions/*.json, and protocol-debt records at "
-        "<crate_dir>/specs/_protocol_debt/*.json today. Refusing to draft/approve "
-        "an artifact type or location it cannot mechanically gate, rather than "
-        "silently skipping validation for it."
+        "at <crate_dir>/specs/_exemptions/*.json, protocol-debt records at "
+        "<crate_dir>/specs/_protocol_debt/*.json, and conflict-resolution records "
+        "at specs/_conflicts/*.json (workspace-level) today. Refusing to "
+        "draft/approve an artifact type or location it cannot mechanically "
+        "gate, rather than silently skipping validation for it."
     )
 
 
@@ -693,6 +789,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         "validate-interaction (Stage 4 G1a/G1b + computed eligibility + G15), "
         "validate-exemption (Stage 4 G1a/G1b naming), "
         "validate-protocol-debt (Stage 4 G1a/G1b + interaction cross-reference), "
+        "validate-evidence (Stage 4 G1a/G1b, workspace-level), "
+        "validate-conflict-resolution (Stage 4 G1a/G1b/G11, workspace-level), "
         "validate-work-package (Stage 7 schema + §10.1, standalone), "
         "validate-promotion (Stage 4.5 schema + §7.1, standalone)"
     )
@@ -730,6 +828,17 @@ def main(argv: list[str]) -> int:
         "validate-protocol-debt", help="Stage 4: G1a/G1b over protocol-debt records"
     )
     validate_protocol_debt_p.set_defaults(func=cmd_validate_protocol_debt)
+
+    validate_evidence_p = sub.add_parser(
+        "validate-evidence", help="Stage 4: G1a/G1b over evidence records (workspace-level)"
+    )
+    validate_evidence_p.set_defaults(func=cmd_validate_evidence)
+
+    validate_conflict_resolution_p = sub.add_parser(
+        "validate-conflict-resolution",
+        help="Stage 4: G1a/G1b/G11 over evidence conflict-resolution records (workspace-level)",
+    )
+    validate_conflict_resolution_p.set_defaults(func=cmd_validate_conflict_resolution)
 
     validate_wp_p = sub.add_parser(
         "validate-work-package", help="Stage 7: schema + §10.1 checks over a work-package manifest"

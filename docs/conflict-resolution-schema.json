@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/conflict-resolution-schema.json",
+  "title": "Evidence conflict resolution — v1.0",
+  "description": "plan.md §11, gate table row G11: 'unresolved evidence conflict' blocks promotion -- only unresolved conflicts block, per chainlink #20's own description. One per specs/_conflicts/<conflict_id>.json -- workspace-level, matching evidence/'s own scope (conflicts arise between evidence records, which aren't owned by any one crate; the promotion-receipt worked example in §7 lists evidence/E-0143.json and specs/_conflicts/EC-004.json as siblings with no crate prefix, unlike boundary/interaction artifact_manifest entries which do carry one). status is the field G11 checks directly: 'resolved' requires resolution + review (enforced by this schema's own if/then, the same conditional-requirement pattern plan.md §1.1 already uses for mode: port requiring port_source); 'unresolved' has neither yet, since there is no selected authority or human sign-off before resolution. This IS in plan.md §7.2's human-checkpoint list ('evidence-conflict resolution'), unlike bare evidence records, so it carries a review block and IS routed through pipeline.py's approve().",
+  "type": "object",
+  "required": ["schema_version", "conflict_id", "evidence", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "conflict_id": {
+      "type": "string",
+      "pattern": "^EC-[0-9]+$",
+      "description": "Must equal the filename stem exactly (G1b, enforced by scripts/validate_conflict_resolution.py)."
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^E-[0-9]+$" },
+      "description": "The conflicting evidence ids -- a conflict is between at least two."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["resolved", "unresolved"]
+    },
+    "resolution": { "$ref": "#/$defs/resolution" },
+    "review": { "$ref": "#/$defs/review" }
+  },
+  "if": {
+    "properties": { "status": { "const": "resolved" } }
+  },
+  "then": {
+    "required": ["resolution", "review"]
+  },
+  "$defs": {
+    "resolution": {
+      "type": "object",
+      "required": ["selected_authority", "disposition_of_other", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "selected_authority": {
+          "type": "string",
+          "pattern": "^E-[0-9]+$",
+          "description": "Must be one of the ids listed in this record's own `evidence` array (G1b, enforced by scripts/validate_conflict_resolution.py -- not expressible as a plain JSON Schema cross-field constraint)."
+        },
+        "disposition_of_other": {
+          "type": "string",
+          "enum": ["required", "incidental", "bug-compat", "unspecified"],
+          "description": "The losing evidence's semantic_disposition after resolution -- same vocabulary as evidence-schema.json's own semantic_disposition."
+        },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "schema_version": "1.0",
+  "conflict_id": "EC-004",
+  "evidence": ["E-0143", "E-0201"],
+  "status": "unresolved"
+}

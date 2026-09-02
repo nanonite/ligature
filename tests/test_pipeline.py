@@ -262,6 +262,37 @@ class CmdValidateProtocolDebtIntegrationTest(unittest.TestCase):
         self.assertEqual(self._run(PROTOCOL_DEBT_FIXTURES / "mislocated"), 1)
 
 
+EVIDENCE_FIXTURES = ROOT / "tests" / "fixtures" / "evidence"
+CONFLICT_RESOLUTION_FIXTURES = ROOT / "tests" / "fixtures" / "conflict_resolution"
+
+
+class CmdValidateEvidenceIntegrationTest(unittest.TestCase):
+    """Evidence is workspace-level, not crate-scoped -- no project
+    descriptor is loaded by cmd_validate_evidence at all, so no
+    --descriptor flag is needed here (unlike every crate-scoped
+    validate-* subcommand above)."""
+
+    def _run(self, workspace: Path) -> int:
+        return pipeline.main(["--workspace", str(workspace), "validate-evidence"])
+
+    def test_valid_fixture_passes(self):
+        self.assertEqual(self._run(EVIDENCE_FIXTURES / "valid"), 0)
+
+    def test_artifact_under_mislocated_directory_is_rejected(self):
+        self.assertEqual(self._run(EVIDENCE_FIXTURES / "mislocated"), 1)
+
+
+class CmdValidateConflictResolutionIntegrationTest(unittest.TestCase):
+    def _run(self, workspace: Path) -> int:
+        return pipeline.main(["--workspace", str(workspace), "validate-conflict-resolution"])
+
+    def test_valid_resolved_fixture_passes(self):
+        self.assertEqual(self._run(CONFLICT_RESOLUTION_FIXTURES / "valid"), 0)
+
+    def test_unresolved_conflict_fails_g11(self):
+        self.assertEqual(self._run(CONFLICT_RESOLUTION_FIXTURES / "unresolved"), 1)
+
+
 WP_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "work_packages" / "valid"
 PROMOTION_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "promotions" / "valid"
 
@@ -397,6 +428,11 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_exemptions").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_protocol_debt").mkdir(parents=True)
+        # Workspace-level, deliberately NOT under crate_a/ -- proves the
+        # dispatcher recognizes it without any crate membership (chainlink
+        # #20: conflict-resolution records aren't crate-scoped at all).
+        (self.workspace / "evidence").mkdir(parents=True)
+        (self.workspace / "specs" / "_conflicts").mkdir(parents=True)
         self.descriptor_path = self.workspace / "project-descriptor.json"
         self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
 
@@ -899,6 +935,83 @@ class CmdApproveIntegrationTest(unittest.TestCase):
             "no_work_package_touches_its_path": False,
             "no_release_claim_includes_it": True,
             "tracking_issue": "chainlink:#99",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def _write_real_evidence(self, evidence_id: str) -> None:
+        (self.workspace / "evidence" / f"{evidence_id}.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "id": evidence_id,
+            "kind": "source-artifact",
+            "claim": "some proposition",
+            "origin": {
+                "repository": "https://example.com/repo",
+                "commit": "a1b2c3d",
+                "symbol": "Some::symbol",
+                "path": "src/lib.rs",
+                "content_hash": "sha256:" + "0" * 64,
+                "line_hint": "1-10",
+            },
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "P",
+        }))
+
+    def test_approve_valid_conflict_resolution_succeeds(self):
+        """#20: conflict-resolution records are workspace-level, not
+        crate-scoped, deliberately NOT under crate_a/ -- proves the
+        dispatcher recognizes the target without any crate membership at
+        all (external review lesson from #19's own G15: don't assume a
+        single-crate_dir='.' test fixture generalizes)."""
+        self._write_real_evidence("E-0143")
+        self._write_real_evidence("E-0201")
+        target = self.workspace / "specs" / "_conflicts" / "EC-004.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "conflict_id": "EC-004",
+            "evidence": ["E-0143", "E-0201"],
+            "status": "resolved",
+            "resolution": {
+                "selected_authority": "E-0201",
+                "disposition_of_other": "incidental",
+                "rationale": "compatibility policy: do not preserve the legacy defect",
+            },
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+
+    def test_approve_unresolved_conflict_is_refused(self):
+        """G11: 'only unresolved conflicts block' -- exercised end to end
+        through approve, not just the standalone validator."""
+        self._write_real_evidence("E-0143")
+        self._write_real_evidence("E-0201")
+        target = self.workspace / "specs" / "_conflicts" / "EC-004.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "conflict_id": "EC-004",
+            "evidence": ["E-0143", "E-0201"],
+            "status": "unresolved",
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_approve_conflict_resolution_with_dangling_evidence_is_refused(self):
+        target = self.workspace / "specs" / "_conflicts" / "EC-004.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "conflict_id": "EC-004",
+            "evidence": ["E-0143", "E-0201"],
+            "status": "resolved",
+            "resolution": {
+                "selected_authority": "E-0201",
+                "disposition_of_other": "incidental",
+                "rationale": "compatibility policy: do not preserve the legacy defect",
+            },
         }))
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 1)

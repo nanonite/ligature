@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "conflict_id": "EC-004",
+  "evidence": ["E-0143", "E-0201"],
+  "status": "resolved",
+  "resolution": {
+    "selected_authority": "E-0201",
+    "disposition_of_other": "incidental",
+    "rationale": "compatibility policy: do not preserve the legacy defect"
+  },
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-08-30"
+  }
+}

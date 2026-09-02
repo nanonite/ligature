@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/evidence-schema.json",
+  "title": "Evidence record — v1.0",
+  "description": "plan.md §11, chainlink #20. One per evidence/<id>.json -- workspace-level, not crate-scoped (evidence isn't owned by any one crate, unlike boundary/interaction/exemption/protocol-debt artifacts). The claim field is required: a hash and location identify bytes, not the proposition the analysis relies on. semantic_disposition is split from lifecycle so aspirational doesn't act as both authority and lifecycle state, and Mode R gets the rejected/deferred/out-of-scope states it needs. Deliberately has NO review block: plan.md §7.2's human-checkpoint list names 'evidence-conflict resolution', not evidence itself -- Stage 0 evidence intake is LLM-proposed and non-normative (plan.md's own flow diagram: 'LLM SIDE -- proposes, NON-NORMATIVE'). Consequently this artifact type is never routed through pipeline.py's approve() (which unconditionally injects a review block that this schema's additionalProperties:false would reject) -- see scripts/validate_evidence.py's module docstring.",
+  "type": "object",
+  "required": ["schema_version", "id", "kind", "claim", "origin", "semantic_disposition", "lifecycle", "confidence", "mode"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Not shown in plan.md §11's own (terser) worked example, but added for consistency with every other schema in this codebase, all of which carry one."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^E-[0-9]+$",
+      "description": "Must equal the filename stem exactly (G1b, enforced by scripts/validate_evidence.py)."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["requirement", "source-artifact", "observed-behavior", "test", "comment"]
+    },
+    "claim": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The proposition this evidence supports -- required, per plan.md §11: 'a hash and location identify bytes, not the proposition the analysis relies on.'"
+    },
+    "origin": { "$ref": "#/$defs/origin" },
+    "semantic_disposition": {
+      "type": "string",
+      "enum": ["required", "incidental", "bug-compat", "unspecified"]
+    },
+    "lifecycle": {
+      "type": "string",
+      "enum": ["accepted", "aspirational", "deferred", "rejected", "out-of-scope"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["P", "R"]
+    }
+  },
+  "$defs": {
+    "origin": {
+      "type": "object",
+      "required": ["repository", "commit", "symbol", "path", "content_hash", "line_hint"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "commit": { "type": "string", "minLength": 1 },
+        "symbol": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "line_hint": {
+          "type": "string",
+          "pattern": "^[0-9]+(-[0-9]+)?$",
+          "description": "A single line ('118') or an inclusive range ('118-160'), matching the worked example."
+        }
+      }
+    }
+  }
+}

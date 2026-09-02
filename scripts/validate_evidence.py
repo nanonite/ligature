@@ -137,17 +137,21 @@ def find_evidence_files(root: Path) -> list[Path]:
 
 
 def validate(root: Path) -> list[Finding]:
-    """Recursive, unanchored scan for the standalone CLI: finds every
-    `evidence` directory anywhere under `root`. Every file found is
-    validated -- a malformed or wrong-extension artifact is reported, not
-    silently skipped (check_naming's own suffix check catches the
-    well-formed-JSON-but-wrong-extension case, matching every other
-    validator in this pipeline)."""
-    validator = load_validator()
-    findings: list[Finding] = []
-    for path in find_evidence_files(root):
-        findings.extend(validate_file(path, validator))
-    return findings
+    """The standalone CLI's entry point. `root` is always the workspace
+    root itself here (unlike scripts/validate_interaction.py's standalone
+    CLI, which has no crate-boundary concept and is deliberately given
+    only an ambiguous scan root) -- there is exactly one legitimate
+    `evidence` directory to anchor to: `root / "evidence"`. Delegates
+    directly to validate_workspace() so the standalone CLI gets the exact
+    same discover-then-reject-by-location behavior, not a separate,
+    weaker unanchored scan.
+
+    External review, medium severity: this used to only check a found
+    file's IMMEDIATE parent name ('evidence'), never where that directory
+    itself sat relative to `root` -- a schema-valid artifact under
+    `<root>/docs/evidence/E-0143.json` matched and passed with zero
+    findings. Reproduced directly before fixing."""
+    return validate_workspace(root, root / "evidence")
 
 
 def validate_workspace(workspace_root: Path, canonical_dir: Path) -> list[Finding]:

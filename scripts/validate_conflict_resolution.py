@@ -221,27 +221,27 @@ def find_conflict_files(root: Path) -> list[Path]:
 
 
 def validate(root: Path, evidence_ids: set[str] | None = None) -> list[Finding]:
-    """Recursive, unanchored scan for the standalone CLI.
+    """The standalone CLI's entry point. `root` is always the workspace
+    root itself here -- there is exactly one legitimate canonical
+    directory to anchor to, `root / "specs" / "_conflicts"`. Delegates
+    directly to validate_workspace() so the standalone CLI gets the exact
+    same discover-then-reject-by-location behavior for the conflict
+    records themselves, not a separate, weaker unanchored scan.
 
-    External review, medium severity: `evidence_ids` used to be left as
-    None unconditionally here, so a resolved conflict in a workspace with
-    no evidence/ directory at all printed OK with only a non-blocking
-    info note -- reproduced directly before fixing. Unlike
-    scripts/validate_interaction.py's own standalone CLI (which has no
-    crate-boundary concept to resolve protocol-debt coverage against),
-    evidence and conflict-resolution are BOTH always direct workspace-
-    level siblings of this same `root` -- `root / "evidence"` is
-    unambiguous. If the caller doesn't supply an explicit `evidence_ids`,
-    it's now derived from that sibling directory, making this scan
-    genuinely fail-closed by default; an explicit `set()` or a real set
-    still works exactly as before for composition by other callers."""
+    External review, medium severity (two rounds): (1) `evidence_ids`
+    used to be left as None unconditionally, so a resolved conflict in a
+    workspace with no evidence/ directory at all printed OK with only a
+    non-blocking info note -- fixed by deriving it from the sibling
+    `root / "evidence"` directory (via scripts/validate_evidence.py's own
+    valid_evidence_ids()) whenever the caller doesn't supply an explicit
+    set. (2) this scan was also unanchored for the conflict-resolution
+    records' own location: a schema-valid resolution under
+    `<root>/not_specs/_conflicts/EC-004.json` matched and passed with
+    zero findings, the mirror-image of scripts/validate_evidence.py's own
+    same-round finding. Both reproduced directly before fixing."""
     if evidence_ids is None:
         evidence_ids = valid_evidence_ids(root / "evidence")
-    validator = load_validator()
-    findings: list[Finding] = []
-    for path in find_conflict_files(root):
-        findings.extend(validate_file(path, validator, evidence_ids))
-    return findings
+    return validate_workspace(root, root / "specs" / "_conflicts", evidence_ids)
 
 
 def validate_workspace(

@@ -162,6 +162,40 @@ class FindEvidenceFilesTest(unittest.TestCase):
             self.assertEqual(len(found), 1)
 
 
+class StandaloneValidateAnchoringTest(unittest.TestCase):
+    """External review, medium severity: validate() (the standalone CLI's
+    entry point) used to only check a found file's IMMEDIATE parent name
+    ('evidence'), never where that directory itself sat relative to
+    `root` -- a schema-valid artifact under <root>/docs/evidence/E-0143.json
+    matched and passed with zero findings. `root` is always the workspace
+    root here (unlike scripts/validate_interaction.py's standalone CLI,
+    which has no crate-boundary concept), so validate() now delegates to
+    validate_workspace(root, root / "evidence"), getting the same
+    discover-then-reject-by-location behavior. Reproduced directly before
+    fixing."""
+
+    def test_mislocated_but_otherwise_valid_artifact_is_rejected_by_location_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stray = root / "docs" / "evidence"
+            stray.mkdir(parents=True)
+            (stray / "E-0143.json").write_text(json.dumps(load_valid()))
+            findings = validate(root)
+        self.assertTrue(
+            any("not directly under the canonical directory" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_correctly_located_artifact_still_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "evidence"
+            canonical.mkdir(parents=True)
+            (canonical / "E-0143.json").write_text(json.dumps(load_valid()))
+            findings = validate(root)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+
 class ValidateWorkspaceTest(unittest.TestCase):
     """validate_workspace(): the descriptor-driven scan pipeline.py's
     cmd_validate_evidence uses -- discovers candidates workspace-wide,

@@ -19,6 +19,24 @@ from validate_conflict_resolution import (  # noqa: E402
 CONFLICT_PATH = Path("specs/_conflicts/EC-004.json")
 
 
+def write_valid_evidence(evidence_dir: Path, evidence_id: str) -> None:
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"{evidence_id}.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "id": evidence_id,
+        "kind": "source-artifact",
+        "claim": "x",
+        "origin": {
+            "repository": "r", "commit": "c", "symbol": "s", "path": "p",
+            "content_hash": "sha256:" + "0" * 64, "line_hint": "1",
+        },
+        "semantic_disposition": "required",
+        "lifecycle": "accepted",
+        "confidence": "high",
+        "mode": "P",
+    }))
+
+
 def load_valid() -> dict:
     return {
         "schema_version": "1.0",
@@ -255,6 +273,44 @@ class FindConflictFilesTest(unittest.TestCase):
             (d / "EC-001.json").write_text("{}")
             found = find_conflict_files(Path(tmp))
             self.assertEqual(len(found), 1)
+
+
+class StandaloneValidateAnchoringTest(unittest.TestCase):
+    """External review, medium severity: validate() used to only check a
+    found file's IMMEDIATE parent name ('_conflicts'), never where that
+    directory itself sat relative to `root` -- a schema-valid resolution
+    under <root>/not_specs/_conflicts/EC-004.json matched and passed with
+    zero findings, the mirror-image of
+    scripts/validate_evidence.py's own same-round finding. `root` is
+    always the workspace root here, so validate() now delegates to
+    validate_workspace(root, root / "specs" / "_conflicts", ...), getting
+    the same discover-then-reject-by-location behavior. Reproduced
+    directly before fixing."""
+
+    def test_mislocated_but_otherwise_valid_artifact_is_rejected_by_location_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stray = root / "not_specs" / "_conflicts"
+            stray.mkdir(parents=True)
+            (stray / "EC-004.json").write_text(json.dumps(load_valid()))
+            write_valid_evidence(root / "evidence", "E-0143")
+            write_valid_evidence(root / "evidence", "E-0201")
+            findings = validate(root)
+        self.assertTrue(
+            any("not directly under the canonical directory" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_correctly_located_artifact_still_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "specs" / "_conflicts"
+            canonical.mkdir(parents=True)
+            (canonical / "EC-004.json").write_text(json.dumps(load_valid()))
+            write_valid_evidence(root / "evidence", "E-0143")
+            write_valid_evidence(root / "evidence", "E-0201")
+            findings = validate(root)
+        self.assertEqual(findings, [], [str(f) for f in findings])
 
 
 class ValidateWorkspaceTest(unittest.TestCase):

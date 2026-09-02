@@ -826,6 +826,8 @@ An external review (2026-09-02) found four further gaps, all reproduced directly
 
 All four independently reproduced as fixed via raw CLI/script calls outside the test suite, including the workspace-level `draft` fix run end to end against a real `crate_dir: "crate_a"` descriptor. Test count: 346 → 354, full suite green, zero regressions.
 
+A further review pass (2026-09-02, medium) found one remaining layout gap: both standalone CLIs' own `validate()` — unlike their `validate_workspace()` counterparts pipeline.py uses — still only checked a found file's *immediate parent name* (`evidence`/`_conflicts`), never where that directory itself sat relative to the given `root`. A schema-valid evidence record under `<root>/docs/evidence/E-0143.json`, and a schema-valid conflict resolution under `<root>/not_specs/_conflicts/EC-004.json`, both matched and passed with zero findings — reproduced directly before fixing. Since `root` is always the workspace root itself for both of these standalone CLIs (unlike `scripts/validate_interaction.py`'s own standalone CLI, which genuinely has no crate-boundary concept and can't derive one canonical directory), `validate()` in both modules now simply delegates to `validate_workspace(root, root / "evidence" | "specs" / "_conflicts", ...)` — the exact same discover-then-reject-by-location behavior, rather than a separate, weaker unanchored scan. Test count: 354 → 358, full suite green, zero regressions.
+
 ---
 
 ## 12. Feedback points — drift tabs

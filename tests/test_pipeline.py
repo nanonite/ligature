@@ -1076,6 +1076,20 @@ class TargetContainmentTest(unittest.TestCase):
         with self.assertRaises(pipeline.PipelineError):
             pipeline._require_target_in_workspace(traversal, self.workspace, self.descriptor)
 
+    def test_workspace_level_conflict_resolution_target_is_accepted(self):
+        """Not under crate_a/ at all -- proves the workspace-level
+        recognition, not just crate membership."""
+        target = self.workspace / "specs" / "_conflicts" / "EC-004.json"
+        pipeline._require_target_in_workspace(target, self.workspace, self.descriptor)  # no raise
+
+    def test_workspace_level_evidence_target_is_accepted(self):
+        """External review, medium severity: evidence/ was missing from
+        this same workspace-level recognition -- draft refused the
+        canonical evidence/E-0001.json target with a real (non-'.')
+        crate_dir. Reproduced directly before fixing."""
+        target = self.workspace / "evidence" / "E-0001.json"
+        pipeline._require_target_in_workspace(target, self.workspace, self.descriptor)  # no raise
+
 
 if __name__ == "__main__":
     unittest.main()

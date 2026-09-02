@@ -29,14 +29,27 @@ evidence/E-0143.json with no crate prefix).
           scope).
 
 The dangling-evidence-reference check accepts an optional
-`evidence_ids: set[str] | None` lookup, defaulting to None -- mirroring
-scripts/validate_interaction.py's/validate_protocol_debt.py's own
-None-means-"not checked in this context" pattern (a visible info-severity
-note, never a silent pass): the single-directory standalone CLI has no
-sibling evidence/ directory to consult. The workspace-aware
-validate_workspace() (pipeline.py's cmd_validate_conflict_resolution)
-always supplies a real lookup, making the check genuinely fail-closed
-there.
+`evidence_ids: set[str] | None` lookup at the validate_data/validate_file
+layer -- None means "not checked in this context" (a visible info-
+severity note, never a silent pass), for composition by any caller that
+genuinely doesn't have the context.
+
+External review, medium severity: the standalone CLI's own `validate()`/
+`main()` used to leave this as None unconditionally, so a resolved
+conflict in a workspace with no evidence/ directory at all -- or any
+missing referenced id -- printed "OK" with only a non-blocking info
+note. This was never structurally necessary the way it is for
+scripts/validate_interaction.py's standalone CLI (which is deliberately
+given only a `root` with no crate-boundary concept to resolve protocol-
+debt coverage against): evidence and conflict-resolution are BOTH
+*always* direct workspace-level siblings of the exact same `root`
+argument, so `root / "evidence"` is unambiguous, not something this CLI
+needs an extra flag or crate context to find. `validate()` now derives
+`valid_evidence_ids(root / "evidence")` by default whenever the caller
+doesn't supply an explicit set, making the standalone CLI genuinely
+fail-closed too, not just the workspace-aware validate_workspace()
+(pipeline.py's cmd_validate_conflict_resolution) a caller can already
+reach.
 """
 from __future__ import annotations
 
@@ -50,6 +63,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_utils import make_validator  # noqa: E402
+from validate_evidence import valid_evidence_ids  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "conflict-resolution-schema.json"
 
@@ -207,11 +221,22 @@ def find_conflict_files(root: Path) -> list[Path]:
 
 
 def validate(root: Path, evidence_ids: set[str] | None = None) -> list[Finding]:
-    """Recursive, unanchored scan for the standalone CLI. `evidence_ids`
-    defaults to None -- this single-root scan has no sibling evidence/
-    directory concept, so the cross-reference check degrades to a visible
-    info note. Only the workspace-aware validate_workspace() (pipeline.py)
-    makes it a real fail-closed check."""
+    """Recursive, unanchored scan for the standalone CLI.
+
+    External review, medium severity: `evidence_ids` used to be left as
+    None unconditionally here, so a resolved conflict in a workspace with
+    no evidence/ directory at all printed OK with only a non-blocking
+    info note -- reproduced directly before fixing. Unlike
+    scripts/validate_interaction.py's own standalone CLI (which has no
+    crate-boundary concept to resolve protocol-debt coverage against),
+    evidence and conflict-resolution are BOTH always direct workspace-
+    level siblings of this same `root` -- `root / "evidence"` is
+    unambiguous. If the caller doesn't supply an explicit `evidence_ids`,
+    it's now derived from that sibling directory, making this scan
+    genuinely fail-closed by default; an explicit `set()` or a real set
+    still works exactly as before for composition by other callers."""
+    if evidence_ids is None:
+        evidence_ids = valid_evidence_ids(root / "evidence")
     validator = load_validator()
     findings: list[Finding] = []
     for path in find_conflict_files(root):

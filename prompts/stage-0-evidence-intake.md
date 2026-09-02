@@ -3,17 +3,16 @@
 One-shot template. Structured-output contract: output only the JSON object
 for a single evidence record, no markdown fence, no prose before or after.
 
-**No formal schema file exists for this yet** (`docs/concept-to-code-modifications.md`
-tracks it as chainlink #20/I6, M3 — evidence `claim` field,
-`semantic_disposition`/`lifecycle` split, conflict resolution). This
-template targets the shape plan.md §11 already specifies in worked-example
-form. Once #20 lands as a real JSON Schema, update the shape below to match
-it exactly rather than trusting this prose copy to still be current.
+Chainlink #20 has landed as a real JSON Schema (`docs/evidence-schema.json`,
+enforced by `scripts/validate_evidence.py`). The output contract below
+matches it field-for-field — if the two ever disagree, the schema is
+authoritative, not this prose copy.
 
 ## Output contract
 
 ```json
 {
+  "schema_version": "1.0",
   "id": "E-<sequential>",
   "kind": "requirement | source-artifact | observed-behavior | test | comment",
   "claim": "<the proposition this evidence supports, in one sentence — not just a hash+location. A hash and a file path identify bytes, not the claim being relied on.>",
@@ -32,6 +31,12 @@ it exactly rather than trusting this prose copy to still be current.
 }
 ```
 
+Emit `id` as the bare `E-<sequential>` value shown above (`pipeline.py`'s
+`draft`/staging step derives the target filename separately) — do not
+invent a `review` block: evidence records never carry one (plan.md §7.2's
+human-checkpoint list names "evidence-conflict resolution," not evidence
+itself), and `additionalProperties: false` rejects one outright.
+
 ## Inputs
 
 - `{{source_material}}` — the code, comment, test, requirement doc, or
@@ -49,11 +54,17 @@ it exactly rather than trusting this prose copy to still be current.
    the proposition, not a description of where it came from. "pop_ready
    returns None only when no task has deadline <= now" is a claim. "found
    in queue.cpp lines 118-160" is not — that's `origin`, not `claim`.
-2. **`semantic_disposition`** and **`lifecycle`** are independent axes, do
-   not conflate them. A claim can be `aspirational` (disposition — is this
-   *intended* behavior at all) and separately `deferred` (lifecycle — is it
-   *accepted into the pipeline* right now). Do not use `aspirational` as a
-   stand-in for `deferred` or vice versa.
+2. **`semantic_disposition`** (`required | incidental | bug-compat |
+   unspecified`) and **`lifecycle`** (`accepted | aspirational | deferred |
+   rejected | out-of-scope`) are independent axes — `aspirational` and
+   `deferred` are both *lifecycle* values, not a disposition/lifecycle
+   pair, so never place one in the other field. A claim can be
+   `semantic_disposition: bug-compat` (a legacy defect being preserved,
+   not a requirement) while its `lifecycle` is separately `deferred` (not
+   yet accepted into the pipeline) — the disposition says what *kind* of
+   authority the claim has if accepted; the lifecycle says whether it
+   *has* been accepted yet. Neither field's value ever substitutes for
+   the other's.
 3. **`mode`**: `P` (differential-testing / port track) only when the
    project descriptor's `mode` is `port` **and** this evidence originates
    from the foreign-language source being ported. `R` (requirements-governed)

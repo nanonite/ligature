@@ -104,7 +104,7 @@ from validate_boundary_contracts import validate_data as validate_boundary_data 
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
 from validate_conflict_resolution import validate_workspace as validate_conflict_resolution_workspace  # noqa: E402
-from validate_evidence import load_evidence_ids  # noqa: E402
+from validate_evidence import valid_evidence_ids  # noqa: E402
 from validate_evidence import validate_workspace as validate_evidence_workspace  # noqa: E402
 from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
 from validate_exemption import validate_crate as validate_exemption_crate  # noqa: E402
@@ -465,7 +465,7 @@ def cmd_validate_conflict_resolution(args: argparse.Namespace) -> int:
     # fail-closed checks here -- not deferred the way #19's G15 initially
     # (and wrongly) was.
     workspace_root = _require_workspace_root_exists(args.workspace)
-    evidence_ids = load_evidence_ids(_evidence_dir_for(workspace_root))
+    evidence_ids = valid_evidence_ids(_evidence_dir_for(workspace_root))
     findings = validate_conflict_resolution_workspace(
         workspace_root, _conflict_dir_for(workspace_root), evidence_ids
     )
@@ -543,7 +543,18 @@ def _require_target_in_workspace(target: Path, workspace: Path, descriptor: dict
     check below would incorrectly refuse a legitimate conflict-resolution
     target in any project whose crate_dir isn't literally "." -- fixed by
     also accepting the one recognized workspace-level artifact location,
-    not just crate membership."""
+    not just crate membership.
+
+    External review, medium severity: evidence/ (project_descriptor.
+    evidence_dir_for) is the *other* workspace-level artifact type from
+    #20 and was missing from this same fix -- with a real crate_dir like
+    "crate_a", `pipeline.py draft` refused the canonical
+    evidence/E-0001.json target outright, even though evidence records
+    are meant to be staged via `draft` (Stage 0). Reproduced directly
+    before fixing. Evidence is still never routed through `approve()`
+    (see scripts/validate_evidence.py's own docstring for why), so this
+    only needs to widen the *draft*-time in-bounds check, not
+    `_select_validate_fn`'s dispatcher, which `cmd_draft` never calls."""
     try:
         target.resolve().relative_to(workspace.resolve())
     except ValueError:
@@ -551,6 +562,8 @@ def _require_target_in_workspace(target: Path, workspace: Path, descriptor: dict
     if _crate_for(target, workspace, descriptor) is not None:
         return
     if target.resolve().parent == _conflict_dir_for(workspace):
+        return
+    if target.resolve().parent == _evidence_dir_for(workspace):
         return
     raise PipelineError(
         f"target {target} does not belong to any crate declared in the project "
@@ -607,7 +620,7 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     # at all (see _require_target_in_workspace's own note on the same gap).
     if target.resolve().parent == _conflict_dir_for(workspace):
         validator = load_conflict_resolution_validator()
-        evidence_ids = load_evidence_ids(_evidence_dir_for(workspace))
+        evidence_ids = valid_evidence_ids(_evidence_dir_for(workspace))
         return lambda path, data: validate_conflict_resolution_data(path, data, validator, evidence_ids)
     crate = _crate_for(target, workspace, descriptor)
     if crate is not None:
@@ -637,9 +650,11 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         "interactions at <crate_dir>/specs/_interactions/*.json, exemptions "
         "at <crate_dir>/specs/_exemptions/*.json, protocol-debt records at "
         "<crate_dir>/specs/_protocol_debt/*.json, and conflict-resolution records "
-        "at specs/_conflicts/*.json (workspace-level) today. Refusing to "
-        "draft/approve an artifact type or location it cannot mechanically "
-        "gate, rather than silently skipping validation for it."
+        "at specs/_conflicts/*.json (workspace-level) today. Evidence records at "
+        "evidence/*.json (workspace-level) are a valid draft target but are never "
+        "approved -- they carry no review block, so approve() cannot promote them. "
+        "Refusing to draft/approve an artifact type or location it cannot "
+        "mechanically gate, rather than silently skipping validation for it."
     )
 
 

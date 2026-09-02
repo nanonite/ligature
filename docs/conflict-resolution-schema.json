@@ -19,9 +19,10 @@
     "evidence": {
       "type": "array",
       "minItems": 2,
+      "maxItems": 2,
       "uniqueItems": true,
       "items": { "type": "string", "pattern": "^E-[0-9]+$" },
-      "description": "The conflicting evidence ids -- a conflict is between at least two."
+      "description": "The two conflicting evidence ids. plan.md §11's worked example and `resolution.disposition_of_other` (singular) both model a pairwise conflict -- exactly one winner, one loser; a three-or-more-evidence conflict would leave `disposition_of_other` unable to say which loser it describes, so it is rejected here rather than silently accepted with an ambiguous resolution."
     },
     "status": {
       "type": "string",

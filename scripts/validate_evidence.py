@@ -182,23 +182,40 @@ def validate_workspace(workspace_root: Path, canonical_dir: Path) -> list[Findin
     return findings
 
 
-def load_evidence_ids(evidence_dir: Path) -> set[str]:
-    """Best-effort load of every schema-shaped evidence id directly under
-    `evidence_dir` -- used by scripts/validate_conflict_resolution.py's own
-    dangling-reference check. Silently skips anything that isn't valid
-    JSON or lacks a string `id`: full G1a/G1b validation of these is
-    validate_workspace's own job, not this loader's."""
-    result: set[str] = set()
+def valid_evidence_ids(evidence_dir: Path) -> set[str]:
+    """The set of ids from evidence records directly under `evidence_dir`
+    that are themselves fully G1a/G1b valid -- used by
+    scripts/validate_conflict_resolution.py's own dangling-reference
+    check, mirroring scripts/validate_protocol_debt.py's own
+    valid_interaction_ids_from_crate().
+
+    External review, high severity: the previous version (load_evidence_ids)
+    trusted any parseable JSON object with a string `id` field -- a file
+    containing only `{"id": "E-0143"}` (missing every other required
+    field, and never checked for correct naming/placement) satisfied a
+    conflict-resolution's cross-reference and let `approve` commit a
+    resolved conflict referencing it. Reproduced directly before fixing.
+    Fixed by requiring validate_file() to return zero findings before an
+    id is trusted -- the same "must be genuinely valid, not just present"
+    bar #19's protocol-debt coverage already applies.
+
+    Duplicate ids across different files are excluded rather than trusted
+    ambiguously (same discipline as G2+'s own duplicate-concept handling)
+    -- check_naming's own flat+id==stem requirement makes this
+    structurally rare within one non-recursive directory listing (two
+    different filenames can't both stem to the same id and still pass),
+    but the guard costs nothing and doesn't assume that invariant holds
+    forever."""
+    result: dict[str, int] = {}
     if not evidence_dir.is_dir():
-        return result
+        return set()
+    validator = load_validator()
     for path in sorted(evidence_dir.glob("*.json")):
-        try:
-            data = json.loads(path.read_text())
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        if validate_file(path, validator):
             continue
-        if isinstance(data, dict) and isinstance(data.get("id"), str):
-            result.add(data["id"])
-    return result
+        data = json.loads(path.read_text())
+        result[data["id"]] = result.get(data["id"], 0) + 1
+    return {evidence_id for evidence_id, count in result.items() if count == 1}
 
 
 def main(argv: list[str]) -> int:

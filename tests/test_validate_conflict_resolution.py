@@ -78,6 +78,18 @@ class G1aFailureTest(unittest.TestCase):
         findings = run(data)
         self.assertTrue(any(f.gate == "G1a" for f in findings))
 
+    def test_too_many_evidence_ids_is_rejected(self):
+        """External review, medium severity: a three-evidence conflict
+        passed with zero findings even though resolution.disposition_of_other
+        (singular) can only describe one loser. plan.md §11's worked
+        example and disposition_of_other's own singular naming both model
+        a pairwise conflict -- reproduced directly before restricting the
+        schema to exactly two evidence ids."""
+        data = load_valid()
+        data["evidence"] = ["E-0143", "E-0201", "E-0301"]
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in findings))
+
     def test_bad_status_enum_value_is_rejected(self):
         data = load_valid()
         data["status"] = "vibes"
@@ -157,6 +169,61 @@ class G11UnresolvedConflictTest(unittest.TestCase):
         self.assertFalse(any(f.gate == "G11" for f in findings))
 
 
+class StandaloneValidateFailsClosedTest(unittest.TestCase):
+    """External review, medium severity: validate() used to leave
+    evidence_ids as None unconditionally, so a resolved conflict in a
+    workspace with no evidence/ directory at all printed OK with only a
+    non-blocking info note. Unlike scripts/validate_interaction.py's own
+    standalone CLI (no crate-boundary concept to resolve against),
+    evidence and conflict-resolution are always direct workspace-level
+    siblings of the same root -- validate() now derives
+    root / "evidence" by default. Reproduced directly before fixing."""
+
+    def test_missing_evidence_directory_is_a_hard_dangling_reference_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_conflicts"
+            d.mkdir(parents=True)
+            (d / "EC-004.json").write_text(json.dumps(load_valid()))
+            findings = validate(Path(tmp))
+        self.assertTrue(
+            any(f.severity == "error" and "dangling reference" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_present_and_valid_sibling_evidence_directory_is_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "specs" / "_conflicts").mkdir(parents=True)
+            (root / "specs" / "_conflicts" / "EC-004.json").write_text(json.dumps(load_valid()))
+            evidence_dir = root / "evidence"
+            evidence_dir.mkdir()
+            for evidence_id in ["E-0143", "E-0201"]:
+                (evidence_dir / f"{evidence_id}.json").write_text(json.dumps({
+                    "schema_version": "1.0",
+                    "id": evidence_id,
+                    "kind": "source-artifact",
+                    "claim": "x",
+                    "origin": {
+                        "repository": "r", "commit": "c", "symbol": "s", "path": "p",
+                        "content_hash": "sha256:" + "0" * 64, "line_hint": "1",
+                    },
+                    "semantic_disposition": "required",
+                    "lifecycle": "accepted",
+                    "confidence": "high",
+                    "mode": "P",
+                }))
+            findings = validate(root)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_explicit_evidence_ids_still_overrides_derivation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_conflicts"
+            d.mkdir(parents=True)
+            (d / "EC-004.json").write_text(json.dumps(load_valid()))
+            findings = validate(Path(tmp), evidence_ids={"E-0143", "E-0201"})
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+
 class NamingTest(unittest.TestCase):
     def test_filename_stem_mismatch_is_rejected(self):
         data = load_valid()
@@ -220,10 +287,32 @@ class ValidateWorkspaceTest(unittest.TestCase):
 
 class StandaloneCliMainTest(unittest.TestCase):
     def test_main_passes_for_valid_fixture_tree(self):
+        """A real sibling evidence/ directory is required now that
+        validate() derives evidence coverage from root/"evidence" by
+        default (Finding 2's fix) -- a resolved conflict with no
+        evidence/ directory at all is a dangling-reference failure, not a
+        pass."""
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / "specs" / "_conflicts"
             d.mkdir(parents=True)
             (d / "EC-004.json").write_text(json.dumps(load_valid()))
+            evidence_dir = Path(tmp) / "evidence"
+            evidence_dir.mkdir()
+            for evidence_id in ["E-0143", "E-0201"]:
+                (evidence_dir / f"{evidence_id}.json").write_text(json.dumps({
+                    "schema_version": "1.0",
+                    "id": evidence_id,
+                    "kind": "source-artifact",
+                    "claim": "x",
+                    "origin": {
+                        "repository": "r", "commit": "c", "symbol": "s", "path": "p",
+                        "content_hash": "sha256:" + "0" * 64, "line_hint": "1",
+                    },
+                    "semantic_disposition": "required",
+                    "lifecycle": "accepted",
+                    "confidence": "high",
+                    "mode": "P",
+                }))
             rc = main([tmp])
         self.assertEqual(rc, 0)
 

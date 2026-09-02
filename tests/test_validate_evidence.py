@@ -9,9 +9,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_evidence import (  # noqa: E402
     find_evidence_files,
-    load_evidence_ids,
     load_validator,
     main,
+    valid_evidence_ids,
     validate,
     validate_data,
     validate_workspace,
@@ -195,23 +195,45 @@ class ValidateWorkspaceTest(unittest.TestCase):
         )
 
 
-class LoadEvidenceIdsTest(unittest.TestCase):
+class ValidEvidenceIdsTest(unittest.TestCase):
     """Used by validate_conflict_resolution.py's own cross-reference."""
 
     def test_missing_dir_returns_empty_set(self):
-        self.assertEqual(load_evidence_ids(Path("/nonexistent")), set())
+        self.assertEqual(valid_evidence_ids(Path("/nonexistent")), set())
 
-    def test_loads_ids_from_valid_files(self):
+    def test_loads_ids_from_valid_correctly_located_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp)
+            d = Path(tmp) / "evidence"
+            d.mkdir()
             (d / "E-0143.json").write_text(json.dumps(load_valid()))
-            self.assertEqual(load_evidence_ids(d), {"E-0143"})
+            self.assertEqual(valid_evidence_ids(d), {"E-0143"})
 
     def test_skips_unparseable_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp)
+            d = Path(tmp) / "evidence"
+            d.mkdir()
             (d / "garbage.json").write_text("not json [[[")
-            self.assertEqual(load_evidence_ids(d), set())
+            self.assertEqual(valid_evidence_ids(d), set())
+
+    def test_schema_invalid_evidence_is_not_trusted(self):
+        """External review, high severity: a file containing only
+        {"id": "E-0143"} (missing every other required field) previously
+        satisfied a conflict-resolution's cross-reference. Reproduced
+        directly before fixing -- must now be excluded entirely."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "evidence"
+            d.mkdir()
+            (d / "E-0143.json").write_text(json.dumps({"id": "E-0143"}))
+            self.assertEqual(valid_evidence_ids(d), set())
+
+    def test_mislocated_or_misnamed_evidence_is_not_trusted(self):
+        """A file that would fail check_naming (id != filename stem) is
+        excluded even though it's otherwise schema-valid."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "evidence"
+            d.mkdir()
+            (d / "wrong-name.json").write_text(json.dumps(load_valid()))
+            self.assertEqual(valid_evidence_ids(d), set())
 
 
 class StandaloneCliMainTest(unittest.TestCase):

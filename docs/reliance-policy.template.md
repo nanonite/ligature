@@ -9,6 +9,15 @@
 
 Schema version this policy targets: `<boundary-contract-schema version>`.
 Owner: `<team or individual accountable for changes>`.
+Policy version: `<policy-name>@<major>.<minor>`
+
+Fill in the `Policy version:` line above with a real value (e.g. `reliance-policy@1.2`),
+as its own line, exactly as shown — `scripts/generate_promotion_receipt.py` parses
+this exact line to compute a promotion receipt's `policy_version` field (chainlink
+#45) and refuses to generate a receipt if it's missing or malformed. Bump it on
+every substantive change to the resolution rule or this project's own additions
+below; this is the mechanical enforcement of "version it like any other policy
+doc" above, not optional decoration.
 
 ## Resolution rule (fixed — do not override)
 

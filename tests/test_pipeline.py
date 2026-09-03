@@ -1158,6 +1158,229 @@ class CmdValidatePromotionIntegrationTest(unittest.TestCase):
             bad_receipt.unlink()
 
 
+class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
+    """Exercised through pipeline.main() end to end -- chainlink #45's own
+    scope. Uses its own isolated tempdir workspace rather than the shared
+    PROMOTION_FIXTURE_ROOT, since accept-promotion writes a real file
+    (and a real audit log) and must never touch the checked-in fixture
+    tree other tests in this file rely on, or this repository's own
+    ci/results/review_log.jsonl."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "project-descriptor.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "project": {"name": "repro", "crate_naming_convention": "^repro-[a-z]+"},
+            "mode": "greenfield",
+            "crates": [
+                {
+                    "crate_dir": "crates/scheduler",
+                    "contracts_crate": "contracts",
+                    "specs_search_root": "crates/scheduler/specs",
+                }
+            ],
+            "verifier_policy": {"default": "creusot"},
+            "compatibility_policy": {"reliance_policy_path": "docs/reliance-policy.md"},
+            "write_set": {"allowed_roots": [], "protected_roots": []},
+            "gate_integrity": [],
+            "review": {"reviewer": "repro", "reviewed_at": "2026-08-27"},
+        }))
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "reliance-policy.md").write_text(
+            "# Reliance policy\n\n"
+            "Schema version this policy targets: `1.0`.\n"
+            "Owner: `platform-team`.\n"
+            "Policy version: `reliance-policy@1.2`\n"
+        )
+        boundary_dir = self.workspace / "crates" / "scheduler" / "specs" / "_boundaries"
+        boundary_dir.mkdir(parents=True)
+        (boundary_dir / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }))
+        self.artifacts = [
+            "docs/reliance-policy.md",
+            "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+        ]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args):
+        return pipeline.main(["--workspace", str(self.workspace), "accept-promotion", *args])
+
+    def test_generates_a_receipt_that_validate_promotion_then_accepts(self):
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+            "--accepted-at", "2026-09-05",
+        )
+        self.assertEqual(rc, 0)
+
+        receipt_path = self.workspace / "specs" / "_promotions" / "scheduling.json"
+        self.assertTrue(receipt_path.exists())
+        data = json.loads(receipt_path.read_text())
+        self.assertEqual(data["promotion_id"], "PROM-SCHEDULING-001")
+        self.assertEqual(data["schema_versions"], {"boundary": "1.0"})
+        self.assertEqual(data["policy_version"], "reliance-policy@1.2")
+
+        validate_rc = pipeline.main(
+            ["--workspace", str(self.workspace), "validate-promotion", str(receipt_path)]
+        )
+        self.assertEqual(validate_rc, 0)
+
+    def test_audit_log_is_written_inside_the_workspace_not_this_repository(self):
+        """External review, medium severity: the CLI used to rely on
+        accept_promotion()'s cwd-relative default, so accepting a
+        promotion for an external/temporary workspace wrote its audit
+        trail into this repository's own ci/results/review_log.jsonl."""
+        repo_log = ROOT / "ci" / "results" / "review_log.jsonl"
+        repo_log_size_before = repo_log.stat().st_size if repo_log.exists() else None
+
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 0)
+
+        workspace_log = self.workspace / "ci" / "results" / "review_log.jsonl"
+        self.assertTrue(workspace_log.exists())
+        repo_log_size_after = repo_log.stat().st_size if repo_log.exists() else None
+        self.assertEqual(repo_log_size_before, repo_log_size_after)
+
+    def test_empty_reviewer_is_refused(self):
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_bad_artifact_path_is_refused(self):
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "does/not/exist.md",
+            "--artifact", "does/not/exist.md",
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_policy_document_with_no_version_marker_is_refused(self):
+        """External review, high severity, third pass: a claimed
+        policy_version with nothing in the file to back it previously
+        passed with zero findings."""
+        (self.workspace / "docs" / "reliance-policy.md").write_text("# Reliance policy\n\nNo marker.\n")
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_malformed_artifact_under_a_kind_directory_is_refused(self):
+        """External review, high severity, third pass: a boundary
+        contract containing only {"schema_version": "999.0", "garbage":
+        true} previously produced a receipt declaring "boundary":
+        "999.0" with zero findings."""
+        garbage_path = (
+            self.workspace / "crates" / "scheduler" / "specs" / "_boundaries"
+            / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        )
+        garbage_path.write_text(json.dumps({"schema_version": "999.0", "garbage": True}))
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_no_recognized_artifact_kind_is_refused(self):
+        """schema_versions can't be computed from a set with no
+        boundary/interaction/exemption/protocol_debt/evidence/
+        conflict_resolution artifact in it."""
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_reviewed_exemption_referencing_a_nonexistent_interaction_is_refused(self):
+        """External review, high severity, fourth pass: a hand-authored
+        review block on an exemption is not enough -- the interaction it
+        names must actually resolve via the real crate's own
+        _interactions/ directory, not degrade to a non-blocking info
+        finding for lack of cross-file context."""
+        exemption_dir = self.workspace / "crates" / "scheduler" / "specs" / "_exemptions"
+        exemption_dir.mkdir(parents=True)
+        (exemption_dir / "I-DOES-NOT-EXIST.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-DOES-NOT-EXIST",
+            "rationale": "Prototype scaffolding boundary, tracked for removal (chainlink:#41)",
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }))
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+            "--artifact", "crates/scheduler/specs/_exemptions/I-DOES-NOT-EXIST.json",
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_boundary_at_a_non_canonical_directory_is_not_trusted(self):
+        """External review, medium severity, fourth pass: a schema-valid
+        boundary at junk/_boundaries/<id>.json -- not the descriptor's
+        real crate boundary directory -- must not have its
+        schema_version trusted."""
+        stray_dir = self.workspace / "junk" / "_boundaries"
+        stray_dir.mkdir(parents=True)
+        (stray_dir / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }))
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+            "--artifact", "junk/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads((self.workspace / "specs" / "_promotions" / "scheduling.json").read_text())
+        self.assertEqual(data["schema_versions"], {"boundary": "1.0"})
+
+
 class CmdValidateWorkPackageIntegrationTest(unittest.TestCase):
     """Exercised through pipeline.main() end to end, matching the pattern
     used for validate/approve -- not just the underlying library call."""

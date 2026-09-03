@@ -34,10 +34,35 @@ Implemented now, against schemas that actually exist:
             artifact carries a promotion_id back (references are
             one-way). Standalone, not routed through draft/approve --
             the receipt's reviewer/accepted_at fields are top-level, not
-            the nested review: {} shape approve() writes, and receipt
-            *generation* (reading a promoted artifact set and computing
-            this) is separate, not-yet-built work, same boundary as
-            validate-work-package's own manifest generator.
+            the nested review: {} shape approve() writes.
+  accept-promotion  Stage 4.5's own generator (#45): loads the real
+            project descriptor (--descriptor, same global flag every
+            other command uses) and deterministically computes
+            artifact_manifest (real file hashes), promotion_id (from
+            `cluster` alone), and schema_versions -- the latter only
+            after validating each accepted artifact against its own
+            real per-kind validator WITH real cross-file context
+            (interactions_by_id, R2's boundary/exemption coverage, G15's
+            protocol-debt coverage, evidence ids -- the same context
+            cmd_validate_interaction/cmd_validate_exemption/
+            cmd_validate_protocol_debt build), so G2/G15/R2/G11/etc. run
+            for real, fail-closed, not degraded to non-blocking info
+            findings. Artifact kind is matched against the descriptor's
+            own canonical directories, not merely a directory sharing a
+            kind's basename. policy_version is read from the accepted
+            policy document's own content (its exactly-one "Policy
+            version: <name>@<major>.<minor>" marker line,
+            docs/reliance-policy.template.md), not supplied as a
+            free-form argument -- --policy-path names which accepted
+            artifact to read it from. Validates the assembled receipt
+            against validate-promotion's own real checks before writing
+            anything, then appends the audit entry and swaps the receipt
+            into place as one transaction (a failure on either side
+            leaves neither behind) -- the dedicated acceptance operation
+            this schema needs, since approve()'s nested review: {} write
+            is incompatible with this schema's top-level reviewer/
+            accepted_at and additionalProperties: false. See
+            scripts/generate_promotion_receipt.py.
   validate-interaction  Stage 4's G1a/G1b/G2++/G15 over interaction (I)
             specs (#16/#17/#19): schema plus COMPUTED eligibility (plan.md
             §5.2) -- eligibility is derived from edge_class, never
@@ -92,6 +117,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from generate_promotion_receipt import PromotionReceiptError  # noqa: E402
+from generate_promotion_receipt import accept_promotion  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import boundary_dir_for as _boundary_dir_for  # noqa: E402
 from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
@@ -154,9 +181,6 @@ NOT_YET_IMPLEMENTED = {
     "attach": "M3's I-schema is now complete (#16-#20); attach (Stage 6) itself is still not built",
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); M3's I-schema is now "
     "complete (#16-#20), but the generator that reads promoted I/O and emits a manifest from it is still not built",
-    "promotion-receipt generation": "#15's schema+validator exist (`validate-promotion`); M3's I-schema is "
-    "now complete (#16-#20), but the generator that reads an accepted artifact set and computes a receipt "
-    "from it is still not built",
     "8A": "#22-#26 (M4 -- bridge/closure track)",
     "8B": "#22-#26 (M4)",
     "8C": "#25 (M4 -- G14 transitive closure)",
@@ -348,6 +372,23 @@ def cmd_validate_promotion(args: argparse.Namespace) -> int:
     for f in findings:
         print(f"  - {f}")
     return 1
+
+
+def cmd_accept_promotion(args: argparse.Namespace) -> int:
+    try:
+        target_path = accept_promotion(
+            workspace_root=args.workspace,
+            cluster=args.cluster,
+            reviewer=args.reviewer,
+            policy_path=args.policy_path,
+            artifact_paths=args.artifact,
+            descriptor_path=args.descriptor,
+            accepted_at=args.accepted_at,
+        )
+    except (PromotionReceiptError, ApprovalRefused, ValueError, ProjectDescriptorError) as e:
+        raise PipelineError(str(e))
+    print(f"accepted: {target_path}")
+    return 0
 
 
 def _require_crate_root_exists(crate: dict, workspace: Path) -> Path:
@@ -1113,7 +1154,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         "validate-evidence (Stage 4 G1a/G1b, workspace-level), "
         "validate-conflict-resolution (Stage 4 G1a/G1b/G11, workspace-level), "
         "validate-work-package (Stage 7 schema + §10.1, standalone), "
-        "validate-promotion (Stage 4.5 schema + §7.1, standalone)"
+        "validate-promotion (Stage 4.5 schema + §7.1, standalone), "
+        "accept-promotion (Stage 4.5's own generator, chainlink #45)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -1178,6 +1220,27 @@ def main(argv: list[str]) -> int:
     )
     validate_promo_p.add_argument("receipt", type=Path)
     validate_promo_p.set_defaults(func=cmd_validate_promotion)
+
+    accept_promo_p = sub.add_parser(
+        "accept-promotion",
+        help="Stage 4.5's own generator: deterministically compute and write a promotion receipt (chainlink #45)",
+    )
+    accept_promo_p.add_argument("cluster")
+    accept_promo_p.add_argument("--reviewer", required=True)
+    accept_promo_p.add_argument("--accepted-at", default=None)
+    accept_promo_p.add_argument(
+        "--policy-path", required=True,
+        help=(
+            "workspace-relative path to the accepted policy document (e.g. docs/reliance-policy.md) "
+            "-- must itself be one of --artifact; its own 'Policy version: <name>@<major>.<minor>' "
+            "line is read to compute policy_version"
+        ),
+    )
+    accept_promo_p.add_argument(
+        "--artifact", action="append", default=[], required=True,
+        help="workspace-relative path being accepted into this promotion, repeatable",
+    )
+    accept_promo_p.set_defaults(func=cmd_accept_promotion)
 
     draft_p = sub.add_parser("draft", help="Stage 0/3: one-shot LLM draft")
     draft_p.add_argument("stage", choices=["0", "3"])

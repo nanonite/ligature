@@ -47,6 +47,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_utils import make_validator  # noqa: E402
+from schema_utils import make_validator_without_required  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "protocol-debt-schema.json"
 
@@ -147,6 +148,41 @@ def check_interaction_cross_reference(
             )
         ]
     return []
+
+
+def check_no_draft_review(path: Path, data: dict) -> list[Finding]:
+    """A Stage 0/3 draft must never carry its own `review` block --
+    review_checkpoint.approve() is the only path that attaches one, after
+    an explicit, non-empty human reviewer signs off (see its own
+    docstring). A model that authors `review` itself is asserting a
+    sign-off that never happened."""
+    if "review" in data:
+        return [
+            Finding(
+                "G1b", path,
+                "draft must not include its own `review` block -- review is only "
+                "attached by approve() after a human reviewer signs off",
+            )
+        ]
+    return []
+
+
+def load_draft_validator() -> Draft202012Validator:
+    return make_validator_without_required(load_schema(), "review")
+
+
+def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+    """Stage 0/3 immediate feedback (plan.md §6.1). `validator` must come
+    from load_draft_validator(), not load_validator() -- `review` isn't
+    required yet at draft time. Excludes check_interaction_cross_reference
+    (G2, needs interactions_by_id -- a cross-file Stage 4 concern)."""
+    review_check = check_no_draft_review(path, data)
+    if review_check:
+        return review_check
+    g1a = gate_g1a(path, data, validator)
+    if g1a:
+        return g1a
+    return check_naming(path, data)
 
 
 def validate_data(

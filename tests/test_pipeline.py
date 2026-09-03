@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -128,6 +129,559 @@ class ParseLlmJsonOutputTest(unittest.TestCase):
         with self.assertRaises(pipeline.PipelineError) as ctx:
             pipeline.parse_llm_json_output("not json at all")
         self.assertIn("not json at all", str(ctx.exception))
+
+
+_STUB_BACKEND_TEMPLATE = """
+import json
+import re
+import sys
+
+prompt = sys.stdin.read()
+m = re.search(r"CLAIM_SOURCE: ([^`]+)", prompt)
+claim = m.group(1).strip() if m else "MISSING"
+
+record = __FIELDS__
+record["claim"] = claim
+print("```json")
+print(json.dumps(record))
+print("```")
+"""
+
+
+class CmdDraftEndToEndTest(unittest.TestCase):
+    """Backend-plumbing coverage for cmd_draft: render_prompt ->
+    invoke_llm_backend -> parse_llm_json_output -> stage_draft -> the
+    immediate G1a/G1b feedback plan.md §6.1 requires ("the output ...
+    is immediately run through G1a/G1b for fast local feedback"). Every
+    other integration test in this file (CmdApproveIntegrationTest et
+    al.) hand-constructs the artifact dict in Python and calls
+    stage_draft()/approve() directly, skipping generation entirely --
+    this class runs the real chain through a real subprocess
+    (llm_backend.kind: claude with a `command` override, the same
+    mechanism a real backend would use -- see
+    InvokeLlmBackendTest.test_custom_command_override_is_used), with a
+    stub script standing in for the model. The stub derives `claim` from
+    a marker embedded in the rendered prompt's source_material variable,
+    so that one field is proven to have flowed through render_prompt ->
+    subprocess stdin -> stdout -> parse_llm_json_output, not asserted
+    from a value hardcoded in the test.
+
+    What this class does NOT cover: whether prompts/stage-0-evidence-intake.md's
+    documented output contract actually matches docs/evidence-schema.json
+    field-for-field -- the stub hardcodes every field but `claim`, so a
+    template that drifted from the schema (dropped a required field from
+    its own prose, e.g.) would not make these tests fail. See
+    EvidenceTemplateSchemaContractTest below for that check. Only
+    evidence (#20) has a Stage 0 template today -- the other five
+    I-schema types have no draft template yet, tracked as follow-up
+    chainlink issues rather than covered here."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "evidence").mkdir(parents=True)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_stub_backend(self, fields: dict) -> Path:
+        script = _STUB_BACKEND_TEMPLATE.replace("__FIELDS__", json.dumps(fields))
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+            f.write(script)
+            path = Path(f.name)
+        self.addCleanup(path.unlink)
+        return path
+
+    def _write_descriptor(self, stub_path: Path) -> None:
+        descriptor = dict(VALID_DESCRIPTOR)
+        descriptor["llm_backend"] = {"kind": "claude", "command": f"{sys.executable} {stub_path}"}
+        self.descriptor_path.write_text(json.dumps(descriptor))
+
+    def _run_draft(self, target: Path) -> int:
+        return pipeline.main([
+            "--workspace", str(self.workspace),
+            "--descriptor", str(self.descriptor_path),
+            "draft", "0", "evidence-intake", str(target),
+            "--var", "source_material=CLAIM_SOURCE: pop_ready returns None only when no task has deadline <= now",
+            "--var", "project_descriptor={}",
+            "--var", "prior_artifact=(none)",
+            "--var", "finding=(none)",
+        ])
+
+    def test_generated_evidence_via_real_subprocess_backend_passes_the_real_validator(self):
+        stub = self._write_stub_backend({
+            "schema_version": "1.0",
+            "id": "E-9001",
+            "kind": "source-artifact",
+            "origin": {
+                "repository": "https://example.com/repro",
+                "commit": "a1b2c3d",
+                "symbol": "TaskQueue::pop_ready",
+                "path": "src/queue.cpp",
+                "content_hash": "sha256:" + "0" * 64,
+                "line_hint": "118-160",
+            },
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "R",
+        })
+        self._write_descriptor(stub)
+        target = self.workspace / "evidence" / "E-9001.json"
+
+        # rc == 0 is itself the assertion that cmd_draft's own immediate
+        # G1a/G1b check passed -- not re-derived here via a second,
+        # independent validate_data() call (that would test the validator
+        # again, not cmd_draft's wiring to it).
+        rc = self._run_draft(target)
+        self.assertEqual(rc, 0)
+
+        draft_path = target.with_suffix(".json.draft")
+        self.assertTrue(draft_path.exists())
+        data = json.loads(draft_path.read_text())
+        # Proves the claim genuinely flowed prompt -> subprocess -> parsed
+        # output, not a value asserted straight from a hand-built fixture.
+        self.assertEqual(data["claim"], "pop_ready returns None only when no task has deadline <= now")
+
+    def test_generated_evidence_missing_required_field_is_rejected_by_cmd_draft_itself(self):
+        """External review, high severity: cmd_draft used to stage a draft
+        and return 0 unconditionally, never running G1a/G1b at all --
+        parse_llm_json_output/stage_draft succeeding was treated as
+        success regardless of whether the generated content was
+        schema-valid. This reproduced that gap directly (a stub omitting
+        `origin`, required by docs/evidence-schema.json, previously
+        returned rc == 0 from cmd_draft; only a separate, manual
+        validate_data() call in this test ever caught it) before
+        _select_draft_validate_fn wired the check into cmd_draft itself.
+        The draft must still be written -- this is fast local feedback
+        for correction, not a promotion refusal; only approve() decides
+        what gets promoted."""
+        stub = self._write_stub_backend({
+            "schema_version": "1.0",
+            "id": "E-9002",
+            "kind": "source-artifact",
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "R",
+        })
+        self._write_descriptor(stub)
+        target = self.workspace / "evidence" / "E-9002.json"
+
+        rc = self._run_draft(target)
+        self.assertEqual(rc, 1)
+
+        draft_path = target.with_suffix(".json.draft")
+        self.assertTrue(draft_path.exists(), "invalid draft must still be retained for correction")
+        data = json.loads(draft_path.read_text())
+        self.assertNotIn("origin", data)
+
+
+class EvidenceTemplateSchemaContractTest(unittest.TestCase):
+    """prompts/stage-0-evidence-intake.md documents its own output
+    contract in prose -- nothing mechanically keeps that prose in sync
+    with docs/evidence-schema.json. CmdDraftEndToEndTest's stub hardcodes
+    every field but `claim`, so a template that silently dropped a
+    required field from its own worked-example JSON block would not be
+    caught there (external review, medium severity). This checks the
+    one thing that matters for that drift: every field
+    docs/evidence-schema.json actually requires is still named as a key
+    at the correct nesting depth in the template's own "Output contract"
+    JSON block.
+
+    External review, low severity, second pass: the first version
+    collected every quoted key across the whole fenced block into one
+    flat set, so it would have passed even if a required `origin` field
+    moved to the top level or appeared under some other unrelated key --
+    it checked presence, not structure. Fixed by parsing the fenced block
+    as real JSON (every value in it is already a quoted string, including
+    the "a | b | c" enum-style placeholders, so it parses as-is) and
+    checking each field exists at its actual schema location, not just
+    somewhere in the document."""
+
+    def test_template_output_contract_names_every_schema_required_field_at_the_right_nesting(self):
+        schema = json.loads((ROOT / "docs" / "evidence-schema.json").read_text())
+        template_text = (PROMPTS / "stage-0-evidence-intake.md").read_text()
+
+        fence = re.search(r"```json\n(.*?)\n```", template_text, re.DOTALL)
+        self.assertIsNotNone(fence, "template has no fenced output-contract JSON block")
+        contract = json.loads(fence.group(1))
+
+        for field in schema["required"]:
+            self.assertIn(
+                field, contract, f"schema requires {field!r} at the top level but the template's contract omits it"
+            )
+        origin_schema = schema["$defs"]["origin"]
+        self.assertIsInstance(
+            contract.get("origin"), dict,
+            "schema's `origin` is a nested object but the template's contract doesn't nest it under `origin`",
+        )
+        for field in origin_schema["required"]:
+            self.assertIn(
+                field, contract["origin"],
+                f"schema requires origin.{field!r} but the template contract's origin object omits it",
+            )
+
+
+class SelectDraftValidateFnTest(unittest.TestCase):
+    """External review, high severity, second pass: cmd_draft's immediate
+    validation (see CmdDraftEndToEndTest) initially delegated every
+    non-evidence target to _select_validate_fn, the SAME dispatcher
+    approve() uses -- but boundary/interaction/exemption/protocol-debt/
+    conflict-resolution schemas all require `review` at the top level,
+    and a Stage 0/3 draft never has one yet (review is only attached by
+    review_checkpoint.approve(), after a human reviewer signs off). That
+    meant EVERY otherwise-valid, review-less draft for those five types
+    failed immediate validation unconditionally, and Stage-4-only
+    cross-file gates (G2+, G15, G11, cross-references) ran at draft time
+    too. Reproduced directly for boundary, interaction, and a resolved
+    conflict-resolution draft before _select_draft_validate_fn was given
+    dedicated, per-type draft validators (scripts/validate_*.py's own
+    validate_draft_data()).
+
+    These tests exercise pipeline._select_draft_validate_fn directly
+    rather than through the full cmd_draft CLI, since only evidence and
+    boundary (prompts/stage-3-boundary-drafting.md) have a real Stage 0/3
+    prompt template today -- interaction/exemption/protocol-debt/
+    conflict-resolution templates are #41-#44, follow-up work. See
+    CmdDraftBoundaryEndToEndTest below for the CLI-level equivalent of
+    the boundary cases here."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
+        (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
+        (self.workspace / "crate_a" / "specs" / "_exemptions").mkdir(parents=True)
+        (self.workspace / "crate_a" / "specs" / "_protocol_debt").mkdir(parents=True)
+        (self.workspace / "evidence").mkdir(parents=True)
+        (self.workspace / "specs" / "_conflicts").mkdir(parents=True)
+        self._write_real_evidence("E-0143")
+        self._write_real_evidence("E-0201")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_real_evidence(self, evidence_id: str) -> None:
+        (self.workspace / "evidence" / f"{evidence_id}.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "id": evidence_id,
+            "kind": "source-artifact",
+            "claim": "placeholder claim",
+            "origin": {
+                "repository": "https://example.com/repro",
+                "commit": "a1b2c3d",
+                "symbol": "TaskQueue::pop_ready",
+                "path": "src/queue.cpp",
+                "content_hash": "sha256:" + "0" * 64,
+                "line_hint": "118-160",
+            },
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "R",
+        }))
+
+    def _findings(self, target: Path, data: dict):
+        validate_fn = pipeline._select_draft_validate_fn(target, self.workspace, VALID_DESCRIPTOR)
+        return validate_fn(target, data)
+
+    def test_valid_pre_review_boundary_draft_passes(self):
+        """External review's exact repro: 'Boundary draft: rejected
+        because review is missing.'"""
+        target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        data = {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_boundary_draft_with_model_supplied_review_is_rejected(self):
+        target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        data = {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+            "review": {"reviewer": "a-model-should-not-write-this", "reviewed_at": "2026-09-02"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_boundary_draft_g2_plus_adversary_case_not_flagged_at_draft_time(self):
+        """G2+ needs specs_search_root (cross-file) and is excluded from
+        immediate feedback -- an adversary-case guarantee that approve()
+        rejects (CmdApproveIntegrationTest.
+        test_g2_plus_failure_is_refused_and_writes_nothing) is not this
+        function's job."""
+        target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        data = {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.A006"],
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_valid_pre_review_interaction_draft_passes(self):
+        """External review's exact repro: 'Interaction draft: rejected
+        because review is missing.'"""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        data = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "protocol_class": "pairwise",
+            "realization": REALIZATION,
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_interaction_draft_with_model_supplied_review_is_rejected(self):
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        data = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "protocol_class": "pairwise",
+            "realization": REALIZATION,
+            "review": {"reviewer": "a-model-should-not-write-this", "reviewed_at": "2026-09-02"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_interaction_draft_computed_eligibility_mismatch_still_caught(self):
+        """check_computed_eligibility is G1b, self-contained -- still
+        part of immediate feedback (plan.md's own "cheap ... eligibility
+        checks" language)."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        data = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "ignore",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "protocol_class": "pairwise",
+            "realization": REALIZATION,
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(
+            any("does not match the value computed" in f.reason for f in findings), [str(f) for f in findings]
+        )
+
+    def test_interaction_draft_non_pairwise_with_no_debt_record_not_flagged_at_draft_time(self):
+        """G15 needs cross-file protocol-debt context and is excluded
+        from immediate feedback -- approve() still rejects it (see
+        test_approve_non_pairwise_interaction_with_no_debt_record_is_refused)."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-004.json"
+        data = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-004",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "protocol_class": "non-pairwise",
+            "realization": REALIZATION,
+            "reliances": [{
+                "obligation_id": "TaskQueue.C003",
+                "required_assurance": {
+                    "required_claims": ["postcondition-holds"],
+                    "accepted_evidence_kinds": ["creusot-deductive-check"],
+                    "minimum_scope": {"input_domain": "queue_len_le_8"},
+                    "trust_policy": {"assumptions_allowed": []},
+                },
+            }],
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_valid_pre_review_exemption_draft_passes(self):
+        target = self.workspace / "crate_a" / "specs" / "_exemptions" / "I-SCHED-TQ-002.json"
+        data = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-002",
+            "rationale": "Prototype scaffolding boundary, tracked for removal (chainlink:#41)",
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_exemption_draft_with_model_supplied_review_is_rejected(self):
+        target = self.workspace / "crate_a" / "specs" / "_exemptions" / "I-SCHED-TQ-002.json"
+        data = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-002",
+            "rationale": "Prototype scaffolding boundary, tracked for removal (chainlink:#41)",
+            "review": {"reviewer": "a-model-should-not-write-this", "reviewed_at": "2026-09-02"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_valid_pre_review_protocol_debt_draft_passes(self):
+        target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-SCHED-TQ-003.json"
+        data = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-003",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_protocol_debt_draft_for_nonexistent_interaction_not_flagged_at_draft_time(self):
+        """check_interaction_cross_reference needs interactions_by_id
+        (cross-file, gate G2) -- not this function's job."""
+        target = self.workspace / "crate_a" / "specs" / "_protocol_debt" / "I-DOES-NOT-EXIST.json"
+        data = {
+            "schema_version": "1.0",
+            "interaction_id": "I-DOES-NOT-EXIST",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_valid_pre_review_resolved_conflict_draft_passes(self):
+        """External review's exact repro: 'Resolved conflict draft:
+        rejected because review is missing' -- the schema's own
+        status=='resolved' if/then requires resolution AND review; a
+        Stage 3 proposal legitimately has the former without the latter
+        yet."""
+        target = self.workspace / "specs" / "_conflicts" / "EC-004.json"
+        data = {
+            "schema_version": "1.0",
+            "conflict_id": "EC-004",
+            "evidence": ["E-0143", "E-0201"],
+            "status": "resolved",
+            "resolution": {
+                "selected_authority": "E-0201",
+                "disposition_of_other": "incidental",
+                "rationale": "compatibility policy: do not preserve the legacy defect",
+            },
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_unresolved_conflict_draft_not_flagged_by_g11_at_draft_time(self):
+        """G11 ('only unresolved conflicts block') is plan.md's own Stage
+        4 promotion gate -- an unresolved draft is a legitimate Stage 3
+        output (surfacing the conflict for a human), not something to
+        reject before it's even staged."""
+        target = self.workspace / "specs" / "_conflicts" / "EC-004.json"
+        data = {
+            "schema_version": "1.0",
+            "conflict_id": "EC-004",
+            "evidence": ["E-0143", "E-0201"],
+            "status": "unresolved",
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_conflict_draft_with_model_supplied_review_is_rejected(self):
+        target = self.workspace / "specs" / "_conflicts" / "EC-004.json"
+        data = {
+            "schema_version": "1.0",
+            "conflict_id": "EC-004",
+            "evidence": ["E-0143", "E-0201"],
+            "status": "resolved",
+            "resolution": {
+                "selected_authority": "E-0201",
+                "disposition_of_other": "incidental",
+                "rationale": "compatibility policy: do not preserve the legacy defect",
+            },
+            "review": {"reviewer": "a-model-should-not-write-this", "reviewed_at": "2026-09-02"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_conflict_draft_dangling_evidence_not_flagged_at_draft_time(self):
+        """check_evidence_cross_reference needs evidence_ids (cross-file)
+        -- not this function's job at draft time; approve() still catches
+        it (see test_approve_conflict_resolution_with_dangling_evidence_is_refused)."""
+        target = self.workspace / "specs" / "_conflicts" / "EC-005.json"
+        data = {
+            "schema_version": "1.0",
+            "conflict_id": "EC-005",
+            "evidence": ["E-9999", "E-0201"],
+            "status": "unresolved",
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+
+class CmdDraftBoundaryEndToEndTest(unittest.TestCase):
+    """CLI-level counterpart to SelectDraftValidateFnTest's boundary
+    cases, exercising the real cmd_draft path (prompts/stage-3-boundary-drafting.md
+    already exists, unlike interaction/exemption/protocol-debt/
+    conflict-resolution) through a real subprocess stub backend --
+    proves the fix holds through the actual entrypoint, not just a
+    direct call to the dispatcher."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_stub_backend(self) -> Path:
+        script = (
+            "import sys\n"
+            "sys.stdin.read()\n"
+            'print(\'{"schema_version": "1.0", "boundary_id": '
+            '"scheduler_dispatch__to__task_queue_pop_ready", '
+            '"caller": {"concept": "Scheduler", "method": "dispatch"}, '
+            '"callee": {"concept": "TaskQueue", "method": "pop_ready"}, '
+            "\"callee_guarantees\": [\"TaskQueue.C003\"]}')\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+            f.write(script)
+            path = Path(f.name)
+        self.addCleanup(path.unlink)
+        return path
+
+    def test_valid_pre_review_boundary_draft_passes_through_cmd_draft_itself(self):
+        stub = self._write_stub_backend()
+        descriptor = dict(VALID_DESCRIPTOR)
+        descriptor["llm_backend"] = {"kind": "claude", "command": f"{sys.executable} {stub}"}
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+
+        rc = pipeline.main([
+            "--workspace", str(self.workspace),
+            "--descriptor", str(self.descriptor_path),
+            "draft", "3", "boundary-drafting", str(target),
+            "--var", "caller_concept=Scheduler",
+            "--var", "caller_method=dispatch",
+            "--var", "callee_concept=TaskQueue",
+            "--var", "callee_method=pop_ready",
+            "--var", "caller_concept_snake=scheduler",
+            "--var", "callee_concept_snake=task_queue",
+            "--var", "caller_spec={}",
+            "--var", "callee_spec={}",
+            "--var", "reliance_policy=(policy text)",
+            "--var", "prior_artifact=(none)",
+            "--var", "finding=(none)",
+        ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.with_suffix(".json.draft").exists())
 
 
 class CmdValidateIntegrationTest(unittest.TestCase):

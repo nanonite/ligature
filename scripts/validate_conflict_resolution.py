@@ -63,6 +63,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_utils import make_validator  # noqa: E402
+from schema_utils import make_validator_without_required  # noqa: E402
 from validate_evidence import valid_evidence_ids  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "conflict-resolution-schema.json"
@@ -181,6 +182,59 @@ def check_g11_unresolved_conflict(path: Path, data: dict) -> list[Finding]:
             )
         ]
     return []
+
+
+def check_no_draft_review(path: Path, data: dict) -> list[Finding]:
+    """A Stage 0/3 draft must never carry its own `review` block --
+    review_checkpoint.approve() is the only path that attaches one, after
+    an explicit, non-empty human reviewer signs off (see its own
+    docstring). A model that authors `review` itself is asserting a
+    sign-off that never happened."""
+    if "review" in data:
+        return [
+            Finding(
+                "G1b", path,
+                "draft must not include its own `review` block -- review is only "
+                "attached by approve() after a human reviewer signs off",
+            )
+        ]
+    return []
+
+
+def load_draft_validator() -> Draft202012Validator:
+    return make_validator_without_required(load_schema(), "review")
+
+
+def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+    """Stage 0/3 immediate feedback (plan.md §6.1). `validator` must come
+    from load_draft_validator(), not load_validator() -- this schema's
+    own `status == "resolved" => required: [resolution, review]` if/then
+    (docs/conflict-resolution-schema.json) is stripped of the `review`
+    half by make_validator_without_required's recursive walk, so a
+    genuinely resolved-but-not-yet-reviewed draft (resolution present,
+    review absent -- exactly what a Stage 3 proposal should look like)
+    passes here.
+
+    Deliberately excludes check_evidence_cross_reference (needs
+    evidence_ids, cross-file) and check_g11_unresolved_conflict -- G11 is
+    plan.md's own Stage 4 promotion gate ("only unresolved conflicts
+    block"), not an immediate-feedback concern: an unresolved draft is a
+    legitimate Stage 3 output (surfacing a conflict for a human to
+    resolve), not an error to reject before it's even staged. External
+    review, high severity: the first version of this dispatcher reused
+    approve()'s full validate_data(), which rejected every resolved
+    draft outright (review missing) and every unresolved draft outright
+    (G11) -- both reproduced directly before this fix."""
+    review_check = check_no_draft_review(path, data)
+    if review_check:
+        return review_check
+    g1a = gate_g1a(path, data, validator)
+    if g1a:
+        return g1a
+    findings: list[Finding] = []
+    findings.extend(check_naming(path, data))
+    findings.extend(check_selected_authority_membership(path, data))
+    return findings
 
 
 def validate_data(

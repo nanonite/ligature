@@ -61,6 +61,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_utils import make_validator  # noqa: E402
+from schema_utils import make_validator_without_required  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "interaction-schema.json"
 
@@ -322,6 +323,53 @@ def load_interactions_by_id(interactions_dir: Path) -> InteractionLookup:
             continue
         result[interaction_id] = data
     return result
+
+
+def check_no_draft_review(path: Path, data: dict) -> list[Finding]:
+    """A Stage 0/3 draft must never carry its own `review` block --
+    review_checkpoint.approve() is the only path that attaches one, after
+    an explicit, non-empty human reviewer signs off (see its own
+    docstring). A model that authors `review` itself is asserting a
+    sign-off that never happened."""
+    if "review" in data:
+        return [
+            Finding(
+                "G1b", path,
+                "draft must not include its own `review` block -- review is only "
+                "attached by approve() after a human reviewer signs off",
+            )
+        ]
+    return []
+
+
+def load_draft_validator() -> Draft202012Validator:
+    return make_validator_without_required(load_schema(), "review")
+
+
+def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+    """Stage 0/3 immediate feedback (plan.md §6.1). `validator` must come
+    from load_draft_validator(), not load_validator() -- `review` isn't
+    required yet at draft time. Includes computed-eligibility and
+    reliance-obligation-uniqueness (both G1b, self-contained, no
+    cross-file lookup -- plan.md's own "cheap ... eligibility checks"
+    language). Deliberately excludes G2++ (declared-assurance) and G15
+    (protocol coverage) -- both are plan.md gate-table entries distinct
+    from G1a/G1b, and G15 specifically needs cross-file protocol-debt
+    context this function is never given. External review, high
+    severity: the first version of this dispatcher reused approve()'s
+    full validate_data(), which rejected every review-less draft outright
+    via G1a; reproduced directly before this fix."""
+    review_check = check_no_draft_review(path, data)
+    if review_check:
+        return review_check
+    g1a = gate_g1a(path, data, validator)
+    if g1a:
+        return g1a
+    findings: list[Finding] = []
+    findings.extend(check_naming(path, data))
+    findings.extend(check_computed_eligibility(path, data))
+    findings.extend(check_reliance_obligation_uniqueness(path, data))
+    return findings
 
 
 def validate_data(

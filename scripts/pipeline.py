@@ -98,26 +98,38 @@ from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import approve_pair as checkpoint_approve_pair  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
+from validate_boundary_contracts import load_draft_validator as load_boundary_draft_validator  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
+from validate_boundary_contracts import validate_draft_data as validate_boundary_draft_data  # noqa: E402
+from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
+from validate_conflict_resolution import validate_draft_data as validate_conflict_resolution_draft_data  # noqa: E402
 from validate_conflict_resolution import validate_workspace as validate_conflict_resolution_workspace  # noqa: E402
+from validate_evidence import load_validator as load_evidence_validator  # noqa: E402
 from validate_evidence import valid_evidence_ids  # noqa: E402
+from validate_evidence import validate_data as validate_evidence_data  # noqa: E402
 from validate_evidence import validate_workspace as validate_evidence_workspace  # noqa: E402
+from validate_exemption import load_draft_validator as load_exemption_draft_validator  # noqa: E402
 from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
 from validate_exemption import validate_crate as validate_exemption_crate  # noqa: E402
 from validate_exemption import validate_data as validate_exemption_data  # noqa: E402
+from validate_exemption import validate_draft_data as validate_exemption_draft_data  # noqa: E402
+from validate_interaction import load_draft_validator as load_interaction_draft_validator  # noqa: E402
 from validate_interaction import load_interactions_by_id  # noqa: E402
 from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
 from validate_interaction import validate_crate as validate_interaction_crate  # noqa: E402
 from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
+from validate_interaction import validate_draft_data as validate_interaction_draft_data  # noqa: E402
 from validate_promotion_receipt import load_validator as load_promotion_validator  # noqa: E402
+from validate_protocol_debt import load_draft_validator as load_protocol_debt_draft_validator  # noqa: E402
 from validate_protocol_debt import load_validator as load_protocol_debt_validator  # noqa: E402
 from validate_protocol_debt import valid_interaction_ids_from_crate  # noqa: E402
 from validate_protocol_debt import validate_crate as validate_protocol_debt_crate  # noqa: E402
 from validate_protocol_debt import validate_data as validate_protocol_debt_data  # noqa: E402
+from validate_protocol_debt import validate_draft_data as validate_protocol_debt_draft_data  # noqa: E402
 from validate_promotion_receipt import validate_file as validate_promotion_file  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
@@ -510,6 +522,28 @@ def cmd_draft(args: argparse.Namespace) -> int:
     data = parse_llm_json_output(raw)
     draft_path = stage_draft(data, args.target)
     print(f"staged draft: {draft_path}")
+
+    # plan.md §6.1: generated output is immediately run through G1a/G1b
+    # for fast local feedback, full Stage 4 adjudication unchanged. The
+    # draft stays on disk either way -- this is feedback for correction,
+    # not a promotion decision (only approve() writes the target path).
+    validate_fn = _select_draft_validate_fn(args.target, args.workspace, descriptor)
+    findings = validate_fn(args.target, data)
+    errors = [f for f in findings if getattr(f, "severity", "error") == "error"]
+    infos = [f for f in findings if getattr(f, "severity", "error") == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if errors:
+        print(f"FAIL: generated draft has {len(errors)} G1a/G1b finding(s) -- fix before approve()")
+        for f in errors:
+            print(f"  - {f}")
+        return 1
+
+    print("OK: generated draft passes G1a/G1b immediate checks")
     return 0
 
 
@@ -655,6 +689,78 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         "approved -- they carry no review block, so approve() cannot promote them. "
         "Refusing to draft/approve an artifact type or location it cannot "
         "mechanically gate, rather than silently skipping validation for it."
+    )
+
+
+def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
+    """Immediate Stage 0/3 feedback validator for a freshly generated
+    draft -- plan.md §6.1: "the output ... is immediately run through
+    G1a/G1b for fast local feedback." cmd_draft used to skip this
+    entirely (external review, high severity: a generated evidence
+    record missing the required `origin` block staged with return code
+    0). A second review pass, also high severity, found the first fix's
+    approach -- delegating to _select_validate_fn, the same dispatcher
+    approve() uses -- was itself wrong: boundary/interaction/exemption/
+    protocol-debt/conflict-resolution all require `review` at the schema's
+    own top level (docs/*-schema.json), but a Stage 0/3 draft never has
+    one yet (review_checkpoint.stage_draft() writes the model's raw
+    output; review_checkpoint.approve() is the only thing that attaches
+    `review`, after a human reviewer signs off). Reusing the approve-time
+    validator meant *every* non-evidence draft failed immediate
+    validation unconditionally, and also ran Stage-4-only cross-file
+    gates (G2+, G15, G11, evidence/interaction cross-references) that
+    plan.md §6.1 never asked for at draft time. Reproduced directly for
+    boundary, interaction, and a resolved conflict-resolution draft
+    before this fix.
+
+    Each validate_<type>.py module now owns a dedicated
+    validate_draft_data()/load_draft_validator() pair: schema validation
+    with `review` treated as not-yet-required (schema_utils.
+    make_validator_without_required, applied recursively so a nested
+    if/then like conflict-resolution's status=="resolved" conditional is
+    covered too), an explicit rejection of a model-supplied `review`
+    block, and only the naming/shape (G1b) checks that need no cross-file
+    context -- see each module's own validate_draft_data() docstring for
+    exactly what it excludes and why. This dispatcher's location-matching
+    logic (which directory belongs to which artifact type) intentionally
+    mirrors _select_validate_fn's -- the two must never silently diverge
+    on that -- but calls the draft-time validator, not the approve-time
+    one."""
+    if target.suffix != ".json":
+        raise PipelineError(
+            f"target {target} is not a .json file -- this pipeline only "
+            "recognizes .json artifacts for boundary contracts, interactions, "
+            "exemptions, protocol-debt records, evidence, and conflict-resolution records"
+        )
+    if target.resolve().parent == _evidence_dir_for(workspace):
+        validator = load_evidence_validator()
+        return lambda path, data: validate_evidence_data(path, data, validator)
+    if target.resolve().parent == _conflict_dir_for(workspace):
+        validator = load_conflict_resolution_draft_validator()
+        return lambda path, data: validate_conflict_resolution_draft_data(path, data, validator)
+    crate = _crate_for(target, workspace, descriptor)
+    if crate is not None:
+        resolved_parent = target.resolve().parent
+        if resolved_parent == _boundary_dir_for(crate, workspace):
+            validator = load_boundary_draft_validator()
+            return lambda path, data: validate_boundary_draft_data(path, data, validator)
+        if resolved_parent == _interaction_dir_for(crate, workspace):
+            validator = load_interaction_draft_validator()
+            return lambda path, data: validate_interaction_draft_data(path, data, validator)
+        if resolved_parent == _exemption_dir_for(crate, workspace):
+            validator = load_exemption_draft_validator()
+            return lambda path, data: validate_exemption_draft_data(path, data, validator)
+        if resolved_parent == _protocol_debt_dir_for(crate, workspace):
+            validator = load_protocol_debt_draft_validator()
+            return lambda path, data: validate_protocol_debt_draft_data(path, data, validator)
+    raise PipelineError(
+        f"no draft validator recognizes target {target} -- this pipeline only "
+        "validates drafts for boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
+        "interactions at <crate_dir>/specs/_interactions/*.json, exemptions "
+        "at <crate_dir>/specs/_exemptions/*.json, protocol-debt records at "
+        "<crate_dir>/specs/_protocol_debt/*.json, evidence at evidence/*.json "
+        "(workspace-level), and conflict-resolution records at specs/_conflicts/*.json "
+        "(workspace-level) today."
     )
 
 

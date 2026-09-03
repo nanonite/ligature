@@ -39,6 +39,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_utils import make_validator  # noqa: E402
+from schema_utils import make_validator_without_required  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
 from validate_boundary_naming import check_file as check_naming  # noqa: E402
 
@@ -302,6 +303,48 @@ def gate_g2_plus(
             )
 
     return findings
+
+
+def check_no_draft_review(path: Path, data: dict) -> list[Finding]:
+    """A Stage 0/3 draft must never carry its own `review` block --
+    review_checkpoint.approve() is the only path that attaches one, after
+    an explicit, non-empty human reviewer signs off (see its own
+    docstring). A model that authors `review` itself is asserting a
+    sign-off that never happened."""
+    if "review" in data:
+        return [
+            Finding(
+                "G1b", path,
+                "draft must not include its own `review` block -- review is only "
+                "attached by approve() after a human reviewer signs off",
+            )
+        ]
+    return []
+
+
+def load_draft_validator() -> Draft202012Validator:
+    return make_validator_without_required(load_schema(), "review")
+
+
+def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+    """Stage 0/3 immediate feedback (plan.md §6.1: "immediately run
+    through G1a/G1b for fast local feedback"). `validator` must come from
+    load_draft_validator(), not load_validator() -- the schema's own
+    `review` requirement doesn't apply yet at draft time.
+
+    Deliberately excludes G2+ (needs specs_search_root, a cross-file
+    Stage 4 concern -- external review, high severity: the first version
+    of this dispatcher reused approve()'s full validate_data(), which
+    both rejected every review-less draft outright via G1a and ran G2+
+    at draft time; both reproduced directly before this fix). Full
+    G1a/G1b/G2+ still runs unchanged at approve() time via validate_data()."""
+    review_check = check_no_draft_review(path, data)
+    if review_check:
+        return review_check
+    g1a = gate_g1a(path, data, validator)
+    if g1a:
+        return g1a
+    return gate_g1b(path, data)
 
 
 def validate_data(

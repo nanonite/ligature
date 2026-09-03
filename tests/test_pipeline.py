@@ -79,6 +79,23 @@ class RenderPromptTest(unittest.TestCase):
         self.assertNotRegex(out, r"\{\{[^}]*\}\}")
         self.assertIn("scheduler_dispatch__to__task_queue_pop_ready", out)
 
+    def test_stage_3_interaction_template_renders_with_no_leftover_placeholders(self):
+        variables = {
+            "interaction_id": "I-SCHED-TQ-010",
+            "caller_concept": "Scheduler",
+            "caller_method": "dispatch",
+            "callee_concept": "TaskQueue",
+            "callee_method": "pop_ready",
+            "caller_spec": "{}",
+            "callee_spec": "{}",
+            "target_triple": "x86_64-unknown-linux-gnu",
+            "prior_artifact": "(none)",
+            "finding": "(none)",
+        }
+        out = pipeline.render_prompt(PROMPTS / "stage-3-interaction-drafting.md", variables)
+        self.assertNotRegex(out, r"\{\{[^}]*\}\}")
+        self.assertIn("I-SCHED-TQ-010.json", out)
+
 
 class InvokeLlmBackendTest(unittest.TestCase):
     def test_manual_backend_raises(self):
@@ -682,6 +699,258 @@ class CmdDraftBoundaryEndToEndTest(unittest.TestCase):
         ])
         self.assertEqual(rc, 0)
         self.assertTrue(target.with_suffix(".json.draft").exists())
+
+
+_INTERACTION_STUB_BACKEND_TEMPLATE = """
+import json
+import re
+import sys
+
+prompt = sys.stdin.read()
+m = re.search(r"must equal `?([A-Za-z0-9_-]+)\\.json`?", prompt)
+interaction_id = m.group(1) if m else "MISSING"
+
+record = __FIELDS__
+record["interaction_id"] = interaction_id
+print(json.dumps(record))
+"""
+
+
+class CmdDraftInteractionEndToEndTest(unittest.TestCase):
+    """CLI-level end-to-end coverage for chainlink #41: cmd_draft's real
+    Stage 3 path (prompts/stage-3-interaction-drafting.md) through a real
+    subprocess stub backend, mirroring CmdDraftBoundaryEndToEndTest and
+    CmdDraftEndToEndTest exactly. The stub derives `interaction_id` from
+    a marker the template itself produces after substitution (the
+    "Filename" section's "must equal {{interaction_id}}.json exactly"),
+    so that field is proven to have flowed through render_prompt ->
+    subprocess stdin -> stdout -> parse_llm_json_output, not asserted
+    from a value hardcoded in the test.
+
+    cmd_draft's own immediate validation (_select_draft_validate_fn ->
+    validate_interaction.validate_draft_data) deliberately excludes G15
+    and R2 -- both are cross-file Stage 4 concerns -- so a generated
+    interaction draft does not need a covering boundary contract or
+    protocol-debt record to pass cmd_draft itself; only G1a/G1b (schema,
+    naming, computed eligibility, reliance-obligation uniqueness) apply
+    here. Full Stage 4 coverage is exercised separately by
+    CmdApproveIntegrationTest's own interaction tests."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_stub_backend(self, fields: dict) -> Path:
+        script = _INTERACTION_STUB_BACKEND_TEMPLATE.replace("__FIELDS__", json.dumps(fields))
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+            f.write(script)
+            path = Path(f.name)
+        self.addCleanup(path.unlink)
+        return path
+
+    def _write_descriptor(self, stub_path: Path) -> None:
+        descriptor = dict(VALID_DESCRIPTOR)
+        descriptor["llm_backend"] = {"kind": "claude", "command": f"{sys.executable} {stub_path}"}
+        self.descriptor_path.write_text(json.dumps(descriptor))
+
+    def _run_draft(self, target: Path) -> int:
+        return pipeline.main([
+            "--workspace", str(self.workspace),
+            "--descriptor", str(self.descriptor_path),
+            "draft", "3", "interaction-drafting", str(target),
+            "--var", f"interaction_id={target.stem}",
+            "--var", "caller_concept=Scheduler",
+            "--var", "caller_method=dispatch",
+            "--var", "callee_concept=TaskQueue",
+            "--var", "callee_method=pop_ready",
+            "--var", "caller_spec={}",
+            "--var", "callee_spec={}",
+            "--var", "target_triple=x86_64-unknown-linux-gnu",
+            "--var", "prior_artifact=(none)",
+            "--var", "finding=(none)",
+        ])
+
+    def test_generated_boundary_required_interaction_passes_cmd_drafts_own_validation(self):
+        stub = self._write_stub_backend({
+            "schema_version": "1.0",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["postcondition-holds"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+            "protocol_class": "pairwise",
+            "realization": {
+                "requirement": "required",
+                "config_scope": {
+                    "target": "x86_64-unknown-linux-gnu",
+                    "features": ["default"],
+                    "cfg": [],
+                },
+            },
+        })
+        self._write_descriptor(stub)
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-010.json"
+
+        rc = self._run_draft(target)
+        self.assertEqual(rc, 0)
+
+        draft_path = target.with_suffix(".json.draft")
+        self.assertTrue(draft_path.exists())
+        data = json.loads(draft_path.read_text())
+        # Proves interaction_id genuinely flowed prompt -> subprocess ->
+        # parsed output, not a value asserted straight from a hand-built
+        # fixture.
+        self.assertEqual(data["interaction_id"], "I-SCHED-TQ-010")
+
+    def test_generated_interaction_with_computed_eligibility_mismatch_is_rejected_by_cmd_draft_itself(self):
+        """Negative control: a stub backend that declares eligibility
+        inconsistent with edge_class (G1b's computed-eligibility check,
+        plan.md §5.2) must be rejected by cmd_draft's own immediate
+        validation, not just by a later manual check -- proves the
+        positive test's rc == 0 is a real pass, not a vacuously
+        permissive check. The draft must still be written (fast local
+        feedback for correction, not a promotion refusal)."""
+        stub = self._write_stub_backend({
+            "schema_version": "1.0",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],  # computes to boundary-required
+            "eligibility": "ignore",  # deliberately wrong
+            "rationale": "dispatch's postcondition depends on pop_ready's return discipline",
+            "protocol_class": "pairwise",
+            "realization": {
+                "requirement": "required",
+                "config_scope": {
+                    "target": "x86_64-unknown-linux-gnu",
+                    "features": ["default"],
+                    "cfg": [],
+                },
+            },
+        })
+        self._write_descriptor(stub)
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-011.json"
+
+        rc = self._run_draft(target)
+        self.assertEqual(rc, 1)
+
+        draft_path = target.with_suffix(".json.draft")
+        self.assertTrue(draft_path.exists(), "invalid draft must still be retained for correction")
+
+
+class InteractionTemplateSchemaContractTest(unittest.TestCase):
+    """prompts/stage-3-interaction-drafting.md documents its own output
+    contract in a worked JSON example -- nothing mechanically keeps that
+    prose in sync with docs/interaction-schema.json. External review,
+    medium severity: the template's own positive E2E test stub supplies
+    schema_version directly, so it could not have caught the template
+    itself never telling the model to emit it. Mirrors
+    EvidenceTemplateSchemaContractTest's parse-the-fence-as-real-JSON,
+    check-at-correct-nesting approach, extended for interaction's nested
+    realization/reliance structures and its one deliberately omitted
+    field."""
+
+    @staticmethod
+    def _load_contract() -> dict:
+        template_text = (PROMPTS / "stage-3-interaction-drafting.md").read_text()
+        fence = re.search(r"```json\n(.*?)\n```", template_text, re.DOTALL)
+        assert fence is not None, "template has no fenced output-contract JSON block"
+        return json.loads(fence.group(1))
+
+    def test_template_output_contract_names_every_schema_required_field_at_the_right_nesting(self):
+        schema = json.loads((ROOT / "docs" / "interaction-schema.json").read_text())
+        contract = self._load_contract()
+
+        # `review` is deliberately excluded from model output (see the
+        # template's own "review block" section) even though the schema
+        # requires it -- review_checkpoint.approve() is the only thing
+        # that ever attaches one.
+        for field in schema["required"]:
+            if field == "review":
+                continue
+            self.assertIn(
+                field, contract, f"schema requires {field!r} at the top level but the template's contract omits it"
+            )
+
+        role_schema = schema["$defs"]["role"]
+        for role_name in ("caller", "callee"):
+            self.assertIsInstance(contract.get(role_name), dict, f"schema's {role_name} is a nested object")
+            for field in role_schema["required"]:
+                self.assertIn(
+                    field, contract[role_name], f"schema requires {role_name}.{field!r}"
+                )
+
+        realization_schema = schema["$defs"]["realization"]
+        self.assertIsInstance(contract.get("realization"), dict, "schema's realization is a nested object")
+        for field in realization_schema["required"]:
+            self.assertIn(
+                field, contract["realization"], f"schema requires realization.{field!r}"
+            )
+        config_scope_schema = realization_schema["properties"]["config_scope"]
+        self.assertIsInstance(
+            contract["realization"].get("config_scope"), dict, "schema's realization.config_scope is a nested object"
+        )
+        for field in config_scope_schema["required"]:
+            self.assertIn(
+                field, contract["realization"]["config_scope"],
+                f"schema requires realization.config_scope.{field!r}",
+            )
+
+        self.assertIsInstance(contract.get("reliances"), list, "schema's reliances is an array")
+        self.assertTrue(contract["reliances"], "contract's reliances example must be non-empty to check its shape")
+        reliance_example = contract["reliances"][0]
+        reliance_schema = schema["$defs"]["reliance"]
+        for field in reliance_schema["required"]:
+            self.assertIn(field, reliance_example, f"schema requires reliances[].{field!r}")
+
+        required_assurance_schema = schema["$defs"]["required_assurance"]
+        self.assertIsInstance(
+            reliance_example.get("required_assurance"), dict, "schema's reliances[].required_assurance is a nested object"
+        )
+        for field in required_assurance_schema["required"]:
+            self.assertIn(
+                field, reliance_example["required_assurance"],
+                f"schema requires reliances[].required_assurance.{field!r}",
+            )
+
+        trust_policy_schema = required_assurance_schema["properties"]["trust_policy"]
+        self.assertIsInstance(
+            reliance_example["required_assurance"].get("trust_policy"), dict,
+            "schema's reliances[].required_assurance.trust_policy is a nested object",
+        )
+        for field in trust_policy_schema["required"]:
+            self.assertIn(
+                field, reliance_example["required_assurance"]["trust_policy"],
+                f"schema requires reliances[].required_assurance.trust_policy.{field!r}",
+            )
+
+    def test_template_output_contract_schema_version_matches_the_schemas_const(self):
+        """A key named schema_version being present isn't the same claim
+        as it holding the value the schema actually pins -- external
+        review, low severity: the first version of this test only
+        checked presence."""
+        schema = json.loads((ROOT / "docs" / "interaction-schema.json").read_text())
+        contract = self._load_contract()
+        self.assertEqual(contract.get("schema_version"), schema["properties"]["schema_version"]["const"])
+
+    def test_template_does_not_instruct_the_model_to_author_its_own_review_block(self):
+        contract = self._load_contract()
+        self.assertNotIn("review", contract, "the model must never author its own review block")
 
 
 class CmdValidateIntegrationTest(unittest.TestCase):

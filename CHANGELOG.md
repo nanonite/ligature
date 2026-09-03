@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- Stage 3 draft template: interaction (full I-schema: #16-#19) (#41)
 - R2: eligible-interaction coverage by boundary or reviewed exemption, fail closed (#46)
 - Evidence schema: claim field, semantic_disposition/lifecycle split, conflict resolution (#20)
 - Protocol classification + protocol-debt records, fail closed (#19)

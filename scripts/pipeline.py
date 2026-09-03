@@ -15,6 +15,11 @@ Implemented now, against schemas that actually exist:
   approve-pair  The explicit transactional checkpoint for a new non-pairwise
             interaction and its protocol-debt record, whose cross-references
             require both artifacts to be accepted together.
+  approve-exemption-pair  The same transactional bootstrap for a new
+            interaction and a reviewed exemption covering it (chainlink #46,
+            R2's exemption route) -- neither can be approved alone, since
+            R2 requires an already-promoted exemption and the exemption's
+            own cross-reference requires an already-promoted interaction.
   validate  Stage 4 (G1a/G1b/G2+) over boundary contracts (#9/#11) --
             fully deterministic, no LLM calls, by construction.
   validate-work-package  Stage 7's own schema + §10.1 checks (#14) over a
@@ -43,9 +48,11 @@ Implemented now, against schemas that actually exist:
             _protocol_debt/ directory.
   validate-exemption  Stage 4's G1a/G1b over boundary-required exemption
             objects (#16): schema plus naming (interaction_id == filename
-            stem). Does not yet cross-reference that the named interaction
-            is real or actually eligible -- that is R2's job, still
-            deferred (see NOT_YET_IMPLEMENTED).
+            stem), plus G2 (chainlink #46): the named interaction must
+            resolve to a real, promoted, boundary-required interaction --
+            a dangling or ineligible reference is rejected outright, and
+            never contributes to validate-interaction's own R2 coverage
+            check either (same mechanism, not two).
   validate-protocol-debt  Stage 4's G1a/G1b over protocol-debt records
             (#19): schema plus naming plus interaction cross-reference --
             a debt record naming a nonexistent interaction, or one whose
@@ -103,6 +110,7 @@ from validate_boundary_contracts import load_validator as load_boundary_validato
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
 from validate_boundary_contracts import validate_draft_data as validate_boundary_draft_data  # noqa: E402
+from validate_boundary_contracts import valid_boundary_edges_from_crate  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
@@ -117,6 +125,7 @@ from validate_exemption import load_validator as load_exemption_validator  # noq
 from validate_exemption import validate_crate as validate_exemption_crate  # noqa: E402
 from validate_exemption import validate_data as validate_exemption_data  # noqa: E402
 from validate_exemption import validate_draft_data as validate_exemption_draft_data  # noqa: E402
+from validate_exemption import valid_exemption_interaction_ids_from_crate  # noqa: E402
 from validate_interaction import load_draft_validator as load_interaction_draft_validator  # noqa: E402
 from validate_interaction import load_interactions_by_id  # noqa: E402
 from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
@@ -138,10 +147,6 @@ ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
-    "R2 coverage": "not yet implemented -- every eligible I edge covered by an O artifact or a reviewed "
-    "exemption; needs #16's interaction/exemption validators, which exist, cross-referenced against each "
-    "other, which doesn't yet. (G15's own coverage check, the structurally identical case for non-pairwise "
-    "protocol classification, IS implemented -- see cmd_validate_interaction/cmd_validate_protocol_debt.)",
     "G4/G5 evidence tracing/grounding": "not yet implemented -- required/bug-compat evidence tracing to "
     "nothing (G4) and ungrounded obligations (G5) both need cross-referencing interaction evidence_links "
     "(#16) to evidence ids (#20), which exist individually but aren't cross-referenced against each other yet",
@@ -377,22 +382,39 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
     # chainlink #21 in NOT_YET_IMPLEMENTED, but #21 is only the I-schema
     # milestone gate (all of #15-#20 landed), not an issue that itself
     # implements gates; #19's own title says "fail closed."
+    # R2 (eligible-interaction coverage by boundary or reviewed exemption)
+    # is the same shape, fail-closed the same way -- chainlink #46: load
+    # the crate's own boundary contracts and exemptions, keep only the
+    # ones that are themselves fully valid, and pass both coverage sets
+    # into the scan so an eligible interaction with neither a covering
+    # boundary nor a reviewed exemption is rejected.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
+        specs_search_root = args.workspace / crate["specs_search_root"]
         interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
         valid_debt_interaction_ids = valid_interaction_ids_from_crate(
             crate_root, _protocol_debt_dir_for(crate, args.workspace), interactions_by_id
         )
+        covering_boundary_edges = valid_boundary_edges_from_crate(
+            crate_root, _boundary_dir_for(crate, args.workspace), specs_search_root
+        )
+        valid_exemption_interaction_ids = valid_exemption_interaction_ids_from_crate(
+            crate_root, _exemption_dir_for(crate, args.workspace), interactions_by_id
+        )
         findings_total.extend(
             validate_interaction_crate(
-                crate_root, _interaction_dir_for(crate, args.workspace), valid_debt_interaction_ids
+                crate_root, _interaction_dir_for(crate, args.workspace), valid_debt_interaction_ids,
+                covering_boundary_edges, valid_exemption_interaction_ids,
             )
         )
 
     if not findings_total:
-        print("OK: all interactions pass G1a/G1b (incl. computed eligibility) and G15 protocol coverage")
+        print(
+            "OK: all interactions pass G1a/G1b (incl. computed eligibility), G15 protocol coverage, "
+            "and R2 coverage"
+        )
         return 0
 
     print(f"FAIL: {len(findings_total)} finding(s)")
@@ -404,14 +426,21 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
 def cmd_validate_exemption(args: argparse.Namespace) -> int:
     # Same discover-then-reject-by-location scan as
     # cmd_validate_interaction, for <crate_dir>/specs/_exemptions.
+    # R2's reference-integrity half (chainlink #46): each exemption's own
+    # interaction_id must resolve to a real, boundary-required interaction
+    # -- fail-closed the same way cmd_validate_protocol_debt's own
+    # interaction cross-reference already is.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
-        findings_total.extend(validate_exemption_crate(crate_root, _exemption_dir_for(crate, args.workspace)))
+        interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
+        findings_total.extend(
+            validate_exemption_crate(crate_root, _exemption_dir_for(crate, args.workspace), interactions_by_id)
+        )
 
     if not findings_total:
-        print("OK: all exemptions pass G1a/G1b")
+        print("OK: all exemptions pass G1a/G1b (incl. interaction cross-reference)")
         return 0
 
     print(f"FAIL: {len(findings_total)} finding(s)")
@@ -666,14 +695,25 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         if resolved_parent == _interaction_dir_for(crate, workspace):
             validator = load_interaction_validator()
             crate_root = (workspace / crate["crate_dir"]).resolve()
+            specs_search_root = _specs_search_root_for(target, workspace, descriptor)
             interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
             valid_debt_interaction_ids = valid_interaction_ids_from_crate(
                 crate_root, _protocol_debt_dir_for(crate, workspace), interactions_by_id
             )
-            return lambda path, data: validate_interaction_data(path, data, validator, valid_debt_interaction_ids)
+            covering_boundary_edges = valid_boundary_edges_from_crate(
+                crate_root, _boundary_dir_for(crate, workspace), specs_search_root
+            )
+            valid_exemption_interaction_ids = valid_exemption_interaction_ids_from_crate(
+                crate_root, _exemption_dir_for(crate, workspace), interactions_by_id
+            )
+            return lambda path, data: validate_interaction_data(
+                path, data, validator, valid_debt_interaction_ids, covering_boundary_edges,
+                valid_exemption_interaction_ids,
+            )
         if resolved_parent == _exemption_dir_for(crate, workspace):
             validator = load_exemption_validator()
-            return lambda path, data: validate_exemption_data(path, data, validator)
+            interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
+            return lambda path, data: validate_exemption_data(path, data, validator, interactions_by_id)
         if resolved_parent == _protocol_debt_dir_for(crate, workspace):
             validator = load_protocol_debt_validator()
             interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
@@ -797,6 +837,7 @@ def _select_pair_validate_fn(
         )
 
     crate_root = (workspace / interaction_crate["crate_dir"]).resolve()
+    specs_search_root = workspace / interaction_crate["specs_search_root"]
     interaction_validator = load_interaction_validator()
     debt_validator = load_protocol_debt_validator()
 
@@ -839,8 +880,20 @@ def _select_pair_validate_fn(
             # is not committed unless the debt draft also passes.
             interaction_coverage.add(candidate_id)
 
+        # R2 (chainlink #46): a non-pairwise interaction can independently
+        # be boundary-required, so it needs the same coverage check any
+        # other interaction does -- from the crate's EXISTING promoted
+        # boundaries/exemptions, not from anything in this transaction.
+        covering_boundary_edges = valid_boundary_edges_from_crate(
+            crate_root, _boundary_dir_for(interaction_crate, workspace), specs_search_root
+        )
+        valid_exemption_interaction_ids = valid_exemption_interaction_ids_from_crate(
+            crate_root, _exemption_dir_for(interaction_crate, workspace), interactions_by_id
+        )
+
         interaction_findings = validate_interaction_data(
-            interaction_target, candidate_interaction, interaction_validator, interaction_coverage
+            interaction_target, candidate_interaction, interaction_validator, interaction_coverage,
+            covering_boundary_edges, valid_exemption_interaction_ids,
         )
         interaction_errors = [
             finding for finding in interaction_findings if getattr(finding, "severity", "error") == "error"
@@ -856,6 +909,127 @@ def _select_pair_validate_fn(
         return {
             interaction_target: interaction_findings,
             protocol_debt_target: debt_findings,
+        }
+
+    return validate_pair
+
+
+def _select_interaction_exemption_pair_validate_fn(
+    interaction_target: Path,
+    exemption_target: Path,
+    workspace: Path,
+    descriptor: dict,
+):
+    """Build the transaction validator for a new interaction + exemption
+    pair -- chainlink #46's own bootstrap gap, mirrors
+    _select_pair_validate_fn exactly (interaction + protocol-debt) but for
+    R2's OTHER coverage source.
+
+    External review, high severity: single-artifact approve() makes R2
+    genuinely uncrossable for the exemption route -- an interaction can't
+    be approved without an ALREADY-PROMOTED reviewed exemption covering
+    it (R2), and an exemption can't be approved without the interaction
+    it names ALREADY being a promoted, boundary-required interaction
+    (its own G2 cross-reference, which only ever consults
+    load_interactions_by_id's promoted lookup, never a draft). Neither
+    can go first through approve() alone -- reproduced directly both
+    orders before this fix. This callback validates both drafts against
+    a combined view containing the candidate interaction and candidate
+    exemption, the same bootstrap discipline _select_pair_validate_fn
+    already established for non-pairwise interaction + protocol-debt."""
+    interaction_crate = _crate_for(interaction_target, workspace, descriptor)
+    exemption_crate = _crate_for(exemption_target, workspace, descriptor)
+    if interaction_crate is None or exemption_crate is None:
+        raise PipelineError("paired approval targets must belong to declared crates")
+    if interaction_crate["crate_dir"] != exemption_crate["crate_dir"]:
+        raise PipelineError("paired interaction and exemption targets must belong to the same crate")
+
+    interaction_dir = _interaction_dir_for(interaction_crate, workspace)
+    exemption_dir = _exemption_dir_for(interaction_crate, workspace)
+    if interaction_target.suffix != ".json" or interaction_target.resolve().parent != interaction_dir:
+        raise PipelineError(
+            f"paired approval interaction target must be exactly under {interaction_dir} as a .json file"
+        )
+    if exemption_target.suffix != ".json" or exemption_target.resolve().parent != exemption_dir:
+        raise PipelineError(
+            f"paired approval exemption target must be exactly under {exemption_dir} as a .json file"
+        )
+
+    crate_root = (workspace / interaction_crate["crate_dir"]).resolve()
+    specs_search_root = workspace / interaction_crate["specs_search_root"]
+    debt_dir = _protocol_debt_dir_for(interaction_crate, workspace)
+    interaction_validator = load_interaction_validator()
+    exemption_validator = load_exemption_validator()
+
+    def validate_pair(candidates: dict[Path, dict]) -> dict[Path, list]:
+        candidate_interaction = candidates[interaction_target]
+        candidate_exemption = candidates[exemption_target]
+
+        interaction_id = candidate_interaction.get("interaction_id")
+        exemption_interaction_id = candidate_exemption.get("interaction_id")
+        if not (
+            isinstance(interaction_id, str)
+            and interaction_id == exemption_interaction_id
+            and interaction_target.stem == interaction_id
+            and exemption_target.stem == interaction_id
+        ):
+            raise ApprovalRefused(
+                "paired approval requires the interaction and exemption body IDs "
+                "and filename stems to match; refusing to grant candidate R2 coverage"
+            )
+
+        interactions_by_id = load_interactions_by_id(interaction_dir)
+
+        candidate_id = interaction_id
+        if isinstance(candidate_id, str) and candidate_id in interactions_by_id.duplicate_ids:
+            raise ApprovalRefused(
+                f"interaction_id {candidate_id!r} has duplicate canonical candidates; refusing paired approval"
+            )
+
+        # If this is an update, replace the old promoted version in the
+        # transaction view.  A new pair has no entry to replace.
+        transaction_interactions = dict(interactions_by_id)
+        if isinstance(candidate_id, str):
+            transaction_interactions.pop(candidate_id, None)
+
+        # G15 coverage is unaffected by this transaction (no protocol-debt
+        # record involved here) -- from the crate's existing promoted state.
+        valid_debt_interaction_ids = valid_interaction_ids_from_crate(crate_root, debt_dir, interactions_by_id)
+        # Boundary coverage is likewise unaffected -- a boundary contract
+        # isn't part of this pairing.
+        covering_boundary_edges = valid_boundary_edges_from_crate(
+            crate_root, _boundary_dir_for(interaction_crate, workspace), specs_search_root
+        )
+
+        existing_exemption_coverage = valid_exemption_interaction_ids_from_crate(
+            crate_root, exemption_dir, interactions_by_id
+        )
+        exemption_coverage = set(existing_exemption_coverage)
+        if isinstance(candidate_id, str):
+            # The exemption draft is validated below in the same
+            # transaction.  It is safe to let R2 see this candidate ID
+            # here because the pair is not committed unless the exemption
+            # draft also passes.
+            exemption_coverage.add(candidate_id)
+
+        interaction_findings = validate_interaction_data(
+            interaction_target, candidate_interaction, interaction_validator, valid_debt_interaction_ids,
+            covering_boundary_edges, exemption_coverage,
+        )
+        interaction_errors = [
+            finding for finding in interaction_findings if getattr(finding, "severity", "error") == "error"
+        ]
+
+        exemption_findings: list = []
+        if not interaction_errors and isinstance(candidate_id, str):
+            transaction_interactions[candidate_id] = candidate_interaction
+            exemption_findings = validate_exemption_data(
+                exemption_target, candidate_exemption, exemption_validator, transaction_interactions
+            )
+
+        return {
+            interaction_target: interaction_findings,
+            exemption_target: exemption_findings,
         }
 
     return validate_pair
@@ -902,13 +1076,39 @@ def cmd_approve_pair(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_approve_exemption_pair(args: argparse.Namespace) -> int:
+    descriptor = load_project_descriptor(args.descriptor)
+    _require_target_in_workspace(args.interaction_target, args.workspace, descriptor)
+    _require_target_in_workspace(args.exemption_target, args.workspace, descriptor)
+    validate_fn = _select_interaction_exemption_pair_validate_fn(
+        args.interaction_target, args.exemption_target, args.workspace, descriptor
+    )
+
+    targets = (args.interaction_target, args.exemption_target)
+    drafts = tuple(target.with_suffix(target.suffix + ".draft") for target in targets)
+    try:
+        results = checkpoint_approve_pair(
+            drafts,
+            targets,
+            reviewer=args.reviewer,
+            reviewed_at=args.reviewed_at,
+            validate_fn=validate_fn,
+        )
+    except ApprovalRefused as e:
+        raise PipelineError(str(e))
+    for result in results:
+        print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     print(
         "Implemented: draft (Stage 0/3), approve (checkpoint), "
         "approve-pair (transactional interaction + protocol-debt checkpoint), "
+        "approve-exemption-pair (transactional interaction + exemption checkpoint, R2's exemption bootstrap), "
         "validate (Stage 4 G1a/G1b/G2+), "
-        "validate-interaction (Stage 4 G1a/G1b + computed eligibility + G15), "
-        "validate-exemption (Stage 4 G1a/G1b naming), "
+        "validate-interaction (Stage 4 G1a/G1b + computed eligibility + G15 + R2), "
+        "validate-exemption (Stage 4 G1a/G1b naming + G2 interaction cross-reference), "
         "validate-protocol-debt (Stage 4 G1a/G1b + interaction cross-reference), "
         "validate-evidence (Stage 4 G1a/G1b, workspace-level), "
         "validate-conflict-resolution (Stage 4 G1a/G1b/G11, workspace-level), "
@@ -1001,6 +1201,19 @@ def main(argv: list[str]) -> int:
     approve_pair_p.add_argument("--reviewer", required=True)
     approve_pair_p.add_argument("--reviewed-at", default=None)
     approve_pair_p.set_defaults(func=cmd_approve_pair)
+
+    approve_exemption_pair_p = sub.add_parser(
+        "approve-exemption-pair",
+        help=(
+            "Review and atomically promote a new interaction plus a reviewed exemption covering it "
+            "(R2's exemption bootstrap, chainlink #46)"
+        ),
+    )
+    approve_exemption_pair_p.add_argument("interaction_target", type=Path)
+    approve_exemption_pair_p.add_argument("exemption_target", type=Path)
+    approve_exemption_pair_p.add_argument("--reviewer", required=True)
+    approve_exemption_pair_p.add_argument("--reviewed-at", default=None)
+    approve_exemption_pair_p.set_defaults(func=cmd_approve_exemption_pair)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

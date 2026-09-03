@@ -1,12 +1,13 @@
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from validate_boundary_contracts import validate, load_validator  # noqa: E402
+from validate_boundary_contracts import validate, load_validator, valid_boundary_edges_from_crate  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "boundary_contracts"
 
@@ -110,6 +111,55 @@ class ValidateBoundaryContractsTest(unittest.TestCase):
         self.assertEqual(len(infos), 1)
         self.assertIn("unverifiable", infos[0].reason)
         self.assertIn("no --specs-search-root given", infos[0].reason)
+
+
+class ValidBoundaryEdgesFromCrateTest(unittest.TestCase):
+    """valid_boundary_edges_from_crate(): the coverage set
+    scripts/validate_interaction.py's check_r2_coverage trusts as
+    'covered by a boundary' (chainlink #46)."""
+
+    def test_valid_boundary_contributes_its_edge(self):
+        covered = valid_boundary_edges_from_crate(
+            FIXTURES / "valid_crate",
+            FIXTURES / "valid_crate" / "specs" / "_boundaries",
+            FIXTURES / "valid_crate" / "specs",
+        )
+        self.assertEqual(covered, {("Scheduler", "dispatch", "TaskQueue", "pop_ready")})
+
+    def test_schema_invalid_boundary_contributes_no_coverage(self):
+        covered = valid_boundary_edges_from_crate(
+            FIXTURES / "g1a_fail",
+            FIXTURES / "g1a_fail" / "specs" / "_boundaries",
+            None,
+        )
+        self.assertEqual(covered, set())
+
+    def test_info_only_g2_plus_finding_does_not_disqualify_coverage(self):
+        """External review self-check: an earlier version of this
+        function treated ANY finding (including info-severity) as
+        disqualifying, so a boundary with a legitimate info-only G2+
+        finding (here: specs_search_root=None, "applies_to
+        unverifiable") was silently dropped from R2 coverage even though
+        it's a genuinely valid, reviewed boundary contract. Reproduced
+        directly before fixing -- this fixture is the same one
+        ValidateBoundaryContractsTest.test_g2_plus_applies_to_check_degrades_gracefully_without_search_root
+        uses to prove that finding really is info-only, not error."""
+        fixture = FIXTURES / "g2_plus_applies_to_mismatch"
+        covered = valid_boundary_edges_from_crate(fixture, fixture / "specs" / "_boundaries", None)
+        self.assertNotEqual(covered, set(), "a valid boundary with only an info-severity finding must still count")
+
+    def test_mislocated_boundary_contributes_no_coverage(self):
+        """A boundary contract that exists but sits outside the exact
+        canonical directory must not silently grant R2 coverage --
+        mirrors validate_crate()'s own location-anchoring discipline."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root = Path(tmp)
+            stray = crate_root / "not_specs" / "_boundaries"
+            stray.mkdir(parents=True)
+            (stray / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps(VALID_INSTANCE))
+            canonical = crate_root / "specs" / "_boundaries"  # never created
+            covered = valid_boundary_edges_from_crate(crate_root, canonical, None)
+        self.assertEqual(covered, set())
 
 
 if __name__ == "__main__":

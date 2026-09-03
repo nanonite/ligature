@@ -62,8 +62,40 @@ def load_valid() -> dict:
     }
 
 
-def run(data: dict, path: Path = INTERACTION_PATH, valid_debt_interaction_ids: set[str] | None = None):
-    return validate_data(path, data, load_validator(), valid_debt_interaction_ids)
+_AUTO = "auto"
+
+
+def run(
+    data: dict,
+    path: Path = INTERACTION_PATH,
+    valid_debt_interaction_ids: set[str] | None = None,
+    covering_boundary_edges=_AUTO,
+    valid_exemption_interaction_ids: set[str] | None = _AUTO,
+):
+    """`covering_boundary_edges` defaults to the edge implied by `data`'s
+    own caller/callee, and `valid_exemption_interaction_ids` defaults to
+    empty (real-but-unused, not "not checked") -- R2 (chainlink #46) is
+    orthogonal to almost everything else this file tests (naming, G1a
+    schema, realization, reliance assurance, G2++), so satisfying it via
+    the boundary side automatically keeps every test that isn't
+    specifically about R2 unaffected. check_r2_coverage's "not checked"
+    info note fires if EITHER coverage source is None, so both defaults
+    must be real (non-None) values for that to stay silent. Pass an
+    explicit value (including None, to test the not-checked info note,
+    or an empty/mismatched set, to test the fail-closed rejection) to
+    override either one."""
+    if covering_boundary_edges == _AUTO:
+        caller = data.get("caller") or {}
+        callee = data.get("callee") or {}
+        covering_boundary_edges = {
+            (caller.get("concept"), caller.get("method"), callee.get("concept"), callee.get("method"))
+        }
+    if valid_exemption_interaction_ids == _AUTO:
+        valid_exemption_interaction_ids = set()
+    return validate_data(
+        path, data, load_validator(), valid_debt_interaction_ids, covering_boundary_edges,
+        valid_exemption_interaction_ids,
+    )
 
 
 class ComputeEligibilityTest(unittest.TestCase):
@@ -275,6 +307,94 @@ class G15ProtocolCoverageTest(unittest.TestCase):
         self.assertEqual(data["protocol_class"], "pairwise")
         findings = run(data, valid_debt_interaction_ids=set())
         self.assertFalse(any(f.gate == "G15" for f in findings))
+
+
+class R2CoverageTest(unittest.TestCase):
+    """plan.md gate table §12: R2 -- 'eligible I edge with no boundary
+    and no reviewed exemption' blocks promotion, 'block by edge class'.
+    Chainlink #46. Structurally mirrors G15ProtocolCoverageTest above,
+    per plan.md §11's own note that the two checks are structurally
+    identical."""
+
+    def test_boundary_required_with_no_context_supplied_is_an_info_note_not_a_failure(self):
+        """Both coverage sources None (the standalone single-directory
+        CLI's own default) means 'not checked in this context' -- a
+        visible info note, not a silent pass and not an incorrect hard
+        failure."""
+        data = load_valid()
+        findings = run(data, covering_boundary_edges=None, valid_exemption_interaction_ids=None)
+        self.assertFalse(any(f.gate == "R2" and f.severity == "error" for f in findings))
+        self.assertTrue(any(f.gate == "R2" and f.severity == "info" for f in findings))
+
+    def test_boundary_required_with_empty_coverage_is_rejected(self):
+        """The fail-closed case: real (non-None) but empty coverage on
+        both sides -- e.g. a crate with no boundaries or exemptions at
+        all -- rejects every boundary-required interaction."""
+        data = load_valid()
+        findings = run(data, covering_boundary_edges=set(), valid_exemption_interaction_ids=set())
+        self.assertTrue(any(f.gate == "R2" and f.severity == "error" for f in findings), [str(f) for f in findings])
+
+    def test_boundary_required_covered_by_matching_boundary_edge_is_accepted(self):
+        data = load_valid()
+        edge = ("Scheduler", "dispatch", "TaskQueue", "pop_ready")
+        findings = run(data, covering_boundary_edges={edge}, valid_exemption_interaction_ids=set())
+        self.assertFalse(any(f.gate == "R2" for f in findings), [str(f) for f in findings])
+
+    def test_boundary_required_with_a_different_boundary_edge_is_rejected(self):
+        """A non-empty boundary coverage set that doesn't include THIS
+        interaction's own edge still rejects it."""
+        data = load_valid()
+        other_edge = ("SomeOther", "method_a", "SomeOtherCallee", "method_b")
+        findings = run(data, covering_boundary_edges={other_edge}, valid_exemption_interaction_ids=set())
+        self.assertTrue(any(f.gate == "R2" and f.severity == "error" for f in findings), [str(f) for f in findings])
+
+    def test_boundary_required_covered_by_reviewed_exemption_is_accepted(self):
+        """No boundary contract at all -- coverage comes entirely from a
+        reviewed exemption naming this interaction_id."""
+        data = load_valid()
+        findings = run(
+            data, covering_boundary_edges=set(), valid_exemption_interaction_ids={data["interaction_id"]}
+        )
+        self.assertFalse(any(f.gate == "R2" for f in findings), [str(f) for f in findings])
+
+    def test_boundary_required_with_exemption_for_a_different_interaction_is_rejected(self):
+        data = load_valid()
+        findings = run(
+            data, covering_boundary_edges=set(), valid_exemption_interaction_ids={"I-SOME-OTHER-INTERACTION"}
+        )
+        self.assertTrue(any(f.gate == "R2" and f.severity == "error" for f in findings), [str(f) for f in findings])
+
+    def test_inform_is_exempt_regardless_of_coverage(self):
+        data = load_valid()
+        data["interaction_id"] = "I-SCHED-TQ-002"
+        data["edge_class"] = ["pure-data-type-reference"]
+        data["eligibility"] = "inform"
+        findings = run(
+            data, path=Path("crates/scheduler/specs/_interactions/I-SCHED-TQ-002.json"),
+            covering_boundary_edges=set(), valid_exemption_interaction_ids=set(),
+        )
+        self.assertFalse(any(f.gate == "R2" for f in findings))
+
+    def test_ignore_is_exempt_regardless_of_coverage(self):
+        data = load_valid()
+        data["interaction_id"] = "I-SCHED-TQ-003"
+        data["edge_class"] = ["marker-type"]
+        data["eligibility"] = "ignore"
+        findings = run(
+            data, path=Path("crates/scheduler/specs/_interactions/I-SCHED-TQ-003.json"),
+            covering_boundary_edges=set(), valid_exemption_interaction_ids=set(),
+        )
+        self.assertFalse(any(f.gate == "R2" for f in findings))
+
+    def test_either_source_alone_is_sufficient_not_both_required(self):
+        """A boundary AND an exemption both covering the same edge is not
+        a conflict -- R2 only requires at least one."""
+        data = load_valid()
+        edge = ("Scheduler", "dispatch", "TaskQueue", "pop_ready")
+        findings = run(
+            data, covering_boundary_edges={edge}, valid_exemption_interaction_ids={data["interaction_id"]}
+        )
+        self.assertFalse(any(f.gate == "R2" for f in findings), [str(f) for f in findings])
 
 
 class StrictInteractionLookupTest(unittest.TestCase):
@@ -648,9 +768,13 @@ class ValidateCrateTest(unittest.TestCase):
     validate()/find_interaction_files()), then rejects any that don't sit
     directly under the crate's exact canonical directory."""
 
+    # load_valid()'s own caller/callee edge -- satisfies R2 (chainlink
+    # #46) for the tests below that assert a true zero-findings pass.
+    _COVERING_EDGE = {("Scheduler", "dispatch", "TaskQueue", "pop_ready")}
+
     def test_missing_crate_root_raises(self):
         with self.assertRaises(FileNotFoundError):
-            validate_crate(Path("/nonexistent"), Path("/nonexistent/specs/_interactions"), set())
+            validate_crate(Path("/nonexistent"), Path("/nonexistent/specs/_interactions"), set(), set(), set())
 
     def test_finds_and_validates_files_in_the_canonical_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -658,7 +782,7 @@ class ValidateCrateTest(unittest.TestCase):
             canonical = crate_root / "specs" / "_interactions"
             canonical.mkdir(parents=True)
             (canonical / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
-            findings = validate_crate(crate_root, canonical, set())
+            findings = validate_crate(crate_root, canonical, set(), self._COVERING_EDGE, set())
         self.assertEqual(findings, [], [str(f) for f in findings])
 
     def test_mislocated_but_otherwise_valid_artifact_is_rejected_by_location_alone(self):
@@ -676,7 +800,7 @@ class ValidateCrateTest(unittest.TestCase):
             stray.mkdir(parents=True)
             (stray / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
             canonical = crate_root / "specs" / "_interactions"  # never created
-            findings = validate_crate(crate_root, canonical, set())
+            findings = validate_crate(crate_root, canonical, set(), set(), set())
         self.assertTrue(
             any("not directly under the canonical directory" in f.reason for f in findings),
             [str(f) for f in findings],
@@ -696,7 +820,7 @@ class ValidateCrateTest(unittest.TestCase):
             data["interaction_id"] = "I-SCHED-TQ-002"
             data["eligibility"] = "ignore"
             (stray / "I-SCHED-TQ-002.json").write_text(json.dumps(data))
-            findings = validate_crate(crate_root, canonical, set())
+            findings = validate_crate(crate_root, canonical, set(), self._COVERING_EDGE, set())
         self.assertTrue(any("not directly under the canonical directory" in f.reason for f in findings))
         self.assertFalse(any(f.path.name == "I-SCHED-TQ-001.json" for f in findings))
 
@@ -706,11 +830,27 @@ class StandaloneCliMainTest(unittest.TestCase):
     same discipline established for validate_promotion_receipt.py: an
     untested entrypoint is exactly how a wiring gap ships invisibly."""
 
+    def _write_covering_boundary(self, specs: Path) -> None:
+        """A real, reviewed boundary contract covering load_valid()'s own
+        caller/callee edge -- satisfies R2 (chainlink #46) so a
+        boundary-required fixture can legitimately reach rc == 0."""
+        (specs / "_boundaries").mkdir(parents=True, exist_ok=True)
+        (specs / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }))
+
     def test_main_passes_for_valid_fixture_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp) / "specs" / "_interactions"
+            specs = Path(tmp) / "specs"
+            d = specs / "_interactions"
             d.mkdir(parents=True)
             (d / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
+            self._write_covering_boundary(specs)
             rc = main([tmp])
         self.assertEqual(rc, 0)
 
@@ -753,6 +893,7 @@ class StandaloneCliMainTest(unittest.TestCase):
             (specs / "_protocol_debt").mkdir()
             (specs / "_interactions" / "I-SCHED-TQ-001.json").write_text(json.dumps(interaction))
             (specs / "_protocol_debt" / "I-SCHED-TQ-001.json").write_text(json.dumps(debt))
+            self._write_covering_boundary(specs)
             rc = main([tmp])
         self.assertEqual(rc, 0)
 
@@ -785,6 +926,50 @@ class StandaloneCliMainTest(unittest.TestCase):
         self.assertTrue(
             any(
                 finding.gate == "G15" and finding.path.parts[-4:-1] == ("crate_b", "specs", "_interactions")
+                for finding in findings
+            ),
+            [str(finding) for finding in findings],
+        )
+
+    def test_main_keeps_r2_boundary_coverage_scoped_to_each_crate(self):
+        """Chainlink #46: a boundary contract in one crate must not cover
+        an eligible interaction of the same shape in a different crate --
+        mirrors test_main_keeps_protocol_debt_coverage_scoped_to_each_crate
+        exactly, for R2 instead of G15."""
+        interaction_a = load_valid()
+        interaction_b = json.loads(json.dumps(interaction_a))
+        boundary = {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for crate, interaction in [("crate_a", interaction_a), ("crate_b", interaction_b)]:
+                interaction_dir = root / crate / "specs" / "_interactions"
+                interaction_dir.mkdir(parents=True)
+                (interaction_dir / "I-SCHED-TQ-001.json").write_text(json.dumps(interaction))
+            boundary_dir = root / "crate_a" / "specs" / "_boundaries"
+            boundary_dir.mkdir()
+            (boundary_dir / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps(boundary))
+
+            findings = validate(root)
+
+        self.assertTrue(
+            any(
+                finding.gate == "R2" and finding.severity == "error"
+                and finding.path.parts[-4:-1] == ("crate_b", "specs", "_interactions")
+                for finding in findings
+            ),
+            [str(finding) for finding in findings],
+        )
+        self.assertFalse(
+            any(
+                finding.gate == "R2" and finding.severity == "error"
+                and finding.path.parts[-4:-1] == ("crate_a", "specs", "_interactions")
                 for finding in findings
             ),
             [str(finding) for finding in findings],

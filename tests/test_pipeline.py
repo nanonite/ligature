@@ -772,6 +772,12 @@ class CmdValidateInteractionIntegrationTest(unittest.TestCase):
         its location is wrong, proving location alone causes rejection."""
         self.assertEqual(self._run(INTERACTION_FIXTURES / "mislocated"), 1)
 
+    def test_boundary_required_interaction_with_no_boundary_or_exemption_is_rejected(self):
+        """Chainlink #46 (R2), end to end through cmd_validate_interaction:
+        a boundary-required interaction with no sibling _boundaries or
+        _exemptions directory at all must fail closed, not report OK."""
+        self.assertEqual(self._run(INTERACTION_FIXTURES / "uncovered_r2"), 1)
+
 
 class CmdValidateExemptionIntegrationTest(unittest.TestCase):
     def _run(self, workspace: Path) -> int:
@@ -1088,6 +1094,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         end to end through approve, not just validate_interaction.py
         directly. Includes a reliance since G2++ (#17) requires at least
         one for a boundary-required edge."""
+        self._write_promoted_boundary()
         target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
         target.with_suffix(".json.draft").write_text(json.dumps({
             "schema_version": "1.0",
@@ -1157,6 +1164,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
     def test_approve_interaction_with_reliances_succeeds(self):
         """#17: reliances[].required_assurance, exercised end to end
         through approve, not just the schema/G1b unit tests."""
+        self._write_promoted_boundary()
         target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
         target.with_suffix(".json.draft").write_text(json.dumps({
             "schema_version": "1.0",
@@ -1183,6 +1191,37 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
         self.assertTrue(target.exists())
+
+    def test_approve_boundary_required_interaction_with_no_coverage_is_refused(self):
+        """Chainlink #46 (R2), end to end through approve: no covering
+        boundary contract or reviewed exemption anywhere in the crate --
+        deliberately does NOT call self._write_promoted_boundary()."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["postcondition-holds"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+            "protocol_class": "pairwise",
+            "realization": REALIZATION,
+        }))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
 
     def test_approve_interaction_with_type_split_violation_is_refused(self):
         """A verification-method value in required_claims must be
@@ -1235,6 +1274,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
 
     def test_approve_valid_exemption_succeeds(self):
         """#16: same dispatcher extension, for exemption targets."""
+        self._write_real_interaction("I-SCHED-TQ-002", "pairwise")
         target = self.workspace / "crate_a" / "specs" / "_exemptions" / "I-SCHED-TQ-002.json"
         target.with_suffix(".json.draft").write_text(json.dumps({
             "schema_version": "1.0",
@@ -1244,6 +1284,25 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
         self.assertTrue(target.exists())
+
+    def _write_promoted_boundary(self) -> None:
+        """A real, already-promoted (not .draft) boundary contract
+        covering Scheduler.dispatch -> TaskQueue.pop_ready -- satisfies
+        R2 (chainlink #46) for the boundary-required interaction fixtures
+        this class reuses across many tests, all of which declare that
+        same edge."""
+        target = (
+            self.workspace / "crate_a" / "specs" / "_boundaries"
+            / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        )
+        target.write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }))
 
     def _write_real_interaction(self, interaction_id: str, protocol_class: str) -> None:
         """A real, already-promoted interaction file -- not a .draft --
@@ -1314,6 +1373,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
     def test_approve_pair_bootstraps_non_pairwise_interaction_and_debt_atomically(self):
         """The two new artifacts validate against each other in one
         transaction; neither side must already be approved."""
+        self._write_promoted_boundary()
         interaction_target, debt_target = self._stage_non_pairwise_pair()
         rc = self._run(
             "approve-pair",
@@ -1369,6 +1429,117 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         self.assertFalse(debt_target.exists())
         self.assertTrue(interaction_target.with_suffix(".json.draft").exists())
         self.assertTrue(debt_target.with_suffix(".json.draft").exists())
+
+    def _stage_interaction_exemption_pair(self, interaction_id: str = "I-SCHED-TQ-007") -> tuple[Path, Path]:
+        """A boundary-required interaction with NO covering boundary
+        contract anywhere -- its only possible R2 coverage is the paired
+        exemption. Deliberately does NOT call self._write_promoted_boundary()."""
+        interaction_target = self.workspace / "crate_a" / "specs" / "_interactions" / f"{interaction_id}.json"
+        exemption_target = self.workspace / "crate_a" / "specs" / "_exemptions" / f"{interaction_id}.json"
+        interaction_target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": interaction_id,
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful"],
+            "eligibility": "boundary-required",
+            "rationale": "dispatch relies on pop_ready's return discipline",
+            "reliances": [
+                {
+                    "obligation_id": "TaskQueue.C003",
+                    "required_assurance": {
+                        "required_claims": ["postcondition-holds"],
+                        "accepted_evidence_kinds": ["creusot-deductive-check"],
+                        "minimum_scope": {"input_domain": "queue_len_le_8"},
+                        "trust_policy": {"assumptions_allowed": []},
+                    },
+                }
+            ],
+            "protocol_class": "pairwise",
+            "realization": REALIZATION,
+        }))
+        exemption_target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": interaction_id,
+            "rationale": "Prototype scaffolding boundary, tracked for removal (chainlink:#46)",
+        }))
+        return interaction_target, exemption_target
+
+    def test_approve_single_interaction_is_refused_when_only_a_reviewed_exemption_would_cover_it(self):
+        """External review's exact repro, order 1: R2 requires an
+        already-promoted exemption, so a lone interaction approval fails
+        closed even though the eventual plan is to cover it by
+        exemption, not a boundary."""
+        interaction_target, exemption_target = self._stage_interaction_exemption_pair()
+        rc = self._run("approve", str(interaction_target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(interaction_target.exists())
+
+    def test_approve_single_exemption_is_refused_without_an_already_promoted_interaction(self):
+        """External review's exact repro, order 2: the exemption's own
+        cross-reference only ever consults promoted interactions, never a
+        draft, so a lone exemption approval fails closed as a dangling
+        reference even though the interaction it names is staged right
+        alongside it."""
+        interaction_target, exemption_target = self._stage_interaction_exemption_pair()
+        rc = self._run("approve", str(exemption_target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(exemption_target.exists())
+
+    def test_approve_exemption_pair_bootstraps_interaction_and_exemption_atomically(self):
+        """The fix: approve-exemption-pair breaks the cycle the two tests
+        above reproduce -- neither artifact is promoted until both
+        validate against a transaction view containing the other."""
+        interaction_target, exemption_target = self._stage_interaction_exemption_pair()
+        rc = self._run(
+            "approve-exemption-pair", str(interaction_target), str(exemption_target), "--reviewer", "alice",
+            "--reviewed-at", "2026-09-03",
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue(interaction_target.exists())
+        self.assertTrue(exemption_target.exists())
+        self.assertFalse(interaction_target.with_suffix(".json.draft").exists())
+        self.assertFalse(exemption_target.with_suffix(".json.draft").exists())
+        self.assertEqual(json.loads(interaction_target.read_text())["review"]["reviewer"], "alice")
+        self.assertEqual(json.loads(exemption_target.read_text())["review"]["reviewer"], "alice")
+
+    def test_approve_exemption_pair_refuses_the_whole_pair_when_the_exemption_draft_is_invalid(self):
+        interaction_target, exemption_target = self._stage_interaction_exemption_pair()
+        exemption_draft = exemption_target.with_suffix(".json.draft")
+        exemption_data = json.loads(exemption_draft.read_text())
+        del exemption_data["rationale"]
+        exemption_draft.write_text(json.dumps(exemption_data))
+
+        rc = self._run(
+            "approve-exemption-pair", str(interaction_target), str(exemption_target), "--reviewer", "alice"
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse(interaction_target.exists())
+        self.assertFalse(exemption_target.exists())
+        self.assertTrue(interaction_target.with_suffix(".json.draft").exists())
+        self.assertTrue(exemption_target.with_suffix(".json.draft").exists())
+
+    def test_approve_exemption_pair_refuses_mismatched_body_ids_before_granting_coverage(self):
+        """An exemption for an existing I-B must not be able to cover a
+        new I-A merely because both are supplied to the pair command."""
+        self._write_real_interaction("I-B", "pairwise")
+        interaction_target, unused_exemption_target = self._stage_interaction_exemption_pair("I-A")
+        unused_exemption_target.with_suffix(".json.draft").unlink()
+        exemption_target = self.workspace / "crate_a" / "specs" / "_exemptions" / "I-B.json"
+        exemption_target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-B",
+            "rationale": "Prototype scaffolding boundary, tracked for removal (chainlink:#46)",
+        }))
+
+        rc = self._run(
+            "approve-exemption-pair", str(interaction_target), str(exemption_target), "--reviewer", "alice"
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse(interaction_target.exists())
+        self.assertFalse(exemption_target.exists())
+        self.assertTrue(interaction_target.with_suffix(".json.draft").exists())
+        self.assertTrue(exemption_target.with_suffix(".json.draft").exists())
 
     def test_approve_valid_protocol_debt_succeeds(self):
         """#19: _select_validate_fn's dispatcher extended to recognize

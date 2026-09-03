@@ -374,6 +374,48 @@ def validate_file(
     return validate_data(path, data, validator, specs_search_root)
 
 
+def valid_boundary_edges_from_crate(
+    crate_root: Path, canonical_dir: Path, specs_search_root: Path | None
+) -> set[tuple[str | None, str | None, str | None, str | None]]:
+    """The set of (caller_concept, caller_method, callee_concept,
+    callee_method) edges covered by a fully valid (zero-ERROR-finding --
+    G1a/G1b/G2+, which includes the schema's own `review` requirement) boundary
+    contract directly under `canonical_dir` in this crate -- what R2
+    (plan.md gate table §12: "eligible I edge with no boundary and no
+    reviewed exemption") treats as 'covered by a boundary'.
+
+    Mirrors scripts/validate_protocol_debt.py's own
+    valid_interaction_ids_from_crate: runs the same discover-then-validate
+    logic used throughout this codebase but returns coverage, not
+    findings. A mislocated boundary contract (correctly rejected by G1b
+    elsewhere) never contributes coverage -- only files directly under
+    `canonical_dir` are considered here.
+
+    Trust is gated on error-severity findings only, not mere non-emptiness
+    -- gate_g2_plus can legitimately return an info-severity finding for
+    an otherwise-valid boundary (e.g. `specs_search_root=None`, or a
+    concept spec that doesn't exist yet: "applies_to unverifiable", not a
+    defect in the boundary contract itself). Treating ANY finding as
+    disqualifying would silently drop a genuinely valid boundary from R2
+    coverage the moment G2+ had nothing to say -- reproduced directly
+    (specs_search_root=None, the standalone CLI's own default) before
+    fixing."""
+    canonical_resolved = canonical_dir.resolve()
+    validator = load_validator()
+    covered: set[tuple[str | None, str | None, str | None, str | None]] = set()
+    for path in sorted(find_boundary_files(crate_root)):
+        if path.resolve().parent != canonical_resolved:
+            continue
+        findings = validate_file(path, validator, specs_search_root)
+        if any(getattr(finding, "severity", "error") == "error" for finding in findings):
+            continue
+        data = json.loads(path.read_text())
+        caller = data.get("caller") or {}
+        callee = data.get("callee") or {}
+        covered.add((caller.get("concept"), caller.get("method"), callee.get("concept"), callee.get("method")))
+    return covered
+
+
 def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]:
     validator = load_validator()
     findings: list[Finding] = []

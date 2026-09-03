@@ -6,11 +6,15 @@ object standing in for a boundary artifact -- it never carries a
 promotion_id (references are one-way, plan.md §7.1) and it never lives
 nested inside the boundary or interaction it relates to.
 
-Deliberately out of scope here (chainlink #21): cross-referencing that
-interaction_id names a real, eligible I edge, and that R2's coverage
-requirement (boundary OR reviewed exemption) is actually satisfied --
-that needs both scripts/validate_interaction.py and this module together
-and belongs to the R2 gate, not this one.
+Chainlink #46 (R2, plan.md gate table §12): check_interaction_cross_reference
+below is R2's reference-integrity half -- an exemption only makes sense
+if it names a real, eligible interaction (mirrors
+scripts/validate_protocol_debt.py's own G2-labeled cross-reference
+exactly). R2's *coverage* half (does an eligible interaction actually
+have a covering boundary or reviewed exemption) lives in
+scripts/validate_interaction.py's check_r2_coverage, fed by
+valid_exemption_interaction_ids_from_crate below -- the two modules
+together implement R2, neither alone.
 """
 from __future__ import annotations
 
@@ -114,14 +118,93 @@ def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator)
     return check_naming(path, data)
 
 
-def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+def check_interaction_cross_reference(
+    path: Path, data: dict, interactions_by_id: dict[str, dict] | None
+) -> list[Finding]:
+    """R2's reference-integrity half (plan.md gate table §12; chainlink
+    #46): an exemption only makes sense if it names a real, eligible
+    interaction. Mirrors scripts/validate_protocol_debt.py's own
+    G2-labeled check_interaction_cross_reference exactly, including its
+    None-means-unchecked handling.
+
+    `interactions_by_id=None` means the caller couldn't determine which
+    interactions exist -- a visible info note, not a silent pass.
+    `validate_crate` always supplies a real lookup."""
+    if interactions_by_id is None:
+        return [
+            Finding(
+                "G2", path,
+                "interaction cross-reference was not checked -- no interaction context "
+                "was supplied to this validator run",
+                severity="info",
+            )
+        ]
+
+    interaction_id = data["interaction_id"]
+    interaction = interactions_by_id.get(interaction_id)
+    if interaction is None:
+        return [
+            Finding(
+                "G2", path,
+                f"interaction_id {interaction_id!r} does not resolve to any real "
+                "interaction -- dangling reference",
+            )
+        ]
+
+    eligibility = interaction.get("eligibility")
+    if eligibility != "boundary-required":
+        return [
+            Finding(
+                "G2", path,
+                f"interaction_id {interaction_id!r} has eligibility {eligibility!r} -- "
+                "an exemption only applies to a boundary-required interaction",
+            )
+        ]
+    return []
+
+
+def validate_data(
+    path: Path, data: dict, validator: Draft202012Validator, interactions_by_id: dict[str, dict] | None = None
+) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
         return g1a
-    return check_naming(path, data)
+    findings: list[Finding] = []
+    findings.extend(check_naming(path, data))
+    findings.extend(check_interaction_cross_reference(path, data, interactions_by_id))
+    return findings
 
 
-def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
+def valid_exemption_interaction_ids_from_crate(
+    crate_root: Path, canonical_dir: Path, interactions_by_id: dict[str, dict]
+) -> set[str]:
+    """The set of interaction_ids covered by a fully valid (zero-finding
+    -- G1a/G1b/G2, incl. the schema's own `review` requirement) exemption
+    directly under `canonical_dir` in this crate -- what
+    scripts/validate_interaction.py's check_r2_coverage treats as
+    'covered by a reviewed exemption'. Mirrors
+    scripts/validate_protocol_debt.py's own
+    valid_interaction_ids_from_crate exactly: an exemption naming a
+    dangling or ineligible interaction_id (rejected by
+    check_interaction_cross_reference above) never contributes coverage,
+    which is how a dangling/ineligible exemption reference is rejected
+    for R2 purposes, not by a separate mechanism."""
+    canonical_resolved = canonical_dir.resolve()
+    validator = load_validator()
+    covered: set[str] = set()
+    for path in sorted(find_exemption_files(crate_root)):
+        if path.resolve().parent != canonical_resolved:
+            continue
+        findings = validate_file(path, validator, interactions_by_id)
+        if not findings:
+            data = json.loads(path.read_text())
+            covered.add(data["interaction_id"])
+    return covered
+
+
+def validate_file(
+    path: Path, validator: Draft202012Validator, interactions_by_id: dict[str, dict] | None = None
+) -> list[Finding]:
     try:
         text = path.read_text()
     except UnicodeDecodeError as e:
@@ -130,7 +213,7 @@ def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
         data = json.loads(text)
     except json.JSONDecodeError as e:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
-    return validate_data(path, data, validator)
+    return validate_data(path, data, validator, interactions_by_id)
 
 
 def find_exemption_files(root: Path) -> list[Path]:
@@ -142,21 +225,67 @@ def find_exemption_files(root: Path) -> list[Path]:
     return [p for p in root.glob("**/_exemptions/**/*") if p.is_file()]
 
 
-def validate(root: Path) -> list[Finding]:
+def _standalone_interaction_lookup(root: Path) -> dict[Path, dict[str, dict]]:
+    """Resolve the interaction lookup for R2's cross-reference from
+    canonical sibling directories below root -- mirrors
+    scripts/validate_interaction.py's own _standalone_debt_coverage
+    exactly (same rationale: the standalone command receives a workspace
+    or crate root, not an individual file directory, so its recursive
+    discovery can see `specs/_exemptions` and the sibling
+    `specs/_interactions`). A missing sibling is an empty lookup, not an
+    unknown context: a dangling exemption reference must fail closed.
+    Keyed by resolved `_exemptions` directory, so separate crates can't
+    borrow one another's interactions."""
+    from validate_interaction import load_interactions_by_id
+
+    lookup_by_exemption_dir: dict[Path, dict[str, dict]] = {}
+    exemption_dirs = sorted(path for path in root.glob("**/_exemptions") if path.is_dir())
+    for exemptions_dir in exemption_dirs:
+        resolved_exemptions_dir = exemptions_dir.resolve()
+        interactions_dir = exemptions_dir.parent / "_interactions"
+        lookup_by_exemption_dir[resolved_exemptions_dir] = (
+            load_interactions_by_id(interactions_dir) if interactions_dir.is_dir() else {}
+        )
+    return lookup_by_exemption_dir
+
+
+def _exemption_dir_for_path(path: Path) -> Path | None:
+    """Return the nearest `_exemptions` ancestor for a discovered file."""
+    for parent in (path.parent, *path.parents):
+        if parent.name == "_exemptions":
+            return parent.resolve()
+    return None
+
+
+def validate(root: Path, interactions_by_id: dict[str, dict] | None = None) -> list[Finding]:
     """Recursive, unanchored scan for the standalone CLI. External review,
     high severity: this used to silently `continue` past any non-.json
     file, so a malformed or wrong-extension artifact under a real
     `_exemptions` directory produced an overall OK -- every file found is
     now validated (check_naming's own suffix check, above, catches the
-    well-formed-JSON-but-wrong-extension case)."""
+    well-formed-JSON-but-wrong-extension case).
+
+    If no explicit lookup is supplied, this root-level scan derives one
+    per directory from sibling `_interactions/` directories (mirrors
+    scripts/validate_interaction.py's own valid_debt_interaction_ids
+    handling in its validate()) -- this CLI entrypoint is given enough
+    context to fail closed."""
     validator = load_validator()
+    lookup_by_exemption_dir = None
+    if interactions_by_id is None:
+        lookup_by_exemption_dir = _standalone_interaction_lookup(root)
     findings: list[Finding] = []
     for path in find_exemption_files(root):
-        findings.extend(validate_file(path, validator))
+        if lookup_by_exemption_dir is None:
+            lookup = interactions_by_id
+        else:
+            exemption_dir = _exemption_dir_for_path(path)
+            lookup = lookup_by_exemption_dir.get(exemption_dir, {})
+        findings.extend(validate_file(path, validator, lookup))
     return findings
 
 
-def validate_crate(crate_root: Path, canonical_dir: Path) -> list[Finding]:
+def validate_crate(crate_root: Path, canonical_dir: Path, interactions_by_id: dict[str, dict]) -> list[Finding]:
     """The descriptor-driven scan pipeline.py's cmd_validate_exemption
     uses: discovers every exemption-shaped candidate anywhere under
     `crate_root` (same crate-wide find_exemption_files discovery the
@@ -186,7 +315,7 @@ def validate_crate(crate_root: Path, canonical_dir: Path) -> list[Finding]:
                 )
             )
             continue
-        findings.extend(validate_file(path, validator))
+        findings.extend(validate_file(path, validator, interactions_by_id))
     return findings
 
 
@@ -201,12 +330,20 @@ def main(argv: list[str]) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    if not findings:
-        print("OK: all exemptions pass G1a/G1b")
+    errors = [f for f in findings if f.severity == "error"]
+    infos = [f for f in findings if f.severity == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if not errors:
+        print("OK: all exemptions pass G1a/G1b (incl. interaction cross-reference)")
         return 0
 
-    print(f"FAIL: {len(findings)} finding(s)")
-    for f in findings:
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
         print(f"  - {f}")
     return 1
 

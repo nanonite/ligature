@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Interaction (I) validation: G1a (schema), G1b (naming + COMPUTED
 eligibility + reliance-obligation uniqueness), G2++ (declared assurance
-requirement present), G15 (non-pairwise protocol coverage).
+requirement present), G15 (non-pairwise protocol coverage), R2 (eligible
+edge covered by a boundary or reviewed exemption).
 
-plan.md §5.1/§5.2/§5.3/§8.1, gate table §12, chainlink #16/#17/#19.
-Phases run in order -- G1b/G2++/G15 on a schema-invalid document isn't
+plan.md §5.1/§5.2/§5.3/§8.1, gate table §12, chainlink #16/#17/#19/#46.
+Phases run in order -- G1b/G2++/G15/R2 on a schema-invalid document isn't
 meaningful.
 
   G1a   -- draft-2020-12 JSON Schema validation against
@@ -40,14 +41,28 @@ meaningful.
            `validate_data` calls may still omit context and receive a
            visible info-severity note ("not checked") for composition by
            callers that have not supplied a workspace/crate root.
+  R2    -- eligible I edge with no boundary and no reviewed exemption
+           blocks promotion (plan.md gate table, §12; chainlink #46).
+           "Block by edge class": only `boundary-required` edges are in
+           scope -- `inform`/`ignore` edges have nothing to cover, the
+           same eligibility gate G2++ uses. Structurally identical to G15
+           above: the caller supplies two coverage sources --
+           `covering_boundary_edges` (scripts/validate_boundary_contracts.py's
+           own valid_boundary_edges_from_crate) and
+           `valid_exemption_interaction_ids` (scripts/validate_exemption.py's
+           own valid_exemption_interaction_ids_from_crate, which already
+           excludes any exemption with a dangling or ineligible
+           interaction_id) -- either one alone is sufficient. The
+           standalone CLI derives both recursively from sibling
+           `_boundaries/`/`_exemptions/` directories. `pipeline.py
+           approve-exemption-pair` is the bootstrap path for a new
+           interaction and its covering exemption, which otherwise can't
+           be approved in either order (each requires the other to
+           already be promoted).
 
-Deliberately out of scope here (later M3 issues): realization/config_scope
-(#18, already landed) is implemented; R2's cross-reference check that an
-eligible edge is actually covered by a boundary or a reviewed exemption
-remains deferred (needs scripts/validate_exemption.py too, same shape as
-G15 above but not yet wired in) -- G2++ only checks that an assurance
-requirement is *declared*, not that it resolves to a real boundary or
-obligation, which is R2's and G2's job respectively.
+realization/config_scope (#18) is implemented; G2++ only checks that an
+assurance requirement is *declared*, not that it resolves to a real
+boundary or obligation, which is R2's and G2's job respectively.
 """
 from __future__ import annotations
 
@@ -265,6 +280,59 @@ def check_g15_protocol_coverage(
     return []
 
 
+def check_r2_coverage(
+    path: Path,
+    data: dict,
+    covering_boundary_edges: set[tuple] | None,
+    valid_exemption_interaction_ids: set[str] | None,
+) -> list[Finding]:
+    """plan.md gate table §12: R2 -- 'eligible I edge with no boundary
+    and no reviewed exemption' blocks promotion, 'block by edge class'
+    (only boundary-required edges are in scope -- inform/ignore edges
+    have nothing to cover, mirroring check_g2_plus_plus's own eligibility
+    gate). Chainlink #46. Structurally identical to check_g15_protocol_coverage
+    above, per plan.md §11's own note ("G15 itself... is a cross-file
+    coverage check, structurally identical to R2's own") -- same
+    None-means-unchecked handling, same fail-closed-on-empty-set
+    discipline once a real crate context is supplied.
+
+    `covering_boundary_edges` comes from
+    scripts/validate_boundary_contracts.py's own
+    valid_boundary_edges_from_crate; `valid_exemption_interaction_ids`
+    comes from scripts/validate_exemption.py's own
+    valid_exemption_interaction_ids_from_crate (which already excludes
+    any exemption with a dangling or ineligible interaction_id -- see
+    that module's check_interaction_cross_reference). Either one alone
+    is sufficient coverage; only an interaction with NEITHER is rejected."""
+    if data["eligibility"] != "boundary-required":
+        return []
+    if covering_boundary_edges is None or valid_exemption_interaction_ids is None:
+        return [
+            Finding(
+                "R2", path,
+                "eligibility is boundary-required but R2 coverage was not checked -- "
+                "no boundary/exemption context was supplied to this validator run",
+                severity="info",
+            )
+        ]
+    caller = data.get("caller") or {}
+    callee = data.get("callee") or {}
+    edge = (caller.get("concept"), caller.get("method"), callee.get("concept"), callee.get("method"))
+    if edge in covering_boundary_edges:
+        return []
+    if data["interaction_id"] in valid_exemption_interaction_ids:
+        return []
+    return [
+        Finding(
+            "R2", path,
+            f"eligibility is boundary-required but no boundary contract for this edge and no "
+            f"reviewed exemption covers interaction_id {data['interaction_id']!r} "
+            "(plan.md gate table §12: R2 -- eligible I edge with no boundary and no reviewed "
+            "exemption blocks promotion)",
+        )
+    ]
+
+
 class InteractionLookup(dict[str, dict]):
     """A lookup plus the IDs invalidated by duplicate candidates.
 
@@ -377,6 +445,8 @@ def validate_data(
     data: dict,
     validator: Draft202012Validator,
     valid_debt_interaction_ids: set[str] | None = None,
+    covering_boundary_edges: set[tuple] | None = None,
+    valid_exemption_interaction_ids: set[str] | None = None,
 ) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
@@ -388,11 +458,16 @@ def validate_data(
     findings.extend(check_reliance_obligation_uniqueness(path, data))
     findings.extend(check_g2_plus_plus(path, data))
     findings.extend(check_g15_protocol_coverage(path, data, valid_debt_interaction_ids))
+    findings.extend(check_r2_coverage(path, data, covering_boundary_edges, valid_exemption_interaction_ids))
     return findings
 
 
 def validate_file(
-    path: Path, validator: Draft202012Validator, valid_debt_interaction_ids: set[str] | None = None
+    path: Path,
+    validator: Draft202012Validator,
+    valid_debt_interaction_ids: set[str] | None = None,
+    covering_boundary_edges: set[tuple] | None = None,
+    valid_exemption_interaction_ids: set[str] | None = None,
 ) -> list[Finding]:
     try:
         text = path.read_text()
@@ -402,7 +477,9 @@ def validate_file(
         data = json.loads(text)
     except json.JSONDecodeError as e:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
-    return validate_data(path, data, validator, valid_debt_interaction_ids)
+    return validate_data(
+        path, data, validator, valid_debt_interaction_ids, covering_boundary_edges, valid_exemption_interaction_ids
+    )
 
 
 def find_interaction_files(root: Path) -> list[Path]:
@@ -446,6 +523,38 @@ def _standalone_debt_coverage(root: Path) -> dict[Path, set[str]]:
     return coverage_by_interaction_dir
 
 
+def _standalone_r2_coverage(root: Path) -> tuple[dict[Path, set[tuple]], dict[Path, set[str]]]:
+    """Resolve R2 coverage from canonical sibling directories below root
+    -- mirrors _standalone_debt_coverage exactly, for R2's two coverage
+    sources instead of G15's one. A missing `_boundaries`/`_exemptions`
+    sibling contributes an empty set for that source, not an unknown
+    context: an uncovered eligible interaction must fail closed. Keyed
+    by resolved `_interactions` directory, so separate crates can't
+    borrow one another's coverage."""
+    from validate_boundary_contracts import valid_boundary_edges_from_crate
+    from validate_exemption import valid_exemption_interaction_ids_from_crate
+
+    boundary_edges_by_dir: dict[Path, set[tuple]] = {}
+    exemption_ids_by_dir: dict[Path, set[str]] = {}
+    interaction_dirs = sorted(path for path in root.glob("**/_interactions") if path.is_dir())
+    for interactions_dir in interaction_dirs:
+        resolved_interactions_dir = interactions_dir.resolve()
+        boundary_edges_by_dir[resolved_interactions_dir] = set()
+        exemption_ids_by_dir[resolved_interactions_dir] = set()
+        boundary_dir = interactions_dir.parent / "_boundaries"
+        if boundary_dir.is_dir():
+            boundary_edges_by_dir[resolved_interactions_dir].update(
+                valid_boundary_edges_from_crate(root, boundary_dir, None)
+            )
+        exemption_dir = interactions_dir.parent / "_exemptions"
+        if exemption_dir.is_dir():
+            interactions_by_id = load_interactions_by_id(interactions_dir)
+            exemption_ids_by_dir[resolved_interactions_dir].update(
+                valid_exemption_interaction_ids_from_crate(root, exemption_dir, interactions_by_id)
+            )
+    return boundary_edges_by_dir, exemption_ids_by_dir
+
+
 def _interaction_dir_for_path(path: Path) -> Path | None:
     """Return the nearest `_interactions` ancestor for a discovered file."""
     for parent in (path.parent, *path.parents):
@@ -454,7 +563,12 @@ def _interaction_dir_for_path(path: Path) -> Path | None:
     return None
 
 
-def validate(root: Path, valid_debt_interaction_ids: set[str] | None = None) -> list[Finding]:
+def validate(
+    root: Path,
+    valid_debt_interaction_ids: set[str] | None = None,
+    covering_boundary_edges: set[tuple] | None = None,
+    valid_exemption_interaction_ids: set[str] | None = None,
+) -> list[Finding]:
     """Recursive, unanchored scan for the standalone CLI: finds every
     `_interactions` directory anywhere under `root`. External review,
     high severity: this used to silently `continue` past any non-.json
@@ -465,16 +579,19 @@ def validate(root: Path, valid_debt_interaction_ids: set[str] | None = None) -> 
     but-wrong-extension case that would otherwise slip past validate_file's
     JSON-parse step).
 
-    If no explicit coverage set is supplied, this root-level scan derives
-    per-directory coverage from sibling `_protocol_debt/` directories
-    recursively.  The lower-level `validate_data` API retains its
-    optional-context info note, but this CLI entrypoint is given enough
-    context to fail closed.
+    If no explicit coverage is supplied, this root-level scan derives
+    per-directory coverage from sibling `_protocol_debt/`/`_boundaries/`/
+    `_exemptions/` directories recursively.  The lower-level
+    `validate_data` API retains its optional-context info note, but this
+    CLI entrypoint is given enough context to fail closed.
     """
     validator = load_validator()
     coverage_by_interaction_dir = None
     if valid_debt_interaction_ids is None:
         coverage_by_interaction_dir = _standalone_debt_coverage(root)
+    r2_by_interaction_dir = None
+    if covering_boundary_edges is None or valid_exemption_interaction_ids is None:
+        r2_by_interaction_dir = _standalone_r2_coverage(root)
     findings: list[Finding] = []
     for path in find_interaction_files(root):
         if coverage_by_interaction_dir is None:
@@ -482,11 +599,24 @@ def validate(root: Path, valid_debt_interaction_ids: set[str] | None = None) -> 
         else:
             interaction_dir = _interaction_dir_for_path(path)
             coverage = coverage_by_interaction_dir.get(interaction_dir, set())
-        findings.extend(validate_file(path, validator, coverage))
+        if r2_by_interaction_dir is None:
+            edges, exemption_ids = covering_boundary_edges, valid_exemption_interaction_ids
+        else:
+            interaction_dir = _interaction_dir_for_path(path)
+            boundary_edges_by_dir, exemption_ids_by_dir = r2_by_interaction_dir
+            edges = boundary_edges_by_dir.get(interaction_dir, set())
+            exemption_ids = exemption_ids_by_dir.get(interaction_dir, set())
+        findings.extend(validate_file(path, validator, coverage, edges, exemption_ids))
     return findings
 
 
-def validate_crate(crate_root: Path, canonical_dir: Path, valid_debt_interaction_ids: set[str]) -> list[Finding]:
+def validate_crate(
+    crate_root: Path,
+    canonical_dir: Path,
+    valid_debt_interaction_ids: set[str],
+    covering_boundary_edges: set[tuple],
+    valid_exemption_interaction_ids: set[str],
+) -> list[Finding]:
     """The descriptor-driven scan pipeline.py's cmd_validate_interaction
     uses: discovers every interaction-shaped candidate anywhere under
     `crate_root` (same crate-wide `find_interaction_files` discovery the
@@ -521,7 +651,12 @@ def validate_crate(crate_root: Path, canonical_dir: Path, valid_debt_interaction
                 )
             )
             continue
-        findings.extend(validate_file(path, validator, valid_debt_interaction_ids))
+        findings.extend(
+            validate_file(
+                path, validator, valid_debt_interaction_ids, covering_boundary_edges,
+                valid_exemption_interaction_ids,
+            )
+        )
     return findings
 
 
@@ -548,7 +683,7 @@ def main(argv: list[str]) -> int:
             print(f"  - {f}")
 
     if not errors:
-        print("OK: all interactions pass G1a/G1b (incl. computed eligibility) and G15 protocol coverage")
+        print("OK: all interactions pass G1a/G1b (incl. computed eligibility), G15 protocol coverage, and R2 coverage")
         return 0
 
     print(f"FAIL: {len(errors)} finding(s)")

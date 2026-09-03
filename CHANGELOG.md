@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- I-schema: closed (#21)
 - Deterministic promotion-receipt generator + dedicated acceptance operation (Stage 4.5, no LLM) (#45)
 - Stage 3 draft template: interaction (full I-schema: #16-#19) (#41)
 - R2: eligible-interaction coverage by boundary or reviewed exemption, fail closed (#46)

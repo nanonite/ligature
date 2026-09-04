@@ -98,14 +98,37 @@ Implemented now, against schemas that actually exist:
             enforced directly, not deferred. Also workspace-level; IS
             routed through draft/approve, since it does carry a review
             block and is in §7.2's checkpoint list.
+  validate-bridge  Stage 4's G1a/G1b/G2 over bridge specifications
+            (plan.md §8.2/§8.3, chainlink #22): schema (incl. the typed
+            bindings/premises/conclusion bridge_logic form, and the
+            structural exclusion of "caller-postcondition" from
+            available_contract_facts' role enum -- a caller postcondition
+            only holds after the caller returns, so it can never be an
+            available call-site fact) plus naming (bridge_id == filename
+            stem, flat inside a crate's _bridges/ directory) plus
+            self-contained consistency (callee_requirement must equal
+            bridge_logic.conclusion.obligation_id -- the human-readable
+            summary and the machine-checkable conclusion can never
+            silently diverge) plus G2: boundary_id must resolve to a
+            real, promoted boundary contract in the same crate, and
+            callee_requirement must be one of that boundary's own
+            callee_guarantees. This is the schema+validator half of #22
+            only -- generating a verifier harness from bridge_logic is
+            explicitly out of scope here (plan.md §15's own open items
+            list harness-generation semantics as unresolved design
+            territory), deferred to a follow-up chainlink issue.
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
   emission, attach, manifest and promotion-receipt *generation* (the
   schemas/validators exist as of #14/#15; the generators that read
   promoted I/O and emit these don't, since they need the rest of the
-  I-schema machinery M3 builds), Stage 8A-8C (#22-#26, M4). `pipeline
-  status` reports this honestly instead of a stage silently no-op'ing.
+  I-schema machinery M3 builds), Stage 8A-8C (#22-#26, M4) -- bridge
+  *specifications* now have a schema+validator (#22, validate-bridge
+  above), but harness generation/dispatch and the rest of Stage 8A-8C
+  (satisfies()/profile governance #23, C_static extraction #24, G14
+  transitive closure #25) remain open. `pipeline status` reports this
+  honestly instead of a stage silently no-op'ing.
 """
 from __future__ import annotations
 
@@ -122,6 +145,7 @@ from generate_promotion_receipt import accept_promotion  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import boundary_dir_for as _boundary_dir_for  # noqa: E402
 from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
+from project_descriptor import bridge_dir_for as _bridge_dir_for  # noqa: E402
 from project_descriptor import conflict_dir_for as _conflict_dir_for  # noqa: E402
 from project_descriptor import evidence_dir_for as _evidence_dir_for  # noqa: E402
 from project_descriptor import exemption_dir_for as _exemption_dir_for  # noqa: E402
@@ -132,12 +156,18 @@ from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import approve_pair as checkpoint_approve_pair  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
+from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
 from validate_boundary_contracts import load_draft_validator as load_boundary_draft_validator  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate as validate_boundaries  # noqa: E402
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
 from validate_boundary_contracts import validate_draft_data as validate_boundary_draft_data  # noqa: E402
 from validate_boundary_contracts import valid_boundary_edges_from_crate  # noqa: E402
+from validate_bridge import load_draft_validator as load_bridge_draft_validator  # noqa: E402
+from validate_bridge import load_validator as load_bridge_validator  # noqa: E402
+from validate_bridge import validate_crate as validate_bridge_crate  # noqa: E402
+from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
+from validate_bridge import validate_draft_data as validate_bridge_draft_data  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
@@ -516,6 +546,35 @@ def cmd_validate_protocol_debt(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_validate_bridge(args: argparse.Namespace) -> int:
+    # Same discover-then-reject-by-location scan as
+    # cmd_validate_interaction/cmd_validate_exemption/
+    # cmd_validate_protocol_debt, for <crate_dir>/specs/_bridges, plus
+    # the G2 boundary cross-reference validate_bridge.py's own
+    # check_boundary_cross_reference needs: only boundaries that are
+    # themselves fully valid (schema + naming) are trusted, the same
+    # "must be genuinely valid, not just present" bar every other
+    # cross-reference in this pipeline applies.
+    descriptor = load_project_descriptor(args.descriptor)
+    findings_total = []
+    for crate in descriptor["crates"]:
+        crate_root = _require_crate_root_exists(crate, args.workspace)
+        specs_search_root = args.workspace / crate["specs_search_root"]
+        boundaries_by_id = load_boundaries_by_id(_boundary_dir_for(crate, args.workspace), specs_search_root)
+        findings_total.extend(
+            validate_bridge_crate(crate_root, _bridge_dir_for(crate, args.workspace), boundaries_by_id)
+        )
+
+    if not findings_total:
+        print("OK: all bridges pass G1a/G1b (incl. conclusion consistency) and G2 boundary cross-reference")
+        return 0
+
+    print(f"FAIL: {len(findings_total)} finding(s)")
+    for f in findings_total:
+        print(f"  - {f}")
+    return 1
+
+
 def _require_workspace_root_exists(workspace: Path) -> Path:
     if not workspace.is_dir():
         raise PipelineError(f"workspace root does not exist or is not a directory: {workspace}")
@@ -716,7 +775,7 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         raise PipelineError(
             f"target {target} is not a .json file -- this pipeline only "
             "recognizes .json artifacts for boundary contracts, interactions, "
-            "exemptions, protocol-debt records, and conflict-resolution records"
+            "exemptions, protocol-debt records, bridges, and conflict-resolution records"
         )
     # Chainlink #20: conflict-resolution records are workspace-level, not
     # crate-scoped -- checked before the crate-anchored block below, not
@@ -759,12 +818,20 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
             validator = load_protocol_debt_validator()
             interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
             return lambda path, data: validate_protocol_debt_data(path, data, validator, interactions_by_id)
+        if resolved_parent == _bridge_dir_for(crate, workspace):
+            validator = load_bridge_validator()
+            boundary_specs_search_root = _specs_search_root_for(target, workspace, descriptor)
+            boundaries_by_id = load_boundaries_by_id(
+                _boundary_dir_for(crate, workspace), boundary_specs_search_root
+            )
+            return lambda path, data: validate_bridge_data(path, data, validator, boundaries_by_id)
     raise PipelineError(
         f"no validator recognizes target {target} -- this pipeline only "
         "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
         "interactions at <crate_dir>/specs/_interactions/*.json, exemptions "
         "at <crate_dir>/specs/_exemptions/*.json, protocol-debt records at "
-        "<crate_dir>/specs/_protocol_debt/*.json, and conflict-resolution records "
+        "<crate_dir>/specs/_protocol_debt/*.json, bridges at "
+        "<crate_dir>/specs/_bridges/*.json, and conflict-resolution records "
         "at specs/_conflicts/*.json (workspace-level) today. Evidence records at "
         "evidence/*.json (workspace-level) are a valid draft target but are never "
         "approved -- they carry no review block, so approve() cannot promote them. "
@@ -811,7 +878,7 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
         raise PipelineError(
             f"target {target} is not a .json file -- this pipeline only "
             "recognizes .json artifacts for boundary contracts, interactions, "
-            "exemptions, protocol-debt records, evidence, and conflict-resolution records"
+            "exemptions, protocol-debt records, bridges, evidence, and conflict-resolution records"
         )
     if target.resolve().parent == _evidence_dir_for(workspace):
         validator = load_evidence_validator()
@@ -834,12 +901,16 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
         if resolved_parent == _protocol_debt_dir_for(crate, workspace):
             validator = load_protocol_debt_draft_validator()
             return lambda path, data: validate_protocol_debt_draft_data(path, data, validator)
+        if resolved_parent == _bridge_dir_for(crate, workspace):
+            validator = load_bridge_draft_validator()
+            return lambda path, data: validate_bridge_draft_data(path, data, validator)
     raise PipelineError(
         f"no draft validator recognizes target {target} -- this pipeline only "
         "validates drafts for boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
         "interactions at <crate_dir>/specs/_interactions/*.json, exemptions "
         "at <crate_dir>/specs/_exemptions/*.json, protocol-debt records at "
-        "<crate_dir>/specs/_protocol_debt/*.json, evidence at evidence/*.json "
+        "<crate_dir>/specs/_protocol_debt/*.json, bridges at "
+        "<crate_dir>/specs/_bridges/*.json, evidence at evidence/*.json "
         "(workspace-level), and conflict-resolution records at specs/_conflicts/*.json "
         "(workspace-level) today."
     )
@@ -1151,6 +1222,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "validate-interaction (Stage 4 G1a/G1b + computed eligibility + G15 + R2), "
         "validate-exemption (Stage 4 G1a/G1b naming + G2 interaction cross-reference), "
         "validate-protocol-debt (Stage 4 G1a/G1b + interaction cross-reference), "
+        "validate-bridge (Stage 4 G1a/G1b/G2 over bridge specifications, chainlink #22), "
         "validate-evidence (Stage 4 G1a/G1b, workspace-level), "
         "validate-conflict-resolution (Stage 4 G1a/G1b/G11, workspace-level), "
         "validate-work-package (Stage 7 schema + §10.1, standalone), "
@@ -1191,6 +1263,11 @@ def main(argv: list[str]) -> int:
         "validate-protocol-debt", help="Stage 4: G1a/G1b over protocol-debt records"
     )
     validate_protocol_debt_p.set_defaults(func=cmd_validate_protocol_debt)
+
+    validate_bridge_p = sub.add_parser(
+        "validate-bridge", help="Stage 4: G1a/G1b/G2 over bridge specifications (chainlink #22)"
+    )
+    validate_bridge_p.set_defaults(func=cmd_validate_bridge)
 
     validate_evidence_p = sub.add_parser(
         "validate-evidence", help="Stage 4: G1a/G1b over evidence records (workspace-level)"

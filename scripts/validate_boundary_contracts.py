@@ -416,6 +416,57 @@ def valid_boundary_edges_from_crate(
     return covered
 
 
+class BoundaryLookup(dict[str, dict]):
+    """A lookup plus the IDs invalidated by duplicate candidates -- mirrors
+    scripts/validate_interaction.py's own InteractionLookup exactly."""
+
+    def __init__(self):
+        super().__init__()
+        self.duplicate_ids: set[str] = set()
+
+
+def load_boundaries_by_id(canonical_dir: Path, specs_search_root: Path | None = None) -> BoundaryLookup:
+    """Load only approved, fully valid, canonically located boundary
+    contracts, keyed by boundary_id -- mirrors
+    scripts/validate_interaction.py's own load_interactions_by_id
+    exactly (chainlink #22's own bridge cross-reference needs the same
+    "must be genuinely valid, not just present" trust bar boundaries.py's
+    R2 coverage set already established, but keyed by id with the full
+    record retained, not just the caller/callee edge tuple
+    valid_boundary_edges_from_crate returns -- a bridge's own G2 check
+    needs to inspect the boundary's callee_guarantees, not just confirm
+    an edge exists.
+
+    Only considers files directly under `canonical_dir` -- a mislocated
+    boundary contract (correctly rejected by G1b elsewhere) is not a
+    real boundary a bridge may reference."""
+    result = BoundaryLookup()
+    if not canonical_dir.is_dir():
+        return result
+
+    validator = load_validator()
+    candidates: dict[str, list[tuple[Path, dict]]] = {}
+    for path in sorted(p for p in canonical_dir.iterdir() if p.is_file() and p.suffix != ".draft"):
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("boundary_id"), str):
+            candidates.setdefault(data["boundary_id"], []).append((path, data))
+
+    result.duplicate_ids = {boundary_id for boundary_id, entries in candidates.items() if len(entries) > 1}
+
+    for boundary_id, entries in candidates.items():
+        if boundary_id in result.duplicate_ids:
+            continue
+        path, data = entries[0]
+        findings = validate_data(path, data, validator, specs_search_root)
+        if any(getattr(finding, "severity", "error") == "error" for finding in findings):
+            continue
+        result[boundary_id] = data
+    return result
+
+
 def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]:
     validator = load_validator()
     findings: list[Finding] = []

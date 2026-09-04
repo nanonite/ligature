@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/bridge-schema.json",
+  "title": "Bridge specification (call-site fact semantics) — v1.0",
+  "description": "plan.md §8.2/§8.3, chainlink #22. One per crates/*/specs/_bridges/<bridge_id>.json. A caller postcondition holds only AFTER the caller returns -- it cannot establish a callee precondition at an earlier call site. The real obligation is: caller preconditions AND caller invariants AND path condition AND prior call results IMPLY callee precondition. available_contract_facts therefore has no 'caller-postcondition' role in its enum -- the schema makes the unsound shortcut structurally impossible to write, the same discipline plan.md §5.2's computed eligibility and chainlink #17's disjoint claim/evidence-method enums already use elsewhere in this pipeline. bridge_logic (§8.3) is the typed replacement for prose bridge_logic: prose cannot support machine assurance (the harness may assert a weaker property, fidelity can't be checked, and the result can't show the declared bridge was actually checked).",
+  "type": "object",
+  "required": [
+    "schema_version", "bridge_id", "boundary_id", "callee_requirement",
+    "available_contract_facts", "target_expression", "protocol_class",
+    "bridge_logic", "review"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "bridge_id": {
+      "type": "string",
+      "pattern": "^BR-[A-Z][A-Z0-9-]*-[0-9]{3}$",
+      "description": "Must equal the filename stem exactly (G1b, enforced by scripts/validate_bridge.py), same discipline as boundary_id/interaction_id."
+    },
+    "boundary_id": {
+      "type": "string",
+      "description": "The boundary contract this bridge proves a call-site implication for. Cross-referenced to a real, promoted boundary contract in the same crate (G2, scripts/validate_bridge.py) -- not checked structurally by this schema."
+    },
+    "callee_requirement": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$",
+      "description": "<Concept>.<id> -- the specific callee_guarantees entry (docs/boundary-contract-schema.json) this bridge discharges. Must be one of boundary_id's own callee_guarantees (G2, cross-referenced) and must equal bridge_logic.conclusion.obligation_id exactly (G1b, checked structurally here -- the human-readable summary and the machine-checkable conclusion can never silently diverge)."
+    },
+    "available_contract_facts": {
+      "type": "array",
+      "description": "Facts genuinely available at the call site (plan.md §8.2): caller preconditions, invariants, previously-established callee postconditions, trusted environment assumptions. Deliberately has no 'caller-postcondition' role -- a caller postcondition only holds after the caller returns, so it can never be a fact available before the callee is invoked.",
+      "items": { "$ref": "#/$defs/contract_fact" }
+    },
+    "required_local_facts": {
+      "type": "array",
+      "description": "Facts established locally at the call site (branch conditions, loop invariants, argument predicates) that aren't already a caller/callee contract obligation. Optional -- not every bridge needs one.",
+      "items": { "$ref": "#/$defs/local_fact" }
+    },
+    "target_expression": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The concrete call being discharged, e.g. \"TaskQueue.C001(args, callee_state)\". Free text at the schema level -- deeper expression structure is bridge_logic's job, not this field's."
+    },
+    "protocol_class": {
+      "type": "string",
+      "enum": ["pairwise", "non-pairwise"],
+      "description": "Same vocabulary as docs/interaction-schema.json's own field -- a bridge for a non-pairwise edge discharges one step of a multi-step protocol, not the whole thing."
+    },
+    "bridge_logic": { "$ref": "#/$defs/bridge_logic" },
+    "review": { "$ref": "#/$defs/review" }
+  },
+  "$defs": {
+    "contract_fact": {
+      "type": "object",
+      "required": ["obligation_id", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "obligation_id": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "caller-precondition",
+            "invariant",
+            "prior-callee-postcondition",
+            "trusted-environment-assumption"
+          ],
+          "description": "Deliberately excludes 'caller-postcondition' -- plan.md §8.2: 'the enclosing caller postcondition is normally not among them,' since it only holds after the caller returns."
+        }
+      }
+    },
+    "local_fact": {
+      "type": "object",
+      "required": ["fact_id", "expression"],
+      "additionalProperties": false,
+      "properties": {
+        "fact_id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "expression": { "type": "string", "minLength": 1 }
+      }
+    },
+    "bridge_logic": {
+      "type": "object",
+      "required": ["bindings", "premises", "conclusion"],
+      "additionalProperties": false,
+      "description": "plan.md §8.3's typed expression form -- the machine-checkable replacement for prose bridge_logic. Generating a verifier harness from this representation is chainlink #22's own follow-up (harness codegen), tracked separately -- this schema only fixes the representation harness generation would compile from.",
+      "properties": {
+        "bindings": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string", "minLength": 1 },
+              {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": { "type": "string", "minLength": 1 }
+              }
+            ]
+          },
+          "description": "Name -> type. A binding's value is either a bare type name (e.g. caller_self: Scheduler) or a nested named group of typed sub-bindings (e.g. args: {now: Time}), matching plan.md §8.3's own worked example exactly."
+        },
+        "premises": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "conclusion": {
+          "type": "object",
+          "required": ["obligation_id"],
+          "additionalProperties": false,
+          "properties": {
+            "obligation_id": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$"
+            }
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

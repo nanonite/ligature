@@ -372,6 +372,7 @@ class SelectDraftValidateFnTest(unittest.TestCase):
         (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_exemptions").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_protocol_debt").mkdir(parents=True)
+        (self.workspace / "crate_a" / "specs" / "_bridges").mkdir(parents=True)
         (self.workspace / "evidence").mkdir(parents=True)
         (self.workspace / "specs" / "_conflicts").mkdir(parents=True)
         self._write_real_evidence("E-0143")
@@ -637,6 +638,92 @@ class SelectDraftValidateFnTest(unittest.TestCase):
             "conflict_id": "EC-005",
             "evidence": ["E-9999", "E-0201"],
             "status": "unresolved",
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_valid_pre_review_bridge_draft_passes(self):
+        target = self.workspace / "crate_a" / "specs" / "_bridges" / "BR-SCHED-TQ-001.json"
+        data = {
+            "schema_version": "1.0",
+            "bridge_id": "BR-SCHED-TQ-001",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "callee_requirement": "TaskQueue.C003",
+            "available_contract_facts": [
+                {"obligation_id": "Scheduler.C010", "role": "caller-precondition"},
+            ],
+            "target_expression": "TaskQueue.pop_ready(args, callee_state)",
+            "protocol_class": "pairwise",
+            "bridge_logic": {
+                "bindings": {"caller_self": "Scheduler"},
+                "premises": ["caller_self.ready()"],
+                "conclusion": {"obligation_id": "TaskQueue.C003"},
+            },
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_bridge_draft_with_model_supplied_review_is_rejected(self):
+        target = self.workspace / "crate_a" / "specs" / "_bridges" / "BR-SCHED-TQ-001.json"
+        data = {
+            "schema_version": "1.0",
+            "bridge_id": "BR-SCHED-TQ-001",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "callee_requirement": "TaskQueue.C003",
+            "available_contract_facts": [],
+            "target_expression": "TaskQueue.pop_ready(args, callee_state)",
+            "protocol_class": "pairwise",
+            "bridge_logic": {
+                "bindings": {"caller_self": "Scheduler"},
+                "premises": ["caller_self.ready()"],
+                "conclusion": {"obligation_id": "TaskQueue.C003"},
+            },
+            "review": {"reviewer": "a-model-should-not-write-this", "reviewed_at": "2026-09-02"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_bridge_draft_conclusion_mismatch_still_caught(self):
+        """check_conclusion_consistency is G1b, self-contained -- still
+        part of immediate feedback, mirroring
+        test_interaction_draft_computed_eligibility_mismatch_still_caught."""
+        target = self.workspace / "crate_a" / "specs" / "_bridges" / "BR-SCHED-TQ-001.json"
+        data = {
+            "schema_version": "1.0",
+            "bridge_id": "BR-SCHED-TQ-001",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "callee_requirement": "TaskQueue.C003",
+            "available_contract_facts": [],
+            "target_expression": "TaskQueue.pop_ready(args, callee_state)",
+            "protocol_class": "pairwise",
+            "bridge_logic": {
+                "bindings": {"caller_self": "Scheduler"},
+                "premises": ["caller_self.ready()"],
+                "conclusion": {"obligation_id": "TaskQueue.C099"},
+            },
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(
+            any("does not match bridge_logic.conclusion.obligation_id" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_bridge_draft_dangling_boundary_not_flagged_at_draft_time(self):
+        """G2 needs boundaries_by_id (cross-file) -- not this function's
+        job at draft time; validate-bridge still catches it (see
+        CmdValidateBridgeIntegrationTest.test_dangling_boundary_fails)."""
+        target = self.workspace / "crate_a" / "specs" / "_bridges" / "BR-SCHED-TQ-001.json"
+        data = {
+            "schema_version": "1.0",
+            "bridge_id": "BR-SCHED-TQ-001",
+            "boundary_id": "does_not_exist",
+            "callee_requirement": "TaskQueue.C003",
+            "available_contract_facts": [],
+            "target_expression": "TaskQueue.pop_ready(args, callee_state)",
+            "protocol_class": "pairwise",
+            "bridge_logic": {
+                "bindings": {"caller_self": "Scheduler"},
+                "premises": ["caller_self.ready()"],
+                "conclusion": {"obligation_id": "TaskQueue.C003"},
+            },
         }
         self.assertEqual(self._findings(target, data), [])
 
@@ -1089,6 +1176,27 @@ class CmdValidateProtocolDebtIntegrationTest(unittest.TestCase):
 
     def test_artifact_under_mislocated_directory_is_rejected(self):
         self.assertEqual(self._run(PROTOCOL_DEBT_FIXTURES / "mislocated"), 1)
+
+
+BRIDGE_FIXTURES = ROOT / "tests" / "fixtures" / "bridges"
+
+
+class CmdValidateBridgeIntegrationTest(unittest.TestCase):
+    def _run(self, workspace: Path) -> int:
+        with tempfile.TemporaryDirectory() as tmp:
+            descriptor_path = _single_crate_descriptor_path(tmp)
+            return pipeline.main(
+                ["--workspace", str(workspace), "--descriptor", str(descriptor_path), "validate-bridge"]
+            )
+
+    def test_valid_fixture_crate_passes(self):
+        self.assertEqual(self._run(BRIDGE_FIXTURES / "valid"), 0)
+
+    def test_dangling_boundary_fails(self):
+        self.assertEqual(self._run(BRIDGE_FIXTURES / "dangling_boundary"), 1)
+
+    def test_artifact_under_mislocated_directory_is_rejected(self):
+        self.assertEqual(self._run(BRIDGE_FIXTURES / "mislocated"), 1)
 
 
 EVIDENCE_FIXTURES = ROOT / "tests" / "fixtures" / "evidence"

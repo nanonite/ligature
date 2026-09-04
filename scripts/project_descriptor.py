@@ -74,6 +74,18 @@ def protocol_debt_dir_for(crate: dict, workspace: Path) -> Path:
     return (workspace / crate["crate_dir"] / "specs" / "_protocol_debt").resolve()
 
 
+def bridge_dir_for(crate: dict, workspace: Path) -> Path:
+    """plan.md §8.2's canonical layout: crates/*/specs/_bridges/*.json,
+    the same discipline as boundary_dir_for. Crate-scoped, not
+    workspace-level, since a bridge is tied to one boundary_id, which is
+    itself always in the same crate as its boundary contract."""
+    return (workspace / crate["crate_dir"] / "specs" / "_bridges").resolve()
+
+
+def bridge_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
+    return [bridge_dir_for(crate, workspace) for crate in descriptor["crates"]]
+
+
 def protocol_debt_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
     return [protocol_debt_dir_for(crate, workspace) for crate in descriptor["crates"]]
 

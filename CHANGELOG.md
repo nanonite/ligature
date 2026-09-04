@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- G14 transitive closure + CG6 well-foundedness discharge; closure profiles & degradation records (#25)
 - Coarse C_static extractor with honest unresolved classes; R1/G16 risk tiers (#24)
 - satisfies() mechanism + governed assurance-profile authorship (#23)
 - Typed bridge expression language + call-site fact semantics; harness generation (#22)

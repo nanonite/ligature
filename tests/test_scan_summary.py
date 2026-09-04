@@ -26,6 +26,7 @@ import validate_boundary_contracts  # noqa: E402
 import validate_boundary_naming  # noqa: E402
 import validate_bridge  # noqa: E402
 import validate_callsites  # noqa: E402
+import validate_closure  # noqa: E402
 import validate_conflict_resolution  # noqa: E402
 import validate_evidence  # noqa: E402
 import validate_exemption  # noqa: E402
@@ -41,6 +42,7 @@ SCANNING_VALIDATORS = [
     (validate_boundary_naming, "boundary artifacts"),
     (validate_bridge, "bridges"),
     (validate_callsites, "C_static reports"),
+    (validate_closure, "closure artifacts"),
     (validate_conflict_resolution, "conflict-resolution records"),
     (validate_evidence, "evidence records"),
     (validate_exemption, "exemptions"),
@@ -58,6 +60,7 @@ PIPELINE_SCANS = {
     "validate-callsites": "C_static reports",
     "validate-evidence": "evidence records",
     "validate-conflict-resolution": "conflict-resolution records",
+    "validate-closure": "closure artifacts",
 }
 
 

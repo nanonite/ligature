@@ -48,8 +48,19 @@ by design: applying CG1/CG3/CG4-style verifier-ceiling policy across a
 whole cluster is closure-profile territory (plan.md §4, G14 itself,
 chainlink #25) -- a broader, later mechanism this module does not
 attempt to anticipate, the same boundary chainlink #22 drew around
-harness generation. Once #25 defines what belongs in `context`, callers
-pass it through unchanged; this function's signature already matches."""
+harness generation.
+
+#25 has since defined that shape: `scripts/gate_g14.py`'s
+closure_context() -- cluster, declared closure_kind and owning_verifier,
+the requiring and providing work packages, the obligation, and the
+closure depth. This function still ignores it, and that is now a
+decision rather than a deferral: a required_profile is authored
+governance, and silently strengthening or weakening it from ambient
+cluster facts would move a risk decision out of the reviewed artifact
+that owns it. Cluster-level policy (CG1/CG3/CG4 ceilings, closure_kind
+consistency) is applied by G14 itself, which has the whole closure in
+front of it; what the context buys is that every finding can name the
+edge's provenance."""
 from __future__ import annotations
 
 import json

@@ -139,6 +139,22 @@ Implemented now, against schemas that actually exist:
             low is a visible accepted limitation. Reports "all
             discovered call sites resolved", never "all call sites
             resolved".
+  validate-closure  Stage 8C's G1a/G1b over closure profiles and
+            degradation records (plan.md §4, chainlink #25), plus G17:
+            `deductive` is refused for a Kani-owned cluster, and a
+            cluster's profile and degradation record must agree about
+            which conditions failed -- in both directions, since a stale
+            excuse and an undeclared degradation each hide something.
+  gate-g14  Stage 8C's release closure (plan.md §8.5): loads every
+            required-guarantee dependency, computes the TRANSITIVE
+            closure, detects cycles, evaluates satisfies() on every
+            requirement in it, and holds every assumption anywhere in
+            the closure against the cluster's own entry trust policy --
+            §8.5's motivating case is a depth-2 assumption that every
+            direct check passes over. A cycle closes only with an
+            explicit well-foundedness discharge naming exactly its
+            members (CG6). Outcome is per cluster and never global:
+            closes / degraded-under-an-accepted-record / blocked.
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
@@ -146,9 +162,9 @@ Not yet implemented -- the schemas these stages need don't exist yet
   schemas/validators exist as of #14/#15; the generators that read
   promoted I/O and emit these don't, since they need the rest of the
   I-schema machinery M3 builds). Stage 8A is now partly real (#24's
-  three commands above, plus #23's satisfies() mechanism); bridge
-  harness generation/dispatch (#47), per-obligation assurance records,
-  Stage 8B acceptance (#26) and Stage 8C closure (#25) remain open.
+  three commands above, plus #23's satisfies() mechanism), and Stage 8C
+  is real (#25's validate-closure/gate-g14); bridge harness
+  generation/dispatch (#47) and Stage 8B acceptance (#26) remain open.
   `pipeline status` reports this honestly instead of a stage silently
   no-op'ing.
 """
@@ -164,6 +180,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract_c_static import ExtractionError  # noqa: E402
 from extract_c_static import extract_crate as extract_c_static_crate  # noqa: E402
+from gate_g14 import gate_workspace as gate_g14_workspace  # noqa: E402
+from gate_g14 import report_outcomes as report_g14_outcomes  # noqa: E402
 from gate_r1_g16 import gate_workspace as gate_r1_g16_workspace  # noqa: E402
 from gate_r1_g16 import report_findings as report_r1_g16_findings  # noqa: E402
 from generate_promotion_receipt import PromotionReceiptError  # noqa: E402
@@ -199,6 +217,11 @@ from validate_bridge import count_discovered as _count_bridges  # noqa: E402
 from validate_callsites import callsite_report_dir_for as _callsite_report_dir_for  # noqa: E402
 from validate_callsites import validate_workspace as validate_callsites_workspace  # noqa: E402
 from validate_callsites import count_discovered as _count_callsite_reports  # noqa: E402
+from validate_closure import closure_dir_for as _closure_dir_for  # noqa: E402
+from validate_closure import count_discovered as _count_closure_artifacts  # noqa: E402
+from validate_closure import load_validators as load_closure_validators  # noqa: E402
+from validate_closure import validate_draft_data as validate_closure_draft_data  # noqa: E402
+from validate_closure import validate_workspace as validate_closure_workspace  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
@@ -249,10 +272,10 @@ NOT_YET_IMPLEMENTED = {
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); M3's I-schema is now "
     "complete (#16-#20), but the generator that reads promoted I/O and emits a manifest from it is still not built",
     "8A": "partly implemented -- C_static extraction and R1/G16 are real (#24: extract-c-static, "
-    "validate-callsites, gate-r1-g16); per-obligation claim/evidence/scope/trust records and bridge "
-    "harness dispatch (#47) are not built yet",
+    "validate-callsites, gate-r1-g16), and per-obligation assurance records now have both a record "
+    "schema (#23) and a report container G14 reads (#25, docs/assurance-report-schema.json); what is "
+    "missing is the runner that EMITS one from a real verifier run, and bridge harness dispatch (#47)",
     "8B": "#26 (M4)",
-    "8C": "#25 (M4 -- G14 transitive closure)",
 }
 
 _TEMPLATE_VAR = re.compile(r"\{\{(\w+)\}\}")
@@ -700,6 +723,41 @@ def cmd_validate_callsites(args: argparse.Namespace) -> int:
     for f in findings:
         print(f"  - {f}")
     return 1
+
+
+def cmd_validate_closure(args: argparse.Namespace) -> int:
+    # Workspace-level like validate-evidence: specs/_closure/ holds one
+    # profile (and at most one degradation record) per cluster, and a
+    # cluster spans crates by construction. No descriptor is needed.
+    workspace_root = _require_workspace_root_exists(args.workspace)
+    findings = validate_closure_workspace(workspace_root, _closure_dir_for(workspace_root))
+
+    if not findings:
+        print(pass_line(
+            _count_closure_artifacts(workspace_root), "closure artifacts",
+            "G1a/G1b and G17 profile/record consistency", workspace_root,
+        ))
+        return 0
+
+    print(f"FAIL: {len(findings)} finding(s)")
+    for f in findings:
+        print(f"  - {f}")
+    return 1
+
+
+def cmd_gate_g14(args: argparse.Namespace) -> int:
+    """Stage 8C's release closure (chainlink #25). Fails closed on
+    nothing to close: a release gate that reports OK over zero clusters
+    would be the #48 vacuity in its most dangerous position."""
+    workspace = _require_workspace_root_exists(args.workspace)
+    if not _closure_dir_for(workspace).is_dir():
+        raise PipelineError(
+            f"no closure directory at {_closure_dir_for(workspace)} -- a release gate with "
+            "nothing to close is not a pass; author a closure profile per cluster "
+            "(docs/closure-profile-schema.json)"
+        )
+    outcomes, workspace_findings = gate_g14_workspace(workspace)
+    return report_g14_outcomes(outcomes, workspace_findings)
 
 
 def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
@@ -1381,7 +1439,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         "extract-c-static (Stage 8A's coarse syntactic C_static extractor, chainlink #24), "
         "validate-callsites (Stage 8A G1a/G1b over C_static reports, workspace-level), "
         "gate-r1-g16 (Stage 8A R1 reconciliation + G16 risk-tiered unresolved policy; "
-        "exit 3 means a human risk decision is outstanding)"
+        "exit 3 means a human risk decision is outstanding), "
+        "validate-closure (Stage 8C G1a/G1b + G17 over closure profiles and degradation records), "
+        "gate-g14 (Stage 8C release closure over the transitive assurance graph, per cluster, "
+        "with the CG6 well-foundedness discharge, chainlink #25)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -1532,6 +1593,18 @@ def main(argv: list[str]) -> int:
         help="Stage 8A: reconcile C_static against I (R1) and apply the unresolved risk policy (G16)",
     )
     gate_r1_g16_p.set_defaults(func=cmd_gate_r1_g16)
+
+    validate_closure_p = sub.add_parser(
+        "validate-closure",
+        help="Stage 8C: G1a/G1b + G17 over closure profiles and degradation records (chainlink #25)",
+    )
+    validate_closure_p.set_defaults(func=cmd_validate_closure)
+
+    gate_g14_p = sub.add_parser(
+        "gate-g14",
+        help="Stage 8C: G14 transitive closure + CG6 discharge, per cluster (chainlink #25)",
+    )
+    gate_g14_p.set_defaults(func=cmd_gate_g14)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

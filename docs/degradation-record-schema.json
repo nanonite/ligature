@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/degradation-record-schema.json",
+  "title": "Degradation record — v1.0",
+  "description": "plan.md §4's second worked example, chainlink #25. One per degraded cluster at specs/_closure/<cluster>.degradation.json -- the same directory as the closure profile it sits beside, distinguished by the filename suffix exactly as plan.md's own example writes it. 'A declared state, not a failure, on the same footing as protocol debt': a cluster that cannot meet every closure condition is not thereby unreleasable, it is releasable with a named, reviewed, tracked shortfall and an explicit ceiling. What a degradation record can excuse is bounded by its own vocabulary: failed_conditions is an enum of closure-profile CONDITION keys, so it can never excuse a missing proof, an unsatisfied requirement, an unsupported dependency, or a failed bridge -- those are absences of evidence, not declared ceilings, and scripts/gate_g14.py keeps blocking on them with a degradation record present.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "cluster",
+    "failed_conditions",
+    "affected_edges",
+    "ceiling",
+    "tracking_issue",
+    "review"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "cluster": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "description": "Must equal the filename stem with the '.degradation' suffix removed (G1b, scripts/validate_closure.py): specs/_closure/analysis-configuration.degradation.json declares cluster 'analysis-configuration', and names the same cluster its closure profile does."
+    },
+    "failed_conditions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "single_verifier_system",
+          "owning_verifier",
+          "protocol_class_all_pairwise",
+          "unresolved_indirect_calls_at_or_above_medium",
+          "generic_callees_type_universal_or_creusot_owned",
+          "transitive_assumptions_within_policy",
+          "scc_wellfoundedness_discharged"
+        ]
+      },
+      "description": "Exactly the condition keys of docs/closure-profile-schema.json's `conditions` block. A record may only excuse conditions it actually names, and G14 rejects a record naming a condition that in fact holds (G17: 'profile bits inconsistent with degradation record') -- a stale excuse is as misleading as a missing one, and would keep a cluster reading as degraded after the gap closed."
+    },
+    "affected_edges": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "The boundary_ids (or bridge_ids) the shortfall actually lands on -- plan.md §4's own field. Non-empty by construction: a degradation with no located edge is an unfalsifiable claim about the whole cluster."
+    },
+    "ceiling": {
+      "type": "string",
+      "enum": ["documented", "tested", "harness-tested", "assumed", "per-instantiation", "human-risk-acceptance"],
+      "description": "The strongest thing this cluster may claim while degraded, from plan.md §3's Ceiling column and §8.1's vocabulary. CG1 (cross-verifier composition) is `harness-tested`; CG3 (generics under Kani) is `per-instantiation`; CG5 (non-falsifiable assumptions) is `human-risk-acceptance`. Never a verification-method value -- a ceiling is a limit on the claim, not a claim to have run something."
+    },
+    "capability_gap": {
+      "type": "string",
+      "enum": ["CG1", "CG2", "CG3", "CG4", "CG5", "CG6"],
+      "description": "The capability gap from plan.md §3 this degradation instantiates, when it instantiates one. Optional: a shortfall can be ordinary project debt rather than a permanent capability gap, and forcing every record into a CG bucket would misrepresent the fixable ones as permanent."
+    },
+    "tracking_issue": {
+      "type": "string",
+      "pattern": "^[a-z]+:[A-Za-z0-9_.-]+$",
+      "description": "e.g. chainlink:713. plan.md §3's response to every capability gap is 'degradation record + tracking issue' -- the record says what was accepted, the issue is where the accepting stops being permanent. Same shape as a work-package manifest's own trusted_assumptions[].assumption_ref.tracking_issue."
+    },
+    "review": { "$ref": "#/$defs/review" }
+  },
+  "$defs": {
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "description": "plan.md §7.2's human checkpoint: 'closure-profile/degradation-record acceptance'. Accepting a ceiling is a risk decision and never a mechanical one.",
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

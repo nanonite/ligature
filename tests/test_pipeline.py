@@ -2520,6 +2520,61 @@ class Stage8aCStaticIntegrationTest(unittest.TestCase):
             self.assertIn(command, printed)
 
 
+class Stage8cClosureIntegrationTest(unittest.TestCase):
+    """validate-closure and gate-g14 through pipeline.main() (chainlink
+    #25). The workspace itself is built by tests/test_gate_g14.py's own
+    builder -- one description of what a closable cluster looks like, not
+    two."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_gate_g14 import Workspace  # noqa: E402
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self.built = Workspace(self.workspace)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *args) -> tuple[int, str]:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = pipeline.main(["--workspace", str(self.workspace), *args])
+        return code, buffer.getvalue()
+
+    def test_validate_closure_passes_on_a_clean_profile(self):
+        code, printed = self._run("validate-closure")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("(1 discovered)", printed)
+
+    def test_gate_g14_closes_the_cluster(self):
+        code, printed = self._run("gate-g14")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("closes: closure_kind=deductive", printed)
+
+    def test_gate_g14_blocks_when_a_deep_dependency_has_no_record(self):
+        (self.workspace / "ci" / "results" / "WP-C.json").unlink()
+        code, printed = self._run("gate-g14")
+        self.assertEqual(code, 1, printed)
+        self.assertIn("BLOCKED", printed)
+
+    def test_gate_g14_fails_closed_with_nothing_to_close(self):
+        (self.workspace / "specs" / "_closure" / "scheduler-core.json").unlink()
+        (self.workspace / "specs" / "_closure").rmdir()
+        code, printed = self._run("gate-g14")
+        self.assertEqual(code, 1, printed)
+
+    def test_status_lists_the_new_stage_8c_commands(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            pipeline.main(["--workspace", str(self.workspace), "status"])
+        printed = buffer.getvalue()
+        self.assertIn("validate-closure", printed)
+        self.assertIn("gate-g14", printed)
+        self.assertNotIn("8C", printed.split("Not yet implemented:")[1])
+
+
 def _stage8a_interaction(interaction_id: str, caller: tuple, callee: tuple) -> dict:
     return {
         "schema_version": "1.0",

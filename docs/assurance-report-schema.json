@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/assurance-report-schema.json",
+  "title": "Work-package assurance report — v1.0",
+  "description": "The container a work package's CI run emits at its manifest's own report.emit path (ci/results/WP-*.json), when report.per_obligation_assurance_record is true. chainlink #25: G14 needs an ACHIEVED side to evaluate satisfies() against, and #23 defined the per-obligation record (docs/achieved-assurance-schema.json) without defining where a gate finds one. This is that mapping and nothing more. Machine-emitted, never hand-authored and never human-reviewed -- it carries no review block for exactly the reason an achieved record carries none (docs/achieved-assurance-schema.json: a human freely authoring what was 'achieved' would be indistinguishable from fabricating a verification result). Each `record` is deliberately typed only as an object here: scripts/satisfies.py validates every achieved record against its own schema internally and fails closed on an invalid one, so re-stating that shape here would create a second copy to drift.",
+  "type": "object",
+  "required": ["schema_version", "work_package", "obligation_records", "bridge_records"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "work_package": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The work_package id of the manifest this report is the result of. G14 rejects a report whose id disagrees with the manifest that pointed at it -- a report file swapped for another work package's would otherwise satisfy the wrong obligations."
+    },
+    "obligation_records": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/obligation_entry" },
+      "description": "One entry per obligation this work package claims to have established -- its manifest's definition_of_done.provided_guarantees. May be empty: a work package whose run produced nothing is an honest (and, at G14, a blocking) state, not an invalid report."
+    },
+    "bridge_records": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/bridge_entry" },
+      "description": "One entry per bridge in definition_of_done.required_preconditions_to_establish -- plan.md §8.2: 'the assurance result records whether the verifier established the implication at each call site'."
+    }
+  },
+  "$defs": {
+    "obligation_entry": {
+      "type": "object",
+      "required": ["obligation_id", "record"],
+      "additionalProperties": false,
+      "properties": {
+        "obligation_id": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$"
+        },
+        "record": {
+          "type": "object",
+          "description": "An achieved assurance record (docs/achieved-assurance-schema.json). Validated by scripts/satisfies.py, not here -- see this schema's own description."
+        }
+      }
+    },
+    "bridge_entry": {
+      "type": "object",
+      "required": ["bridge_id", "record"],
+      "additionalProperties": false,
+      "properties": {
+        "bridge_id": { "type": "string", "minLength": 1 },
+        "record": {
+          "type": "object",
+          "description": "An achieved assurance record for the bridge implication itself."
+        }
+      }
+    }
+  }
+}

@@ -186,6 +186,18 @@ review:
   reviewed_at: 2026-08-2x
 ```
 
+Implemented (chainlink #25) as `docs/closure-profile-schema.json` + `docs/degradation-record-schema.json` + `scripts/validate_closure.py` (G1a/G1b/G17), JSON rather than YAML like every other artifact type here, at `specs/_closure/<cluster>.json` and `specs/_closure/<cluster>.degradation.json` — the same directory and the same filename distinction this section's two examples already draw, workspace-level because a cluster spans crates by construction (`analysis-configuration` in §3 is the worked example).
+
+Three additions to the shape above, each because the gate could not otherwise do its job:
+
+- **`work_packages[]`** — this section names a cluster without saying what is in one, and G14's closure has to start somewhere. The cluster declares its own entry work packages; the closure then follows dependencies *out* of them, including into work packages the cluster never named.
+- **`scc_discharges[]`** — §8.5 requires an explicit well-foundedness discharge, and `scc_wellfoundedness_discharged: true` is a bit, not an argument. Each entry names its SCC's members exactly, a `kind` from §8.5's own closed vocabulary (`step-index` / `decreasing-measure` / `temporal-stratification` — free text would let "we reviewed it" pass as a discharge), and the argument itself. The gate checks that one exists, covers the SCC actually computed, and was reviewed; it cannot check that the argument is *correct*, and says so rather than implying otherwise.
+- **`scc_wellfoundedness_discharged: "not-applicable"`** — this section's own "n/a if acyclic", made a value instead of a comment. An acyclic closure must declare `not-applicable`, not `true`: claiming a discharge that was never needed is a vacuous truth, the same objection #48 raised against a vacuous OK.
+
+`generic_callees_type_universal_or_creusot_owned` is **the one condition the gate cannot recompute** — no artifact in this pipeline carries the type information CG3 needs. It stays a human declaration, and `gate-g14` reports it as declared-not-verified on every run rather than letting it pass as checked. Every other condition is recomputed from the closure and rejected on disagreement in both directions, the discipline G1b already applies to computed eligibility in I. `unresolved_indirect_calls_at_or_above_medium` is not recomputed either — it is *read* from `scripts/gate_r1_g16.py`'s `unresolved_at_or_above_medium()` (#24), so the closure profile and the R1/G16 gate can never disagree about what "unresolved" means.
+
+What a degradation record can excuse is bounded by its own vocabulary, and that bound is the point: `failed_conditions` is an enum of **condition keys only**, so a missing achieved record, an unsatisfied requirement, an unsupported dependency, a failed bridge, or a mis-declared condition bit keeps blocking with a record present. Those are absences of evidence; a ceiling is a limit on a claim, and there is no vocabulary here in which a human accepts "the proof is missing". G17 checks profile and record against each other in both directions — a record naming a condition the profile declares as holding is a stale excuse (the cluster reads as degraded after the gap closed, and nobody shuts the tracking issue), and a profile declaring a condition false with nothing covering it is an undeclared degradation.
+
 ---
 
 ## 5. Four graphs
@@ -545,6 +557,16 @@ Direct A→B checking passes while a C-level assumption sits below policy. G14 m
 6. Fail if any required dependency is unsupported or below policy.
 
 **For cycles (CG6):** mutual satisfaction is not soundness. An O-SCC closes only with all of — every body meets its provided contracts; every bridge requirement passes; every assumption satisfies policy; **and an explicit well-foundedness discharge** (step index, decreasing measure, or temporal stratification showing no instantaneous circular dependence). An accepted interface contract alone does not close the release gate.
+
+Implemented (chainlink #25) as `scripts/gate_g14.py`, wired as `pipeline.py gate-g14`, with all six steps above in that order. The graph comes from the artifacts that already existed: a work-package manifest's `definition_of_done` is both sides of an edge — `provided_guarantees` is what a work package supplies, `required_guarantees` what it needs — so the provider index is `obligation_id → work package`, and the closure is a walk over it from the cluster's own entry manifests. The achieved side needed one new container, `docs/assurance-report-schema.json`, at each manifest's own `report.emit` path: #23 defined the per-obligation record without defining where a gate finds one. Two work packages providing the same obligation is a hard error rather than a first-wins pick — the closure would otherwise be over a graph that depends on directory order.
+
+**Step 5 is not step 4 repeated.** Running `satisfies()` on every edge checks each edge against *its own* `trust_policy`; this section's opening case is an assumption that every such check passes and that the cluster's own entry policy would never have allowed. So the gate additionally collects every assumption appearing in any achieved record anywhere in the closure and holds it against the cluster's entry requirements' allow-lists. That check is what fires on the depth-2 case, and it is a distinct finding from the edge-level one, tagged with the `transitive_assumptions_within_policy` condition so a degradation record can name it.
+
+`satisfies(required_profile, achieved_record, context)`'s third parameter is **defined here** (#23 accepted it unused and named #25 as the issue that would define it): `gate_g14.closure_context()` carries what a cluster-level policy needs and a single edge cannot know — which cluster, its declared kind and owning verifier, which work package required this of which other, and the closure depth. `satisfies()` still ignores it, deliberately: a `required_profile` is authored governance, and silently strengthening or weakening it from ambient cluster facts would move a risk decision out of the reviewed artifact that owns it. Policy is applied in the gate, with each edge's provenance attached to the finding.
+
+Cycle detection is iterative Tarjan (a long dependency chain must not blow the stack in a release gate); a non-trivial SCC is size > 1 or a genuine self-dependency. A discharge must match the computed SCC's member set exactly, and a discharge naming a component that no longer exists is rejected as stale rather than ignored.
+
+The outcome is **per cluster and never global**: `closes` (with its `closure_kind` reported alongside, since two clusters with identical bits carry different guarantees), `degraded` (a reviewed record covers exactly the conditions that failed — exit 0, and the wording never says closed), or `blocked`. There is deliberately no aggregate "everything closed" line, and the gate prints §4's per-cluster caveat every run. Nothing to close is a failure, not a pass (#48's discipline in its most dangerous position): a release gate reporting OK over zero clusters would be claiming exactly what it never computed.
 
 ---
 

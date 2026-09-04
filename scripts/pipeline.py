@@ -117,18 +117,40 @@ Implemented now, against schemas that actually exist:
             explicitly out of scope here (plan.md §15's own open items
             list harness-generation semantics as unresolved design
             territory), deferred to a follow-up chainlink issue.
+  extract-c-static  Stage 8A's coarse C_static extractor (plan.md §9,
+            chainlink #24): one report per descriptor crate into
+            ci/results/c_static/<crate>.json -- a generated observation,
+            never a spec under the protected crates/*/specs/**. Requires
+            an explicit --target: C is configuration-relative, and an
+            invented target makes R1's configuration comparison
+            meaningless. Syntactic, so it only ever claims
+            `discovered-lower-bound` -- a claim the schema itself binds
+            to the extractor's backing.
+  validate-callsites  Stage 8A's G1a/G1b over those reports:
+            schema, naming (report_id == filename stem, flat inside
+            c_static/), and RECOMPUTED callsite coverage -- the stored
+            counts are never trusted, the same discipline G1b applies to
+            computed eligibility in I. Workspace-level; carries no
+            review block, so never routed through draft/approve.
+  gate-r1-g16  Stage 8A's R1 + G16 (plan.md §9.1): realized calls
+            reconciled against I within compatible configurations, and
+            unresolved call sites risk-tiered -- critical/high block,
+            medium is a human decision (exit 3, never a silent pass),
+            low is a visible accepted limitation. Reports "all
+            discovered call sites resolved", never "all call sites
+            resolved".
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
   emission, attach, manifest and promotion-receipt *generation* (the
   schemas/validators exist as of #14/#15; the generators that read
   promoted I/O and emit these don't, since they need the rest of the
-  I-schema machinery M3 builds), Stage 8A-8C (#22-#26, M4) -- bridge
-  *specifications* now have a schema+validator (#22, validate-bridge
-  above), but harness generation/dispatch and the rest of Stage 8A-8C
-  (satisfies()/profile governance #23, C_static extraction #24, G14
-  transitive closure #25) remain open. `pipeline status` reports this
-  honestly instead of a stage silently no-op'ing.
+  I-schema machinery M3 builds). Stage 8A is now partly real (#24's
+  three commands above, plus #23's satisfies() mechanism); bridge
+  harness generation/dispatch (#47), per-obligation assurance records,
+  Stage 8B acceptance (#26) and Stage 8C closure (#25) remain open.
+  `pipeline status` reports this honestly instead of a stage silently
+  no-op'ing.
 """
 from __future__ import annotations
 
@@ -140,6 +162,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from extract_c_static import ExtractionError  # noqa: E402
+from extract_c_static import extract_crate as extract_c_static_crate  # noqa: E402
+from gate_r1_g16 import gate_workspace as gate_r1_g16_workspace  # noqa: E402
+from gate_r1_g16 import report_findings as report_r1_g16_findings  # noqa: E402
 from generate_promotion_receipt import PromotionReceiptError  # noqa: E402
 from generate_promotion_receipt import accept_promotion  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
@@ -168,6 +194,8 @@ from validate_bridge import load_validator as load_bridge_validator  # noqa: E40
 from validate_bridge import validate_crate as validate_bridge_crate  # noqa: E402
 from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
 from validate_bridge import validate_draft_data as validate_bridge_draft_data  # noqa: E402
+from validate_callsites import callsite_report_dir_for as _callsite_report_dir_for  # noqa: E402
+from validate_callsites import validate_workspace as validate_callsites_workspace  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
@@ -211,8 +239,10 @@ NOT_YET_IMPLEMENTED = {
     "attach": "M3's I-schema is now complete (#16-#20); attach (Stage 6) itself is still not built",
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); M3's I-schema is now "
     "complete (#16-#20), but the generator that reads promoted I/O and emits a manifest from it is still not built",
-    "8A": "#22-#26 (M4 -- bridge/closure track)",
-    "8B": "#22-#26 (M4)",
+    "8A": "partly implemented -- C_static extraction and R1/G16 are real (#24: extract-c-static, "
+    "validate-callsites, gate-r1-g16); per-obligation claim/evidence/scope/trust records and bridge "
+    "harness dispatch (#47) are not built yet",
+    "8B": "#26 (M4)",
     "8C": "#25 (M4 -- G14 transitive closure)",
 }
 
@@ -573,6 +603,93 @@ def cmd_validate_bridge(args: argparse.Namespace) -> int:
     for f in findings_total:
         print(f"  - {f}")
     return 1
+
+
+def cmd_extract_c_static(args: argparse.Namespace) -> int:
+    """Stage 8A: generate one C_static report per descriptor crate
+    (chainlink #24). Output goes to ci/results/c_static/<crate>.json --
+    a generated CI observation, never under crates/*/specs/**, which the
+    descriptor's write_set marks protected precisely because specs are
+    hand-authored and promoted.
+
+    The target triple is a required argument, never defaulted: C is
+    configuration-relative (plan.md §5), and an invented target would
+    make R1's own configuration comparison meaningless. An existing
+    report at the output path is passed back in as `--previous` so a
+    human-set risk tier survives re-extraction (extractor defaults are
+    re-derived, as they should be)."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    out_dir = _callsite_report_dir_for(workspace)
+    config_scope = {
+        "target": args.target,
+        "features": sorted(set(args.feature)),
+        "cfg": sorted(set(args.cfg)),
+    }
+
+    for crate in descriptor["crates"]:
+        crate_root = _require_crate_root_exists(crate, workspace)
+        report_id = crate["crate_dir"].replace("/", "_")
+        out_path = out_dir / f"{report_id}.json"
+        previous = None
+        if out_path.exists():
+            try:
+                previous = json.loads(out_path.read_text())
+            except json.JSONDecodeError:
+                previous = None
+        try:
+            report = extract_c_static_crate(
+                crate_root, workspace, report_id, crate["crate_dir"], config_scope, previous
+            )
+        except ExtractionError as e:
+            raise PipelineError(str(e))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2) + "\n")
+        coverage = report["callsite_coverage"]
+        print(
+            f"wrote {out_path}: {coverage['discovered']} discovered, {coverage['resolved']} resolved, "
+            f"{coverage['unresolved']} unresolved "
+            f"({report['coverage_scope']['completeness_claim']})"
+        )
+    return 0
+
+
+def cmd_validate_callsites(args: argparse.Namespace) -> int:
+    # Workspace-level like validate-evidence: one ci/results/c_static
+    # directory per workspace, not one per crate (each report names its
+    # own crate_dir). No descriptor is needed to resolve anything.
+    workspace_root = _require_workspace_root_exists(args.workspace)
+    findings = validate_callsites_workspace(workspace_root, _callsite_report_dir_for(workspace_root))
+
+    if not findings:
+        print("OK: all C_static reports pass G1a/G1b (incl. recomputed callsite coverage)")
+        return 0
+
+    print(f"FAIL: {len(findings)} finding(s)")
+    for f in findings:
+        print(f"  - {f}")
+    return 1
+
+
+def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
+    """Stage 8A's R1 + G16 (chainlink #24). Exit codes are three-valued,
+    matching plan.md §9.1's own three dispositions: 0 pass, 1 blocked
+    (critical/high unresolved, or a definite cross-concept call absent
+    from I), 3 a human risk decision is outstanding. A medium tier is
+    never collapsed into either neighbour -- that collapse is exactly
+    what §9.1 rejects in both directions."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    if not _callsite_report_dir_for(workspace).is_dir():
+        raise PipelineError(
+            f"no C_static reports at {_callsite_report_dir_for(workspace)} -- run "
+            "`pipeline.py extract-c-static` first; an empty reconciliation is not a pass"
+        )
+    interaction_dirs = {
+        crate["crate_dir"]: _interaction_dir_for(crate, workspace) for crate in descriptor["crates"]
+    }
+    findings, counts = gate_r1_g16_workspace(workspace, interaction_dirs)
+    return report_r1_g16_findings(findings, counts)
 
 
 def _require_workspace_root_exists(workspace: Path) -> Path:
@@ -1227,7 +1344,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         "validate-conflict-resolution (Stage 4 G1a/G1b/G11, workspace-level), "
         "validate-work-package (Stage 7 schema + §10.1, standalone), "
         "validate-promotion (Stage 4.5 schema + §7.1, standalone), "
-        "accept-promotion (Stage 4.5's own generator, chainlink #45)"
+        "accept-promotion (Stage 4.5's own generator, chainlink #45), "
+        "extract-c-static (Stage 8A's coarse syntactic C_static extractor, chainlink #24), "
+        "validate-callsites (Stage 8A G1a/G1b over C_static reports, workspace-level), "
+        "gate-r1-g16 (Stage 8A R1 reconciliation + G16 risk-tiered unresolved policy; "
+        "exit 3 means a human risk decision is outstanding)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -1354,6 +1475,30 @@ def main(argv: list[str]) -> int:
     approve_exemption_pair_p.add_argument("--reviewer", required=True)
     approve_exemption_pair_p.add_argument("--reviewed-at", default=None)
     approve_exemption_pair_p.set_defaults(func=cmd_approve_exemption_pair)
+
+    extract_c_static_p = sub.add_parser(
+        "extract-c-static",
+        help="Stage 8A: extract C_static call sites per crate into ci/results/c_static (chainlink #24)",
+    )
+    extract_c_static_p.add_argument(
+        "--target", required=True,
+        help="Rust target triple this observation is relative to -- required, never guessed",
+    )
+    extract_c_static_p.add_argument("--feature", action="append", default=[])
+    extract_c_static_p.add_argument("--cfg", action="append", default=[])
+    extract_c_static_p.set_defaults(func=cmd_extract_c_static)
+
+    validate_callsites_p = sub.add_parser(
+        "validate-callsites",
+        help="Stage 8A: G1a/G1b over C_static reports, incl. recomputed coverage (workspace-level)",
+    )
+    validate_callsites_p.set_defaults(func=cmd_validate_callsites)
+
+    gate_r1_g16_p = sub.add_parser(
+        "gate-r1-g16",
+        help="Stage 8A: reconcile C_static against I (R1) and apply the unresolved risk policy (G16)",
+    )
+    gate_r1_g16_p.set_defaults(func=cmd_gate_r1_g16)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

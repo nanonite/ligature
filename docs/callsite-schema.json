@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/callsite-schema.json",
+  "title": "C_static extraction report — v1.0",
+  "description": "plan.md §9, chainlink #24. One generated report per crate, at ci/results/c_static/<report_id>.json, holding the realized-call (C_static) observation for one configuration: the call sites discovered, their honest resolution class (definite-direct-call / possible-dispatch / unresolved-indirect-call), the scope the extractor can actually speak for (coverage_scope), the configuration the observation is relative to (config_scope, the same shape as an interaction's realization.config_scope so R1 can compare them directly), and what the extractor could NOT attribute (attribution_scope). This is an OBSERVATION, never a normative artifact: it carries no `review` block and is never routed through draft/approve -- it is regenerated from source, and a promoted spec is never derived from it. Reconciling it against I (R1) and applying the unresolved risk policy (G16) is scripts/gate_r1_g16.py's job, not this schema's -- the same boundary #16 drew for R2 and #22 drew for harness generation.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "report_id",
+    "crate_dir",
+    "coverage_scope",
+    "config_scope",
+    "attribution_scope",
+    "callsites",
+    "callsite_coverage"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "report_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Must equal the filename stem exactly (G1b, enforced by scripts/validate_callsites.py), the same discipline as boundary_id/interaction_id/bridge_id."
+    },
+    "crate_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Workspace-relative crate directory this report was extracted from -- the descriptor's own crates[].crate_dir value, so the gate can resolve which crate's _interactions/ this report reconciles against."
+    },
+    "coverage_scope": { "$ref": "#/$defs/coverage_scope" },
+    "config_scope": { "$ref": "#/$defs/config_scope" },
+    "attribution_scope": { "$ref": "#/$defs/attribution_scope" },
+    "callsites": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/callsite" },
+      "description": "Every discovered call site, in source order. May be empty -- a crate with no attributable call sites is a real, honest result, and its callsite_coverage says so."
+    },
+    "callsite_coverage": { "$ref": "#/$defs/callsite_coverage" }
+  },
+  "$defs": {
+    "coverage_scope": {
+      "type": "object",
+      "required": [
+        "extractor",
+        "extractor_version",
+        "extractor_backing",
+        "supported_call_forms",
+        "unsupported_call_forms",
+        "completeness_claim"
+      ],
+      "additionalProperties": false,
+      "description": "plan.md §9's coverage_scope block: what this extractor can speak for, and how strongly. The extractor_backing/completeness_claim pair is the structural form of chainlink #24's 'no regex-only completeness claim' -- see the conditional below.",
+      "properties": {
+        "extractor": { "type": "string", "minLength": 1 },
+        "extractor_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "extractor_backing": {
+          "type": "string",
+          "enum": ["syntactic", "compiler"],
+          "description": "How the extractor knows what it knows. `syntactic` = a source-level lexer/structural pass with no name resolution or type information. `compiler` = backed by a real compiler front end (rustc/MIR), which is what plan.md §9 defers to 'later, for release-critical clusters or disputed edges'."
+        },
+        "supported_call_forms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "unsupported_call_forms": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Call forms this extractor cannot see at all -- distinct from forms it sees but cannot resolve (those become possible-dispatch / unresolved-indirect-call call sites, which ARE in the report). May be empty only if the extractor genuinely has no blind spot."
+        },
+        "completeness_claim": {
+          "type": "string",
+          "enum": ["discovered-lower-bound", "sound-for-supported-forms"],
+          "description": "`discovered-lower-bound`: these call sites exist; others may exist that were not discovered. `sound-for-supported-forms`: every call site of a supported form IS in this report -- a soundness claim only a compiler-backed extractor may make (see the if/then below)."
+        }
+      },
+      "allOf": [
+        {
+          "description": "chainlink #24, structurally: 'no regex-only completeness claim'. A syntactic extractor has no name resolution, so it cannot know it saw everything -- it may only claim a lower bound. Only a compiler-backed extractor may assert soundness for its supported forms. Encoded here rather than left to a validator so no future extractor can quietly promote its own claim.",
+          "if": {
+            "properties": { "extractor_backing": { "const": "syntactic" } },
+            "required": ["extractor_backing"]
+          },
+          "then": {
+            "properties": { "completeness_claim": { "const": "discovered-lower-bound" } }
+          }
+        }
+      ]
+    },
+    "config_scope": {
+      "type": "object",
+      "required": ["target", "features", "cfg"],
+      "additionalProperties": false,
+      "description": "The configuration this observation is relative to. Same shape and same target pattern as docs/interaction-schema.json's realization.config_scope, deliberately -- R1 compares the two directly ('realized calls matching within compatible configurations', plan.md §12), and a divergent shape would make that comparison guesswork.",
+      "properties": {
+        "target": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]+(?:\\.[a-z0-9_]+)*(?:-[a-z0-9_]+(?:\\.[a-z0-9_]+)*){1,3}$"
+        },
+        "features": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "cfg": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "attribution_scope": {
+      "type": "object",
+      "required": [
+        "scanned_item_kinds",
+        "local_concepts",
+        "unattributed_call_sites",
+        "out_of_scope_call_sites",
+        "macro_invocations"
+      ],
+      "additionalProperties": false,
+      "description": "What the extractor looked inside, which concepts it considers in-scope, and what it saw but could not attribute to a source-level method identity. These counts are the honest complement of `callsites`: they exist so an omission is visible and counted rather than silently absent from the report.",
+      "properties": {
+        "scanned_item_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["inherent-impl-method", "trait-impl-method"] }
+        },
+        "local_concepts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+          "description": "The concept universe this report is scoped to: every type with an impl block in the scanned sources. C is a relation between local concept methods, so a call whose callee cannot be any of these is out of the graph's domain (counted in out_of_scope_call_sites), not an unresolved edge -- tiering `HashMap::new()` as a medium-risk unresolved call site would bury the real dispatch risk in noise. Recorded here so the scoping decision is auditable rather than implicit."
+        },
+        "unattributed_call_sites": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Call-shaped expressions found outside any scanned item kind (free functions, trait default bodies, impls on foreign or non-concept-shaped types, const initializers). Counted, never attributed -- a caller role needs a concept, and inventing one would be a fabricated method identity."
+        },
+        "out_of_scope_call_sites": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Call sites inside a scanned method whose callee cannot be any local concept method (see local_concepts) -- calls into std, other crates, or free functions. Out of C's domain by construction, not unresolved edges."
+        },
+        "macro_invocations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Macro invocations encountered. A macro can expand to calls that are not present in the source token stream at all; this count makes that blind spot visible."
+        }
+      }
+    },
+    "callsite_coverage": {
+      "type": "object",
+      "required": ["discovered", "resolved", "unresolved"],
+      "additionalProperties": false,
+      "description": "plan.md §9's callsite_coverage, with one deliberate rename: plan's `checked` is a RECONCILIATION outcome (was this call site checked against I?), which extraction cannot know -- scripts/gate_r1_g16.py computes and reports `checked`. What extraction knows is source-level resolution, so this block reports `resolved`. All three counts are recomputed from `callsites` and rejected on disagreement (G1b, scripts/validate_callsites.py) -- never trusted as stored, the same discipline computed eligibility applies in I.",
+      "properties": {
+        "discovered": { "type": "integer", "minimum": 0 },
+        "resolved": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Call sites with call_class definite-direct-call -- resolved to a source-level method identity."
+        },
+        "unresolved": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "possible-dispatch + unresolved-indirect-call. plan.md §9: report 'all discovered call sites resolved' when this is 0. Never 'all call sites resolved'."
+        }
+      }
+    },
+    "callsite": {
+      "type": "object",
+      "required": ["callsite_id", "call_class", "caller", "source", "risk_tier_source"],
+      "additionalProperties": false,
+      "properties": {
+        "callsite_id": {
+          "type": "string",
+          "pattern": "^CS-[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{3}$",
+          "description": "plan.md §9's own shape (CS-SCHED-DISPATCH-004). Deterministic from caller concept/method plus a 1-based occurrence index within that method, so re-extraction of unchanged source produces the same ids and a human-set risk tier can be carried over (extract_c_static.py --previous)."
+        },
+        "call_class": {
+          "type": "string",
+          "enum": ["definite-direct-call", "possible-dispatch", "unresolved-indirect-call"],
+          "description": "plan.md §9's three classes, exactly. definite-direct-call: callee resolved to a concept method at source level. possible-dispatch: the method name is known, the receiver type is not -- may be a dynamic dispatch. unresolved-indirect-call: the callee cannot be named at all (call through a value, a binding indistinguishable from a fn pointer or closure without name resolution)."
+        },
+        "caller": { "$ref": "#/$defs/role" },
+        "callee": { "$ref": "#/$defs/role" },
+        "callee_method": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "possible-dispatch only: the method name is known even though the receiving concept is not. Never promoted to a `callee` role -- naming a concept the extractor did not resolve would be a fabricated edge."
+        },
+        "unresolved_expression": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The call expression as it appears in source, for the two unresolved classes -- what a human needs to adjudicate the risk tier."
+        },
+        "source": { "$ref": "#/$defs/source" },
+        "risk_tier": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"],
+          "description": "plan.md §9.1: critical/high block, medium is a human decision, low is a visible accepted limitation. Required on the two unresolved classes, forbidden on definite-direct-call (a resolved call has no unresolved risk to tier)."
+        },
+        "risk_tier_source": {
+          "type": "string",
+          "enum": ["not-applicable", "extractor-default", "human"],
+          "description": "Where risk_tier came from. The extractor only ever emits `extractor-default` with tier `medium` -- it has no basis for critical/high, and `low` would silently accept a limitation nobody looked at. Moving a tier off the default is a human decision and carries its own review block."
+        },
+        "risk_review": { "$ref": "#/$defs/review" },
+        "required_bridges": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "plan.md §9's own field: bridge_ids a checker must discharge at this call site. Populated by later Stage 8A work (#47 harness generation), not by extraction."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "call_class": { "const": "definite-direct-call" } },
+            "required": ["call_class"]
+          },
+          "then": {
+            "required": ["callee"],
+            "properties": { "risk_tier_source": { "const": "not-applicable" } },
+            "allOf": [
+              { "not": { "required": ["risk_tier"] } },
+              { "not": { "required": ["callee_method"] } },
+              { "not": { "required": ["unresolved_expression"] } }
+            ]
+          },
+          "else": {
+            "required": ["risk_tier", "unresolved_expression"],
+            "properties": { "risk_tier_source": { "enum": ["extractor-default", "human"] } },
+            "not": { "required": ["callee"] }
+          }
+        },
+        {
+          "if": {
+            "properties": { "call_class": { "const": "possible-dispatch" } },
+            "required": ["call_class"]
+          },
+          "then": { "required": ["callee_method"] }
+        },
+        {
+          "if": {
+            "properties": { "call_class": { "const": "unresolved-indirect-call" } },
+            "required": ["call_class"]
+          },
+          "then": { "not": { "required": ["callee_method"] } }
+        },
+        {
+          "description": "A human-set tier carries its own review block; an extractor default must not carry one, since no human signed off on it.",
+          "if": {
+            "properties": { "risk_tier_source": { "const": "human" } },
+            "required": ["risk_tier_source"]
+          },
+          "then": { "required": ["risk_review"] },
+          "else": { "not": { "required": ["risk_review"] } }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "required": ["path", "symbol", "line", "syntax_hash"],
+      "additionalProperties": false,
+      "description": "plan.md §9's source block, plus `line`. syntax_hash -- not the line number -- is the stable anchor: it hashes the enclosing method's comment- and literal-stripped token text, so reformatting or an edit elsewhere in the file does not invalidate it.",
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "description": "Workspace-relative source path." },
+        "symbol": { "type": "string", "minLength": 1, "description": "e.g. \"Scheduler::dispatch\"." },
+        "line": { "type": "integer", "minimum": 1 },
+        "syntax_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "role": {
+      "type": "object",
+      "required": ["concept", "method"],
+      "additionalProperties": false,
+      "description": "Identical to docs/interaction-schema.json's own role definition -- R1 matches C roles against I roles, so the two vocabularies must not drift.",
+      "properties": {
+        "concept": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+        "method": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

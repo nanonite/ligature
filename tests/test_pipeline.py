@@ -1,9 +1,11 @@
 import argparse
+import io
 import json
 import re
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2414,6 +2416,137 @@ class TargetContainmentTest(unittest.TestCase):
         crate_dir. Reproduced directly before fixing."""
         target = self.workspace / "evidence" / "E-0001.json"
         pipeline._require_target_in_workspace(target, self.workspace, self.descriptor)  # no raise
+
+
+CALLSITE_FIXTURE = ROOT / "tests" / "fixtures" / "callsites" / "crate_scheduler" / "src" / "lib.rs"
+
+
+class Stage8aCStaticIntegrationTest(unittest.TestCase):
+    """extract-c-static -> validate-callsites -> gate-r1-g16, end to end
+    through pipeline.main() (chainlink #24). Exercised through the CLI
+    from the start: the validate-work-package review chain found that an
+    untested entrypoint is exactly how a wiring gap ships invisibly no
+    matter how well tested the library functions underneath are."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        crate_src = self.workspace / "crates" / "scheduler" / "src"
+        crate_src.mkdir(parents=True)
+        (crate_src / "lib.rs").write_text(CALLSITE_FIXTURE.read_text())
+        self.interactions = self.workspace / "crates" / "scheduler" / "specs" / "_interactions"
+        self.interactions.mkdir(parents=True)
+
+        descriptor = json.loads(
+            (ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text()
+        )
+        descriptor["crates"] = [
+            {"crate_dir": "crates/scheduler", "contracts_crate": "contracts", "specs_search_root": "crates"}
+        ]
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *args) -> int:
+        return pipeline.main(
+            ["--workspace", str(self.workspace), "--descriptor", str(self.descriptor_path), *args]
+        )
+
+    def _report(self) -> dict:
+        path = self.workspace / "ci" / "results" / "c_static" / "crates_scheduler.json"
+        return json.loads(path.read_text())
+
+    def test_extract_writes_a_report_outside_the_protected_spec_tree(self):
+        self.assertEqual(self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu"), 0)
+        report = self._report()
+        self.assertEqual(report["crate_dir"], "crates/scheduler")
+        self.assertEqual(report["config_scope"]["target"], "x86_64-unknown-linux-gnu")
+        self.assertEqual(report["coverage_scope"]["completeness_claim"], "discovered-lower-bound")
+        self.assertFalse((self.workspace / "crates" / "scheduler" / "specs" / "_c_static").exists())
+
+    def test_target_is_required_never_defaulted(self):
+        with self.assertRaises(SystemExit):
+            self._run("extract-c-static")
+
+    def test_extracted_report_passes_validate_callsites(self):
+        self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+        self.assertEqual(pipeline.main(["--workspace", str(self.workspace), "validate-callsites"]), 0)
+
+    def test_re_extraction_carries_a_human_risk_tier(self):
+        self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+        path = self.workspace / "ci" / "results" / "c_static" / "crates_scheduler.json"
+        report = json.loads(path.read_text())
+        target = next(c for c in report["callsites"] if c["call_class"] != "definite-direct-call")
+        target["risk_tier"] = "low"
+        target["risk_tier_source"] = "human"
+        target["risk_review"] = {"reviewer": "alice", "reviewed_at": "2026-09-04"}
+        path.write_text(json.dumps(report))
+
+        self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+        carried = {c["callsite_id"]: c for c in self._report()["callsites"]}[target["callsite_id"]]
+        self.assertEqual(carried["risk_tier"], "low")
+        self.assertEqual(carried["risk_tier_source"], "human")
+
+    def test_gate_blocks_on_undeclared_realized_calls(self):
+        self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+        self.assertEqual(self._run("gate-r1-g16"), 1)
+
+    def test_gate_without_reports_is_an_error_not_a_pass(self):
+        self.assertEqual(self._run("gate-r1-g16"), 1)  # PipelineError -> 1, with an explicit message
+
+    def test_gate_returns_a_decision_code_once_drift_is_declared(self):
+        # Declaring every definite cross-concept call removes the R1
+        # blockers; the two unresolved sites remain, at the extractor's
+        # medium default -- a human decision, never a silent pass.
+        for record in [
+            _stage8a_interaction("scheduler_dispatch__to__task_queue_pop_ready",
+                                 ("Scheduler", "dispatch"), ("TaskQueue", "pop_ready")),
+            _stage8a_interaction("scheduler_clone__to__task_queue_new",
+                                 ("Scheduler", "clone"), ("TaskQueue", "new")),
+        ]:
+            (self.interactions / f"{record['interaction_id']}.json").write_text(json.dumps(record))
+
+        self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+        self.assertEqual(self._run("gate-r1-g16"), 3)
+
+    def test_status_lists_the_new_stage_8a_commands(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            pipeline.main(["--workspace", str(self.workspace), "status"])
+        printed = buffer.getvalue()
+        for command in ("extract-c-static", "validate-callsites", "gate-r1-g16"):
+            self.assertIn(command, printed)
+
+
+def _stage8a_interaction(interaction_id: str, caller: tuple, callee: tuple) -> dict:
+    return {
+        "schema_version": "1.0",
+        "interaction_id": interaction_id,
+        "caller": {"concept": caller[0], "method": caller[1]},
+        "callee": {"concept": callee[0], "method": callee[1]},
+        "edge_class": ["stateful"],
+        "eligibility": "boundary-required",
+        "rationale": "declared for the Stage 8A integration test",
+        "protocol_class": "pairwise",
+        "reliances": [
+            {
+                "obligation_id": "TaskQueue.C003",
+                "required_assurance": {
+                    "required_claims": ["postcondition-holds"],
+                    "accepted_evidence_kinds": ["creusot-deductive-check"],
+                    "minimum_scope": {"input_domain": "all"},
+                    "trust_policy": {"assumptions_allowed": []},
+                },
+            }
+        ],
+        "realization": {
+            "requirement": "required",
+            "config_scope": {"target": "x86_64-unknown-linux-gnu", "features": [], "cfg": []},
+        },
+        "review": {"reviewer": "alice", "reviewed_at": "2026-09-04"},
+    }
 
 
 if __name__ == "__main__":

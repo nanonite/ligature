@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 ### Fixed
+- Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
 - Coarse C_static extractor with honest unresolved classes; R1/G16 risk tiers (#24)

@@ -65,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from validate_evidence import valid_evidence_ids  # noqa: E402
+from scan_summary import pass_line  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "conflict-resolution-schema.json"
 
@@ -326,6 +327,14 @@ def validate_workspace(
     return findings
 
 
+def count_discovered(root: Path) -> int:
+    """The candidate set this module's own scan walks, counted for
+    the honest pass line (chainlink #48). Wraps find_conflict_files()
+    rather than re-deriving its glob, so the count can never drift
+    from the set actually validated."""
+    return len(find_conflict_files(root))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root", type=Path, help="Workspace root to scan for **/_conflicts/**/*.json")
@@ -333,6 +342,7 @@ def main(argv: list[str]) -> int:
 
     try:
         findings = validate(args.root)
+        discovered = count_discovered(args.root)
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -346,7 +356,7 @@ def main(argv: list[str]) -> int:
             print(f"  - {f}")
 
     if not errors:
-        print("OK: all conflict-resolution records pass G1a/G1b/G11")
+        print(pass_line(discovered, "conflict-resolution records", "G1a/G1b/G11", args.root))
         return 0
 
     print(f"FAIL: {len(errors)} finding(s)")

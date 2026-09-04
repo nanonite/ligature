@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
+from scan_summary import pass_line  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "bridge-schema.json"
 
@@ -299,6 +300,14 @@ def validate_crate(crate_root: Path, canonical_dir: Path, boundaries_by_id: dict
     return findings
 
 
+def count_discovered(root: Path) -> int:
+    """The candidate set this module's own scan walks, counted for
+    the honest pass line (chainlink #48). Wraps find_bridge_files()
+    rather than re-deriving its glob, so the count can never drift
+    from the set actually validated."""
+    return len(find_bridge_files(root))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root", type=Path, help="Workspace or crate root to scan for **/_bridges/**/*.json")
@@ -306,6 +315,7 @@ def main(argv: list[str]) -> int:
 
     try:
         findings = validate(args.root)
+        discovered = count_discovered(args.root)
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -319,7 +329,11 @@ def main(argv: list[str]) -> int:
             print(f"  - {f}")
 
     if not errors:
-        print("OK: all bridges pass G1a/G1b (incl. conclusion consistency) and G2 boundary cross-reference")
+        print(pass_line(
+            discovered, "bridges",
+            "G1a/G1b (incl. conclusion consistency) and G2 boundary cross-reference",
+            args.root,
+        ))
         return 0
 
     print(f"FAIL: {len(errors)} finding(s)")

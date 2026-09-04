@@ -189,34 +189,41 @@ from validate_boundary_contracts import validate as validate_boundaries  # noqa:
 from validate_boundary_contracts import validate_data as validate_boundary_data  # noqa: E402
 from validate_boundary_contracts import validate_draft_data as validate_boundary_draft_data  # noqa: E402
 from validate_boundary_contracts import valid_boundary_edges_from_crate  # noqa: E402
+from validate_boundary_contracts import count_discovered as _count_boundaries  # noqa: E402
 from validate_bridge import load_draft_validator as load_bridge_draft_validator  # noqa: E402
 from validate_bridge import load_validator as load_bridge_validator  # noqa: E402
 from validate_bridge import validate_crate as validate_bridge_crate  # noqa: E402
 from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
 from validate_bridge import validate_draft_data as validate_bridge_draft_data  # noqa: E402
+from validate_bridge import count_discovered as _count_bridges  # noqa: E402
 from validate_callsites import callsite_report_dir_for as _callsite_report_dir_for  # noqa: E402
 from validate_callsites import validate_workspace as validate_callsites_workspace  # noqa: E402
+from validate_callsites import count_discovered as _count_callsite_reports  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
 from validate_conflict_resolution import validate_draft_data as validate_conflict_resolution_draft_data  # noqa: E402
 from validate_conflict_resolution import validate_workspace as validate_conflict_resolution_workspace  # noqa: E402
+from validate_conflict_resolution import count_discovered as _count_conflicts  # noqa: E402
 from validate_evidence import load_validator as load_evidence_validator  # noqa: E402
 from validate_evidence import valid_evidence_ids  # noqa: E402
 from validate_evidence import validate_data as validate_evidence_data  # noqa: E402
 from validate_evidence import validate_workspace as validate_evidence_workspace  # noqa: E402
+from validate_evidence import count_discovered as _count_evidence  # noqa: E402
 from validate_exemption import load_draft_validator as load_exemption_draft_validator  # noqa: E402
 from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
 from validate_exemption import validate_crate as validate_exemption_crate  # noqa: E402
 from validate_exemption import validate_data as validate_exemption_data  # noqa: E402
 from validate_exemption import validate_draft_data as validate_exemption_draft_data  # noqa: E402
 from validate_exemption import valid_exemption_interaction_ids_from_crate  # noqa: E402
+from validate_exemption import count_discovered as _count_exemptions  # noqa: E402
 from validate_interaction import load_draft_validator as load_interaction_draft_validator  # noqa: E402
 from validate_interaction import load_interactions_by_id  # noqa: E402
 from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
 from validate_interaction import validate_crate as validate_interaction_crate  # noqa: E402
 from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
 from validate_interaction import validate_draft_data as validate_interaction_draft_data  # noqa: E402
+from validate_interaction import count_discovered as _count_interactions  # noqa: E402
 from validate_promotion_receipt import load_validator as load_promotion_validator  # noqa: E402
 from validate_protocol_debt import load_draft_validator as load_protocol_debt_draft_validator  # noqa: E402
 from validate_protocol_debt import load_validator as load_protocol_debt_validator  # noqa: E402
@@ -224,9 +231,11 @@ from validate_protocol_debt import valid_interaction_ids_from_crate  # noqa: E40
 from validate_protocol_debt import validate_crate as validate_protocol_debt_crate  # noqa: E402
 from validate_protocol_debt import validate_data as validate_protocol_debt_data  # noqa: E402
 from validate_protocol_debt import validate_draft_data as validate_protocol_debt_draft_data  # noqa: E402
+from validate_protocol_debt import count_discovered as _count_protocol_debt  # noqa: E402
 from validate_promotion_receipt import validate_file as validate_promotion_file  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
+from scan_summary import pass_line  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
@@ -354,11 +363,13 @@ def parse_llm_json_output(raw: str) -> dict:
 def cmd_validate(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
+    discovered = 0
     for crate in descriptor["crates"]:
         crate_root = args.workspace / crate["crate_dir"]
         specs_search_root = args.workspace / crate["specs_search_root"]
         try:
             findings_total.extend(validate_boundaries(crate_root, specs_search_root))
+            discovered += _count_boundaries(crate_root)
         except FileNotFoundError as e:
             # A crate_dir typo in the descriptor must be a loud failure,
             # not a silent "0 boundaries found, all clean" (external
@@ -374,7 +385,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             print(f"  - {f}")
 
     if not errors:
-        print("OK: all boundary contracts pass G1a/G1b/G2+")
+        print(pass_line(discovered, "boundary contracts", "G1a/G1b/G2+", args.workspace))
         return 0
 
     print(f"FAIL: {len(errors)} finding(s)")
@@ -491,6 +502,7 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
     # boundary nor a reviewed exemption is rejected.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
+    discovered = 0
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
         specs_search_root = args.workspace / crate["specs_search_root"]
@@ -504,6 +516,7 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
         valid_exemption_interaction_ids = valid_exemption_interaction_ids_from_crate(
             crate_root, _exemption_dir_for(crate, args.workspace), interactions_by_id
         )
+        discovered += _count_interactions(crate_root)
         findings_total.extend(
             validate_interaction_crate(
                 crate_root, _interaction_dir_for(crate, args.workspace), valid_debt_interaction_ids,
@@ -512,10 +525,11 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
         )
 
     if not findings_total:
-        print(
-            "OK: all interactions pass G1a/G1b (incl. computed eligibility), G15 protocol coverage, "
-            "and R2 coverage"
-        )
+        print(pass_line(
+            discovered, "interactions",
+            "G1a/G1b (incl. computed eligibility), G15 protocol coverage, and R2 coverage",
+            args.workspace,
+        ))
         return 0
 
     print(f"FAIL: {len(findings_total)} finding(s)")
@@ -533,15 +547,19 @@ def cmd_validate_exemption(args: argparse.Namespace) -> int:
     # interaction cross-reference already is.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
+    discovered = 0
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
         interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
+        discovered += _count_exemptions(crate_root)
         findings_total.extend(
             validate_exemption_crate(crate_root, _exemption_dir_for(crate, args.workspace), interactions_by_id)
         )
 
     if not findings_total:
-        print("OK: all exemptions pass G1a/G1b (incl. interaction cross-reference)")
+        print(pass_line(
+            discovered, "exemptions", "G1a/G1b (incl. interaction cross-reference)", args.workspace
+        ))
         return 0
 
     print(f"FAIL: {len(findings_total)} finding(s)")
@@ -557,9 +575,11 @@ def cmd_validate_protocol_debt(args: argparse.Namespace) -> int:
     # cross-reference cmd_validate_interaction's G15 check relies on.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
+    discovered = 0
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
         interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
+        discovered += _count_protocol_debt(crate_root)
         findings_total.extend(
             validate_protocol_debt_crate(
                 crate_root, _protocol_debt_dir_for(crate, args.workspace), interactions_by_id
@@ -567,7 +587,9 @@ def cmd_validate_protocol_debt(args: argparse.Namespace) -> int:
         )
 
     if not findings_total:
-        print("OK: all protocol-debt records pass G1a/G1b (incl. interaction cross-reference)")
+        print(pass_line(
+            discovered, "protocol-debt records", "G1a/G1b (incl. interaction cross-reference)", args.workspace
+        ))
         return 0
 
     print(f"FAIL: {len(findings_total)} finding(s)")
@@ -587,16 +609,22 @@ def cmd_validate_bridge(args: argparse.Namespace) -> int:
     # cross-reference in this pipeline applies.
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
+    discovered = 0
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
         specs_search_root = args.workspace / crate["specs_search_root"]
         boundaries_by_id = load_boundaries_by_id(_boundary_dir_for(crate, args.workspace), specs_search_root)
+        discovered += _count_bridges(crate_root)
         findings_total.extend(
             validate_bridge_crate(crate_root, _bridge_dir_for(crate, args.workspace), boundaries_by_id)
         )
 
     if not findings_total:
-        print("OK: all bridges pass G1a/G1b (incl. conclusion consistency) and G2 boundary cross-reference")
+        print(pass_line(
+            discovered, "bridges",
+            "G1a/G1b (incl. conclusion consistency) and G2 boundary cross-reference",
+            args.workspace,
+        ))
         return 0
 
     print(f"FAIL: {len(findings_total)} finding(s)")
@@ -662,7 +690,10 @@ def cmd_validate_callsites(args: argparse.Namespace) -> int:
     findings = validate_callsites_workspace(workspace_root, _callsite_report_dir_for(workspace_root))
 
     if not findings:
-        print("OK: all C_static reports pass G1a/G1b (incl. recomputed callsite coverage)")
+        print(pass_line(
+            _count_callsite_reports(workspace_root), "C_static reports",
+            "G1a/G1b (incl. recomputed callsite coverage)", workspace_root,
+        ))
         return 0
 
     print(f"FAIL: {len(findings)} finding(s)")
@@ -708,7 +739,7 @@ def cmd_validate_evidence(args: argparse.Namespace) -> int:
     findings = validate_evidence_workspace(workspace_root, _evidence_dir_for(workspace_root))
 
     if not findings:
-        print("OK: all evidence records pass G1a/G1b")
+        print(pass_line(_count_evidence(workspace_root), "evidence records", "G1a/G1b", workspace_root))
         return 0
 
     print(f"FAIL: {len(findings)} finding(s)")
@@ -737,7 +768,9 @@ def cmd_validate_conflict_resolution(args: argparse.Namespace) -> int:
             print(f"  - {f}")
 
     if not errors:
-        print("OK: all conflict-resolution records pass G1a/G1b/G11")
+        print(pass_line(
+            _count_conflicts(workspace_root), "conflict-resolution records", "G1a/G1b/G11", workspace_root
+        ))
         return 0
 
     print(f"FAIL: {len(errors)} finding(s)")

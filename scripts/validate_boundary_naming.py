@@ -25,6 +25,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scan_summary import pass_line  # noqa: E402
+
 # <segment>__to__<segment>, where each segment is snake_case with no leading/
 # trailing/doubled underscore of its own (that would make `__to__` ambiguous
 # to detect) and is not itself the literal word "to".
@@ -116,6 +119,14 @@ def validate(root: Path) -> list[Violation]:
     return violations
 
 
+def count_discovered(root: Path) -> int:
+    """The candidate set this module's own scan walks, counted for
+    the honest pass line (chainlink #48). Wraps find_boundary_files()
+    rather than re-deriving its glob, so the count can never drift
+    from the set actually validated."""
+    return len(find_boundary_files(root))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -127,12 +138,13 @@ def main(argv: list[str]) -> int:
 
     try:
         violations = validate(args.root)
+        discovered = count_discovered(args.root)
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
     if not violations:
-        print("OK: no boundary naming/layout violations found")
+        print(pass_line(discovered, "boundary artifacts", "naming/layout checks", args.root))
         return 0
 
     print(f"FAIL: {len(violations)} boundary naming/layout violation(s)")

@@ -42,6 +42,7 @@ from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
 from validate_boundary_naming import check_file as check_naming  # noqa: E402
+from scan_summary import pass_line  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "boundary-contract-schema.json"
 
@@ -477,6 +478,18 @@ def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]
     return findings
 
 
+def count_discovered(root: Path) -> int:
+    """The candidate set this module's own scan walks, counted for
+    the honest pass line (chainlink #48). Wraps find_boundary_files()
+    rather than re-deriving its glob, so the count can never drift
+    from the set actually validated.
+
+    validate() skips non-.json files under a _boundaries/ directory,
+    so they are not discovered boundary contracts here either.
+    """
+    return len([p for p in find_boundary_files(root) if p.suffix == ".json"])
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("root", type=Path, help="Workspace or crate root to scan for **/_boundaries/**/*.json")
@@ -490,6 +503,7 @@ def main(argv: list[str]) -> int:
 
     try:
         findings = validate(args.root, args.specs_search_root)
+        discovered = count_discovered(args.root)
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -503,7 +517,7 @@ def main(argv: list[str]) -> int:
             print(f"  - {f}")
 
     if not errors:
-        print("OK: all boundary contracts pass G1a/G1b/G2+")
+        print(pass_line(discovered, "boundary contracts", "G1a/G1b/G2+", args.root))
         return 0
 
     print(f"FAIL: {len(errors)} finding(s)")

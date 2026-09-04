@@ -298,8 +298,30 @@ class WorkspaceTest(unittest.TestCase):
         broken["callsite_coverage"] = {"discovered": 2, "resolved": 2, "unresolved": 0}
         self.write_report(broken)
         findings, counts = gate_workspace(self.workspace, {"crates/scheduler": self.interactions_dir})
-        self.assertEqual(findings, [])
         self.assertEqual(counts.discovered, 0)
+        self.assertEqual(counts.reports, 0)
+        # ...and reconciling nothing is a blocked gate, not a pass
+        # (chainlink #48): the directory exists, so the CLI's own
+        # missing-directory refusal never fires here.
+        self.assertTrue(any("empty reconciliation is not a pass" in t for t in texts(findings, "G16", "error")))
+
+    def test_an_empty_report_directory_blocks(self):
+        findings, counts = gate_workspace(self.workspace, {"crates/scheduler": self.interactions_dir})
+        self.assertEqual(counts.reports, 0)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(report_findings(findings, counts), EXIT_BLOCKED)
+
+    def test_a_report_with_no_call_sites_claims_no_coverage(self):
+        empty_report = valid_report()
+        empty_report["callsites"] = []
+        empty_report["callsite_coverage"] = {"discovered": 0, "resolved": 0, "unresolved": 0}
+        self.write_report(empty_report)
+        findings, counts = gate_workspace(self.workspace, {"crates/scheduler": self.interactions_dir})
+        self.assertEqual(counts.reports, 1)
+        statement = coverage_statement(counts)
+        self.assertIn("no coverage claimed", statement)
+        self.assertNotIn(HONEST_COVERAGE_STATEMENT, statement)
+        self.assertEqual(texts(findings, severity="error"), [])
 
     def test_cli_requires_reports_to_exist(self):
         empty = Path(self._tmp.name) / "empty"

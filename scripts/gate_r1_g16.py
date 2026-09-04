@@ -99,12 +99,16 @@ class Reconciliation:
     own note on the rename): it is a reconciliation outcome, known only
     here -- a definite-direct-call either matched an interaction or was
     ignored as an intra-concept helper."""
+    reports: int = 0
     discovered: int = 0
     checked: int = 0
     unresolved: int = 0
 
     def __str__(self) -> str:
-        return f"discovered={self.discovered} checked={self.checked} unresolved={self.unresolved}"
+        return (
+            f"reports={self.reports} discovered={self.discovered} "
+            f"checked={self.checked} unresolved={self.unresolved}"
+        )
 
 
 def _edge_key(caller: dict, callee: dict) -> tuple[str, str, str, str]:
@@ -276,6 +280,11 @@ def coverage_statement(counts: Reconciliation) -> str:
     "all discovered call sites resolved", never "all call sites
     resolved" -- the extractor's own completeness_claim is a lower bound,
     so undiscovered call sites are always possible (CG2)."""
+    if counts.discovered == 0:
+        # Vacuously "all resolved" is exactly the wording chainlink #48
+        # found wrong in the validators, one level in: nothing was
+        # discovered, so there is no coverage to claim either way.
+        return "no call sites were discovered -- nothing to resolve, and no coverage claimed"
     if counts.unresolved == 0:
         return f"{HONEST_COVERAGE_STATEMENT} ({counts.discovered} discovered, {counts.checked} checked against I)"
     return (
@@ -307,9 +316,27 @@ def gate_workspace(workspace: Path, interaction_dir_by_crate: dict[str, Path]) -
         interactions = load_interactions_by_id(interaction_dir)
         report_findings, counts = reconcile(path, report, interactions)
         findings.extend(report_findings)
+        totals.reports += 1
         totals.discovered += counts.discovered
         totals.checked += counts.checked
         totals.unresolved += counts.unresolved
+
+    if totals.reports == 0:
+        # The CLI already refuses to run with no ci/results/c_static
+        # directory at all. This is the remaining shape of the same hole
+        # (chainlink #48): the directory exists but holds nothing this
+        # gate would trust -- every report failed G1a/G1b, or the
+        # directory is empty -- and reporting a pass there is a gate
+        # claiming to have reconciled something it never saw. Unlike the
+        # validators, a gate fails closed on it.
+        findings.append(
+            Finding(
+                "G16", callsite_report_dir_for(workspace),
+                "no C_static report was reconciled -- the report directory holds nothing "
+                "valid to check (an empty reconciliation is not a pass); run extract-c-static, "
+                "and check validate-callsites for reports rejected by G1a/G1b",
+            )
+        )
     return findings, totals
 
 

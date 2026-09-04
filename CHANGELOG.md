@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- satisfies() mechanism + governed assurance-profile authorship (#23)
 - Typed bridge expression language + call-site fact semantics; harness generation (#22)
 - I-schema: closed (#21)
 - Deterministic promotion-receipt generator + dedicated acceptance operation (Stage 4.5, no LLM) (#45)

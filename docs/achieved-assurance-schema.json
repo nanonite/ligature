@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/achieved-assurance-schema.json",
+  "title": "Achieved assurance record — v1.0",
+  "description": "plan.md §8.1's 'Achieved:' worked example. One per obligation, machine-recorded by a verifier run into a work package's CI report (ci/results/WP-*.json, §10's `per_obligation_assurance_record: true`) -- never hand-authored or human-reviewed the way a normative file (e.g. an interaction's required_assurance) is: §7.2's human-checkpoint list names 'assurance-profile authorship' (the REQUIRED side), never achieved-record recording, since a human freely authoring what was 'achieved' would be indistinguishable from fabricating a verification result. No `review` block for the same reason evidence records carry none. Consumed by scripts/satisfies.py's satisfies(required_profile, achieved_record, context) -- chainlink #23.",
+  "type": "object",
+  "required": ["schema_version", "claim", "evidence", "trust", "support", "config"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "claim": {
+      "type": "object",
+      "required": ["kind", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["callee-precondition-established", "postcondition-holds"]
+        },
+        "result": {
+          "type": "string",
+          "enum": ["pass", "fail"]
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["kind", "verifier", "harness", "scope"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["kani-bounded-model-check", "creusot-deductive-check", "verus-deductive-check"],
+          "description": "Verification-method category (plan.md §8.1's type split) -- never a claim value, never a trust/support state; the schema's own enum vocabulary keeps this disjoint from `claim.kind`."
+        },
+        "verifier": { "type": "string", "minLength": 1 },
+        "harness": { "type": "string", "minLength": 1 },
+        "scope": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string" },
+          "description": "Verifier-specific scope keys (e.g. input_domain, unwind, harness_hash) -- deliberately open, mirroring docs/interaction-schema.json's own required_assurance.minimum_scope. satisfies() compares this against a required_profile's minimum_scope key-for-key, by exact string equality only -- no numeric ordering is inferred, since the vocabulary is not typed."
+        }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "required": ["assumptions"],
+      "additionalProperties": false,
+      "properties": {
+        "assumptions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "support": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["supported", "unsupported"],
+          "description": "plan.md §16.4: a record with full witness coverage and zero verifier results is still `unsupported` -- satisfies() treats this as an unconditional failure, never something the other fields can outweigh."
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["toolchain", "target", "features"],
+      "additionalProperties": false,
+      "properties": {
+        "toolchain": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "features": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

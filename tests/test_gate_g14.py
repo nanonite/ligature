@@ -153,7 +153,10 @@ def bridge_spec(bridge_id="BR-SCHED-TQ-001", protocol_class="pairwise") -> dict:
         "target_expression": "TaskQueue.C001(args, callee_state)",
         "protocol_class": protocol_class,
         "bridge_logic": {
-            "bindings": {"caller_self": "Scheduler"},
+            # `args` is declared because the premise below uses it: #47's
+            # compiler is total-or-rejecting, so an under-declared binding
+            # set is a compile error, not a shrug.
+            "bindings": {"caller_self": "Scheduler", "args": {"now": "Time"}},
             "premises": ["caller_self.ready(args.now)"],
             "conclusion": {"obligation_id": "TaskQueue.C001"},
         },

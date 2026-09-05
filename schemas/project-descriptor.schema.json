@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/schemas/project-descriptor.schema.json",
   "title": "Reliance-graph pipeline project structure descriptor",
-  "description": "Stage P0 input contract (plan.md §1.1). One per project workspace. Every later stage reads this instead of hardcoding project shape.",
+  "description": "Stage P0 input contract (plan.md \u00a71.1). One per project workspace. Every later stage reads this instead of hardcoding project shape.",
   "type": "object",
   "required": [
     "schema_version",
@@ -17,13 +17,23 @@
   ],
   "additionalProperties": false,
   "if": {
-    "properties": { "mode": { "const": "port" } }
+    "properties": {
+      "mode": {
+        "const": "port"
+      }
+    }
   },
   "then": {
-    "required": ["port_source"]
+    "required": [
+      "port_source"
+    ]
   },
   "else": {
-    "not": { "required": ["port_source"] }
+    "not": {
+      "required": [
+        "port_source"
+      ]
+    }
   },
   "properties": {
     "schema_version": {
@@ -32,7 +42,10 @@
     },
     "project": {
       "type": "object",
-      "required": ["name", "crate_naming_convention"],
+      "required": [
+        "name",
+        "crate_naming_convention"
+      ],
       "additionalProperties": false,
       "properties": {
         "name": {
@@ -48,13 +61,20 @@
     },
     "mode": {
       "type": "string",
-      "enum": ["greenfield", "port"],
-      "description": "greenfield = Mode R, requirements-governed decomposition (plan.md §11). port = Mode P, a foreign-language source port validated by differential testing against an oracle."
+      "enum": [
+        "greenfield",
+        "port"
+      ],
+      "description": "greenfield = Mode R, requirements-governed decomposition (plan.md \u00a711). port = Mode P, a foreign-language source port validated by differential testing against an oracle."
     },
     "port_source": {
       "type": "object",
       "description": "Required when mode == 'port'; absent when mode == 'greenfield'.",
-      "required": ["repository", "language", "oracle_build_command"],
+      "required": [
+        "repository",
+        "language",
+        "oracle_build_command"
+      ],
       "additionalProperties": false,
       "properties": {
         "repository": {
@@ -67,7 +87,7 @@
         },
         "oracle_build_command": {
           "type": "string",
-          "description": "Command that builds/runs the origin-language oracle used for Mode P differential testing (plan.md §11)."
+          "description": "Command that builds/runs the origin-language oracle used for Mode P differential testing (plan.md \u00a711)."
         }
       }
     },
@@ -77,7 +97,11 @@
       "description": "concept-to-code binding per crate -- replaces ad hoc --crate-dir/--contracts-crate/--specs-search-root flags (docs/concept-to-code-modifications.md gap #1).",
       "items": {
         "type": "object",
-        "required": ["crate_dir", "contracts_crate", "specs_search_root"],
+        "required": [
+          "crate_dir",
+          "contracts_crate",
+          "specs_search_root"
+        ],
         "additionalProperties": false,
         "properties": {
           "crate_dir": {
@@ -98,67 +122,142 @@
     },
     "verifier_policy": {
       "type": "object",
-      "description": "Default verifier per cluster (plan.md §4). A cluster not listed as its own key uses 'default'.",
-      "required": ["default"],
+      "description": "Default verifier per cluster (plan.md \u00a74). A cluster not listed as its own key uses 'default'.",
+      "required": [
+        "default"
+      ],
       "properties": {
-        "default": { "$ref": "#/$defs/verifier" }
+        "default": {
+          "$ref": "#/$defs/verifier"
+        }
       },
-      "additionalProperties": { "$ref": "#/$defs/verifier" }
+      "additionalProperties": {
+        "$ref": "#/$defs/verifier"
+      }
+    },
+    "verifier_backends": {
+      "type": "object",
+      "description": "plan.md \u00a78.3 / chainlink #47 -- pluggable verifier dispatch, one command per verifier system, exactly as llm_backend is a pluggable one-shot command for Stage 0/3. `pipeline.py check-bridges` compiles a promoted bridge's bridge_logic to a harness and invokes the command for the verifier that owns the bridge's cluster, appending the generated harness path. The command must print one JSON verdict object on stdout: {result: pass|fail, scope, assumptions, config}. Optional and deliberately absent by default: with no backend configured, no bridge check is recorded and the gate blocks -- a verifier that never ran must never produce a pass, so the ceiling stays harness-tested (never bridge-checked).",
+      "additionalProperties": false,
+      "properties": {
+        "creusot": {
+          "type": "object",
+          "required": [
+            "command"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Invocation, split on whitespace; the harness path is appended as the final argument."
+            }
+          }
+        },
+        "kani": {
+          "type": "object",
+          "required": [
+            "command"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Invocation, split on whitespace; the harness path is appended as the final argument."
+            }
+          }
+        },
+        "verus": {
+          "type": "object",
+          "required": [
+            "command"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Invocation, split on whitespace; the harness path is appended as the final argument."
+            }
+          }
+        }
+      }
     },
     "compatibility_policy": {
       "type": "object",
-      "required": ["reliance_policy_path"],
+      "required": [
+        "reliance_policy_path"
+      ],
       "additionalProperties": false,
       "properties": {
         "reliance_policy_path": {
           "type": "string",
           "default": "docs/reliance-policy.md",
-          "description": "plan.md §2 semantic policy doc, versioned governance -- not a one-time artifact."
+          "description": "plan.md \u00a72 semantic policy doc, versioned governance -- not a one-time artifact."
         },
         "witness_policy_path": {
           "type": "string",
-          "description": "plan.md §16.5 -- optional, only if the project declares feature witnesses."
+          "description": "plan.md \u00a716.5 -- optional, only if the project declares feature witnesses."
         }
       }
     },
     "write_set": {
       "type": "object",
-      "required": ["allowed_roots", "protected_roots"],
+      "required": [
+        "allowed_roots",
+        "protected_roots"
+      ],
       "additionalProperties": false,
       "properties": {
         "allowed_roots": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Default allowed_write_set roots (plan.md §10) -- a starting point each work package narrows, never widens."
+          "items": {
+            "type": "string"
+          },
+          "description": "Default allowed_write_set roots (plan.md \u00a710) -- a starting point each work package narrows, never widens."
         },
         "protected_roots": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Default protected_write_set roots (plan.md §10) -- specs, CI manifests, gate scripts, schemas, policy docs, Cargo/build files, harnesses, toolchain pins."
+          "items": {
+            "type": "string"
+          },
+          "description": "Default protected_write_set roots (plan.md \u00a710) -- specs, CI manifests, gate scripts, schemas, policy docs, Cargo/build files, harnesses, toolchain pins."
         }
       }
     },
     "gate_integrity": {
       "type": "array",
-      "description": "Gate-implementation paths to hash-pin (G13 validates before any gate runs, plan.md §10/§12).",
+      "description": "Gate-implementation paths to hash-pin (G13 validates before any gate runs, plan.md \u00a710/\u00a712).",
       "items": {
         "type": "object",
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "additionalProperties": false,
         "properties": {
-          "path": { "type": "string" }
+          "path": {
+            "type": "string"
+          }
         }
       }
     },
     "llm_backend": {
       "type": "object",
-      "description": "plan.md §6.1 -- pluggable one-shot LLM backend for Stage 0/3 and findings-driven re-entry.",
-      "required": ["kind"],
+      "description": "plan.md \u00a76.1 -- pluggable one-shot LLM backend for Stage 0/3 and findings-driven re-entry.",
+      "required": [
+        "kind"
+      ],
       "additionalProperties": false,
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["claude", "codex", "opencode", "manual"],
+          "enum": [
+            "claude",
+            "codex",
+            "opencode",
+            "manual"
+          ],
           "description": "manual = print the constructed prompt and wait for the user to run it themselves and hand back the result."
         },
         "command": {
@@ -174,14 +273,24 @@
   "$defs": {
     "verifier": {
       "type": "string",
-      "enum": ["kani", "creusot", "verus"]
+      "enum": [
+        "kani",
+        "creusot",
+        "verus"
+      ]
     },
     "review": {
       "type": "object",
-      "required": ["reviewer", "reviewed_at"],
+      "required": [
+        "reviewer",
+        "reviewed_at"
+      ],
       "additionalProperties": false,
       "properties": {
-        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        },
         "reviewed_at": {
           "type": "string",
           "format": "date",

@@ -139,6 +139,28 @@ Implemented now, against schemas that actually exist:
             low is a visible accepted limitation. Reports "all
             discovered call sites resolved", never "all call sites
             resolved".
+  check-bridges  Stage 8A's bridge harness generation (plan.md §8.3,
+            chainlink #47): compiles a promoted bridge's typed
+            bridge_logic to a harness for the verifier that OWNS its
+            cluster (resolved through the closure profile that names the
+            work package requiring the bridge, then verifier_policy),
+            writes it under ci/harness/, and dispatches it to the
+            configured verifier_backends command, recording the verdict.
+            The compiler is total-or-rejecting over a closed expression
+            fragment -- "compiles to a harness the owning verifier
+            checks" is only a definition if what it cannot compile is
+            refused with a reason. With no backend configured nothing is
+            dispatched and nothing is recorded: a verifier that never ran
+            must never produce a pass.
+  gate-g9  Stage 8A's G9 ("bridge check fails", plan.md §12): recompiles
+            each promoted bridge and checks that the recorded result is
+            about THAT bridge -- the harness on disk matches the
+            recompilation, the recorded harness hash equals the
+            recomputed one, the verifier owns the cluster, the claim
+            passed, and no work package's assurance report asserts a
+            bridge_record that disagrees with the check. This is the
+            machine relation §8.3's temporary "hash-pin the harness and
+            report harness-tested" fallback said did not exist.
   validate-closure  Stage 8C's G1a/G1b over closure profiles and
             degradation records (plan.md §4, chainlink #25), plus G17:
             `deductive` is refused for a Kani-owned cluster, and a
@@ -181,6 +203,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract_c_static import ExtractionError  # noqa: E402
 from extract_c_static import extract_crate as extract_c_static_crate  # noqa: E402
 from gate_g14 import gate_workspace as gate_g14_workspace  # noqa: E402
+from gate_g9 import check_bridges as check_bridges_g9  # noqa: E402
+from gate_g9 import gate_workspace as gate_g9_workspace  # noqa: E402
+from gate_g9 import report_findings as report_g9_findings  # noqa: E402
 from gate_g14 import report_outcomes as report_g14_outcomes  # noqa: E402
 from gate_r1_g16 import gate_workspace as gate_r1_g16_workspace  # noqa: E402
 from gate_r1_g16 import report_findings as report_r1_g16_findings  # noqa: E402
@@ -271,10 +296,12 @@ NOT_YET_IMPLEMENTED = {
     "attach": "M3's I-schema is now complete (#16-#20); attach (Stage 6) itself is still not built",
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); M3's I-schema is now "
     "complete (#16-#20), but the generator that reads promoted I/O and emits a manifest from it is still not built",
-    "8A": "partly implemented -- C_static extraction and R1/G16 are real (#24: extract-c-static, "
-    "validate-callsites, gate-r1-g16), and per-obligation assurance records now have both a record "
-    "schema (#23) and a report container G14 reads (#25, docs/assurance-report-schema.json); what is "
-    "missing is the runner that EMITS one from a real verifier run, and bridge harness dispatch (#47)",
+    "8A": "partly implemented -- C_static extraction and R1/G16 are real (#24), bridge harness "
+    "generation, verifier dispatch and G9 are real (#47: check-bridges, gate-g9), and per-obligation "
+    "assurance records have a record schema (#23) plus the report container G14 reads (#25). What is "
+    "missing is the runner that emits a work package's OBLIGATION records from a real verifier run; "
+    "bridge records now have one (ci/results/bridge_checks/), and no verifier backend is configured "
+    "in this repository, so nothing here dispatches for real",
     "8B": "#26 (M4)",
 }
 
@@ -723,6 +750,46 @@ def cmd_validate_callsites(args: argparse.Namespace) -> int:
     for f in findings:
         print(f"  - {f}")
     return 1
+
+
+def cmd_check_bridges(args: argparse.Namespace) -> int:
+    """Stage 8A (chainlink #47): compile every promoted bridge's
+    bridge_logic to a harness for the verifier that owns its cluster,
+    write it under ci/harness/, dispatch it to the configured
+    verifier_backends command, and record the verdict at
+    ci/results/bridge_checks/<bridge_id>.json.
+
+    Generation always happens; dispatch happens only where a backend is
+    configured. Anything that could not be checked is a finding and no
+    record -- a bridge with no record blocks at gate-g9, which is the
+    honest outcome for a bridge nothing verified."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    written, findings = check_bridges_g9(workspace, descriptor)
+
+    for path in written:
+        print(f"wrote {path}")
+    if not findings:
+        print(f"OK: {len(written)} artifact(s) written; every promoted bridge compiled and was dispatched")
+        return 0
+
+    print(f"FAIL: {len(findings)} finding(s)")
+    for finding in findings:
+        print(f"  - {finding}")
+    return 1
+
+
+def cmd_gate_g9(args: argparse.Namespace) -> int:
+    """Stage 8A's G9 (chainlink #47): recompile each promoted bridge and
+    check that the recorded verifier result is demonstrably about THAT
+    bridge -- harness on disk unchanged from the recompilation, recorded
+    harness hash equal to the recomputed one, owning verifier, passing
+    claim, and no work-package assurance report asserting a bridge_record
+    that disagrees with the check."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    findings, discovered = gate_g9_workspace(workspace, descriptor)
+    return report_g9_findings(findings, discovered, workspace)
 
 
 def cmd_validate_closure(args: argparse.Namespace) -> int:
@@ -1440,6 +1507,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         "validate-callsites (Stage 8A G1a/G1b over C_static reports, workspace-level), "
         "gate-r1-g16 (Stage 8A R1 reconciliation + G16 risk-tiered unresolved policy; "
         "exit 3 means a human risk decision is outstanding), "
+        "check-bridges (Stage 8A bridge harness generation + verifier dispatch, chainlink #47), "
+        "gate-g9 (Stage 8A bridge-check verification against a recompilation of the promoted bridge), "
         "validate-closure (Stage 8C G1a/G1b + G17 over closure profiles and degradation records), "
         "gate-g14 (Stage 8C release closure over the transitive assurance graph, per cluster, "
         "with the CG6 well-foundedness discharge, chainlink #25)"
@@ -1593,6 +1662,18 @@ def main(argv: list[str]) -> int:
         help="Stage 8A: reconcile C_static against I (R1) and apply the unresolved risk policy (G16)",
     )
     gate_r1_g16_p.set_defaults(func=cmd_gate_r1_g16)
+
+    check_bridges_p = sub.add_parser(
+        "check-bridges",
+        help="Stage 8A: compile bridge_logic to a harness, dispatch it to the owning verifier (#47)",
+    )
+    check_bridges_p.set_defaults(func=cmd_check_bridges)
+
+    gate_g9_p = sub.add_parser(
+        "gate-g9",
+        help="Stage 8A: G9 -- the recorded bridge check must be about the bridge it names (#47)",
+    )
+    gate_g9_p.set_defaults(func=cmd_gate_g9)
 
     validate_closure_p = sub.add_parser(
         "validate-closure",

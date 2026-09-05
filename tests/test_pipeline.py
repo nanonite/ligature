@@ -2520,6 +2520,71 @@ class Stage8aCStaticIntegrationTest(unittest.TestCase):
             self.assertIn(command, printed)
 
 
+class Stage8aBridgeCheckIntegrationTest(unittest.TestCase):
+    """check-bridges and gate-g9 through pipeline.main() (chainlink #47).
+    The workspace and the stand-in verifier both come from the test
+    modules that own them."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_gate_g14 import Workspace  # noqa: E402
+        from test_gate_g9 import descriptor_with, fake_backend  # noqa: E402
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        Workspace(self.workspace)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(descriptor_with(fake_backend())))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *args) -> tuple[int, str]:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = pipeline.main([
+                "--workspace", str(self.workspace),
+                "--descriptor", str(self.descriptor_path),
+                *args,
+            ])
+        return code, buffer.getvalue()
+
+    def test_check_bridges_generates_and_dispatches(self):
+        code, printed = self._run("check-bridges")
+        self.assertEqual(code, 0, printed)
+        self.assertTrue((self.workspace / "ci" / "harness" / "BR-SCHED-TQ-001.creusot.rs").is_file())
+        self.assertTrue(
+            (self.workspace / "ci" / "results" / "bridge_checks" / "BR-SCHED-TQ-001.json").is_file()
+        )
+
+    def test_gate_g9_blocks_before_anything_has_been_checked(self):
+        code, printed = self._run("gate-g9")
+        self.assertEqual(code, 1, printed)
+        self.assertIn("no bridge check record", printed)
+
+    def test_gate_g9_passes_once_the_report_is_sourced_from_the_check(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from gate_g9 import bridge_records_for  # noqa: E402
+
+        self._run("check-bridges")
+        report_path = self.workspace / "ci" / "results" / "WP-A.json"
+        report = json.loads(report_path.read_text())
+        report["bridge_records"] = bridge_records_for(self.workspace)
+        report_path.write_text(json.dumps(report))
+
+        code, printed = self._run("gate-g9")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("(1 discovered)", printed)
+
+    def test_status_lists_the_new_bridge_commands(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            pipeline.main(["--workspace", str(self.workspace), "status"])
+        printed = buffer.getvalue()
+        self.assertIn("check-bridges", printed)
+        self.assertIn("gate-g9", printed)
+
+
 class Stage8cClosureIntegrationTest(unittest.TestCase):
     """validate-closure and gate-g14 through pipeline.main() (chainlink
     #25). The workspace itself is built by tests/test_gate_g14.py's own

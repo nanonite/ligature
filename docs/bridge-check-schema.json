@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/bridge-check-schema.json",
+  "title": "Bridge check record — v1.0",
+  "description": "The result of compiling a promoted bridge's bridge_logic to a harness and dispatching that harness to the bridge's owning verifier. plan.md §8.3/§12's G9 row, chainlink #47. One per bridge at ci/results/bridge_checks/<bridge_id>.json, machine-emitted by `pipeline.py check-bridges` -- never hand-authored and never human-reviewed, for the same reason an achieved assurance record carries no review block: a human freely authoring what a verifier 'found' would be indistinguishable from fabricating a result. What makes this a BRIDGE check rather than a harness check is `harness.sha256`: the harness is derived from the promoted bridge_logic by scripts/bridge_harness.py, so the hash can be recomputed from the promoted artifact and compared. plan.md §8.3's temporary alternative pinned a hand-written harness and could only report `harness-tested`; a derived hash pins THIS BRIDGE's harness, which is the machine relation that was missing.",
+  "type": "object",
+  "required": ["schema_version", "bridge_id", "verifier", "harness", "dispatch", "record"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "bridge_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Must equal the filename stem exactly (G1b, scripts/gate_g9.py), the same discipline every other artifact in this codebase follows."
+    },
+    "verifier": {
+      "type": "string",
+      "enum": ["creusot", "kani", "verus"],
+      "description": "The system this harness was compiled FOR and dispatched TO. Checked against the owning verifier of the cluster that requires this bridge (verifier_policy in the project descriptor, resolved through the closure profile that names the work package requiring it) -- a result from a system that does not own the cluster is a cross-verifier composition (CG1), not a check."
+    },
+    "harness": {
+      "type": "object",
+      "required": ["name", "language", "filename", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^bridge_[a-z0-9_]+$" },
+        "language": { "type": "string", "const": "rust" },
+        "filename": { "type": "string", "minLength": 1 },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Of the generated harness source. Recomputed from the promoted bridge on every gate run; a mismatch means the checked harness is not the one this bridge compiles to, and the result says nothing about this bridge."
+        }
+      }
+    },
+    "dispatch": {
+      "type": "object",
+      "required": ["command", "exit_code"],
+      "additionalProperties": false,
+      "description": "How the verifier was actually invoked. Recorded because 'a verifier checked it' is only meaningful if what ran is visible; a record whose command nobody can read is a claim, not evidence.",
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "exit_code": { "type": "integer" }
+      }
+    },
+    "record": {
+      "type": "object",
+      "description": "The achieved assurance record for this bridge (docs/achieved-assurance-schema.json), built from the verifier's own verdict. Validated against that schema by scripts/gate_g9.py rather than re-stated here -- one copy of that shape, as with docs/assurance-report-schema.json's own entries."
+    }
+  }
+}

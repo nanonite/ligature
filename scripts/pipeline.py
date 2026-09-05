@@ -139,6 +139,26 @@ Implemented now, against schemas that actually exist:
             low is a visible accepted limitation. Reports "all
             discovered call sites resolved", never "all call sites
             resolved".
+  validate-gold-set  G1a/G1b over human gold sets (plan.md §5.2's
+            independence argument, chainlink #26): schema, naming, and
+            the scope/provenance discipline -- every edge's caller must
+            be in the curated scope, every derived_from must be a method
+            the curator claimed, and no intra-concept edges (which
+            gate-r1-g16 correctly treats as internal helpers). The
+            anti-circularity guard is in the schema: `derived_from` has
+            no value for "read it in the interaction set", because a
+            gold set derived from the artifact it audits makes recall
+            vacuous.
+  measure-gold-set  Precision, recall and OMISSION against a human gold
+            set (chainlink #26). Omission -- gold edges no candidate
+            source proposed at all -- is the number that makes "R2
+            passed, therefore I is complete" unreadable. Every report
+            lists all seven of plan.md §5.2's independent candidate
+            sources with their real status, because an omission count is
+            only interpretable next to how many sources were actually
+            consulted (two exist here; five are not built). Not a gate:
+            omission is a finding to read; what fails is being unable to
+            measure.
   check-bridges  Stage 8A's bridge harness generation (plan.md §8.3,
             chainlink #47): compiles a promoted bridge's typed
             bridge_logic to a harness for the verifier that OWNS its
@@ -206,6 +226,8 @@ from gate_g14 import gate_workspace as gate_g14_workspace  # noqa: E402
 from gate_g9 import check_bridges as check_bridges_g9  # noqa: E402
 from gate_g9 import gate_workspace as gate_g9_workspace  # noqa: E402
 from gate_g9 import report_findings as report_g9_findings  # noqa: E402
+from measure_gold_set import measure_workspace as measure_gold_set_workspace  # noqa: E402
+from measure_gold_set import report as report_gold_set_measurements  # noqa: E402
 from gate_g14 import report_outcomes as report_g14_outcomes  # noqa: E402
 from gate_r1_g16 import gate_workspace as gate_r1_g16_workspace  # noqa: E402
 from gate_r1_g16 import report_findings as report_r1_g16_findings  # noqa: E402
@@ -247,6 +269,9 @@ from validate_closure import count_discovered as _count_closure_artifacts  # noq
 from validate_closure import load_validators as load_closure_validators  # noqa: E402
 from validate_closure import validate_draft_data as validate_closure_draft_data  # noqa: E402
 from validate_closure import validate_workspace as validate_closure_workspace  # noqa: E402
+from validate_gold_set import count_discovered as _count_gold_sets  # noqa: E402
+from validate_gold_set import gold_set_dir_for as _gold_set_dir_for  # noqa: E402
+from validate_gold_set import validate_workspace as validate_gold_set_workspace  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
@@ -750,6 +775,40 @@ def cmd_validate_callsites(args: argparse.Namespace) -> int:
     for f in findings:
         print(f"  - {f}")
     return 1
+
+
+def cmd_validate_gold_set(args: argparse.Namespace) -> int:
+    # Workspace-level like validate-closure: one gold set per cluster,
+    # and a cluster spans crates. No descriptor is needed to resolve
+    # anything here -- the track check belongs to measurement, which is
+    # where a descriptor is actually read.
+    workspace_root = _require_workspace_root_exists(args.workspace)
+    findings = validate_gold_set_workspace(workspace_root, _gold_set_dir_for(workspace_root))
+
+    if not findings:
+        print(pass_line(
+            _count_gold_sets(workspace_root), "gold sets",
+            "G1a/G1b (scope, provenance and edge discipline)", workspace_root,
+        ))
+        return 0
+
+    print(f"FAIL: {len(findings)} finding(s)")
+    for f in findings:
+        print(f"  - {f}")
+    return 1
+
+
+def cmd_measure_gold_set(args: argparse.Namespace) -> int:
+    """chainlink #26: measure the accepted interaction set against a
+    human gold set -- precision, recall, and the omission count that
+    keeps the other two honest.
+
+    Not a gate: a non-zero omission count is a finding a human reads, not
+    a block. What fails is being unable to measure at all."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    measurements, findings = measure_gold_set_workspace(workspace, descriptor, write=not args.no_write)
+    return report_gold_set_measurements(measurements, findings, workspace)
 
 
 def cmd_check_bridges(args: argparse.Namespace) -> int:
@@ -1507,6 +1566,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         "validate-callsites (Stage 8A G1a/G1b over C_static reports, workspace-level), "
         "gate-r1-g16 (Stage 8A R1 reconciliation + G16 risk-tiered unresolved policy; "
         "exit 3 means a human risk decision is outstanding), "
+        "validate-gold-set (G1a/G1b over human gold sets, chainlink #26), "
+        "measure-gold-set (precision/recall/omission against a human gold set, chainlink #26), "
         "check-bridges (Stage 8A bridge harness generation + verifier dispatch, chainlink #47), "
         "gate-g9 (Stage 8A bridge-check verification against a recompilation of the promoted bridge), "
         "validate-closure (Stage 8C G1a/G1b + G17 over closure profiles and degradation records), "
@@ -1662,6 +1723,19 @@ def main(argv: list[str]) -> int:
         help="Stage 8A: reconcile C_static against I (R1) and apply the unresolved risk policy (G16)",
     )
     gate_r1_g16_p.set_defaults(func=cmd_gate_r1_g16)
+
+    validate_gold_set_p = sub.add_parser(
+        "validate-gold-set",
+        help="G1a/G1b over human gold sets (chainlink #26)",
+    )
+    validate_gold_set_p.set_defaults(func=cmd_validate_gold_set)
+
+    measure_gold_set_p = sub.add_parser(
+        "measure-gold-set",
+        help="Measure I against a human gold set: precision, recall, omission (chainlink #26)",
+    )
+    measure_gold_set_p.add_argument("--no-write", action="store_true")
+    measure_gold_set_p.set_defaults(func=cmd_measure_gold_set)
 
     check_bridges_p = sub.add_parser(
         "check-bridges",

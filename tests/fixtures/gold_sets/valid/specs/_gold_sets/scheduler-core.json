@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "cluster": "scheduler-core",
+  "track": "mode-r",
+  "curation_scope": {
+    "examined_concepts": ["Scheduler"],
+    "method": ["source-reading", "domain-knowledge"],
+    "completeness_claim": "human-lower-bound"
+  },
+  "edges": [
+    {
+      "caller": { "concept": "Scheduler", "method": "dispatch" },
+      "callee": { "concept": "TaskQueue", "method": "pop_ready" },
+      "derived_from": ["source-reading"],
+      "rationale": "dispatch takes the next ready task from the queue; the call is on the first path through the method body.",
+      "expected_eligibility": "boundary-required"
+    },
+    {
+      "caller": { "concept": "Scheduler", "method": "dispatch" },
+      "callee": { "concept": "TaskQueue", "method": "push_back" },
+      "derived_from": ["source-reading"],
+      "rationale": "dispatch returns unfinished work to the queue before returning; the call is on a field receiver, so a syntactic extractor sees a possible-dispatch rather than a resolved edge."
+    },
+    {
+      "caller": { "concept": "Scheduler", "method": "shutdown" },
+      "callee": { "concept": "TaskQueue", "method": "drain" },
+      "derived_from": ["domain-knowledge"],
+      "rationale": "shutdown must drain the queue before the scheduler can be dropped. No static call site exists: the queue is reached through a trait object installed at construction, so no candidate source in this pipeline can see it. This is the edge the omission metric exists for."
+    }
+  ],
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-09-04"
+  }
+}

@@ -215,6 +215,24 @@ What a degradation record can excuse is bounded by its own vocabulary, and that 
 
 R2 proves coverage **relative to accepted I**; it does not prove I complete. Since Stage 3 generates both I and O, independent candidate sources are mandatory: Mode P source call extraction, tests and runtime traces, S candidates, data-flow analysis, requirements, a separate critic pass, human promotion.
 
+Measured (chainlink #26) by `docs/gold-set-schema.json` + `scripts/validate_gold_set.py` (the human end) and `docs/gold-set-measurement-schema.json` + `scripts/measure_gold_set.py` (the arithmetic), wired as `validate-gold-set` / `measure-gold-set`. A gold set is a **reviewed** artifact (`specs/_gold_sets/<cluster>.json`, review block, human curator) rather than a machine observation, because it is a judgement about which edges exist and a judgement with no author is not evidence. Three numbers per cluster, and the third is why the issue exists:
+
+| | |
+|---|---|
+| **precision** | I edges, within the curated scope, that the gold set contains |
+| **recall** | gold edges that I proposed |
+| **omission** | gold edges **no** candidate source proposed at all |
+
+A fourth is reported beside omission because the two failures are different and differently fixable: **`missed_but_proposed`** — a gold edge absent from I that an independent source *did* propose. The signal existed and the pipeline did not use it.
+
+**Direction discipline.** An edge C_static proposes that I lacks is **R1's** territory (§9.1, `gate-r1-g16`), and it is deliberately not counted here; #26 runs the other way — gold edges nobody proposed. The two are kept apart in the schema, the code, and the report, because letting a good R1 score read as evidence about completeness is exactly the confusion this measurement exists to prevent.
+
+**Anti-circularity is structural, not exhortation.** A gold set copied out of the I set it audits scores recall 1.0 vacuously. Provenance is therefore per edge (`derived_from`), and its enum contains no value meaning "read it in the interaction set" — a curator who worked from I has to write something false rather than merely omit something. G1b additionally requires each edge's method to be one the curator declared, each caller to be inside `examined_concepts` (precision must not count an edge nobody was asked to look at), and refuses intra-concept edges, which `gate-r1-g16` is right to treat as internal helpers.
+
+**Which sources are honestly covered, and which are recorded as absent.** Of the seven independent sources named above, exactly **one** exists as tooling in this codebase: C_static extraction (#24). S-graph, tests/traces, data-flow, requirements and a critic pass are **not built**; Mode P source extraction is **not applicable** to this greenfield (Mode R) workspace and belongs to #5. Every measurement lists all of them with their real status, and the printed summary says "measured against 1 of 7 independent candidate sources" every run, because an omission count is only interpretable next to how many sources were consulted — three omissions against one source is a different statement from three against eight. The gold set is itself a declared `human-lower-bound`, so an omission count from this prototype is a lower bound computed against a lower bound, and says so.
+
+**Not a gate.** A non-zero omission count blocks nothing; it is a finding a human reads. What fails is being *unable* to measure — no gold set, a gold set for a track this workspace is not running, or a scope in which I proposed nothing (precision `undefined`, never `1.0`; #48's discipline applied to an audit rather than a validator).
+
 ### 5.1 Interaction schema (I) — now carries the assurance requirement
 
 ```yaml

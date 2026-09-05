@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- Human gold-set prototype: precision, recall, and omission analysis (#26)
 - Bridge harness generation: compile typed bridge_logic to a verifier-dispatched check (#47)
 - G14 transitive closure + CG6 well-foundedness discharge; closure profiles & degradation records (#25)
 - Coarse C_static extractor with honest unresolved classes; R1/G16 risk tiers (#24)

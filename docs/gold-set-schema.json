@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/gold-set-schema.json",
+  "title": "Human gold set — v1.0",
+  "description": "A human-curated set of interaction edges for one pilot cluster, used to measure what the pipeline PROPOSES against what a human says is there. plan.md §5.2's independence argument is the whole reason it exists: 'R2 proves coverage relative to accepted I; it does not prove I complete. Since Stage 3 generates both I and O, independent candidate sources are mandatory.' A gold set is the human end of that independence, so it sits on the REVIEWED side of this codebase's line (specs/_gold_sets/<cluster>.json, with a review block, promoted through the same checkpoint as any other reviewed artifact) rather than the machine-observation side (docs/callsite-schema.json, docs/achieved-assurance-schema.json): it is a judgement about what edges exist, and a judgement with no author is not evidence of anything. The one thing it must never be is derived from the interaction set it audits -- recall against a gold set copied out of I is vacuously 1.0. That cannot be proven mechanically, so every edge declares HOW the curator found it, and `derived_from` has no value naming the I set; a curator who worked from I has to write something false rather than merely omit something. Never a claim of completeness either: humans miss edges, so `curation_scope.completeness_claim` is a lower bound, exactly as a syntactic extractor's is (chainlink #24).",
+  "type": "object",
+  "required": ["schema_version", "cluster", "track", "curation_scope", "edges", "review"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "cluster": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "description": "Must equal the filename stem exactly (G1b), the same discipline every other artifact here follows. Names the pilot cluster this gold set covers -- the issue's own unit is 'at least one pilot cluster per test track'."
+    },
+    "track": {
+      "type": "string",
+      "enum": ["mode-r", "mode-p"],
+      "description": "plan.md §11's two test tracks: mode-r (greenfield) and mode-p (a foreign-language port validated by differential testing, chainlink #5). Checked against the project descriptor's own `mode` -- a gold set claiming the track this workspace is not running measures nothing that is here."
+    },
+    "curation_scope": {
+      "type": "object",
+      "required": ["examined_concepts", "method", "completeness_claim"],
+      "additionalProperties": false,
+      "description": "What the curator actually looked at. Precision and recall are only meaningful relative to this: counting a proposed edge as a false positive because the curator never examined its caller would measure the curator's time, not the pipeline's quality.",
+      "properties": {
+        "examined_concepts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+          "description": "The concepts whose outgoing edges the curator examined exhaustively. Measurement is restricted to edges whose CALLER is one of these."
+        },
+        "method": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "source-reading",
+              "test-reading",
+              "requirements-reading",
+              "domain-knowledge",
+              "runtime-observation",
+              "interview"
+            ]
+          },
+          "description": "How the curation was done. Deliberately excludes reading the interaction set: see this schema's own description."
+        },
+        "completeness_claim": {
+          "type": "string",
+          "const": "human-lower-bound",
+          "description": "A single value, and a deliberately weak one. A gold set says 'at least these edges exist', never 'exactly these'. An omission count computed against it is therefore itself a lower bound, and scripts/measure_gold_set.py says so in every report rather than letting the number read as a ceiling."
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/gold_edge" },
+      "description": "Non-empty: a gold set with no edges cannot measure precision, recall or omission, and a measurement that cannot be computed must never read as a good score (chainlink #48's discipline applied to this gate's own input)."
+    },
+    "review": { "$ref": "#/$defs/review" }
+  },
+  "$defs": {
+    "gold_edge": {
+      "type": "object",
+      "required": ["caller", "callee", "derived_from", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "caller": { "$ref": "#/$defs/role" },
+        "callee": { "$ref": "#/$defs/role" },
+        "derived_from": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "source-reading",
+              "test-reading",
+              "requirements-reading",
+              "domain-knowledge",
+              "runtime-observation",
+              "interview"
+            ]
+          },
+          "description": "How the curator found THIS edge. The enum has no value for 'read it in the interaction set' on purpose -- a gold set derived from the artifact it audits makes recall vacuous, and the schema refuses to provide the vocabulary for it. Every value here must also appear in curation_scope.method (G1b): an edge found by a method the curator never claimed to use is unexplained."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why this edge is real. A gold set is the human end of an independence argument; an edge with no stated reason cannot be argued with."
+        },
+        "expected_eligibility": {
+          "type": "string",
+          "enum": ["boundary-required", "inform", "ignore"],
+          "description": "Optional. What the curator expects plan.md §5.2's computed eligibility to come out as. Never used to overrule the computation (G1b recomputes eligibility from edge_class and rejects disagreement); it is recorded so a systematic difference between human expectation and the computed table is visible rather than invisible."
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "required": ["concept", "method"],
+      "additionalProperties": false,
+      "description": "Identical to docs/interaction-schema.json's and docs/callsite-schema.json's own role definition -- the three vocabularies must not drift, since measurement compares edges across all three.",
+      "properties": {
+        "concept": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+        "method": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "description": "Attached by review_checkpoint.approve() after a human signs off, never authored by a proposing model. A gold set a model wrote for itself audits nothing.",
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

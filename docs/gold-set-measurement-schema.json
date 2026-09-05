@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/gold-set-measurement-schema.json",
+  "title": "Gold-set measurement — v1.0",
+  "description": "The result of measuring what the pipeline proposed against a human gold set, for one cluster. plan.md §13 item 13, chainlink #26. Machine-emitted at ci/results/gold_set/<cluster>.json by `pipeline.py measure-gold-set`; no review block, for the same reason a C_static report carries none -- it is a computation over artifacts on disk, and a human editing the score would be editing the audit. The number this artifact exists for is `omission`: gold-set edges that NO candidate source proposed at all. Precision and recall are about the proposals that were made; omission is about the ones nobody made, and it is what makes 'R2 passed, therefore I is complete' unreadable. Every measurement carries `sources[]` with each candidate source's availability, because an omission count is only interpretable next to how many independent sources were actually consulted: 3 omissions with two sources available is a different statement from 3 omissions with eight.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "cluster",
+    "track",
+    "gold_set_review",
+    "scope",
+    "sources",
+    "counts",
+    "metrics",
+    "omitted_edges",
+    "missed_but_proposed_edges",
+    "unmatched_proposals"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "cluster": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "track": { "type": "string", "enum": ["mode-r", "mode-p"] },
+    "gold_set_review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "description": "Copied from the gold set that was measured against, so a measurement names the human whose judgement it scores against and when -- an audit against an anonymous standard is not an audit.",
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "required": ["examined_concepts", "completeness_claim"],
+      "additionalProperties": false,
+      "description": "Carried through from the gold set's curation_scope. Every count below is restricted to edges whose caller concept is in examined_concepts; a proposal outside that scope is neither right nor wrong here, because nobody looked.",
+      "properties": {
+        "examined_concepts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" }
+        },
+        "completeness_claim": { "type": "string", "const": "human-lower-bound" }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/source" },
+      "description": "plan.md §5.2's own list of independent candidate sources, every one of them, each with its real status here. A source that does not exist yet is recorded as such rather than contributing silently nothing -- otherwise 'no source proposed this edge' would quietly mean 'the one source we built did not propose it'."
+    },
+    "counts": {
+      "type": "object",
+      "required": [
+        "gold_edges",
+        "proposed_edges",
+        "true_positives",
+        "false_positives",
+        "false_negatives",
+        "omitted",
+        "missed_but_proposed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "gold_edges": { "type": "integer", "minimum": 0 },
+        "proposed_edges": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Edges the INTERACTION SET proposes within scope -- the artifact under audit, not the union of candidate sources."
+        },
+        "true_positives": { "type": "integer", "minimum": 0 },
+        "false_positives": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Proposed by I, not in the gold set. NOT the same as R1's 'realized call absent from I' (chainlink #24, gate-r1-g16), which runs the other direction entirely -- the two are kept apart in this schema, in the report, and in the code."
+        },
+        "false_negatives": { "type": "integer", "minimum": 0 },
+        "omitted": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Gold edges proposed by NO source -- not by I, not by any available independent source. The metric the other two are kept honest by."
+        },
+        "missed_but_proposed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Gold edges absent from I that an independent source DID propose: the signal existed and the pipeline did not use it. A different failure from omission, and a more fixable one."
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["precision", "recall", "omission_rate"],
+      "additionalProperties": false,
+      "properties": {
+        "precision": { "$ref": "#/$defs/ratio" },
+        "recall": { "$ref": "#/$defs/ratio" },
+        "omission_rate": { "$ref": "#/$defs/ratio" }
+      }
+    },
+    "omitted_edges": { "$ref": "#/$defs/edge_list" },
+    "missed_but_proposed_edges": { "$ref": "#/$defs/edge_list" },
+    "unmatched_proposals": { "$ref": "#/$defs/edge_list" }
+  },
+  "$defs": {
+    "ratio": {
+      "oneOf": [
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "string", "const": "undefined" }
+      ],
+      "description": "`undefined` rather than 1.0 or 0.0 when the denominator is zero. A pipeline that proposed nothing has not achieved perfect precision, and reporting 1.0 there is the vacuous-pass shape chainlink #48 removed from every validator in this codebase."
+    },
+    "edge_list": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/measured_edge" },
+      "description": "Listed, not just counted: a number tells a reviewer how bad it is, and the edges tell them what to do."
+    },
+    "measured_edge": {
+      "type": "object",
+      "required": ["caller", "callee", "proposed_by"],
+      "additionalProperties": false,
+      "properties": {
+        "caller": { "$ref": "#/$defs/role" },
+        "callee": { "$ref": "#/$defs/role" },
+        "proposed_by": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Which sources proposed this edge. Empty for an omitted edge -- that emptiness is the finding."
+        },
+        "rationale": {
+          "type": "string",
+          "description": "For a gold edge, the curator's own reason, carried through so an omission is actionable without opening the gold set."
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "required": ["concept", "method"],
+      "additionalProperties": false,
+      "properties": {
+        "concept": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+        "method": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["source", "status", "proposed"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "interaction-set",
+            "c-static-extraction",
+            "s-graph",
+            "tests-and-traces",
+            "data-flow-analysis",
+            "requirements",
+            "critic-pass",
+            "mode-p-source-extraction",
+            "human-promotion"
+          ],
+          "description": "plan.md §5.2's list, plus the interaction set itself (which is the artifact under audit and is NOT independent -- it is listed so a reader can see it was not counted as corroboration)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["available", "not-built", "not-applicable-to-track", "empty"],
+          "description": "`not-built`: no tooling exists in this codebase yet. `not-applicable-to-track`: real elsewhere but not for this track (Mode P source extraction in a greenfield workspace). `empty`: the source exists and produced nothing, which is a result, not an absence."
+        },
+        "independent": {
+          "type": "boolean",
+          "description": "Whether this source is independent of the interaction set being audited. Only independent sources count toward corroboration; the interaction set corroborating itself is the circularity this whole issue exists to measure."
+        },
+        "proposed": { "type": "integer", "minimum": 0 },
+        "detail": { "type": "string" }
+      }
+    }
+  }
+}

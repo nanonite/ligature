@@ -29,6 +29,7 @@ import validate_callsites  # noqa: E402
 import validate_closure  # noqa: E402
 import validate_conflict_resolution  # noqa: E402
 import validate_evidence  # noqa: E402
+import validate_gold_set  # noqa: E402
 import validate_exemption  # noqa: E402
 import validate_interaction  # noqa: E402
 import validate_protocol_debt  # noqa: E402
@@ -45,6 +46,7 @@ SCANNING_VALIDATORS = [
     (validate_closure, "closure artifacts"),
     (validate_conflict_resolution, "conflict-resolution records"),
     (validate_evidence, "evidence records"),
+    (validate_gold_set, "gold sets"),
     (validate_exemption, "exemptions"),
     (validate_interaction, "interactions"),
     (validate_protocol_debt, "protocol-debt records"),
@@ -61,6 +63,7 @@ PIPELINE_SCANS = {
     "validate-evidence": "evidence records",
     "validate-conflict-resolution": "conflict-resolution records",
     "validate-closure": "closure artifacts",
+    "validate-gold-set": "gold sets",
 }
 
 

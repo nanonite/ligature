@@ -2520,6 +2520,63 @@ class Stage8aCStaticIntegrationTest(unittest.TestCase):
             self.assertIn(command, printed)
 
 
+class GoldSetIntegrationTest(unittest.TestCase):
+    """validate-gold-set and measure-gold-set through pipeline.main()
+    (chainlink #26), over the same workspace tests/test_measure_gold_set.py
+    builds."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_measure_gold_set import MeasurementTestCase  # noqa: E402
+
+        self._case = MeasurementTestCase("run")
+        self._case.setUp()
+        self.workspace = self._case.workspace
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+
+    def tearDown(self):
+        self._case.tearDown()
+
+    def _run(self, *args) -> tuple[int, str]:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = pipeline.main([
+                "--workspace", str(self.workspace),
+                "--descriptor", str(self.descriptor_path),
+                *args,
+            ])
+        return code, buffer.getvalue()
+
+    def test_validate_gold_set_passes_and_counts_what_it_checked(self):
+        code, printed = self._run("validate-gold-set")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("(1 discovered)", printed)
+
+    def test_measure_gold_set_reports_all_three_metrics(self):
+        code, printed = self._run("measure-gold-set")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("precision=0.5", printed)
+        self.assertIn("omission=1/3", printed)
+        self.assertIn("OMISSION:", printed)
+        self.assertTrue(
+            (self.workspace / "ci" / "results" / "gold_set" / "scheduler-core.json").is_file()
+        )
+
+    def test_measure_gold_set_fails_closed_with_no_gold_set(self):
+        (self.workspace / "specs" / "_gold_sets" / "scheduler-core.json").unlink()
+        code, printed = self._run("measure-gold-set")
+        self.assertEqual(code, 1, printed)
+        self.assertIn("not a good score", printed)
+
+    def test_status_lists_the_gold_set_commands(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            pipeline.main(["--workspace", str(self.workspace), "status"])
+        printed = buffer.getvalue()
+        self.assertIn("validate-gold-set", printed)
+        self.assertIn("measure-gold-set", printed)
+
+
 class Stage8aBridgeCheckIntegrationTest(unittest.TestCase):
     """check-bridges and gate-g9 through pipeline.main() (chainlink #47).
     The workspace and the stand-in verifier both come from the test

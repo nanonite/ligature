@@ -139,6 +139,20 @@ Implemented now, against schemas that actually exist:
             low is a visible accepted limitation. Reports "all
             discovered call sites resolved", never "all call sites
             resolved".
+  render-witness  Dispatch a witness's already-validated canonical
+            result through the renderer contract (plan.md §16.1/§16.2,
+            chainlink #28): scripts/witness_renderer.py either produces
+            an SVG appropriate to the result's kind or raises -- there is
+            no third path, no "degraded fallback" branch anywhere in the
+            renderer code. Writes NOTHING on failure: no partial SVG, no
+            placeholder. renderer_actual is self-reported by the
+            renderer function itself, not echoed from the request, and
+            cross-checked against the registry key it was dispatched
+            under -- an independent observation of what ran, which is
+            what makes G20's later declared/actual comparison (#31)
+            meaningful. Never mutates a witness spec on disk (a reviewed,
+            normative artifact); prints the output block a draft would
+            quote.
   validate-witness  G1a/G1b over witness specs (plan.md §16.1, chainlink
             #27) plus G2: the witnessed `query` must resolve to a query
             declared `pure: true` in the concept's own spec, matched the
@@ -291,6 +305,8 @@ from validate_witness import count_results as _count_witness_results  # noqa: E4
 from validate_witness import validate_crate as validate_witness_crate  # noqa: E402
 from validate_witness import validate_results as validate_witness_results  # noqa: E402
 from validate_witness import witness_dir_for as _witness_dir_for  # noqa: E402
+from generate_witness import GenerationError  # noqa: E402
+from generate_witness import generate as generate_witness  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
@@ -794,6 +810,23 @@ def cmd_validate_callsites(args: argparse.Namespace) -> int:
     for f in findings:
         print(f"  - {f}")
     return 1
+
+
+def cmd_render_witness(args: argparse.Namespace) -> int:
+    """chainlink #28: dispatch a witness's already-validated canonical
+    result through the renderer contract (scripts/witness_renderer.py)
+    and write its SVG. Fails loudly and writes nothing on any of: no
+    genuinely valid canonical result for this witness_id, an unregistered
+    renderer, or a renderer that cannot honestly handle the result's
+    shape (never a degraded substitute). Prints the `output` block
+    (path/render_hash/renderer_actual) a witness spec draft would quote."""
+    workspace = _require_workspace_root_exists(args.workspace)
+    try:
+        output = generate_witness(workspace, args.witness_id, args.renderer)
+    except GenerationError as e:
+        raise PipelineError(str(e))
+    print(json.dumps(output, indent=2))
+    return 0
 
 
 def cmd_validate_witness(args: argparse.Namespace) -> int:
@@ -1630,6 +1663,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "validate-callsites (Stage 8A G1a/G1b over C_static reports, workspace-level), "
         "gate-r1-g16 (Stage 8A R1 reconciliation + G16 risk-tiered unresolved policy; "
         "exit 3 means a human risk decision is outstanding), "
+        "render-witness (dispatch a canonical result through the renderer contract, chainlink #28), "
         "validate-witness (G1a/G1b/G2 over witness specs + canonical results, chainlink #27), "
         "validate-gold-set (G1a/G1b over human gold sets, chainlink #26), "
         "measure-gold-set (precision/recall/omission against a human gold set, chainlink #26), "
@@ -1788,6 +1822,14 @@ def main(argv: list[str]) -> int:
         help="Stage 8A: reconcile C_static against I (R1) and apply the unresolved risk policy (G16)",
     )
     gate_r1_g16_p.set_defaults(func=cmd_gate_r1_g16)
+
+    render_witness_p = sub.add_parser(
+        "render-witness",
+        help="Dispatch a witness's canonical result through the renderer contract (chainlink #28)",
+    )
+    render_witness_p.add_argument("witness_id", help="e.g. W-TQ-LOAD-FACTOR")
+    render_witness_p.add_argument("--renderer", required=True, help="the DECLARED renderer to dispatch to")
+    render_witness_p.set_defaults(func=cmd_render_witness)
 
     validate_witness_p = sub.add_parser(
         "validate-witness",

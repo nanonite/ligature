@@ -2582,7 +2582,21 @@ class WitnessIntegrationTest(unittest.TestCase):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             pipeline.main(["--workspace", str(self.workspace), "status"])
-        self.assertIn("validate-witness", buffer.getvalue())
+        printed = buffer.getvalue()
+        self.assertIn("validate-witness", printed)
+        self.assertIn("render-witness", printed)
+
+    def test_render_witness_writes_the_svg_and_prints_the_output_block(self):
+        code, printed = self._run("render-witness", "W-TQ-LOAD-FACTOR", "--renderer", "scalar_field_svg")
+        self.assertEqual(code, 0, printed)
+        output = json.loads(printed)
+        self.assertEqual(output["renderer_actual"], "scalar_field_svg")
+        self.assertTrue((self.workspace / output["path"]).is_file())
+
+    def test_render_witness_fails_loudly_on_an_incompatible_renderer_and_writes_nothing(self):
+        code, printed = self._run("render-witness", "W-TQ-LOAD-FACTOR", "--renderer", "series_svg")
+        self.assertEqual(code, 1, printed)
+        self.assertFalse((self.workspace / "docs" / "witnesses").exists())
 
 
 class GoldSetIntegrationTest(unittest.TestCase):

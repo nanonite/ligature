@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- G18 -- witness coverage gate (#29)
 - witness_required: add to concept-to-code's query schema (upstream request) (#33)
 - Renderer contract: hard-fail on fallback, record actual renderer (#28)
 - Witness spec schema: fixture/renderer/determinism contract, incl. canonical numeric-result renderer output (#27)

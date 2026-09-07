@@ -560,6 +560,29 @@ class BridgeTest(GateTestCase):
         all_errors = self.errors(outcome) + [str(f) for f in workspace_findings if f.severity == "error"]
         self.assertTrue(any("no valid bridge specification" in e for e in all_errors))
 
+    def test_a_bridge_at_a_noncanonical_path_is_rejected_not_silently_accepted(self):
+        # External review, high severity: find_bridge_files discovers
+        # **/_bridges/**/* recursively, with no anchor to the crate's
+        # actual declared layout (crates/*/specs/_bridges/), and
+        # load_bridges never checked one -- an otherwise perfectly
+        # well-formed bridge moved to
+        # crates/scheduler/not_specs/_bridges/BR-SCHED-TQ-001.json still
+        # resolved and closed the cluster with zero findings.
+        # validate_bridge.py's own validate_crate already anchors this
+        # exact way for the standalone CLI; load_bridges just never
+        # applied the same check.
+        canonical = self.ws.root / "crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json"
+        data = json.loads(canonical.read_text())
+        canonical.unlink()
+        self.ws.write("crates/scheduler/not_specs/_bridges/BR-SCHED-TQ-001.json", data)
+
+        outcome, workspace_findings = self.ws.cluster()
+        self.assertEqual(outcome.status, "blocked")
+        self.assertTrue(any("no valid bridge specification" in e for e in self.errors(outcome)))
+        self.assertTrue(
+            any("not directly under the canonical directory" in str(f) for f in workspace_findings)
+        )
+
     def test_a_non_pairwise_bridge_fails_the_protocol_condition(self):
         self.ws.write(
             "crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json",

@@ -73,7 +73,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate_r1_g16 import unresolved_at_or_above_medium  # noqa: E402
-from project_descriptor import boundary_dir_for  # noqa: E402
+from project_descriptor import boundary_dir_for, bridge_dir_for  # noqa: E402
 from satisfies import satisfies  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
@@ -613,7 +613,24 @@ def load_bridges(workspace: Path, descriptor: dict) -> tuple[dict[str, dict], li
     identity collision, and is refused everywhere rather than resolved
     from whichever crate happened to validate. This is the same choice
     #14 already made for a work package providing an obligation twice:
-    ambiguous, never first-wins."""
+    ambiguous, never first-wins.
+
+    A THIRD review pass found a bridge stored at a noncanonical path
+    (e.g. `crates/scheduler/not_specs/_bridges/BR-SCHED-TQ-001.json`)
+    still resolved and closed a cluster with no finding at all --
+    `find_bridge_files` discovers `**/_bridges/**/*` recursively, with
+    no anchor to the crate's actual declared layout, and nothing here
+    ever checked one. `validate_bridge.py`'s own `validate_crate`
+    already draws this exact line (its docstring: discover crate-wide so
+    a mislocated artifact is actually found, then reject it by location
+    alone, rather than anchoring the scan itself and reproducing the
+    same zero-findings outcome by omission) -- `load_bridges` just never
+    applied it. Fixed by requiring `path.resolve().parent` equal the
+    crate's `bridge_dir_for()` exactly before a discovered file is
+    treated as a candidate at all: a mislocated file is reported (G1b)
+    and excluded from both the ambiguity tracking above and the
+    resolvable set, the same as `validate_crate` already does for the
+    standalone CLI."""
     bridges: dict[str, dict] = {}
     discovered_in: dict[str, set[str]] = {}
     findings: list[Finding] = []
@@ -626,7 +643,17 @@ def load_bridges(workspace: Path, descriptor: dict) -> tuple[dict[str, dict], li
             continue
         specs_search_root = workspace / crate["specs_search_root"]
         boundaries_by_id = load_boundaries_by_id(boundary_dir_for(crate, workspace), specs_search_root)
+        canonical_bridge_dir = bridge_dir_for(crate, workspace)
         for path in sorted(find_bridge_files(crate_root)):
+            if path.resolve().parent != canonical_bridge_dir:
+                findings.append(
+                    Finding(
+                        "G1b", path,
+                        "bridge artifact is not directly under the canonical directory "
+                        f"{canonical_bridge_dir} -- found under {path.resolve().parent}",
+                    )
+                )
+                continue
             try:
                 data = json.loads(path.read_text())
             except (json.JSONDecodeError, UnicodeDecodeError):

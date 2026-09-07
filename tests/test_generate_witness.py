@@ -5,16 +5,31 @@ Reuses tests/test_witness_result.py's build_result()-shaped documents
 directly, and writes them at the exact ci/results/witnesses/<witness_id>.json
 convention chainlink #27 established, since generate_witness.py's whole
 job is reading that convention honestly.
+
+Two contract gaps an external review found and this file now covers
+directly (both fixed in generate_witness.py):
+  * a requested renderer that disagreed with the canonical result's own
+    self-recorded `renderer_actual` was never checked, so a schema-valid
+    result claiming e.g. `series_svg` could be rendered successfully
+    under a *different* requested renderer, leaving two on-disk records
+    of "what actually ran" that contradict each other;
+  * the SVG was written directly to its final path, so an I/O failure
+    partway through the write (disk full, process killed) could leave a
+    truncated file sitting where a previously good rendering used to be
+    -- "failure means no mutation" was only true at the logic layer, not
+    the I/O layer.
 """
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import generate_witness  # noqa: E402
 from generate_witness import (  # noqa: E402
     EXIT_GENERATION_FAILED,
     EXIT_INPUT_ERROR,
@@ -27,7 +42,7 @@ from generate_witness import (  # noqa: E402
 from witness_result import build_result, encode_grid, encode_series, witness_result_dir_for  # noqa: E402
 
 
-def load_factor_result(values=None) -> dict:
+def load_factor_result(values=None, renderer_actual="scalar_field_svg") -> dict:
     values = values or [0.125, 0.25, 0.375, 0.5]
     return build_result(
         witness_id="W-TQ-LOAD-FACTOR",
@@ -35,7 +50,7 @@ def load_factor_result(values=None) -> dict:
         query="load_factor",
         fixture_id="FX-QUEUE-BOTTOM-ROW",
         seed=0,
-        renderer_actual="scalar_field_svg",
+        renderer_actual=renderer_actual,
         result=encode_grid(1, len(values), [(0, i, v) for i, v in enumerate(values)]),
     )
 
@@ -98,18 +113,177 @@ class SuccessTest(GenerationTestCase):
         self.assertEqual(first["path"], second["path"])
 
 
+class RendererActualAgreementTest(GenerationTestCase):
+    """The high-severity gap: a requested renderer that disagrees with the
+    canonical result's own `renderer_actual` must be rejected before any
+    rendering is attempted, never allowed to produce a schema-valid but
+    self-contradictory pair of on-disk records."""
+
+    def test_a_disagreeing_renderer_is_rejected(self):
+        # The fixture's own result claims scalar_field_svg (see
+        # load_factor_result's default); requesting series_svg -- a
+        # renderer that WOULD have failed for an unrelated reason too,
+        # since the result's kind is grid -- must be rejected for the
+        # disagreement, not (only) the shape mismatch.
+        with self.assertRaises(GenerationError) as caught:
+            generate(self.workspace, "W-TQ-LOAD-FACTOR", "series_svg")
+        message = str(caught.exception)
+        self.assertIn("disagrees with", message)
+        self.assertIn("scalar_field_svg", message)
+        self.assertIn("series_svg", message)
+
+    def test_the_disagreement_is_caught_even_when_the_requested_renderer_COULD_have_rendered_the_shape(self):
+        # Prove this is a genuine pre-check, not an accident of the shape
+        # mismatch: build a result whose KIND is scalar (which scalar_svg
+        # can render just fine) but whose self-recorded renderer_actual
+        # claims scalar_field_svg. Requesting scalar_svg would succeed at
+        # the shape level -- and must still be refused, because it
+        # disagrees with what the result itself says produced it.
+        mismatched = build_result(
+            witness_id="W-TQ-LOAD-FACTOR", concept="TaskQueue", query="load_factor",
+            fixture_id="FX-QUEUE-BOTTOM-ROW", seed=0,
+            renderer_actual="scalar_field_svg",
+            result={"kind": "scalar", "value": "0.5"},
+        )
+        self.write_result(mismatched)
+        with self.assertRaises(GenerationError) as caught:
+            generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_svg")
+        self.assertIn("disagrees with", str(caught.exception))
+        self.assertFalse((self.workspace / "docs" / "witnesses").exists())
+
+    def test_a_matching_renderer_succeeds(self):
+        output = generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
+        self.assertEqual(output["renderer_actual"], "scalar_field_svg")
+
+    def test_a_self_consistent_but_shape_incompatible_result_still_fails_at_render_time(self):
+        # The OTHER boundary: when the requested renderer DOES match the
+        # result's own claim, but that claim was itself wrong for the
+        # data's actual shape (a producer that mislabeled itself), the
+        # failure must still surface -- via the renderer's own kind
+        # check, not the agreement check, since the two disagree in
+        # substance even though the strings match.
+        self_inconsistent = build_result(
+            witness_id="W-TQ-LOAD-FACTOR", concept="TaskQueue", query="load_factor",
+            fixture_id="FX-QUEUE-BOTTOM-ROW", seed=0,
+            renderer_actual="series_svg",
+            result=encode_grid(1, 4, [(0, 0, 0.125), (0, 1, 0.25), (0, 2, 0.375), (0, 3, 0.5)]),
+        )
+        self.write_result(self_inconsistent)
+        with self.assertRaises(GenerationError) as caught:
+            generate(self.workspace, "W-TQ-LOAD-FACTOR", "series_svg")
+        self.assertIn("could not render", str(caught.exception))
+        self.assertFalse((self.workspace / "docs" / "witnesses").exists())
+
+    def test_no_witness_ships_with_two_renderers_claiming_the_same_result(self):
+        # Sanity check on the test fixtures themselves: encode_series and
+        # encode_grid results used across this suite carry distinct
+        # kinds, so "disagreement" tests above are exercising the field
+        # this gap is about, not an accidental kind mismatch.
+        series_result = build_result(
+            witness_id="W-X", concept="X", query="y", fixture_id="FX-1", seed=0,
+            renderer_actual="series_svg", result=encode_series([("a", 1.0)]),
+        )
+        self.assertEqual(series_result["result"]["kind"], "series")
+
+
+class AtomicWriteTest(GenerationTestCase):
+    """The medium-severity gap: a write that fails partway through must
+    never leave a truncated file at the destination, and must never
+    leave a stray temporary file behind either way."""
+
+    def svg_dir(self) -> Path:
+        return self.workspace / "docs" / "witnesses"
+
+    def tmp_files(self) -> list[Path]:
+        directory = self.svg_dir()
+        return [p for p in directory.glob("*.tmp")] if directory.is_dir() else []
+
+    def test_no_temporary_file_remains_after_a_successful_write(self):
+        generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
+        self.assertEqual(self.tmp_files(), [])
+        self.assertEqual(len(list(self.svg_dir().iterdir())), 1)
+
+    def test_a_failure_during_the_write_leaves_no_stray_temp_file(self):
+        with patch("generate_witness.os.fsync", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
+        self.assertEqual(self.tmp_files(), [])
+
+    def test_a_failure_during_the_write_does_not_create_a_truncated_destination(self):
+        with patch("generate_witness.os.fsync", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
+        self.assertFalse((self.workspace / "docs" / "witnesses" / "task_queue.load_factor.svg").exists())
+
+    def test_a_failure_during_regeneration_leaves_the_prior_good_file_byte_identical(self):
+        first = generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
+        before = (self.workspace / first["path"]).read_bytes()
+        self.write_result(load_factor_result([0.9, 0.9, 0.9, 0.9]))
+        with patch("generate_witness.os.fsync", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
+        after = (self.workspace / first["path"]).read_bytes()
+        self.assertEqual(before, after)
+        self.assertEqual(self.tmp_files(), [])
+
+    def test_the_temporary_file_is_created_in_the_same_directory_as_the_destination(self):
+        # Same-directory placement is what makes the final os.replace an
+        # atomic rename rather than a cross-filesystem copy -- assert it
+        # directly against the low-level helper rather than only
+        # inferring it from cleanup behaviour.
+        seen_dirs = []
+        real_mkstemp = generate_witness.tempfile.mkstemp
+
+        def spy(*args, **kwargs):
+            seen_dirs.append(kwargs.get("dir"))
+            return real_mkstemp(*args, **kwargs)
+
+        with patch("generate_witness.tempfile.mkstemp", side_effect=spy):
+            generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
+        destination = self.workspace / "docs" / "witnesses" / "task_queue.load_factor.svg"
+        self.assertEqual(seen_dirs, [destination.parent])
+
+
+class WriteAtomicallyUnitTest(unittest.TestCase):
+    """`_write_atomically` on its own, away from the rest of generation."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.destination = Path(self._tmp.name) / "out.svg"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_content_round_trips(self):
+        generate_witness._write_atomically(self.destination, "<svg>hello</svg>")
+        self.assertEqual(self.destination.read_text(), "<svg>hello</svg>")
+
+    def test_creates_parent_directories(self):
+        nested = Path(self._tmp.name) / "a" / "b" / "out.svg"
+        generate_witness._write_atomically(nested, "x")
+        self.assertEqual(nested.read_text(), "x")
+
+    def test_a_failure_leaves_no_temp_file_and_propagates(self):
+        with patch("generate_witness.os.fsync", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                generate_witness._write_atomically(self.destination, "content")
+        self.assertEqual(list(self.destination.parent.glob("*.tmp")), [])
+        self.assertFalse(self.destination.exists())
+
+    def test_a_failure_does_not_disturb_a_pre_existing_file(self):
+        self.destination.write_text("original")
+        with patch("generate_witness.os.fsync", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                generate_witness._write_atomically(self.destination, "replacement")
+        self.assertEqual(self.destination.read_text(), "original")
+
+
 class FailureWritesNothingTest(GenerationTestCase):
     """The load-bearing property: every failure mode leaves the workspace
     exactly as it was, never a partial or degraded artifact."""
 
     def svg_dir(self) -> Path:
         return self.workspace / "docs" / "witnesses"
-
-    def test_an_incompatible_renderer_writes_nothing(self):
-        with self.assertRaises(GenerationError) as caught:
-            generate(self.workspace, "W-TQ-LOAD-FACTOR", "series_svg")
-        self.assertIn("could not render", str(caught.exception))
-        self.assertFalse(self.svg_dir().exists())
 
     def test_an_unregistered_renderer_writes_nothing(self):
         with self.assertRaises(GenerationError):

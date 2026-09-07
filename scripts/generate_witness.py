@@ -32,9 +32,20 @@ scripts/validate_witness.py's own check_no_draft_review.
 
 Fail loud, in this module's own terms
 ---------------------------------------
-Three ways this refuses to write a file:
+Four ways this refuses to write a file:
   * the canonical result does not exist, or is not genuinely valid
     (chainlink #27's own "genuinely valid, not just present" bar);
+  * the requested renderer disagrees with the canonical result's OWN
+    `renderer_actual` -- docs/witness-result-schema.json requires that
+    field precisely so "a result found on its own must still be able to
+    say what made it." A result claiming `series_svg` rendered
+    successfully under a requested `scalar_field_svg` would leave two
+    on-disk records of "what actually ran" that disagree with each
+    other, which is the exact self-describing guarantee that field
+    exists to prevent losing. Checked BEFORE any rendering is attempted,
+    not after -- an operator who asks for the wrong renderer gets told
+    so directly, not a shape-mismatch error that happens to have the
+    same root cause;
   * the declared renderer is unregistered;
   * the declared renderer cannot handle the result's shape, or a
     misregistration is caught by witness_renderer.render()'s
@@ -42,13 +53,22 @@ Three ways this refuses to write a file:
 In every one of those cases this writes NOTHING -- not a partial SVG, not
 a placeholder, not a degraded picture under an honest label. A witness
 whose generation failed has no rendering at all, which is the only
-honest state for it to be in.
+honest state for it to be in. That guarantee extends to the write itself:
+the SVG is written to a temporary sibling file and atomically replaces
+the destination only once it is completely and correctly on disk (see
+`_write_atomically`) -- a plain write that only fails partway through
+(disk full, process killed) would otherwise leave a truncated file
+sitting where a previously good rendering used to be, silently breaking
+the same "failure means no mutation" guarantee at the I/O layer instead
+of the logic layer.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -74,6 +94,35 @@ def output_path_for(concept: str, query: str) -> str:
     return f"docs/witnesses/{snake_case(concept)}.{query}.svg"
 
 
+def _write_atomically(destination: Path, content: str) -> None:
+    """Write `content` to `destination` such that any failure partway
+    through -- disk full, process killed, an interrupted syscall -- leaves
+    whatever was already at `destination` completely untouched, never
+    truncated or partially overwritten.
+
+    Writes to a temporary file in the SAME directory as `destination`
+    first (a cross-filesystem temp dir would make the final replace a
+    copy, not a rename, reopening exactly the window this exists to
+    close), flushes and fsyncs it, then atomically replaces the
+    destination with `os.replace` -- POSIX guarantees that call is atomic
+    for a rename within one filesystem, so a reader can only ever observe
+    the old complete file or the new complete file, never a mixture."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, destination)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def generate(workspace: Path, witness_id: str, renderer_name: str) -> dict:
     """Returns the `output` block for the caller to paste into a witness
     spec draft, and writes the SVG as a side effect. Raises
@@ -89,6 +138,16 @@ def generate(workspace: Path, witness_id: str, renderer_name: str) -> dict:
             "from it"
         )
 
+    result_renderer_actual = result_document["renderer_actual"]
+    if result_renderer_actual != renderer_name:
+        raise GenerationError(
+            f"requested renderer {renderer_name!r} disagrees with witness {witness_id!r}'s own "
+            f"canonical result, which already records renderer_actual "
+            f"{result_renderer_actual!r} -- docs/witness-result-schema.json requires that field so "
+            "a result is self-describing on its own; rendering under a different name here would "
+            "leave two on-disk records of what actually ran, disagreeing with each other"
+        )
+
     try:
         rendered = render(renderer_name, result_document["result"])
     except RendererError as e:
@@ -98,8 +157,7 @@ def generate(workspace: Path, witness_id: str, renderer_name: str) -> dict:
 
     path = output_path_for(result_document["concept"], result_document["query"])
     destination = workspace / path
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(rendered.svg)
+    _write_atomically(destination, rendered.svg)
 
     return {
         "path": path,

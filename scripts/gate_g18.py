@@ -58,7 +58,14 @@ already reports exactly what is wrong with it; this gate only needs the
 yes/no outcome), keyed by `(concept, query)` and, symmetrically with the
 declared side, treated as ambiguous -- excluded, not first-wins -- if a
 genuinely valid witness for the same `(concept, query)` is found under
-more than one crate's canonical `_witnesses/` directory.
+more than one crate's canonical `_witnesses/` directory. That ambiguity
+check is scoped to the declared feature set, same as everything else
+this gate does: two crates each holding a perfectly ordinary duplicate
+witness for a query nobody marked `witness_required` is not this gate's
+business, and must not block it (external review, medium severity, on
+an earlier version that raised the finding regardless of whether the
+query was declared -- reproduced with zero declared features still
+returning a "more than one crate" error).
 
 A declared feature with a valid, unambiguous witness spec still needs
 its declared rendering to actually exist on disk at `output.path`
@@ -153,14 +160,28 @@ def collect_declared_features(descriptor: dict, workspace: Path) -> tuple[dict[t
     return declared, findings
 
 
-def collect_valid_witnesses(descriptor: dict, workspace: Path) -> tuple[dict[tuple[str, str], dict], list[Finding]]:
+def collect_valid_witnesses(
+    descriptor: dict, workspace: Path, declared_keys: set[tuple[str, str]]
+) -> tuple[dict[tuple[str, str], dict], list[Finding]]:
     """Every genuinely valid witness spec in the workspace, keyed by
     (concept, query) -- validate_witness.py's own G1a/G1b/G2 bar, crate
     by crate the same way its CLI does (a witness's canonical directory
     and its query cross-reference are both crate-scoped). A mislocated
     or otherwise invalid witness is not reported again here --
     validate-witness already says exactly what is wrong with it; this
-    gate only needs to know it does not count as coverage."""
+    gate only needs to know it does not count as coverage.
+
+    The cross-crate ambiguity check below is scoped to `declared_keys`
+    (external review, medium severity: an earlier version raised it for
+    every genuinely valid witness in the workspace regardless of
+    whether its query was ever marked witness_required, so two crates
+    each holding an unrelated, perfectly ordinary duplicate witness for
+    an UNDECLARED query blocked the gate even with zero declared
+    features -- reproduced with declared == 0 still returning a "more
+    than one crate" error. That contradicts this module's own stated
+    scope and plan.md:1072: coverage, and everything this gate checks,
+    is relative to the declared feature set; an undeclared query must
+    stay invisible to it, ambiguity findings included)."""
     validator = load_witness_validator()
     by_feature: dict[tuple[str, str], list[tuple[str, dict]]] = {}
     for crate in descriptor["crates"]:
@@ -189,13 +210,15 @@ def collect_valid_witnesses(descriptor: dict, workspace: Path) -> tuple[dict[tup
     for (concept, query), entries in sorted(by_feature.items()):
         crates = sorted({crate_dir for crate_dir, _ in entries})
         if len(crates) > 1:
-            findings.append(
-                Finding(
-                    "G18", f"{concept}.{query}",
-                    f"a genuinely valid witness resolving to this query exists under more than one "
-                    f"crate ({', '.join(crates)}) -- which one is authoritative cannot be determined",
+            if (concept, query) in declared_keys:
+                findings.append(
+                    Finding(
+                        "G18", f"{concept}.{query}",
+                        f"a genuinely valid witness resolving to this query exists under more than "
+                        f"one crate ({', '.join(crates)}) -- which one is authoritative cannot be "
+                        "determined",
+                    )
                 )
-            )
             continue
         witnesses[(concept, query)] = entries[0][1]
     return witnesses, findings
@@ -207,7 +230,7 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[Finding], in
 
     declared, declare_findings = collect_declared_features(descriptor, workspace)
     findings.extend(declare_findings)
-    witnesses, witness_findings = collect_valid_witnesses(descriptor, workspace)
+    witnesses, witness_findings = collect_valid_witnesses(descriptor, workspace, set(declared))
     findings.extend(witness_findings)
 
     for concept, query in sorted(declared):

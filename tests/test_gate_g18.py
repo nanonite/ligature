@@ -183,6 +183,24 @@ class AmbiguityTest(GateTestCase):
         findings, discovered = self.gate(descriptor)
         self.assertTrue(any("more than one crate" in e for e in self.errors(findings)))
 
+    def test_duplicate_valid_witnesses_for_an_undeclared_query_do_not_block(self):
+        # External review, medium severity: an earlier version raised
+        # the cross-crate ambiguity finding for every genuinely valid
+        # witness in the workspace, regardless of whether its query was
+        # ever marked witness_required -- reproduced with zero declared
+        # features still returning a "more than one crate" error. An
+        # undeclared query must stay invisible to this gate, ambiguity
+        # findings included (plan.md:1072, issue #29's own stated scope).
+        self.ws.write_concept_spec(witness_required=False)
+        self.ws.write_witness()
+        self.ws.write_rendering()
+        other = Workspace(self.root, crate_dir="crates/other")
+        other.write_witness()
+        descriptor = descriptor_with("crates/scheduler", "crates/other")
+        findings, discovered = self.gate(descriptor)
+        self.assertEqual(discovered, 0)
+        self.assertEqual(findings, [])
+
 
 class DiscoveryUnitTest(unittest.TestCase):
     def setUp(self):

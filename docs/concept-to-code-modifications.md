@@ -111,6 +111,31 @@ required in `emit_stubs.py` — its query handling only reads `pure` today
 request to apply in the concept-to-code repo. Tracked as chainlink issue #33
 in `ligature-workspace`.
 
+**Implementation status (chainlink #33):** not yet applied upstream — the
+vendored submodule remains an unmodified read-only pin
+(`vendor/concept-to-code` at `deac5cd`, `heads/main`) and nothing in this
+repository edits it. The literal proposed patch — vendor's real `query`
+`$def`, field for field, plus exactly this one new optional property — is
+recorded as its own artifact at
+`docs/concept-to-code-witness-required-schema.json`, so the extension's own
+shape is regression-tested and ready the moment the upstream maintainer
+applies it, without ever touching the submodule in the meantime.
+`tests/test_concept_to_code_witness_required_schema.py` proves: (1) every
+field in the proposed schema other than `witness_required` is pulled
+verbatim from the live vendored `query` `$def` — a drift guard, not a
+one-time copy, so an upstream schema change would fail this test rather than
+silently invalidate the proposal; (2) `witness_required: true` and `false`
+both validate; (3) omitting the field validates and its schema `default` is
+`false`; (4) every non-boolean value (`"true"`, `1`, `0`, `null`, `[]`,
+`{}`) is rejected; (5) `additionalProperties: false` still rejects an
+unrelated field after the extension; (6) every one of the 11 real query
+objects across every vendored fixture/spec `*.json` file still validates
+against the extended schema unchanged — the extension is additive, proven
+against real documents rather than only hand-written ones. `emit_stubs.py`
+confirmed to need no change (re-read at `emit_stubs.py:192-201`: query
+handling is `.get()`-based and reads only `english`, `rust_sig`, `pure` —
+an unrecognized key is inert to it either way).
+
 ### 6. Stable obligation identifier on `constraint` — decided: add `id`
 
 Found while building the boundary-artifact schema (chainlink #9/#11): checked

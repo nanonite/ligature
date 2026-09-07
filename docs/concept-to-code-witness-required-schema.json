@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/concept-to-code-witness-required-schema.json",
+  "title": "concept-to-code query $def, proposed (chainlink #33)",
+  "description": "The literal patch requested upstream: docs/concept-to-code-modifications.md gap #5, tracked as chainlink #33. vendor/concept-to-code/schemas/spec.schema.json's own `query` $def, field for field, plus exactly one new optional property, `witness_required` (boolean, default false), co-located with `pure` as decided. This file is NOT consumed by any of this pipeline's runtime code and is never substituted for the real vendored schema -- vendor/concept-to-code is a read-only submodule pin (docs/concept-to-code-modifications.md's own header) and this is a proposal, not an applied change; nothing here alters vendor/concept-to-code/schemas/spec.schema.json. It exists so the extension's own shape -- valid when true, valid when omitted, rejected when non-boolean, and additive over every query document valid today -- can be regression-tested before the upstream maintainer ever applies it. tests/test_concept_to_code_witness_required_schema.py asserts every field here other than witness_required is pulled verbatim from the live vendored schema at test time, so this proposal can never silently drift from what it is actually proposing a patch against.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["english", "rust_sig", "pure"],
+  "properties": {
+    "english": {
+      "type": "string",
+      "minLength": 10,
+      "description": "Restricted-English question, kept verbatim as Rustdoc on the generated query."
+    },
+    "rust_sig": {
+      "type": "string",
+      "pattern": "^fn\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\(&self[),]",
+      "description": "Rust method signature. Queries must take &self and return a value."
+    },
+    "pure": {
+      "type": "boolean",
+      "const": true,
+      "description": "Queries are pure by construction; Step B rejects mutable query signatures."
+    },
+    "witness_required": {
+      "type": "boolean",
+      "default": false,
+      "description": "Declares this query a feature that must have a witness (plan.md §16.1). Optional; omission means false -- G18 (chainlink #29) reads it as the declared-feature source of truth once the query resolves. Reported upstream as docs/concept-to-code-modifications.md gap #5, chainlink #33; not applied to the vendored submodule."
+    }
+  }
+}

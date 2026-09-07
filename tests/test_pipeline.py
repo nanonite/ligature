@@ -2520,6 +2520,71 @@ class Stage8aCStaticIntegrationTest(unittest.TestCase):
             self.assertIn(command, printed)
 
 
+class WitnessIntegrationTest(unittest.TestCase):
+    """validate-witness through pipeline.main() (chainlink #27), over the
+    workspace tests/test_validate_witness.py builds."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_validate_witness import WorkspaceTest  # noqa: E402
+
+        self._case = WorkspaceTest("run")
+        self._case.setUp()
+        self.workspace = self._case.workspace
+        descriptor = json.loads(
+            (ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text()
+        )
+        descriptor["crates"] = [
+            {"crate_dir": "crates/scheduler", "contracts_crate": "contracts", "specs_search_root": "crates"}
+        ]
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+
+    def tearDown(self):
+        self._case.tearDown()
+
+    def _run(self, *args) -> tuple[int, str]:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = pipeline.main([
+                "--workspace", str(self.workspace),
+                "--descriptor", str(self.descriptor_path),
+                *args,
+            ])
+        return code, buffer.getvalue()
+
+    def test_a_witness_and_its_canonical_result_pass(self):
+        code, printed = self._run("validate-witness")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("(2 discovered)", printed)
+
+    def test_a_non_pure_query_blocks(self):
+        spec_path = self.workspace / "crates" / "scheduler" / "specs" / "task_queue.json"
+        spec = json.loads(spec_path.read_text())
+        spec["queries"][0]["pure"] = False
+        spec_path.write_text(json.dumps(spec))
+        code, printed = self._run("validate-witness")
+        self.assertEqual(code, 1, printed)
+        self.assertIn("observes a side effect", printed)
+
+    def test_a_tampered_result_blocks(self):
+        result_path = (
+            self.workspace / "ci" / "results" / "witnesses" / "W-TQ-LOAD-FACTOR.json"
+        )
+        data = json.loads(result_path.read_text())
+        data["result"]["cells"][0]["value"] = "0.9"
+        result_path.write_text(json.dumps(data))
+        code, printed = self._run("validate-witness")
+        self.assertEqual(code, 1, printed)
+        self.assertIn("is not the hash of this result", printed)
+
+    def test_status_lists_the_witness_command(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            pipeline.main(["--workspace", str(self.workspace), "status"])
+        self.assertIn("validate-witness", buffer.getvalue())
+
+
 class GoldSetIntegrationTest(unittest.TestCase):
     """validate-gold-set and measure-gold-set through pipeline.main()
     (chainlink #26), over the same workspace tests/test_measure_gold_set.py

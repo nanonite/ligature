@@ -139,6 +139,20 @@ Implemented now, against schemas that actually exist:
             low is a visible accepted limitation. Reports "all
             discovered call sites resolved", never "all call sites
             resolved".
+  validate-witness  G1a/G1b over witness specs (plan.md §16.1, chainlink
+            #27) plus G2: the witnessed `query` must resolve to a query
+            declared `pure: true` in the concept's own spec, matched the
+            way validate_boundary_contracts.py matches a constraint (on
+            the spec's own `concept` field, never a filename). Also
+            validates the canonical results under ci/results/witnesses/,
+            recomputing value_domain and value_hash -- the normative
+            determinism artifact `render_hash` deliberately is not.
+            Witness coverage (G18, #29), determinism across a
+            regeneration (G19, #30) and degeneracy against the declared
+            expectation (G20, #31) are separate gates, not this
+            validator. A witness is EVIDENCE, never assurance: nothing
+            here reaches satisfies(), accepted_evidence_kinds or
+            closure_kind.
   validate-gold-set  G1a/G1b over human gold sets (plan.md §5.2's
             independence argument, chainlink #26): schema, naming, and
             the scope/provenance discipline -- every edge's caller must
@@ -272,6 +286,11 @@ from validate_closure import validate_workspace as validate_closure_workspace  #
 from validate_gold_set import count_discovered as _count_gold_sets  # noqa: E402
 from validate_gold_set import gold_set_dir_for as _gold_set_dir_for  # noqa: E402
 from validate_gold_set import validate_workspace as validate_gold_set_workspace  # noqa: E402
+from validate_witness import count_discovered as _count_witnesses  # noqa: E402
+from validate_witness import count_results as _count_witness_results  # noqa: E402
+from validate_witness import validate_crate as validate_witness_crate  # noqa: E402
+from validate_witness import validate_results as validate_witness_results  # noqa: E402
+from validate_witness import witness_dir_for as _witness_dir_for  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
 from validate_conflict_resolution import load_validator as load_conflict_resolution_validator  # noqa: E402
 from validate_conflict_resolution import validate_data as validate_conflict_resolution_data  # noqa: E402
@@ -773,6 +792,51 @@ def cmd_validate_callsites(args: argparse.Namespace) -> int:
 
     print(f"FAIL: {len(findings)} finding(s)")
     for f in findings:
+        print(f"  - {f}")
+    return 1
+
+
+def cmd_validate_witness(args: argparse.Namespace) -> int:
+    """chainlink #27: G1a/G1b over witness specs, plus G2 -- the query
+    must resolve to a `pure: true` query in the concept's own spec --
+    and the canonical results under ci/results/witnesses/, whose
+    value_domain and value_hash are recomputed.
+
+    Crate-scoped like validate-interaction: a witness is over one
+    concept's query, and a concept lives in a crate. G18 coverage (#29),
+    G19 determinism (#30) and G20 degeneracy (#31) are separate gates and
+    are deliberately not here."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    findings_total = []
+    discovered = 0
+    for crate in descriptor["crates"]:
+        crate_root = _require_crate_root_exists(crate, workspace)
+        specs_search_root = workspace / crate["specs_search_root"]
+        discovered += _count_witnesses(crate_root)
+        findings_total.extend(
+            validate_witness_crate(crate_root, _witness_dir_for(crate, workspace), specs_search_root)
+        )
+
+    findings_total.extend(validate_witness_results(workspace))
+    discovered += _count_witness_results(workspace)
+
+    errors = [f for f in findings_total if f.severity == "error"]
+    infos = [f for f in findings_total if f.severity == "info"]
+
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+
+    if not errors:
+        print(pass_line(
+            discovered, "witness artifacts", "G1a/G1b and G2 pure-query resolution", workspace
+        ))
+        return 0
+
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
         print(f"  - {f}")
     return 1
 
@@ -1566,6 +1630,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "validate-callsites (Stage 8A G1a/G1b over C_static reports, workspace-level), "
         "gate-r1-g16 (Stage 8A R1 reconciliation + G16 risk-tiered unresolved policy; "
         "exit 3 means a human risk decision is outstanding), "
+        "validate-witness (G1a/G1b/G2 over witness specs + canonical results, chainlink #27), "
         "validate-gold-set (G1a/G1b over human gold sets, chainlink #26), "
         "measure-gold-set (precision/recall/omission against a human gold set, chainlink #26), "
         "check-bridges (Stage 8A bridge harness generation + verifier dispatch, chainlink #47), "
@@ -1723,6 +1788,12 @@ def main(argv: list[str]) -> int:
         help="Stage 8A: reconcile C_static against I (R1) and apply the unresolved risk policy (G16)",
     )
     gate_r1_g16_p.set_defaults(func=cmd_gate_r1_g16)
+
+    validate_witness_p = sub.add_parser(
+        "validate-witness",
+        help="G1a/G1b/G2 over witness specs and canonical results (chainlink #27)",
+    )
+    validate_witness_p.set_defaults(func=cmd_validate_witness)
 
     validate_gold_set_p = sub.add_parser(
         "validate-gold-set",

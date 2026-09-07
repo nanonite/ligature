@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/witness-spec-schema.json",
+  "title": "Witness spec — v1.0",
+  "description": "plan.md §16.1's worked example, field for field. One per witnessed query at specs/_witnesses/<snake_case(concept)>.<query>.json. A witness spec is NORMATIVE and reviewed -- the opposite side of this codebase's line from a C_static report or an achieved assurance record: it declares a fixture, a determinism contract and an EXPECTATION that later gates test against, and every one of those is a human decision. What a witness produces is evidence and only evidence: §16's own rule is 'evidence, never assurance; never in accepted_evidence_kinds; no effect on closure_kind', and a cluster with full witness coverage and zero verifier results is still `unsupported`. Nothing in this schema creates a path around that -- there is no field here that any assurance, satisfies(), or closure computation reads, and there is deliberately no `assurance`-shaped vocabulary anywhere in it. The determinism split is the other load-bearing decision: `determinism.value_hash` is normative and gates (G19, chainlink #30) over a renderer-independent canonical result (docs/witness-result-schema.json), while `output.render_hash` is change-tracking only and gates nothing, because SVG bytes move with float formatting, locale, attribute order and library version while the computed value does not. Pin the data, not the projection.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "witness_id",
+    "concept",
+    "query",
+    "fixture",
+    "renderer",
+    "expectation",
+    "determinism",
+    "output",
+    "review"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "witness_id": {
+      "type": "string",
+      "pattern": "^W-[A-Z0-9]+(?:-[A-Z0-9]+)*$",
+      "description": "plan.md §16.1's own shape (W-TQ-LOAD-FACTOR). Deliberately NOT derived from the filename: the example's own id abbreviates TaskQueue to TQ, so a derivation rule would either reject the plan's example or invent an abbreviation scheme nobody declared. It is required to be unique across the workspace instead (G1b), which is what an id is actually for."
+    },
+    "concept": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]*$",
+      "description": "PascalCase, matching the concept-to-code `concept` field. The filename's first component is snake_case(concept) using concept-to-code's OWN rule (vendor/concept-to-code/emit_stubs.py:snake_case), copied rather than re-derived -- plan.md §2 records what re-deriving it cost last time (HTTPClient -> h_t_t_p_client)."
+    },
+    "query": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "The queried method's name, as embedded in the concept spec's own `rust_sig`. Must resolve to a query with `pure: true` in the concept's spec -- a G2-style cross-reference check (scripts/validate_witness.py), not a naming convention: a witness over a non-pure method would be observing a side effect and calling it a value."
+    },
+    "fixture": {
+      "type": "object",
+      "required": ["fixture_id", "seed", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "fixture_id": {
+          "type": "string",
+          "pattern": "^FX-[A-Z0-9]+(?:-[A-Z0-9]+)*$"
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Required even when the fixture is fully deterministic and ignores it: a witness whose seed is implicit cannot be reproduced by someone who did not write it, and reproduction is the entire determinism contract."
+        },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "renderer": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "The renderer this witness DECLARES (e.g. scalar_field_svg). `output.renderer_actual` records what actually ran, and the two are compared -- self-contained inside this document, so the check needs no cross-file context and runs at G1b. A renderer silently substituting a degraded fallback (a text strip standing in for a field plot) is the failure this pairing exists to make impossible to hide; hard-failing AT GENERATION on that mismatch is chainlink #28's contract, and G20 (#31) is the gate."
+    },
+    "expectation": {
+      "type": "object",
+      "required": ["renderer", "coverage_region", "value_distribution", "fixture_family"],
+      "additionalProperties": false,
+      "description": "plan.md §16's A2 correction: DECLARE intent, do not infer it. 'All-constant output' is correct for a single-cell fixture and a defect for a full-field one, so a global anomaly detector both false-positives and false-negatives. G20 (#31) tests against this block; without it that gate would have to guess.",
+      "properties": {
+        "renderer": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Must equal the top-level `renderer` (G1b). Present because §16.1's worked example carries it in both places; the duplication is only safe if it is checked, so it is."
+        },
+        "coverage_region": {
+          "type": "string",
+          "enum": ["full-grid", "bottom-row", "corridor", "single-cell", "project-defined"],
+          "description": "plan.md §16.1's own enum. Which part of the fixture's domain the feature is expected to be defined over -- the thing that distinguishes intentional partial coverage from fixture drift."
+        },
+        "value_distribution": {
+          "type": "string",
+          "enum": ["must-vary", "constant-allowed"],
+          "description": "Whether a constant result is a defect here. Checked by G20 (#31) against the canonical result's own recomputed value_domain, never against a heuristic over the rendering."
+        },
+        "fixture_family": {
+          "type": "string",
+          "pattern": "^FX-[A-Z0-9]+(?:-[A-Z0-9]+)*$",
+          "description": "The family this fixture belongs to. A family is DEFINED BY the witnesses that declare it -- there is no separate registry artifact, and G1b enforces the property that makes the family meaningful: every witness declaring the same family must declare the same coverage_region. That is exactly plan.md §16.2's 'coverage_region inconsistent with fixture_family' check, made checkable without inventing an artifact type nobody writes. A standalone family registry becomes worth building only if a family needs to exist with no witness in it."
+        }
+      }
+    },
+    "determinism": {
+      "type": "object",
+      "required": ["value_hash", "claim", "platforms"],
+      "additionalProperties": false,
+      "description": "The NORMATIVE determinism contract: the feature VALUE is stable, not the rendering. G19 (#30) regenerates and compares value_hash, never render_hash.",
+      "properties": {
+        "value_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Over the canonical result (docs/witness-result-schema.json), computed by scripts/witness_result.py's documented serialization -- renderer-independent by construction, since the canonical result contains no rendering and no JSON floats at all."
+        },
+        "claim": {
+          "type": "string",
+          "enum": ["byte-identical-across-runs", "byte-identical-on-declared-platforms"],
+          "description": "plan.md §16.1 writes `byte-identical-across-runs`. The second value exists because `platforms` is a list: a witness that only claims stability on the platforms it names is making a weaker and often truer claim, and the schema should let it say so rather than forcing an over-claim."
+        },
+        "platforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]+(?:\\.[a-z0-9_]+)*(?:-[a-z0-9_]+(?:\\.[a-z0-9_]+)*){1,3}$"
+          },
+          "description": "Rust target triples, same pattern as an interaction's realization.config_scope.target and a C_static report's config_scope.target -- the three must not drift, since a determinism claim is configuration-relative in exactly the way a realized call is."
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["path", "render_hash", "renderer_actual"],
+      "additionalProperties": false,
+      "description": "The generated rendering. Hashed for CHANGE TRACKING ONLY -- render_hash never gates promotion (plan.md §16.5), and no gate in this pipeline reads it.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^docs/witnesses/[a-z0-9_]+\\.[a-z0-9_]+\\.svg$",
+          "description": "plan.md §16.1's generated layout: docs/witnesses/<concept>.<query>.svg. Constrained here so a witness cannot quietly point at a hand-drawn picture somewhere else."
+        },
+        "render_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "renderer_actual": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "What actually ran. The schema REQUIRES it so the declared/actual comparison exists as data rather than as a convention someone remembers -- a generator that fell back to a degraded renderer has to record that it did, and G20 has something to compare."
+        }
+      }
+    },
+    "review": { "$ref": "#/$defs/review" }
+  },
+  "$defs": {
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewed_at"],
+      "additionalProperties": false,
+      "description": "A witness spec is normative and goes through the same human checkpoint as any other normative artifact; attached by review_checkpoint.approve(), never authored by a proposing model.",
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    }
+  }
+}

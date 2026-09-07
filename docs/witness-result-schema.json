@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/witness-result-schema.json",
+  "title": "Canonical witness result — v1.0",
+  "description": "The renderer-independent result a witness's `determinism.value_hash` is taken over. plan.md §16.1 states the split but not the artifact: 'the renderer does not currently emit a canonical numeric result separate from the SVG' -- this is that artifact (chainlink #27). Generated at ci/results/witnesses/<witness_id>.json; machine-emitted, no review block, for the same reason a C_static report carries none. THE FLOAT RULE, which is the whole reason this exists rather than hashing the SVG: a canonical result contains NO JSON NUMBERS FOR MEASURED VALUES. Every measured value is a decimal STRING in a constrained form, produced by whatever computed it. Hashing therefore never formats a float, and the fragility §16.1 names (float-to-string formatting, locale, rounding, attribute order, library version) cannot reach the normative hash: it is confined to the producer, where G19 (#30) catches it by regenerating. `value_domain` is recomputed from the values on every validation and rejected on disagreement -- the same computed-never-stored discipline G1b applies to eligibility in I and coverage in a C_static report -- so a degeneracy check (G20, #31) reading `distinct_values` is reading a fact, not a claim.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "witness_id",
+    "concept",
+    "query",
+    "fixture_id",
+    "seed",
+    "renderer_actual",
+    "canonicalization",
+    "result",
+    "value_domain",
+    "value_hash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "witness_id": { "type": "string", "pattern": "^W-[A-Z0-9]+(?:-[A-Z0-9]+)*$" },
+    "concept": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$" },
+    "query": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "fixture_id": { "type": "string", "pattern": "^FX-[A-Z0-9]+(?:-[A-Z0-9]+)*$" },
+    "seed": { "type": "integer", "minimum": 0 },
+    "renderer_actual": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "What actually produced this result. Carried here as well as in the witness spec's `output` so a result file is self-describing: a result found on its own must still be able to say what made it, or a mismatch is only visible to whoever holds both files."
+    },
+    "canonicalization": {
+      "type": "object",
+      "required": ["rule", "hashed_fields"],
+      "additionalProperties": false,
+      "description": "How value_hash was computed, recorded IN the artifact. A hash whose derivation is only documented in a script is unverifiable the moment the script changes; naming the rule and the hashed field set makes a future change visible as a version bump rather than as a silent re-hash.",
+      "properties": {
+        "rule": {
+          "type": "string",
+          "const": "canonical-json-v1",
+          "description": "JSON, UTF-8, keys sorted, separators (',' ':') with no whitespace, no trailing newline, over exactly the fields named in hashed_fields. Implemented by scripts/witness_result.py."
+        },
+        "hashed_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["witness_id", "concept", "query", "fixture_id", "seed", "result"]
+          },
+          "description": "The identity of the fact, plus the fact. Deliberately excludes renderer_actual, value_domain, paths and anything else about HOW the value was obtained or displayed: the same numbers computed by a different renderer are the same fact and must hash the same, while the same numbers from a different fixture or seed are a different fact and must not."
+        }
+      }
+    },
+    "result": { "$ref": "#/$defs/result" },
+    "value_domain": {
+      "type": "object",
+      "required": ["distinct_values", "minimum", "maximum"],
+      "additionalProperties": false,
+      "description": "Recomputed from `result` on every validation and rejected on disagreement. Exists so a degeneracy check is a lookup rather than a re-derivation: `value_distribution: must-vary` fails exactly when distinct_values is 1 (G20, #31). minimum/maximum are compared as decimals, not as strings, and are absent-safe only for an empty result, which the result kinds forbid.",
+      "properties": {
+        "distinct_values": { "type": "integer", "minimum": 1 },
+        "minimum": { "$ref": "#/$defs/decimal" },
+        "maximum": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "value_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Over the canonical serialization of hashed_fields. Recomputed by scripts/witness_result.py and rejected on disagreement -- a stored hash is a claim, and this one is normative."
+    }
+  },
+  "$defs": {
+    "decimal": {
+      "type": "string",
+      "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]*[1-9])?(?:e-?[1-9][0-9]*)?$",
+      "description": "A measured value, as a canonical decimal string. NOT a JSON number: a JSON number would have to be re-formatted to be hashed, and that formatting step is precisely the platform-dependent thing §16.1 says must not reach the normative hash. The producer emits this form (scripts/witness_result.py's canonical_number() is the reference implementation: shortest round-trip for f64, normalized exponent, no '+', no leading zeros, a single spelling of zero, and no trailing zeros in the fraction -- 0.10 and 0.1 are one number and must never be two hashes). NaN and ±Infinity have no spelling here at all -- a witness whose value is not a number has no stable value to pin, and the schema refuses to give it one."
+    },
+    "result": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar_result" },
+        { "$ref": "#/$defs/series_result" },
+        { "$ref": "#/$defs/grid_result" }
+      ],
+      "description": "Three kinds, covering the renderer families §16.1 names: a single value, a keyed sequence, and a 2-D field (what scalar_field_svg draws and what `coverage_region` talks about). Adding a fourth is a reviewed schema change like any other -- the closed set is what stops a producer inventing a shape the gates cannot read."
+    },
+    "scalar_result": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "const": "scalar" },
+        "value": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "series_result": {
+      "type": "object",
+      "required": ["kind", "points"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "const": "series" },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["key", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "key": { "type": "string", "minLength": 1 },
+              "value": { "$ref": "#/$defs/decimal" }
+            }
+          },
+          "description": "Order is significant and is part of the hash: a series reordered is a different serialization, and a producer that emits points in a nondeterministic order has a determinism defect G19 should catch rather than a canonicalizer should hide."
+        }
+      }
+    },
+    "grid_result": {
+      "type": "object",
+      "required": ["kind", "rows", "columns", "cells"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "const": "grid" },
+        "rows": { "type": "integer", "minimum": 1 },
+        "columns": { "type": "integer", "minimum": 1 },
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["row", "column", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "row": { "type": "integer", "minimum": 0 },
+              "column": { "type": "integer", "minimum": 0 },
+              "value": { "$ref": "#/$defs/decimal" }
+            }
+          },
+          "description": "Sparse by design: a feature defined only along a corridor or a bottom row has cells only there, which is what makes `coverage_region` a checkable statement about the result rather than about the picture. Cells are required to be unique by (row, column) and sorted (scripts/validate_witness.py) -- two values for one cell has no meaning, and an unsorted order would make the hash depend on iteration order."
+        }
+      }
+    }
+  }
+}

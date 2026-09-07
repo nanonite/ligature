@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +27,7 @@ from witness_result import (  # noqa: E402
     encode_scalar,
     encode_series,
     is_canonical_decimal,
+    is_canonically_encoded,
     values_of,
 )
 
@@ -221,6 +223,129 @@ class ValueDomainTest(unittest.TestCase):
     def test_a_non_canonical_value_is_refused(self):
         with self.assertRaises(WitnessResultError):
             compute_value_domain({"kind": "scalar", "value": "0.10"})
+
+    def test_a_non_canonically_encoded_value_is_refused_even_if_decimal_shaped(self):
+        # "1e1" passes is_canonical_decimal's own pattern -- it must
+        # still be refused, since canonical_number() would never itself
+        # produce it for the value ten.
+        with self.assertRaises(WitnessResultError):
+            compute_value_domain({"kind": "scalar", "value": "1e1"})
+
+    def test_distinct_values_counts_numbers_not_spellings(self):
+        # External review, high severity, reproduced exactly this way: a
+        # constant grid with half its cells spelled "10" and half spelled
+        # "1e1" reported distinct_values: 2 before this fix, letting a
+        # future degeneracy check (#31) miss real degeneracy.
+        constant = encode_grid(1, 2, [(0, 0, 10.0), (0, 1, 10.0)])
+        constant["cells"][1]["value"] = "1e1"
+        with self.assertRaises(WitnessResultError):
+            # Now refused outright at the encoding-check step -- a
+            # canonical result cannot carry two spellings of one number
+            # at all, which is the stronger and more direct fix.
+            compute_value_domain(constant)
+
+
+class IsCanonicallyEncodedTest(unittest.TestCase):
+    """The round-trip check is_canonical_decimal's shape-only pattern
+    cannot provide on its own."""
+
+    def test_the_shortest_spelling_is_accepted(self):
+        self.assertTrue(is_canonically_encoded("10"))
+        self.assertTrue(is_canonically_encoded("0.125"))
+        self.assertTrue(is_canonically_encoded("0"))
+
+    def test_a_redundant_exponent_is_refused(self):
+        # "1e1" is shaped like a decimal (is_canonical_decimal accepts
+        # it) but is not what canonical_number() would produce for ten.
+        self.assertTrue(is_canonical_decimal("1e1"))
+        self.assertFalse(is_canonically_encoded("1e1"))
+
+    def test_a_genuine_exponent_spelling_is_accepted(self):
+        # canonical_number() itself uses an exponent for magnitudes repr
+        # would -- confirm the round-trip check accepts its own output.
+        encoded = canonical_number(1e300)
+        self.assertIn("e", encoded)
+        self.assertTrue(is_canonically_encoded(encoded))
+
+    def test_every_encoding_canonical_number_produces_round_trips(self):
+        for value in (0, 1, -1, 0.5, -0.5, 1e300, 1e-300, 2 ** 53, 1 / 7, 3.0):
+            with self.subTest(value=value):
+                self.assertTrue(is_canonically_encoded(canonical_number(value)))
+
+    def test_a_non_decimal_string_is_refused(self):
+        self.assertFalse(is_canonically_encoded("not-a-number"))
+        self.assertFalse(is_canonically_encoded("0.10"))
+
+    def test_nan_and_infinity_spellings_are_refused(self):
+        self.assertFalse(is_canonically_encoded("inf"))
+        self.assertFalse(is_canonically_encoded("nan"))
+
+
+class DecimalInputTest(unittest.TestCase):
+    """canonical_number()'s Decimal convenience path -- correct to
+    downcast to f64 (this scheme is scoped to f64-precision values), but
+    must not silently turn a nonzero value into exactly zero."""
+
+    def test_an_ordinary_decimal_downcasts_to_its_nearest_float(self):
+        # Precision loss beyond ~17 significant figures is the downcast
+        # working as designed, not a bug -- must not be over-corrected
+        # into rejecting the common case.
+        self.assertEqual(canonical_number(Decimal("0.1")), "0.1")
+        self.assertEqual(canonical_number(Decimal("10")), "10")
+
+    def test_underflow_to_zero_is_refused(self):
+        # External review, high severity: float(Decimal("1e-400")) is
+        # exactly 0.0 with no exception -- a genuinely nonzero value
+        # silently became a different value, not merely a less precise
+        # spelling of the same one.
+        with self.assertRaises(WitnessResultError):
+            canonical_number(Decimal("1e-400"))
+
+    def test_a_decimal_that_is_genuinely_zero_is_accepted(self):
+        self.assertEqual(canonical_number(Decimal("0")), "0")
+        self.assertEqual(canonical_number(Decimal("0.0")), "0")
+
+    def test_overflow_is_still_refused_via_the_existing_infinity_check(self):
+        # float(Decimal("1e400")) is +inf; already caught by the
+        # pre-existing isinf check, confirmed here so the two failure
+        # modes (overflow, underflow) are both pinned in one place.
+        with self.assertRaises(WitnessResultError):
+            canonical_number(Decimal("1e400"))
+
+
+class HashedFieldsTest(unittest.TestCase):
+    """canonicalization.hashed_fields is checked against the rule's own
+    fixed set, not read as a per-document instruction -- see
+    canonical_payload's own docstring."""
+
+    def test_the_declared_set_matching_the_rule_is_accepted(self):
+        document = build_result(
+            "W-X", "X", "y", "FX-1", 0, "scalar_svg", encode_scalar(0.5)
+        )
+        self.assertEqual(set(document["canonicalization"]["hashed_fields"]), set(HASHED_FIELDS))
+        # canonical_payload succeeds silently -- no exception.
+        canonical_payload(document)
+
+    def test_a_narrower_declared_set_is_refused(self):
+        # External review, medium severity, reproduced exactly this way:
+        # a document claiming hashed_fields: ["result"] previously passed
+        # validation even though value_hash was computed over all six
+        # fields -- defeating the self-describing hash contract.
+        document = build_result(
+            "W-X", "X", "y", "FX-1", 0, "scalar_svg", encode_scalar(0.5)
+        )
+        document["canonicalization"]["hashed_fields"] = ["result"]
+        with self.assertRaises(WitnessResultError):
+            canonical_payload(document)
+
+    def test_a_reordered_but_equal_set_is_still_accepted(self):
+        # Order is documentary only -- canonical_payload's own output is
+        # always key-sorted regardless of hashed_fields' array order.
+        document = build_result(
+            "W-X", "X", "y", "FX-1", 0, "scalar_svg", encode_scalar(0.5)
+        )
+        document["canonicalization"]["hashed_fields"] = list(reversed(HASHED_FIELDS))
+        canonical_payload(document)  # no exception
 
 
 class StandInProducerTest(unittest.TestCase):

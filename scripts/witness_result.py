@@ -115,13 +115,34 @@ def canonical_number(value) -> str:
 
     NaN and ±Infinity are refused outright: a witness whose value is not
     a number has no stable value to pin, and encoding one would let a
-    broken fixture produce a perfectly reproducible hash."""
+    broken fixture produce a perfectly reproducible hash.
+
+    A `Decimal` argument is downcast to the nearest float64 -- correct
+    and intentional, since this scheme is scoped to f64-precision
+    measured values (plan.md §16.1: a real query's own Rust signature
+    returns `f64`), not arbitrary-precision decimals. Losing digits
+    beyond float64's ~17 significant figures is that downcast working as
+    designed. What is NOT designed, and was silent before this check
+    existed (external review, high severity): `float()` does not raise
+    on a magnitude float64 cannot represent at all -- it returns ±inf on
+    overflow (already caught below, since inf has no canonical form) and
+    exactly `0.0` on underflow, with nothing to tell a genuinely nonzero
+    Decimal apart from a real zero. `Decimal('1e-400')` silently became
+    the string `"0"`, indistinguishable from a witness whose true value
+    is zero -- a different value than the one actually computed, not
+    merely a less precise spelling of it."""
     if isinstance(value, bool):
         raise WitnessResultError("a boolean is not a measured value")
     if isinstance(value, int):
         return str(value)
     if isinstance(value, Decimal):
-        value = float(value)
+        as_float = float(value)
+        if value != 0 and as_float == 0.0:
+            raise WitnessResultError(
+                f"{value} underflows to 0.0 as an f64 -- silently encoding a nonzero value as "
+                "exactly zero would misrepresent what was actually computed, not just lose precision"
+            )
+        value = as_float
     if not isinstance(value, float):
         raise WitnessResultError(f"cannot encode {value!r} ({type(value).__name__}) as a measured value")
     if math.isnan(value) or math.isinf(value):
@@ -146,7 +167,45 @@ def canonical_number(value) -> str:
 
 
 def is_canonical_decimal(text: str) -> bool:
+    """Shape only: does `text` look like a canonical decimal at all. Not
+    sufficient on its own -- see `is_canonically_encoded`, which this
+    codebase's actual validation uses."""
     return isinstance(text, str) and bool(DECIMAL_RE.match(text))
+
+
+def is_canonically_encoded(text: str) -> bool:
+    """Whether `text` is EXACTLY what `canonical_number()` would produce
+    for its own numeric value -- not merely shaped like a decimal.
+
+    `is_canonical_decimal` alone accepts "1e1" for the value ten, which
+    `canonical_number()` itself would spell "10" (its float `repr` never
+    needs an exponent for so small a magnitude). Two producers computing
+    the identical float could then emit two different, individually
+    pattern-valid strings for one number -- silently breaking "the same
+    fact hashes the same," the whole point of canonicalization, and (one
+    layer down) letting `distinct_values` overcount, since a set of raw
+    strings sees "10" and "1e1" as different elements even though they
+    are one value (external review, high severity: reproduced with a
+    constant grid, half its cells spelled the shortest way and half
+    spelled with a redundant exponent, `distinct_values: 2`).
+
+    This is a round-trip check, not a second, looser pattern: parse
+    `text` back to the float it denotes and ask whether re-encoding that
+    float reproduces `text` verbatim. A string a producer's own
+    `canonical_number()` actually emitted always round-trips -- that is
+    what "shortest string that round-trips exactly" means -- so this
+    never rejects genuine output, only a spelling nothing in this
+    codebase would have produced."""
+    if not is_canonical_decimal(text):
+        return False
+    try:
+        value = float(text)
+    except (ValueError, OverflowError):
+        return False
+    try:
+        return canonical_number(value) == text
+    except WitnessResultError:
+        return False
 
 
 def values_of(result: dict) -> list[str]:
@@ -165,21 +224,34 @@ def values_of(result: dict) -> list[str]:
 
 def compute_value_domain(result: dict) -> dict:
     """Recomputed on every validation, never trusted as stored. Compared
-    as decimals, not as strings: "10" < "9" lexically and 10 > 9
-    numerically, and a domain computed the first way would make a
-    degeneracy check nonsense."""
+    as decimals, not as strings throughout -- for ordering ("10" < "9"
+    lexically and 10 > 9 numerically, and a domain computed the first way
+    would make a degeneracy check nonsense) and, just as much, for
+    DISTINCTNESS: "10" and "1e1" are two strings and one value, and
+    `distinct_values` must count the value (external review, high
+    severity -- see `is_canonically_encoded`'s own docstring for the
+    reproduction). Requiring every value to be canonically encoded, not
+    merely decimal-shaped, is what makes counting distinct STRINGS safe
+    at all: once every value is provably the one spelling its number has,
+    a set of the spellings and a set of the numbers are the same count,
+    and this still compares by Decimal explicitly rather than leaning on
+    that equivalence, so the guarantee is not silently lost if the
+    encoding check above it ever loosens."""
     values = values_of(result)
     if not values:
         raise WitnessResultError("a result with no values has no domain")
     for value in values:
-        if not is_canonical_decimal(value):
+        if not is_canonically_encoded(value):
             raise WitnessResultError(
-                f"{value!r} is not a canonical decimal string -- a canonical result carries no JSON "
-                "numbers for measured values, so that hashing never has to format a float"
+                f"{value!r} is not canonically encoded -- either not a canonical decimal string at "
+                "all, or a spelling canonical_number() would never itself produce for that value "
+                "(e.g. '1e1' for ten, which canonical_number() spells '10') -- a canonical result "
+                "carries no JSON numbers for measured values, and admitting a second valid spelling "
+                "of one number defeats that discipline just as surely as a JSON number would"
             )
     numeric = sorted(values, key=Decimal)
     return {
-        "distinct_values": len(set(values)),
+        "distinct_values": len({Decimal(value) for value in values}),
         "minimum": numeric[0],
         "maximum": numeric[-1],
     }
@@ -188,10 +260,32 @@ def compute_value_domain(result: dict) -> dict:
 def canonical_payload(document: dict) -> str:
     """`canonical-json-v1`: sorted keys, no whitespace, exactly the hashed
     fields. Returned as text rather than bytes so a caller can show a
-    reviewer precisely what was hashed."""
+    reviewer precisely what was hashed.
+
+    `document["canonicalization"]["hashed_fields"]`, when present, is not
+    a per-document CHOICE of which fields to hash -- rule
+    `canonical-json-v1` hashes exactly `HASHED_FIELDS`, always, and the
+    declared list exists so a future rule change is a visible version
+    bump, never a silent re-hash (this module's own docstring). So the
+    declared list is CHECKED against the one true set this rule hashes,
+    not read as an instruction: hashing a document's declared subset
+    instead of the real set would let it claim a smaller footprint than
+    what its `value_hash` was actually computed over (external review,
+    medium severity -- reproduced with a document declaring
+    `hashed_fields: ["result"]` while `value_hash` was, in truth, over
+    all six fields, defeating the entire point of recording the list).
+    Order is not part of the comparison -- the payload below is
+    key-sorted regardless of what order `hashed_fields` names them in,
+    so a reordering is not a meaningfully different set."""
     missing = [field for field in HASHED_FIELDS if field not in document]
     if missing:
         raise WitnessResultError(f"cannot canonicalize: missing {missing!r}")
+    declared = (document.get("canonicalization") or {}).get("hashed_fields")
+    if declared is not None and set(declared) != set(HASHED_FIELDS):
+        raise WitnessResultError(
+            f"canonicalization.hashed_fields {declared!r} does not match what this rule actually "
+            f"hashes ({list(HASHED_FIELDS)!r})"
+        )
     payload = {field: document[field] for field in HASHED_FIELDS}
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 

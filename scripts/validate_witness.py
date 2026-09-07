@@ -77,9 +77,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scan_summary import pass_line  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
+from witness_result import HASHED_FIELDS  # noqa: E402
 from witness_result import compute_value_domain  # noqa: E402
 from witness_result import compute_value_hash  # noqa: E402
-from witness_result import is_canonical_decimal  # noqa: E402
+from witness_result import is_canonically_encoded  # noqa: E402
 from witness_result import values_of  # noqa: E402
 from witness_result import witness_result_dir_for  # noqa: E402
 
@@ -499,14 +500,36 @@ def validate_result_data(path: Path, data: dict, validator: Draft202012Validator
             )
         )
 
+    declared_fields = set(data["canonicalization"]["hashed_fields"])
+    if declared_fields != set(HASHED_FIELDS):
+        findings.append(
+            Finding(
+                "G1b", path,
+                f"canonicalization.hashed_fields {sorted(declared_fields)!r} does not match what "
+                f"rule {data['canonicalization']['rule']!r} actually hashes "
+                f"({sorted(HASHED_FIELDS)!r}) -- the schema allows any subset, but a document is not "
+                "free to CHOOSE which fields backed its own value_hash after the fact; a document "
+                "claiming a smaller field set than what was actually hashed would defeat the whole "
+                "point of recording the field list (external review, medium severity)",
+            )
+        )
+
     result = data["result"]
     for value in values_of(result):
-        if not is_canonical_decimal(value):
+        if not is_canonically_encoded(value):
             findings.append(
-                Finding("G1b", path, f"measured value {value!r} is not a canonical decimal string")
+                Finding(
+                    "G1b", path,
+                    f"measured value {value!r} is not canonically encoded -- either not a canonical "
+                    "decimal string at all, or a spelling canonical_number() would never itself "
+                    "produce for that value (e.g. '1e1' for ten, which it spells '10'); admitting a "
+                    "second valid spelling of one number would let distinct_values overcount a "
+                    "constant result and let two producers of the same values hash differently",
+                )
             )
 
     if result["kind"] == "grid":
+        rows, columns = result["rows"], result["columns"]
         keys = [(cell["row"], cell["column"]) for cell in result["cells"]]
         if len(set(keys)) != len(keys):
             findings.append(Finding("G1b", path, "grid has more than one value for the same cell"))
@@ -516,6 +539,21 @@ def validate_result_data(path: Path, data: dict, validator: Draft202012Validator
                     "G1b", path,
                     "grid cells are not sorted by (row, column) -- an unsorted grid makes the hash "
                     "depend on the producer's iteration order",
+                )
+            )
+        out_of_bounds = [key for key in keys if not (0 <= key[0] < rows and 0 <= key[1] < columns)]
+        if out_of_bounds:
+            # encode_grid() (the Python producer helper) already refuses
+            # this; nothing enforced it against an arbitrary on-disk
+            # result -- a hand-edited or non-Python-produced file could
+            # declare a 1x1 grid and still carry a cell at (9, 0) with
+            # zero findings (external review, medium severity, reproduced
+            # exactly this way).
+            findings.append(
+                Finding(
+                    "G1b", path,
+                    f"grid declares {rows}x{columns} but has cell(s) outside that range: "
+                    f"{sorted(out_of_bounds)!r}",
                 )
             )
 

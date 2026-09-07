@@ -333,6 +333,63 @@ class ResultValidationTest(unittest.TestCase):
         data["result"]["cells"][0]["value"] = "0.1250"
         self.assertTrue(self.result_findings(data))
 
+    def test_a_decimal_shaped_but_non_canonical_spelling_is_refused(self):
+        # External review, high severity: "1e1" passes the pattern-only
+        # shape check that used to gate this but is not what
+        # canonical_number() would itself produce for the value ten.
+        data = canonical_result()
+        data["result"]["cells"][0]["value"] = "1e1"
+        self.assertTrue(self.result_findings(data))
+
+    def test_distinct_values_is_not_overcounted_by_spelling(self):
+        # A constant result with one cell spelled "10" and another "1e1"
+        # is a single distinct value; the per-value canonical-encoding
+        # check catches the second spelling outright, which is the
+        # stronger fix -- it never reaches distinct-value counting with
+        # two spellings of one number in the first place.
+        data = canonical_result()
+        for cell in data["result"]["cells"]:
+            cell["value"] = "10"
+        data["result"]["cells"][-1]["value"] = "1e1"
+        findings = self.result_findings(data)
+        self.assertTrue(any("not canonically encoded" in f for f in findings))
+
+    def test_a_hashed_fields_subset_is_refused(self):
+        # External review, medium severity, reproduced exactly this way:
+        # a document declaring hashed_fields: ["result"] passed
+        # validation even though value_hash was, in truth, computed over
+        # all six fields.
+        data = canonical_result()
+        data["canonicalization"]["hashed_fields"] = ["result"]
+        findings = self.result_findings(data)
+        self.assertTrue(any("does not match what rule" in f for f in findings))
+
+    def test_a_reordered_hashed_fields_is_accepted(self):
+        data = canonical_result()
+        data["canonicalization"]["hashed_fields"] = list(reversed(data["canonicalization"]["hashed_fields"]))
+        self.assertEqual(self.result_findings(data), [])
+
+    def test_an_out_of_bounds_grid_cell_is_refused(self):
+        # External review, medium severity, reproduced exactly this way:
+        # a schema-valid 1x1 result containing cell (9, 0) passed with
+        # zero findings -- only uniqueness/sortedness were checked, never
+        # bounds against the grid's own declared rows/columns.
+        data = build_result(
+            witness_id="W-TQ-LOAD-FACTOR", concept="TaskQueue", query="load_factor",
+            fixture_id="FX-QUEUE-BOTTOM-ROW", seed=0, renderer_actual="scalar_field_svg",
+            result={"kind": "grid", "rows": 1, "columns": 1, "cells": [{"row": 9, "column": 0, "value": "1"}]},
+        )
+        findings = self.result_findings(data)
+        self.assertTrue(any("outside that range" in f for f in findings))
+
+    def test_a_grid_cell_within_bounds_is_accepted(self):
+        data = build_result(
+            witness_id="W-TQ-LOAD-FACTOR", concept="TaskQueue", query="load_factor",
+            fixture_id="FX-QUEUE-BOTTOM-ROW", seed=0, renderer_actual="scalar_field_svg",
+            result={"kind": "grid", "rows": 2, "columns": 2, "cells": [{"row": 1, "column": 1, "value": "1"}]},
+        )
+        self.assertEqual(self.result_findings(data), [])
+
 
 class WorkspaceTest(unittest.TestCase):
     def setUp(self):

@@ -268,7 +268,17 @@ class IsCanonicallyEncodedTest(unittest.TestCase):
         self.assertTrue(is_canonically_encoded(encoded))
 
     def test_every_encoding_canonical_number_produces_round_trips(self):
-        for value in (0, 1, -1, 0.5, -0.5, 1e300, 1e-300, 2 ** 53, 1 / 7, 3.0):
+        for value in (
+            0, 1, -1, 0.5, -0.5, 1e300, 1e-300, 2 ** 53, 1 / 7, 3.0,
+            # External review, high severity: the boundary immediately
+            # past 2**53, where float64 can no longer represent every
+            # integer exactly. canonical_number()'s own int branch (see
+            # DecimalInputTest and IntegerPrecisionTest below) preserves
+            # these exactly; the round-trip check must not silently
+            # reparse the resulting digit string through float() and
+            # reject what canonical_number() itself just produced.
+            2 ** 53 + 1, 2 ** 64, 10 ** 30 + 1, -(2 ** 53 + 1),
+        ):
             with self.subTest(value=value):
                 self.assertTrue(is_canonically_encoded(canonical_number(value)))
 
@@ -279,6 +289,50 @@ class IsCanonicallyEncodedTest(unittest.TestCase):
     def test_nan_and_infinity_spellings_are_refused(self):
         self.assertFalse(is_canonically_encoded("inf"))
         self.assertFalse(is_canonically_encoded("nan"))
+
+
+class IntegerPrecisionTest(unittest.TestCase):
+    """canonical_number()'s `int` branch preserves an integer exactly
+    beyond float64's ~2**53 precision ceiling; is_canonically_encoded()
+    must verify that against the SAME int-valued reparse, not against a
+    float() reparse that would silently round it first.
+
+    External review, high severity: reproduced with
+    canonical_number(2**53 + 1) == "9007199254740993", which
+    is_canonically_encoded then rejected -- float("9007199254740993")
+    rounds to 9007199254740992.0 (2**53, not 2**53 + 1), a different
+    number, so the round-trip comparison failed against output
+    canonical_number() had only just produced."""
+
+    def test_the_first_integer_float64_cannot_represent_exactly(self):
+        value = 2 ** 53 + 1
+        encoded = canonical_number(value)
+        self.assertEqual(encoded, "9007199254740993")
+        self.assertNotEqual(float(encoded), value)  # confirms float() really does round it
+        self.assertTrue(is_canonically_encoded(encoded))
+
+    def test_a_negative_integer_past_the_boundary(self):
+        encoded = canonical_number(-(2 ** 53 + 1))
+        self.assertTrue(is_canonically_encoded(encoded))
+
+    def test_a_much_larger_integer(self):
+        encoded = canonical_number(10 ** 30 + 1)
+        self.assertEqual(encoded, "1000000000000000000000000000001")
+        self.assertTrue(is_canonically_encoded(encoded))
+
+    def test_2_pow_53_itself_is_still_accepted(self):
+        # The exact boundary value, representable in both branches --
+        # confirms the fix did not merely shift where it breaks.
+        self.assertTrue(is_canonically_encoded(canonical_number(2 ** 53)))
+
+    def test_a_witness_result_over_a_large_integer_builds_successfully(self):
+        # The reviewer's own end-to-end reproduction:
+        # build_result(..., encode_scalar(2**53 + 1)) raised.
+        document = build_result(
+            "W-X", "X", "y", "FX-1", 0, "scalar_svg", encode_scalar(2 ** 53 + 1)
+        )
+        self.assertEqual(document["result"]["value"], "9007199254740993")
+        self.assertEqual(document["value_hash"], compute_value_hash(document))
 
 
 class DecimalInputTest(unittest.TestCase):

@@ -190,18 +190,37 @@ def is_canonically_encoded(text: str) -> bool:
     spelled with a redundant exponent, `distinct_values: 2`).
 
     This is a round-trip check, not a second, looser pattern: parse
-    `text` back to the float it denotes and ask whether re-encoding that
-    float reproduces `text` verbatim. A string a producer's own
+    `text` back to the value it denotes and ask whether re-encoding that
+    value reproduces `text` verbatim. A string a producer's own
     `canonical_number()` actually emitted always round-trips -- that is
     what "shortest string that round-trips exactly" means -- so this
     never rejects genuine output, only a spelling nothing in this
-    codebase would have produced."""
+    codebase would have produced.
+
+    The parse must match `canonical_number()`'s OWN dispatch, not always
+    go through `float`: a plain integer spelling (no '.', no 'e') is
+    reparsed as an `int`, the same branch `canonical_number()` itself
+    takes for integer input, which is exactly why that branch exists --
+    to preserve an integer exactly beyond float64's ~2**53 precision
+    ceiling. Reparsing such a string through `float()` unconditionally
+    would silently round it before the comparison ever ran, incorrectly
+    rejecting exact integer output `canonical_number()` legitimately
+    produced (external review, high severity: reproduced with
+    `canonical_number(2**53 + 1) == "9007199254740993"`, which this
+    function then rejected because `float("9007199254740993")` rounds to
+    `9007199254740992.0`, a different number)."""
     if not is_canonical_decimal(text):
         return False
-    try:
-        value = float(text)
-    except (ValueError, OverflowError):
-        return False
+    if "." not in text and "e" not in text:
+        try:
+            value = int(text)
+        except ValueError:
+            return False
+    else:
+        try:
+            value = float(text)
+        except (ValueError, OverflowError):
+            return False
     try:
         return canonical_number(value) == text
     except WitnessResultError:

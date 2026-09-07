@@ -971,7 +971,15 @@ def cmd_validate_closure(args: argparse.Namespace) -> int:
 def cmd_gate_g14(args: argparse.Namespace) -> int:
     """Stage 8C's release closure (chainlink #25). Fails closed on
     nothing to close: a release gate that reports OK over zero clusters
-    would be the #48 vacuity in its most dangerous position."""
+    would be the #48 vacuity in its most dangerous position.
+
+    Loads the project descriptor so gate_g14_workspace can resolve each
+    bridge's own crate's boundary contracts for its G2 check (external
+    review, high severity: an earlier version validated bridges with no
+    boundary context at all, which degrades G2 to a non-blocking info
+    note and let a cluster close over a bridge whose boundary_id resolved
+    nowhere)."""
+    descriptor = load_project_descriptor(args.descriptor)
     workspace = _require_workspace_root_exists(args.workspace)
     if not _closure_dir_for(workspace).is_dir():
         raise PipelineError(
@@ -979,7 +987,7 @@ def cmd_gate_g14(args: argparse.Namespace) -> int:
             "nothing to close is not a pass; author a closure profile per cluster "
             "(docs/closure-profile-schema.json)"
         )
-    outcomes, workspace_findings = gate_g14_workspace(workspace)
+    outcomes, workspace_findings = gate_g14_workspace(workspace, descriptor)
     return report_g14_outcomes(outcomes, workspace_findings)
 
 

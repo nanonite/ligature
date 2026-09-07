@@ -42,6 +42,37 @@ from test_validate_closure import valid_degradation, valid_profile  # noqa: E402
 REVIEW = {"reviewer": "alice", "reviewed_at": "2026-09-04"}
 
 
+def default_descriptor() -> dict:
+    """A minimal, schema-valid descriptor naming the single crate every
+    fixture in this module lives under. Built locally rather than
+    imported from test_gate_g9.py's own descriptor_with(), which imports
+    FROM this module -- importing it back would be circular."""
+    descriptor = json.loads(
+        (ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text()
+    )
+    descriptor["crates"] = [
+        {"crate_dir": "crates/scheduler", "contracts_crate": "contracts", "specs_search_root": "crates"}
+    ]
+    return descriptor
+
+
+def boundary_contract() -> dict:
+    """The boundary BR-SCHED-TQ-001 (see bridge_spec() below) declares as
+    its own boundary_id, with callee_guarantees covering that bridge's
+    callee_requirement -- without this, load_bridges' own G2 check
+    (chainlink #25's fix) rejects the bridge as a dangling reference and
+    every "happy path" fixture in this module would fail closed instead
+    of closing."""
+    return {
+        "schema_version": "1.0",
+        "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+        "caller": {"concept": "Scheduler", "method": "dispatch"},
+        "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+        "callee_guarantees": ["TaskQueue.C001"],
+        "review": dict(REVIEW),
+    }
+
+
 def required_assurance(
     claims=("postcondition-holds",),
     kinds=("creusot-deductive-check",),
@@ -218,6 +249,12 @@ class Workspace:
 
     def __init__(self, root: Path):
         self.root = root
+        self.descriptor = default_descriptor()
+        self.write("project-descriptor.json", self.descriptor)
+        self.write(
+            "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+            boundary_contract(),
+        )
         self.write("ci/manifest/WP-A.json", manifest(
             "WP-A",
             provided=[("Scheduler.C001", required_assurance())],
@@ -276,7 +313,7 @@ class Workspace:
         self.write(relative, data)
 
     def outcomes(self):
-        return gate_workspace(self.root)
+        return gate_workspace(self.root, self.descriptor)
 
     def cluster(self, name="scheduler-core"):
         outcomes, workspace_findings = self.outcomes()
@@ -423,6 +460,64 @@ class BridgeTest(GateTestCase):
         (self.ws.root / "crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json").unlink()
         outcome, _ = self.ws.cluster()
         self.assertTrue(any("no valid bridge specification" in e for e in self.errors(outcome)))
+
+    def test_a_bridge_whose_boundary_id_resolves_nowhere_blocks(self):
+        # External review, high severity: load_bridges() used to validate
+        # a bridge with no boundary context at all (boundaries_by_id
+        # defaulted to None), which degrades G2 to a non-blocking info
+        # note -- a cluster was reproduced closing successfully even
+        # though its bridge's boundary_id resolved nowhere. Deleting the
+        # only boundary contract in the fixture reproduces exactly that:
+        # the bridge itself is otherwise perfectly well-formed.
+        (
+            self.ws.root
+            / "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"
+        ).unlink()
+        outcome, _ = self.ws.cluster()
+        self.assertEqual(outcome.status, "blocked")
+        self.assertTrue(any("no valid bridge specification" in e for e in self.errors(outcome)))
+
+    def test_a_bridge_whose_boundary_lacks_the_callee_guarantee_blocks(self):
+        # The other half of G2: the boundary exists and is otherwise
+        # valid, but never declares the specific guarantee this bridge
+        # claims to discharge.
+        boundary = boundary_contract()
+        boundary["callee_guarantees"] = ["TaskQueue.C099"]
+        self.ws.write(
+            "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+            boundary,
+        )
+        outcome, _ = self.ws.cluster()
+        self.assertEqual(outcome.status, "blocked")
+        self.assertTrue(any("no valid bridge specification" in e for e in self.errors(outcome)))
+
+    def test_load_bridges_scopes_a_bridges_boundary_check_to_its_own_crate(self):
+        # A bridge's boundary_id must resolve within the SAME crate
+        # (validate_bridge.py's own docstring) -- a merged cross-crate
+        # boundaries_by_id would let a bridge in one crate silently
+        # resolve against a same-named boundary declared in another,
+        # defeating that scoping instead of just fixing the original gap.
+        # Two crates, each with a bridge of the same bridge_id but only
+        # ONE crate has the matching boundary contract: the bridge in the
+        # crate WITHOUT it must not resolve via the other crate's.
+        from gate_g14 import load_bridges
+
+        descriptor = copy.deepcopy(self.ws.descriptor)
+        descriptor["crates"].append(
+            {"crate_dir": "crates/other", "contracts_crate": "contracts", "specs_search_root": "crates"}
+        )
+        self.ws.write("crates/other/specs/_bridges/BR-SCHED-TQ-001.json", bridge_spec())
+        # deliberately no boundary contract under crates/other/specs/_boundaries/
+
+        bridges = load_bridges(self.ws.root, descriptor)
+        # setdefault keeps the FIRST crate's (valid) bridge; the second
+        # crate's identically-named-but-unresolvable one must never have
+        # been able to borrow the first crate's boundary to pass G2.
+        self.assertIn("BR-SCHED-TQ-001", bridges)
+        only_valid_copy = json.loads(
+            (self.ws.root / "crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json").read_text()
+        )
+        self.assertEqual(bridges["BR-SCHED-TQ-001"], only_valid_copy)
 
     def test_a_non_pairwise_bridge_fails_the_protocol_condition(self):
         self.ws.write(

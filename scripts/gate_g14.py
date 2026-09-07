@@ -73,8 +73,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate_r1_g16 import unresolved_at_or_above_medium  # noqa: E402
+from project_descriptor import boundary_dir_for  # noqa: E402
 from satisfies import satisfies  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
+from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
 from validate_bridge import find_bridge_files  # noqa: E402
 from validate_bridge import load_validator as load_bridge_validator  # noqa: E402
 from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
@@ -563,26 +565,54 @@ def check_transitive_assumptions(
     return findings
 
 
-def load_bridges(workspace: Path) -> dict[str, dict]:
+def load_bridges(workspace: Path, descriptor: dict) -> dict[str, dict]:
     """Every fully valid bridge specification in the workspace, by
-    bridge_id -- the "genuinely valid, not just present" bar. Location
-    discipline and the G2 boundary cross-reference belong to
-    `validate-bridge`; what this gate needs from a bridge is its
-    protocol_class and the fact that it exists at all."""
+    bridge_id -- the "genuinely valid, not just present" bar, INCLUDING
+    G2: `boundary_id` must resolve to a real, valid, promoted boundary
+    contract in the bridge's own crate.
+
+    An earlier version scanned the whole workspace in one pass and called
+    `validate_bridge_data(path, data, validator)` with no
+    `boundaries_by_id` argument, which defaults to `None` --
+    `check_boundary_cross_reference`'s own documented behavior for `None`
+    is "not checked", a visible info note, never a blocking finding
+    (external review, high severity: a cluster was reproduced closing
+    successfully even though its bridge's `boundary_id` resolved
+    nowhere). "Every bridge must pass before closure" is meaningless if
+    the boundary half of a bridge's own G2 check never ran.
+
+    Fixed by scanning CRATE BY CRATE, the same way
+    `pipeline.py`'s `cmd_validate_bridge` does: each crate's boundaries
+    are loaded once via `load_boundaries_by_id`, and only bridges
+    directly under that crate are validated against them -- preserving
+    `validate_bridge.py`'s own "must be in the same crate" scoping rather
+    than merging every crate's boundaries into one dict, which would let
+    a bridge's `boundary_id` resolve against a DIFFERENT crate's boundary
+    of the same name and silently defeat that scoping instead of fixing
+    the original gap."""
     bridges: dict[str, dict] = {}
     if not workspace.is_dir():
         return bridges
     validator = load_bridge_validator()
-    for path in sorted(find_bridge_files(workspace)):
-        try:
-            data = json.loads(path.read_text())
-        except (json.JSONDecodeError, UnicodeDecodeError):
+    for crate in descriptor["crates"]:
+        crate_root = (workspace / crate["crate_dir"]).resolve()
+        if not crate_root.is_dir():
             continue
-        if not isinstance(data, dict) or not isinstance(data.get("bridge_id"), str):
-            continue
-        if any(f.severity == "error" for f in validate_bridge_data(path, data, validator)):
-            continue
-        bridges.setdefault(data["bridge_id"], data)
+        specs_search_root = workspace / crate["specs_search_root"]
+        boundaries_by_id = load_boundaries_by_id(boundary_dir_for(crate, workspace), specs_search_root)
+        for path in sorted(find_bridge_files(crate_root)):
+            try:
+                data = json.loads(path.read_text())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(data, dict) or not isinstance(data.get("bridge_id"), str):
+                continue
+            if any(
+                f.severity == "error"
+                for f in validate_bridge_data(path, data, validator, boundaries_by_id)
+            ):
+                continue
+            bridges.setdefault(data["bridge_id"], data)
     return bridges
 
 
@@ -996,7 +1026,7 @@ def gate_cluster(
     )
 
 
-def gate_workspace(workspace: Path) -> tuple[list[ClusterOutcome], list[Finding]]:
+def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[ClusterOutcome], list[Finding]]:
     """Every cluster with a valid closure profile. Workspace-level
     findings (unreadable manifests, ambiguous providers) are returned
     separately: they are not any one cluster's fault, and attributing
@@ -1007,7 +1037,7 @@ def gate_workspace(workspace: Path) -> tuple[list[ClusterOutcome], list[Finding]
     workspace_findings.extend(manifest_findings)
     providers, provider_findings = build_provider_index(manifests)
     workspace_findings.extend(provider_findings)
-    bridges = load_bridges(workspace)
+    bridges = load_bridges(workspace, descriptor)
 
     reports = load_callsite_reports(workspace)
     if reports:
@@ -1080,6 +1110,7 @@ def report_outcomes(outcomes: list[ClusterOutcome], workspace_findings: list[Fin
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("workspace", type=Path, help="Workspace root holding specs/_closure/ and ci/manifest/")
+    parser.add_argument("--descriptor", type=Path, default=None)
     args = parser.parse_args(argv)
 
     if not args.workspace.is_dir():
@@ -1092,8 +1123,14 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return EXIT_INPUT_ERROR
+    descriptor_path = args.descriptor or (args.workspace / "project-descriptor.json")
+    try:
+        descriptor = json.loads(descriptor_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"error: cannot read project descriptor {descriptor_path}: {e}", file=sys.stderr)
+        return EXIT_INPUT_ERROR
 
-    outcomes, workspace_findings = gate_workspace(args.workspace)
+    outcomes, workspace_findings = gate_workspace(args.workspace, descriptor)
     return report_outcomes(outcomes, workspace_findings)
 
 

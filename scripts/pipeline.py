@@ -167,6 +167,17 @@ Implemented now, against schemas that actually exist:
             validator. A witness is EVIDENCE, never assurance: nothing
             here reaches satisfies(), accepted_evidence_kinds or
             closure_kind.
+  gate-g18  Stage 4's witness coverage gate (plan.md §16.2, chainlink
+            #29): every query marked `witness_required: true` in a
+            concept spec must resolve to a genuinely valid witness spec
+            (validate-witness's own G1a/G1b/G2 bar) whose declared
+            rendering actually exists on disk. Coverage is relative to
+            the DECLARED feature set only -- an undeclared query is
+            invisible to this gate, the same boundary R2 draws against
+            accepted I. The same `(concept, query)` declared true in more
+            than one concept spec, or covered by a genuinely valid
+            witness in more than one crate, is ambiguous and excluded
+            rather than resolved from whichever sorted first.
   validate-gold-set  G1a/G1b over human gold sets (plan.md §5.2's
             independence argument, chainlink #26): schema, naming, and
             the scope/provenance discipline -- every edge's caller must
@@ -251,6 +262,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract_c_static import ExtractionError  # noqa: E402
 from extract_c_static import extract_crate as extract_c_static_crate  # noqa: E402
 from gate_g14 import gate_workspace as gate_g14_workspace  # noqa: E402
+from gate_g18 import gate_workspace as gate_g18_workspace  # noqa: E402
+from gate_g18 import report_findings as report_g18_findings  # noqa: E402
 from gate_g9 import check_bridges as check_bridges_g9  # noqa: E402
 from gate_g9 import gate_workspace as gate_g9_workspace  # noqa: E402
 from gate_g9 import report_findings as report_g9_findings  # noqa: E402
@@ -991,6 +1004,16 @@ def cmd_gate_g14(args: argparse.Namespace) -> int:
     return report_g14_outcomes(outcomes, workspace_findings)
 
 
+def cmd_gate_g18(args: argparse.Namespace) -> int:
+    """Stage 4's G18 (chainlink #29): every query marked
+    witness_required has a witness spec and a generated rendering,
+    checked against the declared feature set only (plan.md §16.2)."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    findings, discovered = gate_g18_workspace(workspace, descriptor)
+    return report_g18_findings(findings, discovered, workspace)
+
+
 def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
     """Stage 8A's R1 + G16 (chainlink #24). Exit codes are three-valued,
     matching plan.md §9.1's own three dispositions: 0 pass, 1 blocked
@@ -1679,7 +1702,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "gate-g9 (Stage 8A bridge-check verification against a recompilation of the promoted bridge), "
         "validate-closure (Stage 8C G1a/G1b + G17 over closure profiles and degradation records), "
         "gate-g14 (Stage 8C release closure over the transitive assurance graph, per cluster, "
-        "with the CG6 well-foundedness discharge, chainlink #25)"
+        "with the CG6 well-foundedness discharge, chainlink #25), "
+        "gate-g18 (Stage 4 witness coverage over the declared witness_required feature set, "
+        "chainlink #29)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -1881,6 +1906,12 @@ def main(argv: list[str]) -> int:
         help="Stage 8C: G14 transitive closure + CG6 discharge, per cluster (chainlink #25)",
     )
     gate_g14_p.set_defaults(func=cmd_gate_g14)
+
+    gate_g18_p = sub.add_parser(
+        "gate-g18",
+        help="Stage 4: G18 -- every witness_required query has a witness spec and rendering (#29)",
+    )
+    gate_g18_p.set_defaults(func=cmd_gate_g18)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

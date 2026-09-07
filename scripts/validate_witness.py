@@ -222,6 +222,16 @@ def check_output_path(path: Path, data: dict) -> list[Finding]:
     return []
 
 
+def query_name_from_sig(rust_sig: str) -> str:
+    """concept-to-code embeds a query's name in `rust_sig` (plan.md §2's
+    "de facto id"; a query has no name field of its own). Factored out
+    of resolve_query so chainlink #29's G18 can discover the declared
+    witness_required set with the identical extraction, rather than
+    re-deriving it and risking the two silently disagreeing about what a
+    query is even called."""
+    return rust_sig.split("(", 1)[0].replace("fn", "", 1).strip() if "(" in rust_sig else ""
+
+
 def resolve_query(concept: str, query: str, specs_search_root: Path | None) -> tuple[str, dict | None]:
     """Resolve <Concept>.<query> to a query dict in the concept's spec.
 
@@ -265,9 +275,7 @@ def resolve_query(concept: str, query: str, specs_search_root: Path | None) -> t
         return "ambiguous", None
 
     for candidate in matches[0].get("queries", []) or []:
-        signature = candidate.get("rust_sig", "")
-        name = signature.split("(", 1)[0].replace("fn", "", 1).strip() if "(" in signature else ""
-        if name == query:
+        if query_name_from_sig(candidate.get("rust_sig", "")) == query:
             return "resolved", candidate
     return "dangling", None
 

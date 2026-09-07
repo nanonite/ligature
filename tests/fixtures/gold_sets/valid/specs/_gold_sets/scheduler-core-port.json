@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "cluster": "scheduler-core-port",
+  "track": "mode-p",
+  "curation_scope": {
+    "examined_concepts": ["Scheduler"],
+    "method": ["source-reading", "domain-knowledge"],
+    "completeness_claim": "human-lower-bound"
+  },
+  "edges": [
+    {
+      "caller": { "concept": "Scheduler", "method": "dispatch" },
+      "callee": { "concept": "TaskQueue", "method": "pop_ready" },
+      "derived_from": ["source-reading"],
+      "rationale": "The ported C++ scheduler's Dispatch() reads the next ready task off the queue on its first branch; the Rust port carries the same call.",
+      "expected_eligibility": "boundary-required"
+    },
+    {
+      "caller": { "concept": "Scheduler", "method": "dispatch" },
+      "callee": { "concept": "TaskQueue", "method": "push_back" },
+      "derived_from": ["source-reading"],
+      "rationale": "The origin oracle's Dispatch() requeues unfinished work via queue_.push_back() before returning; the port's own call is on a field receiver, so a syntactic extractor sees a possible-dispatch rather than a resolved edge, same as the Mode R pilot."
+    },
+    {
+      "caller": { "concept": "Scheduler", "method": "shutdown" },
+      "callee": { "concept": "TaskQueue", "method": "drain" },
+      "derived_from": ["domain-knowledge"],
+      "rationale": "Shutdown() in the origin repository drains the queue through a virtual dispatch table (an IQueueSink*); no static call site exists in the port either, since the port keeps the same trait-object indirection. This is the edge Mode P's own differential-testing oracle would need to catch, and it is exactly the shape the omission metric exists for."
+    }
+  ],
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-09-07"
+  }
+}

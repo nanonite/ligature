@@ -60,9 +60,20 @@ silent zero:
   data-flow-analysis         NOT BUILT.
   requirements               NOT BUILT.
   critic-pass                NOT BUILT.
-  mode-p-source-extraction   NOT APPLICABLE to a greenfield (mode-r)
-                             workspace; it is the Mode P track's own
-                             source, chainlink #5.
+  mode-p-source-extraction   NOT BUILT -- chainlink #5 (the Mode P port
+                             validation track) does not exist in this
+                             codebase either, so this source is unbuilt
+                             on a Mode P workspace exactly like the five
+                             above. On a Mode R (greenfield) workspace it
+                             is additionally NOT APPLICABLE TO THE TRACK:
+                             it is Mode P's own source and has no place
+                             in a Mode R measurement even once built. The
+                             two statuses are deliberately not collapsed
+                             into one: "not built" is a fixable gap in
+                             this codebase; "not applicable to track" is
+                             never fixable for a Mode R workspace, since
+                             the source concerns a different track
+                             entirely.
   interaction-set            AVAILABLE, and NOT independent: it is the
                              artifact under audit. Listed so a reader
                              can see it was not counted as corroboration.
@@ -267,16 +278,21 @@ def build_sources(workspace: Path, descriptor: dict, gold_edges: dict, track: st
     for source, detail in NOT_BUILT.items():
         results.append(SourceResult(source, "not-built", True, set(), detail))
 
-    results.append(
-        SourceResult(
-            "mode-p-source-extraction",
-            "available" if track == "mode-p" else "not-applicable-to-track",
-            True,
-            set(),
-            "Mode P's own candidate source (chainlink #5); this workspace runs "
-            f"{track}" if track != "mode-p" else "Mode P source extraction is not built yet (chainlink #5)",
-        )
-    )
+    if track == "mode-p":
+        # Chainlink #5 does not exist in this codebase either, so this
+        # source is unbuilt here exactly like the five above it --
+        # external review, medium severity: an earlier version reported
+        # "available" on a Mode P workspace with zero edges proposed,
+        # overstating how many independent sources were actually
+        # consulted (a source with no tooling behind it contributing
+        # nothing is not the same fact as a source that ran and found
+        # nothing, and only the latter is "available").
+        mode_p_status = "not-built"
+        mode_p_detail = "Mode P's own candidate source (chainlink #5) is not built in this codebase"
+    else:
+        mode_p_status = "not-applicable-to-track"
+        mode_p_detail = f"Mode P's own candidate source (chainlink #5); this workspace runs {track}"
+    results.append(SourceResult("mode-p-source-extraction", mode_p_status, True, set(), mode_p_detail))
     return results
 
 

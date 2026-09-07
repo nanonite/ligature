@@ -233,6 +233,11 @@ class SourceRegisterTest(MeasurementTestCase):
         self.assertEqual(by_source["s-graph"]["status"], "not-built")
         self.assertEqual(by_source["critic-pass"]["status"], "not-built")
         self.assertEqual(by_source["mode-p-source-extraction"]["status"], "not-applicable-to-track")
+        # It is unbuilt in this codebase, not merely irrelevant here --
+        # the ModePPilotClusterTest below pins the OTHER half of this
+        # status (a real Mode P workspace still reports not-built, never
+        # available, since chainlink #5 does not exist either).
+        self.assertNotEqual(by_source["mode-p-source-extraction"]["status"], "available")
 
     def test_the_interaction_set_is_listed_and_marked_not_independent(self):
         measurement, _ = self.single()
@@ -255,6 +260,169 @@ class SourceRegisterTest(MeasurementTestCase):
         self.assertEqual(entry["status"], "not-built")
         self.assertEqual(measurement["counts"]["omitted"], 2)
         self.assertEqual(measurement["counts"]["missed_but_proposed"], 0)
+
+
+MODE_P_GOLD_SET_FIXTURE = (
+    ROOT / "tests" / "fixtures" / "gold_sets" / "valid" / "specs" / "_gold_sets" / "scheduler-core-port.json"
+)
+
+
+def port_descriptor() -> dict:
+    """A schema-valid `mode: port` descriptor -- the shape
+    schemas/examples/project-descriptor.port.example.json pins, with
+    `crates` overridden to match this test module's own fixture data.
+    `port_source` is required by the schema's own if/then whenever
+    `mode == "port"`."""
+    descriptor = json.loads(
+        (ROOT / "schemas" / "examples" / "project-descriptor.port.example.json").read_text()
+    )
+    descriptor["crates"] = [
+        {"crate_dir": "crates/scheduler", "contracts_crate": "contracts", "specs_search_root": "crates"}
+    ]
+    return descriptor
+
+
+class ModePPilotClusterTest(unittest.TestCase):
+    """The issue's own acceptance criterion, read literally: "at least one
+    pilot cluster per test track (C2)". plan.md §11 names two test
+    tracks -- Mode R (greenfield) and Mode P (a foreign-language source
+    port validated by differential testing, chainlink #5) -- and the
+    Mode R pilot alone does not satisfy "per test track".
+
+    This workspace's own project descriptor is greenfield, and chainlink
+    #5 (the Mode P port track itself) is not built in this codebase --
+    so, matching this repo's own precedent for an unbuilt-but-necessary
+    piece (tests/fixtures/callsites/'s never-compiled Rust, chainlink
+    #24; tests/fixtures/bridges/verifier/fake_verifier.py, chainlink
+    #47), this is a fixture pilot cluster: a real `mode: port` project
+    descriptor, a real reviewed Mode P gold set
+    (scheduler-core-port.json), and real interaction/C_static data,
+    proving scripts/measure_gold_set.py measures a Mode P cluster
+    correctly -- track-derivation, the track-match rejection, and the
+    mode-p-source-extraction status all included. It does not implement
+    Mode P itself; it proves the measurement tool is track-agnostic
+    where it should be and track-aware exactly where plan.md §11 says it
+    must be."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self.descriptor = port_descriptor()
+        self.write("project-descriptor.json", self.descriptor)
+        self.write(
+            "specs/_gold_sets/scheduler-core-port.json",
+            json.loads(MODE_P_GOLD_SET_FIXTURE.read_text()),
+        )
+        # Same shape as the Mode R pilot's own I: one gold edge proposed,
+        # one edge the human rejects (a false positive), one gold edge
+        # (push_back) missed by I but visible to C_static, and one gold
+        # edge (drain, through a trait object) omitted by every source.
+        self.write(
+            "crates/scheduler/specs/_interactions/scheduler_dispatch__to__task_queue_pop_ready.json",
+            interaction(
+                "scheduler_dispatch__to__task_queue_pop_ready",
+                ("Scheduler", "dispatch"), ("TaskQueue", "pop_ready"),
+            ),
+        )
+        self.write(
+            "crates/scheduler/specs/_interactions/scheduler_dispatch__to__clock_now.json",
+            interaction("scheduler_dispatch__to__clock_now", ("Scheduler", "dispatch"), ("Clock", "now")),
+        )
+        self.write(
+            "ci/results/c_static/crates_scheduler.json",
+            callsite_report([(("Scheduler", "dispatch"), ("TaskQueue", "push_back"))]),
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, relative: str, data: dict) -> Path:
+        path = self.workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2))
+        return path
+
+    def measure(self, write=True):
+        return measure_workspace(self.workspace, self.descriptor, write=write)
+
+    def single(self):
+        measurements, findings = self.measure()
+        self.assertEqual(len(measurements), 1, [str(f) for f in findings])
+        return measurements[0], findings
+
+    def test_the_track_is_derived_from_mode_port(self):
+        measurement, _ = self.single()
+        self.assertEqual(measurement["track"], "mode-p")
+        self.assertEqual(measurement["cluster"], "scheduler-core-port")
+
+    def test_precision_recall_and_omission_match_the_mode_r_pilots_own_shape(self):
+        # The measurement machinery is track-agnostic by design; this is
+        # the same worked example the Mode R pilot pins (0.5 / 0.3333 /
+        # 1 of 3), reproduced against a mode: port descriptor and a
+        # track: mode-p gold set to prove it actually runs end to end
+        # for the Mode P track, not merely that the code compiles for it.
+        measurement, _ = self.single()
+        self.assertEqual(measurement["metrics"]["precision"], 0.5)
+        self.assertEqual(measurement["metrics"]["recall"], round(1 / 3, 4))
+        self.assertEqual(measurement["counts"]["omitted"], 1)
+        self.assertEqual(measurement["counts"]["missed_but_proposed"], 1)
+
+    def test_the_omitted_edge_is_the_one_only_differential_testing_could_catch(self):
+        measurement, _ = self.single()
+        omitted = measurement["omitted_edges"]
+        self.assertEqual(len(omitted), 1)
+        self.assertEqual(omitted[0]["callee"], {"concept": "TaskQueue", "method": "drain"})
+        self.assertIn("virtual dispatch", omitted[0]["rationale"])
+
+    def test_mode_p_source_extraction_is_not_built_here_either(self):
+        # The medium-severity fix: chainlink #5 does not exist in this
+        # codebase, so even a genuine Mode P workspace reports
+        # not-built, never available -- a source with no tooling behind
+        # it contributes nothing, and "available" would overstate how
+        # many independent sources were actually consulted.
+        measurement, _ = self.single()
+        entry = next(e for e in measurement["sources"] if e["source"] == "mode-p-source-extraction")
+        self.assertEqual(entry["status"], "not-built")
+        self.assertEqual(entry["proposed"], 0)
+
+    def test_c_static_extraction_is_still_available_regardless_of_track(self):
+        # The one real independent source this codebase has is not
+        # itself track-specific -- it reads a C_static report the same
+        # way for Mode P as for Mode R.
+        measurement, _ = self.single()
+        entry = next(e for e in measurement["sources"] if e["source"] == "c-static-extraction")
+        self.assertEqual(entry["status"], "available")
+
+    def test_a_mode_r_gold_set_is_refused_against_a_mode_p_descriptor(self):
+        # The inverse of HonestyTest's own mode-p-against-mode-r case:
+        # confirms the track-match rejection runs both directions, not
+        # only the one this suite happened to build first. Swap in the
+        # Mode R pilot's own gold set (track: mode-r), under ITS OWN
+        # filename -- a filename/cluster mismatch would be rejected by
+        # G1b before the track check ever ran, which would prove nothing
+        # about track matching.
+        (self.workspace / "specs" / "_gold_sets" / "scheduler-core-port.json").unlink()
+        self.write("specs/_gold_sets/scheduler-core.json", gold_set())  # track: mode-r
+        measurements, findings = self.measure()
+        self.assertEqual(measurements, [])
+        self.assertTrue(any("would score the wrong track" in str(f) for f in findings))
+
+    def test_the_measurement_artifact_is_written_and_schema_valid(self):
+        self.measure()
+        path = measurement_dir_for(self.workspace) / "scheduler-core-port.json"
+        self.assertTrue(path.is_file())
+        data = json.loads(path.read_text())
+        self.assertEqual(list(load_measurement_validator().iter_errors(data)), [])
+
+    def test_the_printed_report_names_the_mode_p_track(self):
+        measurements, findings = self.measure()
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = report(measurements, findings, self.workspace)
+        printed = buffer.getvalue()
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("scheduler-core-port", printed)
+        self.assertIn("mode-p", printed)
 
 
 class HonestyTest(MeasurementTestCase):

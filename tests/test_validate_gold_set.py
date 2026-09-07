@@ -154,6 +154,21 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual([str(f) for f in validate(self.workspace)], [])
         self.assertEqual(count_discovered(self.workspace), 1)
 
+    def test_the_mode_p_pilot_fixture_also_passes(self):
+        # The issue's own acceptance criterion is "at least one pilot
+        # cluster per test track" -- this is the Mode P half's own
+        # validation, so the fixture is checked on its own terms and not
+        # only indirectly through a successful measurement.
+        port_gold_set = json.loads(
+            (
+                ROOT / "tests" / "fixtures" / "gold_sets" / "valid" / "specs" / "_gold_sets"
+                / "scheduler-core-port.json"
+            ).read_text()
+        )
+        self.write("specs/_gold_sets/scheduler-core-port.json", port_gold_set)
+        self.assertEqual([str(f) for f in validate(self.workspace)], [])
+        self.assertEqual(port_gold_set["track"], "mode-p")
+
     def test_a_mislocated_gold_set_is_found_and_rejected_by_location(self):
         self.write("docs/_gold_sets/scheduler-core.json", gold_set())
         findings = [str(f) for f in validate(self.workspace)]

@@ -497,27 +497,68 @@ class BridgeTest(GateTestCase):
         # boundaries_by_id would let a bridge in one crate silently
         # resolve against a same-named boundary declared in another,
         # defeating that scoping instead of just fixing the original gap.
-        # Two crates, each with a bridge of the same bridge_id but only
-        # ONE crate has the matching boundary contract: the bridge in the
-        # crate WITHOUT it must not resolve via the other crate's.
+        # Two crates, two DIFFERENTLY-named bridges (so the cross-crate
+        # bridge_id ambiguity check below stays out of the way of what
+        # this test is isolating): only ONE crate has the matching
+        # boundary contract, so the other crate's bridge must fail its
+        # own G2 check rather than resolve via the first crate's boundary.
         from gate_g14 import load_bridges
 
         descriptor = copy.deepcopy(self.ws.descriptor)
         descriptor["crates"].append(
             {"crate_dir": "crates/other", "contracts_crate": "contracts", "specs_search_root": "crates"}
         )
-        self.ws.write("crates/other/specs/_bridges/BR-SCHED-TQ-001.json", bridge_spec())
+        self.ws.write(
+            "crates/other/specs/_bridges/BR-OTHER-TQ-001.json",
+            bridge_spec(bridge_id="BR-OTHER-TQ-001"),
+        )
         # deliberately no boundary contract under crates/other/specs/_boundaries/
 
-        bridges = load_bridges(self.ws.root, descriptor)
-        # setdefault keeps the FIRST crate's (valid) bridge; the second
-        # crate's identically-named-but-unresolvable one must never have
-        # been able to borrow the first crate's boundary to pass G2.
+        bridges, findings = load_bridges(self.ws.root, descriptor)
         self.assertIn("BR-SCHED-TQ-001", bridges)
-        only_valid_copy = json.loads(
-            (self.ws.root / "crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json").read_text()
+        self.assertNotIn("BR-OTHER-TQ-001", bridges)
+        self.assertFalse(findings)
+
+    def test_a_bridge_id_discovered_in_two_crates_is_ambiguous_not_first_wins(self):
+        # External review, high severity: an earlier fix scoped G2
+        # VALIDATION per crate but still merged the RESULT into one flat
+        # dict keyed only by bridge_id via setdefault -- first-crate-wins.
+        # Reproduced: WP-A (crate scheduler) requires BR-SCHED-TQ-001; its
+        # own crate's boundary contract is removed, invalidating its
+        # bridge; a second crate supplies an independently VALID bridge
+        # under the same bridge_id. The scheduler cluster used to close
+        # by resolving against the other crate's substitute. bridge_id is
+        # a workspace-wide identifier naming exactly one bridge, so this
+        # must be an ambiguous-identity hard error, never a silent
+        # substitution -- the same choice already made for a work package
+        # providing an obligation twice.
+        (
+            self.ws.root
+            / "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"
+        ).unlink()
+
+        descriptor = copy.deepcopy(self.ws.descriptor)
+        descriptor["crates"].append(
+            {"crate_dir": "crates/other", "contracts_crate": "contracts", "specs_search_root": "crates"}
         )
-        self.assertEqual(bridges["BR-SCHED-TQ-001"], only_valid_copy)
+        self.ws.write(
+            "crates/other/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+            boundary_contract(),
+        )
+        self.ws.write("crates/other/specs/_bridges/BR-SCHED-TQ-001.json", bridge_spec())
+        self.ws.descriptor = descriptor
+        self.ws.write("project-descriptor.json", descriptor)
+
+        from gate_g14 import load_bridges
+
+        bridges, findings = load_bridges(self.ws.root, descriptor)
+        self.assertNotIn("BR-SCHED-TQ-001", bridges)
+        self.assertTrue(any("more than one crate" in str(f) for f in findings))
+
+        outcome, workspace_findings = self.ws.cluster()
+        self.assertEqual(outcome.status, "blocked")
+        all_errors = self.errors(outcome) + [str(f) for f in workspace_findings if f.severity == "error"]
+        self.assertTrue(any("no valid bridge specification" in e for e in all_errors))
 
     def test_a_non_pairwise_bridge_fails_the_protocol_condition(self):
         self.ws.write(

@@ -230,7 +230,8 @@ def check_bridges(
     written: list[Path] = []
     backends = descriptor.get("verifier_backends") or {}
     owned = owning_verifier_by_bridge(workspace, descriptor)
-    bridges = load_bridges(workspace, descriptor)
+    bridges, bridge_findings = load_bridges(workspace, descriptor)
+    findings.extend(bridge_findings)
 
     for bridge_id in sorted(bridges):
         bridge = bridges[bridge_id]
@@ -374,7 +375,8 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[Finding], in
     """G9 proper: every promoted bridge must have a check that is
     demonstrably about IT. Returns (findings, bridges discovered)."""
     findings: list[Finding] = []
-    bridges = load_bridges(workspace, descriptor)
+    bridges, bridge_findings = load_bridges(workspace, descriptor)
+    findings.extend(bridge_findings)
     checks, load_findings = load_bridge_checks(workspace)
     findings.extend(load_findings)
     owned = owning_verifier_by_bridge(workspace, descriptor)

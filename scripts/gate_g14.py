@@ -565,7 +565,7 @@ def check_transitive_assumptions(
     return findings
 
 
-def load_bridges(workspace: Path, descriptor: dict) -> dict[str, dict]:
+def load_bridges(workspace: Path, descriptor: dict) -> tuple[dict[str, dict], list[Finding]]:
     """Every fully valid bridge specification in the workspace, by
     bridge_id -- the "genuinely valid, not just present" bar, INCLUDING
     G2: `boundary_id` must resolve to a real, valid, promoted boundary
@@ -589,10 +589,36 @@ def load_bridges(workspace: Path, descriptor: dict) -> dict[str, dict]:
     than merging every crate's boundaries into one dict, which would let
     a bridge's `boundary_id` resolve against a DIFFERENT crate's boundary
     of the same name and silently defeat that scoping instead of fixing
-    the original gap."""
+    the original gap.
+
+    A SECOND review pass found that fix was incomplete: per-crate
+    VALIDATION was correctly scoped, but the RESULT was still merged into
+    one flat `bridges: dict[str, dict]` keyed only by `bridge_id`, with
+    `setdefault` -- first-crate-wins. That reintroduces cross-crate
+    substitution one step later: if crate A's own bridge fails validation
+    (e.g. its boundary contract is removed) while crate B happens to
+    supply a DIFFERENT, independently valid bridge under the SAME
+    bridge_id, crate A's requirement resolves to crate B's bridge, and a
+    cluster built entirely from crate A's own work packages was
+    reproduced closing successfully over crate B's substitute. Work
+    packages carry no explicit crate association today (`functions[]` are
+    Rust module paths, not a crate pointer), so true crate-qualified
+    resolution through a work package's own requirement is not available
+    without a larger schema change. What IS available now: `bridge_id` is
+    supposed to be a workspace-wide identifier naming exactly one bridge,
+    the same way `boundary_id`/`interaction_id` are -- so a bridge_id
+    DISCOVERED (a real file whose `bridge_id` field names it, regardless
+    of whether that particular copy is itself individually valid) under
+    more than one crate is not "the first valid one wins," it is an
+    identity collision, and is refused everywhere rather than resolved
+    from whichever crate happened to validate. This is the same choice
+    #14 already made for a work package providing an obligation twice:
+    ambiguous, never first-wins."""
     bridges: dict[str, dict] = {}
+    discovered_in: dict[str, set[str]] = {}
+    findings: list[Finding] = []
     if not workspace.is_dir():
-        return bridges
+        return bridges, findings
     validator = load_bridge_validator()
     for crate in descriptor["crates"]:
         crate_root = (workspace / crate["crate_dir"]).resolve()
@@ -607,13 +633,30 @@ def load_bridges(workspace: Path, descriptor: dict) -> dict[str, dict]:
                 continue
             if not isinstance(data, dict) or not isinstance(data.get("bridge_id"), str):
                 continue
+            bridge_id = data["bridge_id"]
+            discovered_in.setdefault(bridge_id, set()).add(crate["crate_dir"])
             if any(
                 f.severity == "error"
                 for f in validate_bridge_data(path, data, validator, boundaries_by_id)
             ):
                 continue
-            bridges.setdefault(data["bridge_id"], data)
-    return bridges
+            bridges.setdefault(bridge_id, data)
+
+    for bridge_id in sorted(discovered_in):
+        crates = sorted(discovered_in[bridge_id])
+        if len(crates) > 1:
+            findings.append(
+                Finding(
+                    "G14", bridge_id,
+                    f"discovered under more than one crate ({', '.join(crates)}) -- bridge_id is a "
+                    "workspace-wide identifier naming exactly one bridge, so this is an identity "
+                    "collision, not a choice between them; resolving it from either crate would let "
+                    "one crate's bridge silently stand in for a different crate's requirement of the "
+                    "same id",
+                )
+            )
+            bridges.pop(bridge_id, None)
+    return bridges, findings
 
 
 def check_bridges(
@@ -1037,7 +1080,8 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[ClusterOutco
     workspace_findings.extend(manifest_findings)
     providers, provider_findings = build_provider_index(manifests)
     workspace_findings.extend(provider_findings)
-    bridges = load_bridges(workspace, descriptor)
+    bridges, bridge_findings = load_bridges(workspace, descriptor)
+    workspace_findings.extend(bridge_findings)
 
     reports = load_callsite_reports(workspace)
     if reports:

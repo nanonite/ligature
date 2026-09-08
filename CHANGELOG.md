@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- G20 -- degenerate-witness gate against declared expectation (#31)
 - G19 -- witness determinism gate (#30)
 - G18 -- witness coverage gate (#29)
 - witness_required: add to concept-to-code's query schema (upstream request) (#33)

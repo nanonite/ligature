@@ -54,19 +54,53 @@ resolve against.
 
 Reuses rather than duplicates
 --------------------------------
-Every discovery/identity rule here is read straight from the gate that
-already owns it, never re-derived: `gate_g18.collect_declared_features`/
-`collect_valid_witnesses`/`gate_workspace` for the declared feature set
-and G18 coverage; `gate_g19.collect_valid_witness_entries`/
-`gate_workspace` for genuinely valid witness discovery and G19
-determinism (including a REAL regeneration dispatch when a
-`witness_backend` is configured -- the ledger is a fresh recomputation,
-not a cache of a stale one); `gate_g20.gate_workspace` for degeneracy;
-`validate_closure.load_cluster_artifacts` for closure profiles;
-`gate_g14.load_manifests` + its own assurance-report validator for
-workspace-wide assurance-report discovery; `atomic_write.write_atomically`
-for the same "failure means no mutation" I/O guarantee chainlink #28
-already established.
+Every discovery/identity/disposition rule here is read straight from
+the function that already owns it, never re-derived: `gate_g18`'s
+`collect_declared_features`/`collect_valid_witnesses`/`gate_workspace`
+for the declared feature set and G18 coverage; `gate_g19`'s
+`collect_valid_witness_entries`/`collect_valid_witness_specs` for
+genuinely valid witness discovery (including cross-file witness_id
+ambiguity) and its `check_witness_determinism` for a REAL regeneration
+dispatch when a `witness_backend` is configured (factored out of
+`gate_workspace()`'s own loop, chainlink #34, so a caller needing the
+regenerated DOCUMENT itself -- not just a pass/fail finding -- can
+reuse the identical checks); `gate_g20`'s `check_must_vary` and
+`check_candidate_fixture_family_consistency` (chainlink #31's own
+candidate-symmetric check, reused here for every declared feature, not
+only a promotion candidate) for degeneracy, evaluated against the SAME
+document `check_witness_determinism` just regenerated -- never a
+separately-read, possibly stale on-disk result
+(`load_results_by_witness`, which `gate_g20.gate_workspace()`'s own
+standalone scan still legitimately uses for ITS OWN, differently-scoped
+purpose); `validate_closure.load_cluster_artifacts` for closure
+profiles; `gate_g14.load_manifests` + its own assurance-report
+validator for workspace-wide assurance-report discovery;
+`atomic_write.write_atomically` for the same "failure means no
+mutation" I/O guarantee chainlink #28 already established.
+
+An external review found two further gaps in an earlier version of
+this reuse, both now fixed:
+
+  * Feeding `gate_g20.check_must_vary` the SAME on-disk
+    `load_results_by_witness()` results `gate_g20.gate_workspace()`
+    itself uses meant a witness with NO stored result (or a STALE one
+    left over from a different fixture/seed while a freshly regenerated
+    result was actually constant) produced no G20 finding at all --
+    read here as `degeneracy: ok` and, combined with a genuine G19
+    pass, `implementation_observed: true`. Reproduced both ways.
+    `degeneracy` is now derived from the identical document
+    `check_witness_determinism` just regenerated (never `ok` unless
+    that document exists and is clean; `not-checked` when it does not).
+
+  * `gate_g20`'s own workspace-wide pairwise family-consistency scan
+    only ever flags whichever witness sorts SECOND within a disagreeing
+    family -- correct for a scan reporting SOME finding somewhere, but
+    wrong for asking "is THIS declared feature clean": renaming a
+    witness_id could change which of two conflicting family members
+    read as green. `check_candidate_fixture_family_consistency` is now
+    called once per declared feature against every OTHER genuinely
+    valid witness, so every member of an inconsistent family gets its
+    OWN, sort-order-independent disposition.
 """
 from __future__ import annotations
 
@@ -84,9 +118,11 @@ from gate_g14 import load_manifests  # noqa: E402
 from gate_g18 import collect_declared_features  # noqa: E402
 from gate_g18 import collect_valid_witnesses  # noqa: E402
 from gate_g18 import gate_workspace as gate_g18_workspace  # noqa: E402
+from gate_g19 import check_witness_determinism  # noqa: E402
 from gate_g19 import collect_valid_witness_entries  # noqa: E402
-from gate_g19 import gate_workspace as gate_g19_workspace  # noqa: E402
-from gate_g20 import gate_workspace as gate_g20_workspace  # noqa: E402
+from gate_g19 import collect_valid_witness_specs  # noqa: E402
+from gate_g20 import check_candidate_fixture_family_consistency  # noqa: E402
+from gate_g20 import check_must_vary  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from validate_closure import load_cluster_artifacts  # noqa: E402
 
@@ -186,23 +222,32 @@ def closure_kind_for(cluster: str, closure_artifacts: dict) -> str:
 
 def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) -> dict:
     """Build the ledger dict (not yet validated or written). Runs the
-    real G18/G19/G20 gates -- including G19's real regeneration dispatch
-    when a witness_backend is configured -- so this is a fresh
-    recomputation every time, never a cache of a previous run."""
-    declared, _ = collect_declared_features(descriptor, workspace)
+    real G18/G19/G20 checks -- including G19's real regeneration
+    dispatch when a witness_backend is configured -- so this is a fresh
+    recomputation every time, never a cache of a previous run.
+
+    Raises GenerationError outright when collect_declared_features()
+    itself reports an ambiguous declaration (external review, medium
+    severity: an earlier version discarded those findings and silently
+    iterated only the ambiguity-collapsed map, so two specs declaring
+    the same required feature produced an empty ledger and "nothing to
+    check" rather than a visible problem)."""
+    declared, declare_findings = collect_declared_features(descriptor, workspace)
+    ambiguous_declarations = [f for f in declare_findings if f.severity == "error"]
+    if ambiguous_declarations:
+        raise GenerationError(
+            "cannot generate a feature ledger over an ambiguous declared feature set: "
+            + "; ".join(str(f) for f in ambiguous_declarations)
+        )
+
     g18_findings, _ = gate_g18_workspace(workspace, descriptor)
     witnesses, _ = collect_valid_witnesses(descriptor, workspace, set(declared))
-    g19_findings, _ = gate_g19_workspace(workspace, descriptor, runner=runner)
-    g20_findings, _ = gate_g20_workspace(workspace, descriptor)
+    all_valid_specs, g19_spec_findings = collect_valid_witness_specs(descriptor, workspace)
     closure_artifacts = load_cluster_artifacts(workspace)
+    backend = descriptor.get("witness_backend")
 
     g18_error_subjects = {f.subject for f in g18_findings if f.severity == "error"}
-    g19_by_subject: dict[str, list] = {}
-    for f in g19_findings:
-        g19_by_subject.setdefault(f.subject, []).append(f)
-    g20_by_subject: dict[str, list] = {}
-    for f in g20_findings:
-        g20_by_subject.setdefault(f.subject, []).append(f)
+    ambiguous_witness_ids = {f.subject for f in g19_spec_findings}
 
     features: list[dict] = []
     concept_spec_paths: set[Path] = set()
@@ -218,16 +263,50 @@ def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) ->
         if witness_id is None:
             determinism = "not-checked"
             degeneracy = "not-checked"
+        elif witness_id in ambiguous_witness_ids:
+            # A genuinely valid (concept, query)-scoped witness whose
+            # witness_id nonetheless collides with a DIFFERENT file
+            # elsewhere -- a structural identity problem neither
+            # determinism nor degeneracy can be meaningfully evaluated
+            # over (external review's own reasoning for why an
+            # ambiguous witness_id must never resolve to whichever file
+            # a caller happened to look up).
+            determinism = "fail"
+            degeneracy = "not-checked"
         else:
-            g19_here = g19_by_subject.get(witness_id, [])
-            g20_here = g20_by_subject.get(witness_id, [])
-            if any(NO_BACKEND_MARKER in f.reason for f in g19_here):
+            document, det_findings = check_witness_determinism(witness_id, witness, backend, workspace, runner)
+            if any(NO_BACKEND_MARKER in f.reason for f in det_findings):
                 determinism = "not-checked"
-            elif g19_here:
+            elif det_findings:
                 determinism = "fail"
             else:
                 determinism = "pass"
-            degeneracy = "warn" if g20_here else "ok"
+
+            # Family consistency is a static property of the declared
+            # specs, independent of whether regeneration succeeded --
+            # checked directly against every OTHER genuinely valid
+            # witness (chainlink #31's own check_candidate_fixture_family_consistency,
+            # symmetric regardless of sort order, reused rather than
+            # gate_g20's pairwise workspace scan, which only ever flags
+            # whichever witness sorts second in a disagreeing pair).
+            family_findings = check_candidate_fixture_family_consistency(witness_id, witness, all_valid_specs)
+            if document is None:
+                # External review, high severity: gate_g20.py's own
+                # check_must_vary reads a STORED result from disk
+                # (load_results_by_witness), completely independent of
+                # G19's live regeneration -- with no stored result on
+                # disk at all, or a stale/mismatched one, it silently
+                # skips (no finding), which this ledger used to read as
+                # "degeneracy: ok". Fixed by evaluating must-vary
+                # against the SAME freshly regenerated document
+                # determinism just trusted, never a separately-read
+                # on-disk one; with no trustworthy document at all,
+                # must-vary is honestly not-checked (family consistency
+                # alone can still surface a warning).
+                degeneracy = "warn" if family_findings else "not-checked"
+            else:
+                must_vary_findings = check_must_vary({witness_id: witness}, {witness_id: document})
+                degeneracy = "warn" if (must_vary_findings or family_findings) else "ok"
 
         implementation_observed = witness_present and determinism == "pass" and degeneracy == "ok"
 

@@ -280,6 +280,66 @@ class G20StateTest(GateTestCase):
         self.assertEqual(entry["degeneracy"], "warn")
         self.assertFalse(entry["implementation_observed"])
 
+    def test_a_stored_result_is_never_consulted_a_fresh_regeneration_decides_it(self):
+        # External review, high severity, reproduction 1: gate_g20's own
+        # check_must_vary silently skipped (no finding) when there was
+        # no STORED result on disk at all -- read by an earlier version
+        # of this ledger as degeneracy: ok even though nothing was ever
+        # actually checked. The fix does not add a special case for "no
+        # stored result": it stops consulting on-disk results entirely
+        # and evaluates the SAME freshly regenerated document G19
+        # trusts, so degeneracy: ok here is genuine (a real regeneration
+        # happened and did vary), not a false pass. Deliberately writes
+        # no stored result at all to prove that absence is irrelevant.
+        self.ws.write_concept_spec()
+        baseline = run_producer()
+        self.ws.write_witness(witness_spec(value_hash=baseline["value_hash"]))
+        self.ws.write_rendering()
+        ledger = self.generate()
+        entry = self.feature(ledger)
+        self.assertEqual(entry["determinism"], "pass")
+        self.assertEqual(entry["degeneracy"], "ok")
+        self.assertTrue(entry["implementation_observed"])
+
+    def test_no_backend_leaves_degeneracy_honestly_not_checked_not_ok(self):
+        # The reviewer's explicit alternative to evaluating a fresh
+        # regeneration: "or report not-checked". With no witness_backend
+        # configured, check_witness_determinism never regenerates
+        # anything, so there is no document to run check_must_vary
+        # against -- degeneracy must say so rather than defaulting to ok.
+        self.ws.write_concept_spec()
+        happy_path_witness_and_rendering(self.ws)
+        descriptor = descriptor_with("crates/scheduler")  # no witness_backend
+        ledger = self.generate(descriptor)
+        entry = self.feature(ledger)
+        self.assertEqual(entry["determinism"], "not-checked")
+        self.assertEqual(entry["degeneracy"], "not-checked")
+        self.assertFalse(entry["implementation_observed"])
+
+    def test_a_stale_varying_stored_result_does_not_hide_a_freshly_constant_one(self):
+        # External review, high severity, reproduction 2: a STALE
+        # varying result sitting on disk (from an earlier, different
+        # run) made gate_g20's own disk-based check_must_vary see
+        # varying data and report no finding, even though the CURRENT
+        # freshly regenerated result is constant. degeneracy must be
+        # computed from the SAME fresh document determinism trusted,
+        # never a separately-read on-disk one.
+        self.ws.write_concept_spec()
+        constant_result = run_producer("--constant")
+        spec = witness_spec(value_hash=constant_result["value_hash"])
+        self.ws.write_witness(spec)
+        self.ws.write_rendering()
+        stale_varying = run_producer()  # ready=3 default -- genuinely varies
+        self.ws.write_result(stale_varying)
+        constant_backend = descriptor_with(
+            "crates/scheduler", backend_command=f"{PRODUCER_BACKEND} --constant"
+        )
+        ledger = self.generate(constant_backend)
+        entry = self.feature(ledger)
+        self.assertEqual(entry["determinism"], "pass")
+        self.assertEqual(entry["degeneracy"], "warn")
+        self.assertFalse(entry["implementation_observed"])
+
 
 class ClosureKindTest(GateTestCase):
     def test_closure_kind_is_reported_independently_of_witness_state(self):
@@ -374,13 +434,22 @@ class AssuranceStatusTest(GateTestCase):
 
 
 class AmbiguityAndConflictTest(GateTestCase):
-    def test_an_ambiguous_declaration_across_two_concept_specs_is_invisible(self):
+    def test_an_ambiguous_declaration_across_two_concept_specs_fails_generation_explicitly(self):
+        # External review, medium severity: an earlier version discarded
+        # collect_declared_features()'s own ambiguity findings and
+        # iterated only the ambiguity-collapsed map, so two specs
+        # declaring the same required feature produced an EMPTY ledger
+        # and "nothing to check" -- a real, unresolved problem silently
+        # omitted rather than surfaced. Generation must now fail
+        # outright rather than produce a ledger that looks clean.
         self.ws.write_concept_spec()
         self.ws.write_concept_spec(filename="task_queue_dup.json")
-        ledger = self.generate()
-        # collect_declared_features excludes the ambiguous declaration
-        # outright -- G18's own established boundary, reused here.
-        self.assertEqual(ledger["features"], [])
+        with self.assertRaises(gfl.GenerationError) as caught:
+            self.generate()
+        self.assertIn("ambiguous", str(caught.exception))
+        with self.assertRaises(gfl.GenerationError):
+            gfl.write_ledger(self.root, self.descriptor)
+        self.assertFalse((self.root / "ci" / "results" / "feature_ledger.json").exists())
 
     def test_an_ambiguous_witness_id_across_crates_leaves_the_feature_unobserved(self):
         self.ws.write_concept_spec()
@@ -394,6 +463,39 @@ class AmbiguityAndConflictTest(GateTestCase):
         ledger = self.generate(descriptor)
         entry = self.feature(ledger)
         self.assertFalse(entry["implementation_observed"])
+
+    def test_every_member_of_a_disagreeing_fixture_family_gets_a_non_clean_disposition(self):
+        # External review, high severity: gate_g20's own workspace-wide
+        # pairwise family-consistency scan only ever flags whichever
+        # witness sorts SECOND within a disagreeing family -- reported
+        # here to prove BOTH members of the conflict get a non-clean
+        # degeneracy, regardless of which witness_id happens to sort
+        # first ("W-TQ-DEPTH" sorts before "W-TQ-LOAD-FACTOR", the exact
+        # ordering that let the "first" one read as falsely green
+        # before this fix).
+        self.ws.write_concept_spec(extra_queries=(
+            {"english": "How deep is the queue right now?", "rust_sig": "fn depth(&self) -> usize", "pure": True,
+             "witness_required": True},
+        ))
+        first = witness_spec(value_hash=run_producer()["value_hash"])
+        self.ws.write_witness(first)
+        self.ws.write_rendering()
+
+        second = witness_spec(value_hash=run_producer()["value_hash"])
+        second["witness_id"] = "W-TQ-DEPTH"
+        second["query"] = "depth"
+        second["output"]["path"] = "docs/witnesses/task_queue.depth.svg"
+        second["expectation"]["coverage_region"] = "full-grid"  # disagrees with `first`'s "bottom-row"
+        self.ws.write_witness(second)
+        self.ws.write_rendering("docs/witnesses/task_queue.depth.svg")
+
+        ledger = self.generate()
+        load_factor = self.feature(ledger, "TaskQueue.load_factor")
+        depth = self.feature(ledger, "TaskQueue.depth")
+        self.assertEqual(load_factor["degeneracy"], "warn")
+        self.assertEqual(depth["degeneracy"], "warn")
+        self.assertFalse(load_factor["implementation_observed"])
+        self.assertFalse(depth["implementation_observed"])
 
 
 class DeterminismAndHashingTest(GateTestCase):

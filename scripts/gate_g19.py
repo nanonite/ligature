@@ -259,6 +259,81 @@ def identity_mismatches(spec: dict, document: dict) -> list[str]:
     return sorted(field for field, expected in expected_identity.items() if document.get(field) != expected)
 
 
+def check_witness_determinism(
+    witness_id: str, spec: dict, backend: dict | None, workspace: Path, runner=subprocess.run
+) -> tuple[dict | None, list[Finding]]:
+    """The per-witness body of gate_workspace()'s own loop, factored out
+    (external review, chainlink #34) so a caller needing the freshly
+    REGENERATED DOCUMENT itself -- not just a pass/fail finding --
+    can reuse the identical checks rather than re-deriving them.
+    generate_feature_ledger.py is exactly that caller: its degeneracy
+    column must examine the SAME freshly regenerated result this
+    determinism check just trusted, never a stale one separately read
+    from disk (gate_g20.py's own check_must_vary reads
+    load_results_by_witness()'s on-disk results, which this function
+    never touches at all).
+
+    Returns (document, findings). `document` is the regenerated result
+    if and only if it is genuinely valid (G1a/G1b) AND its identity
+    matches the current spec -- trustworthy for a caller to examine
+    further, regardless of whether its value_hash agreed with the
+    spec's declared one (that disagreement is reported in `findings`,
+    not by withholding `document`; a hash mismatch does not mean the
+    regeneration was untrustworthy, only that determinism failed).
+    `document` is None for every failure mode that makes the result
+    itself untrustworthy: no backend, a failed dispatch, an invalid
+    result, or a mismatched identity."""
+    if backend is None:
+        return None, [
+            Finding(
+                "G19", witness_id,
+                "no witness_backend configured in the project descriptor -- a determinism claim "
+                "cannot be verified without an actual regeneration this run, so this gate cannot "
+                "record a pass for a query that was never re-evaluated",
+            )
+        ]
+
+    document, _, _, error = regenerate_witness(spec, backend, workspace, runner)
+    if document is None:
+        return None, [Finding("G19", witness_id, f"witness_backend failed to regenerate this witness: {error}")]
+
+    result_findings = validate_result_data(Path(f"{witness_id}.json"), document, load_result_validator())
+    result_errors = [f for f in result_findings if f.severity == "error"]
+    if result_errors:
+        return None, [
+            Finding(
+                "G19", witness_id,
+                "the regenerated result is not genuinely valid: " + "; ".join(f.reason for f in result_errors),
+            )
+        ]
+
+    mismatched = identity_mismatches(spec, document)
+    if mismatched:
+        return None, [
+            Finding(
+                "G19", witness_id,
+                f"the regenerated result's {', '.join(sorted(mismatched))} does not match the "
+                "current witness spec -- witness_backend ignored (or was passed) arguments other "
+                "than what this spec currently declares, so its value_hash cannot be trusted as "
+                "this witness's determinism check",
+            )
+        ]
+
+    declared = spec["determinism"]["value_hash"]
+    regenerated_hash = document["value_hash"]
+    if declared != regenerated_hash:
+        return document, [
+            Finding(
+                "G19", witness_id,
+                f"determinism.value_hash {declared} does not match the regenerated value_hash "
+                f"{regenerated_hash} -- the declared byte-identical-across-runs claim does not "
+                "hold; render_hash is never part of this comparison",
+            )
+        ]
+
+    return document, []
+
+
 def gate_workspace(workspace: Path, descriptor: dict, runner=subprocess.run) -> tuple[list[Finding], int]:
     """G19 proper. Returns (findings, witness specs checked)."""
     findings: list[Finding] = []
@@ -266,63 +341,10 @@ def gate_workspace(workspace: Path, descriptor: dict, runner=subprocess.run) -> 
     specs, spec_findings = collect_valid_witness_specs(descriptor, workspace)
     findings.extend(spec_findings)
     backend = descriptor.get("witness_backend")
-    result_validator = load_result_validator()
 
     for witness_id, spec in sorted(specs.items()):
-        if backend is None:
-            findings.append(
-                Finding(
-                    "G19", witness_id,
-                    "no witness_backend configured in the project descriptor -- a determinism claim "
-                    "cannot be verified without an actual regeneration this run, so this gate cannot "
-                    "record a pass for a query that was never re-evaluated",
-                )
-            )
-            continue
-
-        document, _, _, error = regenerate_witness(spec, backend, workspace, runner)
-        if document is None:
-            findings.append(
-                Finding("G19", witness_id, f"witness_backend failed to regenerate this witness: {error}")
-            )
-            continue
-
-        result_findings = validate_result_data(Path(f"{witness_id}.json"), document, result_validator)
-        result_errors = [f for f in result_findings if f.severity == "error"]
-        if result_errors:
-            findings.append(
-                Finding(
-                    "G19", witness_id,
-                    "the regenerated result is not genuinely valid: "
-                    + "; ".join(f.reason for f in result_errors),
-                )
-            )
-            continue
-
-        mismatched = identity_mismatches(spec, document)
-        if mismatched:
-            findings.append(
-                Finding(
-                    "G19", witness_id,
-                    f"the regenerated result's {', '.join(sorted(mismatched))} does not match the "
-                    "current witness spec -- witness_backend ignored (or was passed) arguments other "
-                    "than what this spec currently declares, so its value_hash cannot be trusted as "
-                    "this witness's determinism check",
-                )
-            )
-            continue
-
-        declared = spec["determinism"]["value_hash"]
-        regenerated_hash = document["value_hash"]
-        if declared != regenerated_hash:
-            findings.append(
-                Finding(
-                    "G19", witness_id,
-                    f"determinism.value_hash {declared} does not match the regenerated value_hash "
-                    f"{regenerated_hash} -- the declared byte-identical-across-runs claim does not "
-                    "hold; render_hash is never part of this comparison",
-                )
-            )
+        _, witness_findings = check_witness_determinism(witness_id, spec, backend, workspace, runner)
+        findings.extend(witness_findings)
 
     return findings, len(specs)
 

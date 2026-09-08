@@ -197,6 +197,23 @@ Implemented now, against schemas that actually exist:
             VALUE, not the rendering, and a changed `render_hash` alone
             must never block. Reuses validate_witness.py's own G1a/G1b
             result validation rather than re-hashing anything.
+  gate-g20  Stage 4.5's degenerate-witness gate (plan.md §12's gate
+            table, chainlink #31): `expectation.value_distribution:
+            must-vary` but the current genuinely valid canonical result
+            measures only one distinct value, and `coverage_region`
+            inconsistent with `fixture_family` workspace-wide (reuses
+            validate_witness.py's own check_family_consistency rather
+            than reimplementing it). Both WARN, never a hard Stage-4/CI
+            block -- the gate table's own "block at promotion if
+            unresolved" names a promotion-time enforcement point that
+            does not exist yet for witness specs, so this gate's job is
+            to make the finding impossible to miss: it exits with a
+            THIRD, distinct code, mirroring gate-r1-g16's own
+            EXIT_DECISION_REQUIRED tier, never collapsing into a clean 0
+            or the same exit code a real block uses. An ambiguous
+            witness_id (imported from gate-g19's own collection) still
+            blocks outright -- a structural identity problem, not a
+            degeneracy one.
   validate-gold-set  G1a/G1b over human gold sets (plan.md §5.2's
             independence argument, chainlink #26): schema, naming, and
             the scope/provenance discipline -- every edge's caller must
@@ -285,6 +302,8 @@ from gate_g18 import gate_workspace as gate_g18_workspace  # noqa: E402
 from gate_g18 import report_findings as report_g18_findings  # noqa: E402
 from gate_g19 import gate_workspace as gate_g19_workspace  # noqa: E402
 from gate_g19 import report_findings as report_g19_findings  # noqa: E402
+from gate_g20 import gate_workspace as gate_g20_workspace  # noqa: E402
+from gate_g20 import report_findings as report_g20_findings  # noqa: E402
 from gate_g9 import check_bridges as check_bridges_g9  # noqa: E402
 from gate_g9 import gate_workspace as gate_g9_workspace  # noqa: E402
 from gate_g9 import report_findings as report_g9_findings  # noqa: E402
@@ -1046,6 +1065,19 @@ def cmd_gate_g19(args: argparse.Namespace) -> int:
     return report_g19_findings(findings, discovered, workspace)
 
 
+def cmd_gate_g20(args: argparse.Namespace) -> int:
+    """Stage 4.5's G20 (chainlink #31): every genuinely valid witness
+    declaring value_distribution: must-vary must not measure a constant
+    result, and fixture_family/coverage_region must agree workspace-wide
+    -- both WARN severity (plan.md §12's gate table), exit code
+    distinguishing pass/warn/blocked three ways like gate-r1-g16's own
+    EXIT_DECISION_REQUIRED tier."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    findings, discovered = gate_g20_workspace(workspace, descriptor)
+    return report_g20_findings(findings, discovered, workspace)
+
+
 def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
     """Stage 8A's R1 + G16 (chainlink #24). Exit codes are three-valued,
     matching plan.md §9.1's own three dispositions: 0 pass, 1 blocked
@@ -1738,7 +1770,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "gate-g18 (Stage 4 witness coverage over the declared witness_required feature set, "
         "chainlink #29), "
         "gate-g19 (Stage 8A/CI witness determinism: regenerate, compare value_hash, never "
-        "render_hash, chainlink #30)"
+        "render_hash, chainlink #30), "
+        "gate-g20 (Stage 4.5 degeneracy: must-vary vs constant, fixture-family/coverage_region "
+        "consistency, warn -- block at promotion if unresolved, chainlink #31)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -1952,6 +1986,12 @@ def main(argv: list[str]) -> int:
         help="Stage 8A/CI: G19 -- regenerate and compare a witness's value_hash, never render_hash (#30)",
     )
     gate_g19_p.set_defaults(func=cmd_gate_g19)
+
+    gate_g20_p = sub.add_parser(
+        "gate-g20",
+        help="Stage 4.5: G20 -- must-vary vs constant, fixture-family consistency, warn (#31)",
+    )
+    gate_g20_p.set_defaults(func=cmd_gate_g20)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

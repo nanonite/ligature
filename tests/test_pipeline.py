@@ -2676,7 +2676,56 @@ class CmdApproveWitnessIntegrationTest(unittest.TestCase):
         target.with_suffix(".json.draft").write_text(json.dumps(draft))
         rc = self._run("approve", str(target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
         self.assertEqual(rc, 1)
-        self.assertFalse(target.exists())
+
+    def test_a_first_time_must_vary_witness_over_a_constant_result_is_refused(self):
+        # External review, high severity: the previous validate_fn ran
+        # gate_g20.gate_workspace(), which scans whatever is already on
+        # disk -- for a FIRST-TIME promotion there is nothing on disk
+        # for this witness_id at all, so the candidate was invisible to
+        # the scan and a must-vary-over-constant witness was approved
+        # with exit code 0. Reproduced here exactly that way: remove the
+        # already-promoted target this fixture starts with, then approve
+        # a fresh draft as if it had never existed.
+        from witness_result import build_result, encode_grid  # noqa: E402
+
+        constant = build_result(
+            witness_id="W-TQ-LOAD-FACTOR", concept="TaskQueue", query="load_factor",
+            fixture_id="FX-QUEUE-BOTTOM-ROW", seed=0, renderer_actual="scalar_field_svg",
+            result=encode_grid(1, 4, [(0, 0, 0.5), (0, 1, 0.5), (0, 2, 0.5), (0, 3, 0.5)]),
+        )
+        self._case.write_result(constant)
+        self.target.unlink()
+        self._write_draft(self._witness_spec())
+        rc = self._run("approve", str(self.target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.target.exists())
+
+    def test_a_first_time_witness_conflicting_with_an_existing_peers_family_is_refused(self):
+        # A brand-new witness (never before on disk) whose fixture_family
+        # matches an EXISTING promoted witness's but declares a
+        # different coverage_region. The candidate itself must be
+        # checked against its prospective peers directly, not via the
+        # pairwise scan that only flags whichever witness sorts second.
+        spec = json.loads((self.workspace / "crates" / "scheduler" / "specs" / "task_queue.json").read_text())
+        spec["queries"].append(
+            {"english": "How deep is the queue right now?", "rust_sig": "fn depth(&self) -> usize", "pure": True}
+        )
+        (self.workspace / "crates" / "scheduler" / "specs" / "task_queue.json").write_text(json.dumps(spec))
+
+        second = self._witness_spec()
+        second["witness_id"] = "W-TQ-DEPTH"
+        second["query"] = "depth"
+        second["output"]["path"] = "docs/witnesses/task_queue.depth.svg"
+        second["expectation"]["coverage_region"] = "full-grid"
+        second["expectation"]["fixture_family"] = self._witness_spec()["expectation"]["fixture_family"]
+        second_target = self.workspace / "crates" / "scheduler" / "specs" / "_witnesses" / "task_queue.depth.json"
+        draft = dict(second)
+        draft.pop("review", None)
+        second_target.with_suffix(".json.draft").write_text(json.dumps(draft))
+
+        rc = self._run("approve", str(second_target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
+        self.assertEqual(rc, 1)
+        self.assertFalse(second_target.exists())
 
 
 class GoldSetIntegrationTest(unittest.TestCase):

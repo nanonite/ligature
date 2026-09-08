@@ -16,15 +16,18 @@ block at Stage 4.5
 A real defect the Stage 4/CI report must surface loudly, but not one
 that should hard-block that run on its own; the gate table's own
 "block at promotion if unresolved" is a SEPARATE, later enforcement
-point. This module realizes both halves of that sentence with ONE set
-of findings rather than two mechanisms: `gate_workspace()` reports them
-at WARN (never a silent pass, never a hard CI block -- see `EXIT_WARN`
-below), and `validate_witness_for_approval()` is the `validate_fn`
-`pipeline.py`'s `approve()` now dispatches to for a witness spec
-promotion, which re-checks the SAME findings and promotes exactly the
-ones naming the witness being promoted from WARN to ERROR before
-`approve()`'s own "refuse on any error" rule sees them. "Warn early,
-block at promotion" is the identical finding at two severities
+point. This module realizes both halves of that sentence with the SAME
+two checks rather than two mechanisms: `gate_workspace()` runs them
+over the on-disk workspace and reports WARN (never a silent pass, never
+a hard CI block -- see `EXIT_WARN` below), and
+`validate_witness_for_approval()` is the `validate_fn` `pipeline.py`'s
+`approve()` now dispatches to for a witness spec promotion, which runs
+the identical checks against the PROSPECTIVE post-promotion set (the
+candidate replacing or inserting its own entry -- `gate_workspace()`'s
+own on-disk scan cannot see a not-yet-written candidate at all) and
+reports what it finds at ERROR before `approve()`'s own "refuse on any
+error" rule sees it. "Warn early, block at promotion" is the identical
+defect at two severities
 depending on WHEN it is checked, not two different code paths that
 could silently drift apart.
 
@@ -178,6 +181,44 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[Finding], in
     return findings, len(specs)
 
 
+def check_candidate_fixture_family_consistency(
+    candidate_witness_id: str, candidate: dict, specs: dict[str, dict]
+) -> list[Finding]:
+    """Whether `candidate` itself conflicts with any OTHER witness in
+    `specs` sharing its `fixture_family` -- checked directly against
+    every peer, symmetric regardless of iteration/sort order.
+
+    Deliberately NOT `check_fixture_family_consistency()`/
+    `check_family_consistency()`: that pairwise scan only ever flags
+    whichever witness sorts SECOND within a disagreeing family (the
+    first one "sets" the region, the second is reported as disagreeing
+    with it). That is an acceptable shape for a workspace-wide scan
+    reporting SOME finding somewhere, but wrong for "does THIS
+    candidate conflict" -- a candidate that happens to sort before its
+    conflicting peer would silently escape that check entirely."""
+    family = candidate["expectation"]["fixture_family"]
+    region = candidate["expectation"]["coverage_region"]
+    findings: list[Finding] = []
+    for witness_id, spec in sorted(specs.items()):
+        if witness_id == candidate_witness_id:
+            continue
+        if spec["expectation"]["fixture_family"] != family:
+            continue
+        peer_region = spec["expectation"]["coverage_region"]
+        if peer_region != region:
+            findings.append(
+                Finding(
+                    "G20", candidate_witness_id,
+                    f"fixture_family {family!r} is declared with coverage_region {region!r} here and "
+                    f"{peer_region!r} at witness_id {witness_id!r} -- a family whose members disagree "
+                    "about the region it covers is not a declaration a degeneracy check can test "
+                    "against",
+                    severity="warn",
+                )
+            )
+    return findings
+
+
 def validate_witness_for_approval(
     path: Path, data: dict, validator, specs_search_root: Path | None, workspace: Path, descriptor: dict
 ) -> list:
@@ -193,28 +234,41 @@ def validate_witness_for_approval(
     applies internally between its own G1a and G1b/G2. If that already
     fails, G20 does not even run.
 
-    Otherwise, runs G20's full workspace scan (a fixture-family
-    disagreement is inherently cross-witness, so the scan cannot be
-    narrowed to one document ahead of time) and keeps only the findings
-    naming THIS witness_id, promoted from WARN to ERROR -- approve()'s
-    own rule ("refuse on any error-severity finding") then does the
-    actual blocking, with no change to approve() itself. A finding
-    about a DIFFERENT witness (e.g. the other half of a fixture-family
-    disagreement) is not surfaced through THIS promotion at all: it is
-    real, and `pipeline.py gate-g20`'s own workspace-wide run still
-    reports it, but promoting one witness is not grounds to refuse it
-    over a defect naming a different one."""
+    Otherwise, checks the CANDIDATE `data` itself -- not whatever
+    `gate_workspace()` finds already sitting on disk at `path`.
+    approve() calls this validate_fn BEFORE writing anything, so a
+    first-time promotion has no on-disk entry for this witness_id at
+    all (a workspace-wide scan would silently find nothing to check),
+    and an update's stale on-disk version is a DIFFERENT document than
+    the one actually being promoted (external review, high severity:
+    reproduced end to end -- a first-time must-vary witness backed by a
+    constant result was approved with exit code 0, because the
+    workspace scan the previous version ran never included the
+    candidate at all). Fixed by constructing the PROSPECTIVE
+    post-promotion witness set: every other genuinely valid witness
+    currently on disk, with the candidate replacing (update) or
+    inserting as (first-time) its own `witness_id` entry, then checking
+    the candidate specifically against that set -- must-vary against
+    its own (unaffected) canonical result, and fixture-family
+    consistency against every peer directly
+    (`check_candidate_fixture_family_consistency`, not the pairwise
+    scan `gate_workspace()` itself uses, which only ever flags whichever
+    witness sorts second in a disagreeing pair)."""
     findings = validate_witness_data(path, data, validator, specs_search_root)
     if any(f.severity == "error" for f in findings):
         return findings
 
     witness_id = data["witness_id"]
-    g20_findings, _ = gate_workspace(workspace, descriptor)
-    for finding in g20_findings:
-        if finding.subject != witness_id:
-            continue
-        severity = "error" if finding.severity == "warn" else finding.severity
-        findings.append(Finding(finding.gate, finding.subject, finding.reason, severity))
+    specs, _ = collect_valid_witness_specs(descriptor, workspace)
+    specs = dict(specs)
+    specs[witness_id] = data
+
+    results = load_results_by_witness(workspace)
+    candidate_findings = check_must_vary({witness_id: data}, results)
+    candidate_findings.extend(check_candidate_fixture_family_consistency(witness_id, data, specs))
+
+    for finding in candidate_findings:
+        findings.append(Finding(finding.gate, finding.subject, finding.reason, "error"))
     return findings
 
 

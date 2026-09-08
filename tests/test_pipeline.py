@@ -2727,6 +2727,54 @@ class CmdApproveWitnessIntegrationTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(second_target.exists())
 
+    def test_a_first_time_witness_reusing_an_existing_peers_id_is_refused(self):
+        # External review, high severity, second pass: the candidate-aware
+        # fix's own first version collapsed the on-disk scan by
+        # witness_id BEFORE substituting the candidate --
+        # `specs[witness_id] = data` silently overwrote whatever OTHER
+        # file already occupied that dict key, so a first-time file
+        # reusing an existing peer's witness_id erased that peer from
+        # the prospective model instead of colliding with it. Reproduced
+        # exactly: a new task_queue.depth.json declares the SAME
+        # witness_id the already-promoted task_queue.load_factor.json
+        # uses, with constant-allowed so must-vary itself never trips --
+        # only the uniqueness check can catch this.
+        spec = json.loads((self.workspace / "crates" / "scheduler" / "specs" / "task_queue.json").read_text())
+        spec["queries"].append(
+            {"english": "How deep is the queue right now?", "rust_sig": "fn depth(&self) -> usize", "pure": True}
+        )
+        (self.workspace / "crates" / "scheduler" / "specs" / "task_queue.json").write_text(json.dumps(spec))
+
+        second = self._witness_spec()
+        second["query"] = "depth"
+        second["output"]["path"] = "docs/witnesses/task_queue.depth.svg"
+        second["expectation"]["value_distribution"] = "constant-allowed"
+        # witness_id left at the default -- the exact id the already-
+        # promoted task_queue.load_factor.json also declares.
+        second_target = self.workspace / "crates" / "scheduler" / "specs" / "_witnesses" / "task_queue.depth.json"
+        draft = dict(second)
+        draft.pop("review", None)
+        second_target.with_suffix(".json.draft").write_text(json.dumps(draft))
+
+        rc = self._run("approve", str(second_target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
+        self.assertEqual(rc, 1)
+        self.assertFalse(second_target.exists())
+        self.assertTrue(self.target.exists(), "the existing peer must survive a refused promotion")
+
+    def test_renaming_a_witnesss_own_id_on_reapproval_leaves_no_false_ghost_conflict(self):
+        # Inverse of the erasure bug above: excluding by PATH (not by
+        # witness_id) means an existing file's OLD on-disk identity is
+        # correctly dropped from the prospective set when re-approving
+        # it under a NEW witness_id -- it must not linger as a "ghost"
+        # peer that spuriously conflicts with the very candidate
+        # replacing it.
+        renamed = self._witness_spec()
+        renamed["witness_id"] = "W-TQ-LOAD-FACTOR-V2"
+        renamed["expectation"]["coverage_region"] = "full-grid"
+        self._write_draft(renamed)
+        rc = self._run("approve", str(self.target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
+        self.assertEqual(rc, 0)
+
 
 class GoldSetIntegrationTest(unittest.TestCase):
     """validate-gold-set and measure-gold-set through pipeline.main()

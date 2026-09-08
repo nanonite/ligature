@@ -81,6 +81,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gate_g19 import collect_valid_witness_entries  # noqa: E402
 from gate_g19 import collect_valid_witness_specs  # noqa: E402
 from gate_g19 import identity_mismatches  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
@@ -219,6 +220,30 @@ def check_candidate_fixture_family_consistency(
     return findings
 
 
+def check_candidate_uniqueness(
+    candidate_witness_id: str, entries: list[tuple[Path, dict]]
+) -> list[Finding]:
+    """Whether `candidate_witness_id` remains unique across the
+    PROSPECTIVE set `entries` (path-based substitution already
+    applied). Run before any witness_id-keyed collapsing, so a
+    candidate whose witness_id collides with a DIFFERENT file is caught
+    directly rather than silently overwriting that file's entry in a
+    dict keyed by witness_id."""
+    colliding_paths = sorted(
+        str(entry_path) for entry_path, entry_data in entries if entry_data["witness_id"] == candidate_witness_id
+    )
+    if len(colliding_paths) > 1:
+        return [
+            Finding(
+                "G20", candidate_witness_id,
+                f"witness_id {candidate_witness_id!r} would no longer be unique across the workspace "
+                f"after this promotion -- also declared at {', '.join(colliding_paths)}",
+                severity="warn",
+            )
+        ]
+    return []
+
+
 def validate_witness_for_approval(
     path: Path, data: dict, validator, specs_search_root: Path | None, workspace: Path, descriptor: dict
 ) -> list:
@@ -238,31 +263,56 @@ def validate_witness_for_approval(
     `gate_workspace()` finds already sitting on disk at `path`.
     approve() calls this validate_fn BEFORE writing anything, so a
     first-time promotion has no on-disk entry for this witness_id at
-    all (a workspace-wide scan would silently find nothing to check),
-    and an update's stale on-disk version is a DIFFERENT document than
-    the one actually being promoted (external review, high severity:
-    reproduced end to end -- a first-time must-vary witness backed by a
-    constant result was approved with exit code 0, because the
-    workspace scan the previous version ran never included the
-    candidate at all). Fixed by constructing the PROSPECTIVE
-    post-promotion witness set: every other genuinely valid witness
-    currently on disk, with the candidate replacing (update) or
-    inserting as (first-time) its own `witness_id` entry, then checking
-    the candidate specifically against that set -- must-vary against
-    its own (unaffected) canonical result, and fixture-family
-    consistency against every peer directly
-    (`check_candidate_fixture_family_consistency`, not the pairwise
-    scan `gate_workspace()` itself uses, which only ever flags whichever
-    witness sorts second in a disagreeing pair)."""
+    all, and an update's stale on-disk version is a DIFFERENT document
+    than the one actually being promoted (external review, high
+    severity: reproduced end to end -- a first-time must-vary witness
+    backed by a constant result was approved with exit code 0, because
+    a workspace scan never included the candidate at all).
+
+    Fixed by constructing the PROSPECTIVE post-promotion witness set BY
+    PATH, not by witness_id: every genuinely valid witness currently on
+    disk EXCEPT whatever sits at this exact promotion target (an
+    update's stale content, correctly dropped regardless of what
+    witness_id it declared), plus the candidate inserted at that target
+    path. A second review pass, still high severity, found the first
+    version of this fix collapsed by witness_id BEFORE substituting the
+    candidate -- `specs[witness_id] = data` silently overwrote whatever
+    OTHER file happened to already occupy that dict key, so a
+    first-time candidate reusing an unrelated peer's witness_id erased
+    that peer from the prospective model instead of colliding with it
+    (reproduced: a new file declaring an existing peer's witness_id
+    approved with exit code 0, leaving two promoted files sharing one
+    supposedly workspace-unique id). Uniqueness is now checked directly
+    against the path-substituted set (`check_candidate_uniqueness`)
+    BEFORE anything is collapsed into a witness_id-keyed dict for the
+    must-vary/fixture-family checks -- collapsing first is exactly what
+    made the collision invisible.
+
+    Must-vary is checked against the candidate's own (unaffected)
+    canonical result; fixture-family consistency against every peer in
+    the prospective set directly (`check_candidate_fixture_family_consistency`,
+    not the pairwise scan `gate_workspace()` itself uses, which only
+    ever flags whichever witness sorts second in a disagreeing pair)."""
     findings = validate_witness_data(path, data, validator, specs_search_root)
     if any(f.severity == "error" for f in findings):
         return findings
 
     witness_id = data["witness_id"]
-    specs, _ = collect_valid_witness_specs(descriptor, workspace)
-    specs = dict(specs)
-    specs[witness_id] = data
+    target = path.resolve()
+    entries = [
+        (entry_path, entry_data)
+        for entry_path, entry_data in collect_valid_witness_entries(descriptor, workspace)
+        if entry_path != target
+    ]
+    entries.append((target, data))
 
+    uniqueness_findings = check_candidate_uniqueness(witness_id, entries)
+    if uniqueness_findings:
+        for finding in uniqueness_findings:
+            findings.append(Finding(finding.gate, finding.subject, finding.reason, "error"))
+        return findings
+
+    specs = {entry_data["witness_id"]: entry_data for _, entry_data in entries}
     results = load_results_by_witness(workspace)
     candidate_findings = check_must_vary({witness_id: data}, results)
     candidate_findings.extend(check_candidate_fixture_family_consistency(witness_id, data, specs))

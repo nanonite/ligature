@@ -109,22 +109,24 @@ class Finding:
         return f"[{self.gate}/{self.severity}] {self.subject}: {self.reason}"
 
 
-def collect_valid_witness_specs(descriptor: dict, workspace: Path) -> tuple[dict[str, dict], list[Finding]]:
-    """Every genuinely valid witness spec in the workspace, keyed by
-    witness_id -- validate_witness.py's own G1a/G1b/G2 bar, crate by
-    crate the same way its CLI does (a witness's canonical directory
-    and its query cross-reference are both crate-scoped).
+def collect_valid_witness_entries(descriptor: dict, workspace: Path) -> list[tuple[Path, dict]]:
+    """Every genuinely valid witness spec in the workspace, as
+    (resolved path, data) pairs -- validate_witness.py's own G1a/G1b/G2
+    bar, crate by crate the same way its CLI does (a witness's
+    canonical directory and its query cross-reference are both
+    crate-scoped). No witness_id collapsing or ambiguity handling here
+    -- that is collect_valid_witness_specs()'s job, built on top of
+    this.
 
-    A witness_id found valid in more than one FILE is ambiguous --
-    excluded, not first-wins, whether the duplicates sit in the same
-    crate or different ones (external review, medium severity: an
-    earlier version only compared the set of owning CRATE NAMES, so two
-    valid files in the SAME crate both silently fell through to
-    whichever sorted first). The same "ambiguous, never first-wins"
-    choice gate_g18.py already makes for a (concept, query) pair and
-    gate_g14.py makes for a cross-crate bridge_id collision."""
+    Exposed separately (chainlink #31, external review) because
+    gate_g20.py's candidate-aware promotion check needs to
+    replace/insert an entry by PATH, not by witness_id: collapsing by
+    witness_id FIRST would let a candidate whose witness_id happens to
+    collide with a DIFFERENT file's silently overwrite that file's
+    entry in the resulting dict instead of being caught as a
+    duplicate."""
     validator = load_witness_validator()
-    by_id: dict[str, list[dict]] = {}
+    entries: list[tuple[Path, dict]] = []
     for crate in descriptor["crates"]:
         crate_root = (workspace / crate["crate_dir"]).resolve()
         if not crate_root.is_dir():
@@ -143,7 +145,25 @@ def collect_valid_witness_specs(descriptor: dict, workspace: Path) -> tuple[dict
             file_findings = validate_witness_data(path, data, validator, specs_search_root)
             if any(f.severity == "error" for f in file_findings):
                 continue
-            by_id.setdefault(data["witness_id"], []).append(data)
+            entries.append((path.resolve(), data))
+    return entries
+
+
+def collect_valid_witness_specs(descriptor: dict, workspace: Path) -> tuple[dict[str, dict], list[Finding]]:
+    """Every genuinely valid witness spec in the workspace, keyed by
+    witness_id -- built from collect_valid_witness_entries() above.
+
+    A witness_id found valid in more than one FILE is ambiguous --
+    excluded, not first-wins, whether the duplicates sit in the same
+    crate or different ones (external review, medium severity: an
+    earlier version only compared the set of owning CRATE NAMES, so two
+    valid files in the SAME crate both silently fell through to
+    whichever sorted first). The same "ambiguous, never first-wins"
+    choice gate_g18.py already makes for a (concept, query) pair and
+    gate_g14.py makes for a cross-crate bridge_id collision."""
+    by_id: dict[str, list[dict]] = {}
+    for _, data in collect_valid_witness_entries(descriptor, workspace):
+        by_id.setdefault(data["witness_id"], []).append(data)
 
     specs: dict[str, dict] = {}
     findings: list[Finding] = []

@@ -57,9 +57,14 @@ need to keep. `render_hash` is deliberately non-normative (plan.md
 from __future__ import annotations
 
 import hashlib
+import sys
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from xml_escape import escape_xml_text  # noqa: E402
 
 SVG_WIDTH = 640
 SVG_HEIGHT = 160
@@ -93,13 +98,7 @@ def _require(result: dict, *keys: str, where: str) -> None:
         raise RendererError(f"{where}: result is missing {missing!r} -- not a shape this renderer accepts")
 
 
-def _escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+_escape = escape_xml_text
 
 
 def _svg_wrapper(width: int, height: int, title: str, body: str) -> str:

@@ -5,7 +5,7 @@ import re
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2951,6 +2951,76 @@ class Stage8cClosureIntegrationTest(unittest.TestCase):
         self.assertIn("validate-closure", printed)
         self.assertIn("gate-g14", printed)
         self.assertNotIn("8C", printed.split("Not yet implemented:")[1])
+
+
+class ContactSheetIntegrationTest(unittest.TestCase):
+    """generate-contact-sheet through pipeline.main() (chainlink #32).
+    The workspace itself is built by test_generate_feature_ledger.py's
+    own Workspace/descriptor_with/happy_path_witness_and_rendering --
+    the ledger and the contact sheet are two projections over the
+    identical underlying state, the same "one description, not two"
+    reasoning Stage8cClosureIntegrationTest above already applies."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_generate_feature_ledger import Workspace  # noqa: E402
+        from test_generate_feature_ledger import happy_path_witness_and_rendering  # noqa: E402
+        from test_gate_g19 import PRODUCER_BACKEND  # noqa: E402
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self.ws = Workspace(self.workspace)
+        # A schema-valid descriptor -- pipeline.py's own cmd_* dispatch
+        # (unlike generate_feature_ledger.py's/generate_contact_sheet.py's
+        # own standalone main(), which just json.loads it directly) goes
+        # through load_project_descriptor(), which validates against the
+        # full project-descriptor schema.
+        self.descriptor = json.loads(
+            (ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text()
+        )
+        self.descriptor["crates"] = [
+            {"crate_dir": "crates/scheduler", "contracts_crate": "contracts", "specs_search_root": "crates"}
+        ]
+        self.descriptor["witness_backend"] = {"command": PRODUCER_BACKEND}
+        (self.workspace / "project-descriptor.json").write_text(json.dumps(self.descriptor))
+        self._happy_path = happy_path_witness_and_rendering
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *args) -> tuple[int, str]:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer), redirect_stderr(buffer):
+            code = pipeline.main(["--workspace", str(self.workspace), *args])
+        return code, buffer.getvalue()
+
+    def test_generate_contact_sheet_writes_the_file_and_reports_the_count(self):
+        self.ws.write_concept_spec()
+        self._happy_path(self.ws)
+        code, printed = self._run("generate-contact-sheet")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("1 declared feature(s)", printed)
+        destination = self.workspace / "docs" / "witnesses" / "_contact_sheet.svg"
+        self.assertTrue(destination.is_file())
+        self.assertIn("∃-witness evidence — not verification.", destination.read_text())
+
+    def test_generate_contact_sheet_reports_zero_features_honestly(self):
+        code, printed = self._run("generate-contact-sheet")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("0 declared features", printed)
+        self.assertIn("nothing to check", printed)
+
+    def test_generate_contact_sheet_fails_closed_on_an_ambiguous_declaration(self):
+        self.ws.write_concept_spec()
+        self.ws.write_concept_spec(filename="task_queue_dup.json")
+        code, printed = self._run("generate-contact-sheet")
+        self.assertEqual(code, 1, printed)
+        self.assertIn("ambiguous", printed)
+
+    def test_status_lists_the_new_command(self):
+        code, printed = self._run("status")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("generate-contact-sheet", printed)
 
 
 def _stage8a_interaction(interaction_id: str, caller: tuple, callee: tuple) -> dict:

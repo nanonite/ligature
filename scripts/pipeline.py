@@ -235,6 +235,26 @@ Implemented now, against schemas that actually exist:
             pipeline obligation exists yet. Refuses to write a
             schema-invalid result; atomic write, same guarantee
             chainlink #28 established for a witness rendering.
+  generate-contact-sheet  Stage 4.5's review surface (plan.md §16.3,
+            chainlink #32): a GENERATED, READ-ONLY SVG at
+            docs/witnesses/_contact_sheet.svg, one panel per DECLARED
+            feature, built over a fresh generate-feature-ledger call --
+            never a stale ci/results/feature_ledger.json. Fixed banner
+            ("∃-witness evidence -- not verification.") plus, per
+            panel, the SAME two-axis discipline #34 established: witness
+            /implementation/determinism/degeneracy are drawn as colored
+            traffic-light badges, while assurance_status and
+            closure_kind are drawn in a completely disjoint, never-green
+            palette with an explicit text prefix -- a fully green panel
+            can never be scanned as "assurance established." Each
+            feature's own generated witness SVG is embedded inline as a
+            base64 data URI when its witness is present (never a
+            relative file link, so the sheet stays one self-contained
+            artifact); missing/unavailable renders an explicit dashed
+            placeholder without dropping the panel. Never a promotion
+            input -- not recognized by approve()'s dispatcher. Refuses
+            to build over an ambiguous declaration or a schema-invalid
+            ledger; atomic write, chainlink #28's own guarantee.
   validate-gold-set  G1a/G1b over human gold sets (plan.md §5.2's
             independence argument, chainlink #26): schema, naming, and
             the scope/provenance discipline -- every edge's caller must
@@ -327,6 +347,7 @@ from gate_g20 import gate_workspace as gate_g20_workspace  # noqa: E402
 from gate_g20 import report_findings as report_g20_findings  # noqa: E402
 from generate_feature_ledger import GenerationError as FeatureLedgerGenerationError  # noqa: E402
 from generate_feature_ledger import write_ledger as write_feature_ledger  # noqa: E402
+from generate_contact_sheet import write_contact_sheet  # noqa: E402
 from gate_g9 import check_bridges as check_bridges_g9  # noqa: E402
 from gate_g9 import gate_workspace as gate_g9_workspace  # noqa: E402
 from gate_g9 import report_findings as report_g9_findings  # noqa: E402
@@ -1125,6 +1146,30 @@ def cmd_generate_feature_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generate_contact_sheet(args: argparse.Namespace) -> int:
+    """Stage 4.5's contact sheet generator (chainlink #32, plan.md
+    §16.3): a GENERATED, READ-ONLY review surface at
+    docs/witnesses/_contact_sheet.svg, one panel per declared
+    (witness_required: true) feature, built over a fresh
+    generate_feature_ledger.generate_ledger() call -- never a stale
+    ci/results/feature_ledger.json. Same reuse discipline as
+    generate-feature-ledger: refuses to build over an ambiguous
+    declaration or a ledger that fails its own schema, and writes
+    atomically so a failed generation leaves the previous complete
+    contact sheet untouched."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    try:
+        destination, count = write_contact_sheet(workspace, descriptor)
+    except FeatureLedgerGenerationError as e:
+        raise PipelineError(str(e))
+    if count == 0:
+        print(f"wrote {destination} (0 declared features -- nothing to check)")
+    else:
+        print(f"wrote {destination} ({count} declared feature(s))")
+    return 0
+
+
 def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
     """Stage 8A's R1 + G16 (chainlink #24). Exit codes are three-valued,
     matching plan.md §9.1's own three dispositions: 0 pass, 1 blocked
@@ -1846,7 +1891,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         "gate-g20 (Stage 4.5 degeneracy: must-vary vs constant, fixture-family/coverage_region "
         "consistency, warn -- block at promotion if unresolved, chainlink #31), "
         "generate-feature-ledger (Stage 4.5 generated projection over G18/G19/G20, "
-        "implementation_observed vs assurance_status never merged, chainlink #34)"
+        "implementation_observed vs assurance_status never merged, chainlink #34), "
+        "generate-contact-sheet (Stage 4.5 review surface with the ∃-witness evidence banner, "
+        "traffic-light witness/determinism/degeneracy columns kept visually distinct from a "
+        "never-green assurance_status/closure_kind column, chainlink #32)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -2072,6 +2120,12 @@ def main(argv: list[str]) -> int:
         help="Stage 4.5: generate ci/results/feature_ledger.json from G18/G19/G20 (#34)",
     )
     generate_feature_ledger_p.set_defaults(func=cmd_generate_feature_ledger)
+
+    generate_contact_sheet_p = sub.add_parser(
+        "generate-contact-sheet",
+        help="Stage 4.5: generate docs/witnesses/_contact_sheet.svg, the review surface (#32)",
+    )
+    generate_contact_sheet_p.set_defaults(func=cmd_generate_contact_sheet)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

@@ -178,6 +178,21 @@ Implemented now, against schemas that actually exist:
             than one concept spec, or covered by a genuinely valid
             witness in more than one crate, is ambiguous and excluded
             rather than resolved from whichever sorted first.
+  gate-g19  Stage 8A/CI's witness determinism gate (plan.md §16.2,
+            chainlink #30): every genuinely valid witness spec's
+            declared `determinism.value_hash` must match its current
+            canonical result's `value_hash` at ci/results/witnesses/ --
+            "regenerated" in the sense that something upstream of this
+            gate re-ran the fixture producer, the same split chainlink
+            #47 draws between check-bridges (generates) and gate-g9
+            (checks). `render_hash` is never read here: a determinism
+            claim is about the measured VALUE, not the rendering, and a
+            changed `render_hash` alone must never block. Reuses
+            validate_witness.py's own G1a/G1b/G2 bar and its
+            `load_results_by_witness` (which already recomputes and
+            rejects a self-inconsistent result) rather than re-hashing
+            anything. A witness spec with no corresponding result
+            blocks: a run that never happened establishes nothing.
   validate-gold-set  G1a/G1b over human gold sets (plan.md §5.2's
             independence argument, chainlink #26): schema, naming, and
             the scope/provenance discipline -- every edge's caller must
@@ -264,6 +279,8 @@ from extract_c_static import extract_crate as extract_c_static_crate  # noqa: E4
 from gate_g14 import gate_workspace as gate_g14_workspace  # noqa: E402
 from gate_g18 import gate_workspace as gate_g18_workspace  # noqa: E402
 from gate_g18 import report_findings as report_g18_findings  # noqa: E402
+from gate_g19 import gate_workspace as gate_g19_workspace  # noqa: E402
+from gate_g19 import report_findings as report_g19_findings  # noqa: E402
 from gate_g9 import check_bridges as check_bridges_g9  # noqa: E402
 from gate_g9 import gate_workspace as gate_g9_workspace  # noqa: E402
 from gate_g9 import report_findings as report_g9_findings  # noqa: E402
@@ -1014,6 +1031,17 @@ def cmd_gate_g18(args: argparse.Namespace) -> int:
     return report_g18_findings(findings, discovered, workspace)
 
 
+def cmd_gate_g19(args: argparse.Namespace) -> int:
+    """Stage 8A/CI's G19 (chainlink #30): regenerate and compare each
+    genuinely valid witness spec's declared determinism.value_hash
+    against its current canonical result -- never render_hash
+    (plan.md §16.2)."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    findings, discovered = gate_g19_workspace(workspace, descriptor)
+    return report_g19_findings(findings, discovered, workspace)
+
+
 def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
     """Stage 8A's R1 + G16 (chainlink #24). Exit codes are three-valued,
     matching plan.md §9.1's own three dispositions: 0 pass, 1 blocked
@@ -1704,7 +1732,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "gate-g14 (Stage 8C release closure over the transitive assurance graph, per cluster, "
         "with the CG6 well-foundedness discharge, chainlink #25), "
         "gate-g18 (Stage 4 witness coverage over the declared witness_required feature set, "
-        "chainlink #29)"
+        "chainlink #29), "
+        "gate-g19 (Stage 8A/CI witness determinism: regenerate, compare value_hash, never "
+        "render_hash, chainlink #30)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -1912,6 +1942,12 @@ def main(argv: list[str]) -> int:
         help="Stage 4: G18 -- every witness_required query has a witness spec and rendering (#29)",
     )
     gate_g18_p.set_defaults(func=cmd_gate_g18)
+
+    gate_g19_p = sub.add_parser(
+        "gate-g19",
+        help="Stage 8A/CI: G19 -- regenerate and compare a witness's value_hash, never render_hash (#30)",
+    )
+    gate_g19_p.set_defaults(func=cmd_gate_g19)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

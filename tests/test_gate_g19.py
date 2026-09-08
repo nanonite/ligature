@@ -217,6 +217,34 @@ class DeterminismTest(GateTestCase):
             any("does not match the current witness spec" in e for e in self.errors(findings))
         )
 
+    def test_a_backend_that_reports_a_different_renderer_actual_is_caught(self):
+        # External review, medium severity: renderer_actual is
+        # deliberately EXCLUDED from value_hash (plan.md §16.1 -- "the
+        # same numbers from a different renderer are the same fact"),
+        # so nothing in the hash comparison alone would ever catch a
+        # backend that silently ignored --renderer and reported a
+        # different, still schema-valid renderer instead. This is
+        # exactly the declared/actual mismatch §16.2 makes a hard error
+        # at generation time for chainlink #28's generate_witness.py,
+        # and this fresh regeneration must apply the identical check.
+        self.ws.write_concept_spec()
+        self.ws.write_witness(witness_spec(value_hash="sha256:" + "a" * 64))
+
+        wrong_renderer = run_producer(renderer="series_svg")
+
+        def fake_runner(argv, **kwargs):
+            class Completed:
+                returncode = 0
+                stdout = json.dumps(wrong_renderer)
+                stderr = ""
+            return Completed()
+
+        findings, discovered = self.gate(runner=fake_runner)
+        self.assertTrue(
+            any("renderer_actual" in e and "does not match the current witness spec" in e
+                for e in self.errors(findings))
+        )
+
     def test_a_backend_producing_a_schema_invalid_result_does_not_count_as_a_regeneration(self):
         self.ws.write_concept_spec()
         self.ws.write_witness(witness_spec(value_hash="sha256:" + "a" * 64))
@@ -301,13 +329,42 @@ class DiscoveryUnitTest(GateTestCase):
 
 
 class RegenerateWitnessUnitTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
     def test_a_real_regeneration_round_trips_through_the_real_schema(self):
         spec = witness_spec(value_hash="sha256:" + "a" * 64)
-        document, argv, exit_code, error = regenerate_witness(spec, {"command": PRODUCER_BACKEND})
+        document, argv, exit_code, error = regenerate_witness(
+            spec, {"command": PRODUCER_BACKEND}, self.workspace
+        )
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
         self.assertEqual(document["witness_id"], spec["witness_id"])
         self.assertIn("--witness-id", argv)
+
+    def test_the_backend_is_invoked_with_cwd_set_to_the_workspace(self):
+        # External review, medium severity: an earlier version ran the
+        # backend in the CALLER's directory rather than the selected
+        # workspace, so a real producer resolving fixture/source files
+        # relative to its cwd could inspect the wrong checkout entirely
+        # when the gate was invoked from elsewhere.
+        spec = witness_spec(value_hash="sha256:" + "a" * 64)
+        seen_cwd = {}
+
+        def recording_runner(argv, **kwargs):
+            seen_cwd["cwd"] = kwargs.get("cwd")
+            class Completed:
+                returncode = 1
+                stdout = ""
+                stderr = "irrelevant -- only the cwd this was invoked with matters here"
+            return Completed()
+
+        regenerate_witness(spec, {"command": "irrelevant"}, self.workspace, runner=recording_runner)
+        self.assertEqual(seen_cwd["cwd"], self.workspace)
 
 
 class ReportingTest(GateTestCase):

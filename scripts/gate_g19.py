@@ -38,7 +38,22 @@ configured, nothing was actually re-evaluated this run, and the gate
 blocks rather than falling back to trusting a file on disk. As defense
 in depth against a misbehaving backend that ignores its own arguments,
 the regenerated document's own identity fields are still compared
-against the spec before its hash is trusted at all.
+against the spec before its hash is trusted at all -- including
+`renderer_actual` against the requested `renderer` (external review,
+medium severity: that field is deliberately EXCLUDED from `value_hash`
+by §16.1's own rule, "the same numbers from a different renderer are
+the same fact," so nothing in the hash comparison alone would ever
+catch a backend that silently ignored `--renderer` and reported a
+different, still schema-valid one instead -- exactly the
+declared/actual mismatch §16.2 makes a hard error at generation time
+for chainlink #28's `generate_witness.py`; this fresh regeneration now
+gets the identical check). The subprocess also runs with `cwd=workspace`
+(external review, medium severity: an earlier version ran it in the
+caller's own directory, so invoking `pipeline.py --workspace
+/elsewhere gate-g19` from a different cwd left a producer unable to
+reliably resolve fixture/source files relative to the workspace it was
+meant to inspect, or resolving them against whatever checkout happened
+to be underfoot instead).
 
 This gate deliberately does not persist the regenerated result to
 ci/results/witnesses/ -- gates in this codebase check, they do not
@@ -147,7 +162,7 @@ def collect_valid_witness_specs(descriptor: dict, workspace: Path) -> tuple[dict
 
 
 def regenerate_witness(
-    spec: dict, backend: dict, runner=subprocess.run
+    spec: dict, backend: dict, workspace: Path, runner=subprocess.run
 ) -> tuple[dict | None, list[str], int, str]:
     """Invoke the configured witness_backend command fresh, passing the
     identifying fields FROM THE CURRENT SPEC as CLI arguments -- so a
@@ -157,7 +172,15 @@ def regenerate_witness(
     None for every failure mode, the same shape gate_g9.py's dispatch()
     uses for the identical reason: a producer that failed to run has
     not established anything, and treating that as a value would turn
-    an infrastructure problem into a determinism claim."""
+    an infrastructure problem into a determinism claim.
+
+    Run with cwd=workspace (external review, medium severity: an
+    earlier version ran the backend in the CALLER's directory, so
+    invoking `pipeline.py --workspace /elsewhere gate-g19` from a
+    different cwd left a producer unable to reliably resolve
+    fixture/source files relative to the workspace it was meant to
+    inspect, or resolving them against whatever checkout happened to be
+    underfoot instead)."""
     argv = backend["command"].split() + [
         "--witness-id", spec["witness_id"],
         "--concept", spec["concept"],
@@ -167,7 +190,7 @@ def regenerate_witness(
         "--renderer", spec["renderer"],
     ]
     try:
-        completed = runner(argv, capture_output=True, text=True)
+        completed = runner(argv, capture_output=True, text=True, cwd=workspace)
     except OSError as e:
         return None, argv, -1, f"could not invoke {argv[0]!r}: {e}"
     if completed.returncode != 0:
@@ -204,7 +227,7 @@ def gate_workspace(workspace: Path, descriptor: dict, runner=subprocess.run) -> 
             )
             continue
 
-        document, _, _, error = regenerate_witness(spec, backend, runner)
+        document, _, _, error = regenerate_witness(spec, backend, workspace, runner)
         if document is None:
             findings.append(
                 Finding("G19", witness_id, f"witness_backend failed to regenerate this witness: {error}")
@@ -229,6 +252,18 @@ def gate_workspace(workspace: Path, descriptor: dict, runner=subprocess.run) -> 
             "query": spec["query"],
             "fixture_id": spec["fixture"]["fixture_id"],
             "seed": spec["fixture"]["seed"],
+            # renderer_actual too (external review, medium severity):
+            # it is excluded from value_hash by design (§16.1's own
+            # "the same numbers from a different renderer are the same
+            # fact" rule), so nothing about the hash comparison below
+            # would ever catch a backend that silently ignored
+            # --renderer and reported a different, still schema-valid
+            # renderer instead. That is exactly the declared/actual
+            # mismatch §16.2 makes a hard error at generation time
+            # (chainlink #28's generate_witness.py); this fresh
+            # regeneration gets the identical check rather than a gap
+            # where the excluded-from-hash field goes unchecked.
+            "renderer_actual": spec["renderer"],
         }
         mismatched = [
             field for field, expected in expected_identity.items() if document.get(field) != expected

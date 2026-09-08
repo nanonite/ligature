@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- Contact sheet: Stage 4.5 review surface with evidence banner (#32)
 - Feature ledger generator: ci/results/feature_ledger.json (#34)
 - G20 -- degenerate-witness gate against declared expectation (#31)
 - G19 -- witness determinism gate (#30)

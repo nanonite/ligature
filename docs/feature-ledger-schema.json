@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/feature-ledger-schema.json",
+  "title": "Feature ledger — v1.0",
+  "description": "plan.md §16.4, chainlink #34. A GENERATED, READ-ONLY projection, same tier as the Stage 4.5 contact sheet (§16.3): derived entirely from already-normative or already-generated artifacts, itself normative of nothing. Machine-emitted at ci/results/feature_ledger.json; no `review` block, for the same reason a C_static report or an achieved assurance record carries none -- a human freely authoring what was 'observed' would be indistinguishable from fabricating a result. Never consulted by satisfies(), assurance computation, or closure computation (§16.6's boundary): it reports on those mechanisms, it does not participate in them. The two-column discipline is the whole reason this file exists: `implementation_observed` (a weak liveness fact -- the body executed on its fixture and produced a stable, non-degenerate value) and `assurance_status` (the contract is established, from the owning obligation's validated assurance record) are NEVER the same bit and are NEVER inferred from each other -- the identical discipline this plan already applies to `closure_kind` vs. coverage.",
+  "type": "object",
+  "required": ["schema_version", "generated_from", "features"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "generated_from": {
+      "type": "object",
+      "required": ["concept_specs_hash", "witness_specs_hash", "assurance_results_hash"],
+      "additionalProperties": false,
+      "description": "sha256 over a canonical (sorted-key, compact-separator JSON, canonical-json-v1 style) serialization of every input artifact actually consulted while generating this ledger, sorted by path -- so the SAME workspace state always produces the SAME hashes, and a changed input is visible here before it is visible in `features`.",
+      "properties": {
+        "concept_specs_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Over every concept spec (vendor/concept-to-code layer) that owns at least one declared (witness_required: true) feature."
+        },
+        "witness_specs_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Over every genuinely valid witness spec discovered workspace-wide (validate_witness.py's own G1a/G1b/G2 bar), regardless of whether it backs a declared feature."
+        },
+        "assurance_results_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Over every genuinely schema-valid work-package assurance report reachable from a schema-valid manifest's own report.emit path, workspace-wide."
+        }
+      }
+    },
+    "features": {
+      "type": "array",
+      "description": "One entry per DECLARED feature (a concept-to-code query with witness_required: true) -- coverage here is relative to the declared set only, the identical boundary chainlink #29's G18 already draws: an undeclared query is invisible to this ledger, exactly as R2 stays invisible to an undeclared interaction.",
+      "items": { "$ref": "#/$defs/feature_entry" },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "feature_entry": {
+      "type": "object",
+      "required": [
+        "feature", "witness_required", "witness_present", "implementation_observed",
+        "determinism", "degeneracy", "assurance_status", "owning_cluster", "closure_kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "feature": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "<Concept>.<query> -- the same identity a witness spec's own concept/query pair names."
+        },
+        "witness_required": {
+          "type": "boolean",
+          "const": true,
+          "description": "Always true: only witness_required: true queries are declared features and appear here at all. Present explicitly rather than left implicit, matching plan.md §16.4's own worked example."
+        },
+        "witness_present": {
+          "type": "boolean",
+          "description": "chainlink #29's G18 disposition for this feature: a genuinely valid witness spec exists, its declared rendering exists on disk, and it is not ambiguous."
+        },
+        "implementation_observed": {
+          "type": "boolean",
+          "description": "The WEAK liveness fact only: the body executed on its fixture and produced a stable, non-degenerate value. True only when witness_present is true AND the witness's canonical result genuinely matches this spec's own identity (never trusted on witness_id alone) AND chainlink #30's G19 (determinism) and #31's G20 (degeneracy) both dispose clean for it. Never implies, and must never be read as, assurance -- see assurance_status."
+        },
+        "determinism": {
+          "type": "string",
+          "enum": ["pass", "fail", "not-checked"],
+          "description": "chainlink #30's G19 disposition for this feature's witness. not-checked when there is no witness to check, or no witness_backend is configured in the project descriptor (nothing was actually re-evaluated, which is a different fact from a real mismatch)."
+        },
+        "degeneracy": {
+          "type": "string",
+          "enum": ["ok", "warn", "not-checked"],
+          "description": "chainlink #31's G20 disposition for this feature's witness. not-checked when there is no witness to check."
+        },
+        "assurance_status": {
+          "type": "string",
+          "enum": ["unsupported", "tested", "bounded", "deductive"],
+          "description": "The CONTRACT, from the owning obligation's validated assurance record -- never inferred from witness_present, implementation_observed, determinism, or degeneracy. A green witness proves the body runs on one fixture; it proves nothing about the contract. Currently always 'unsupported': see generate_feature_ledger.py's own module docstring for why no mechanical link between a witnessed query and an obligation exists yet in this codebase."
+        },
+        "owning_cluster": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "The concept spec's own top-level `cluster` field (vendor/concept-to-code's schema, already domain-agnostic and required) -- read directly, not re-derived."
+        },
+        "closure_kind": {
+          "type": "string",
+          "enum": ["deductive", "bounded", "n/a"],
+          "description": "The owning cluster's genuinely valid closure profile's own declared closure_kind (docs/closure-profile-schema.json), or 'n/a' when no genuinely valid closure profile exists for this cluster. Kept strictly separate from witness/coverage state, the same discipline plan.md §16.4 already names."
+        }
+      }
+    }
+  }
+}

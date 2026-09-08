@@ -56,7 +56,7 @@ whose generation failed has no rendering at all, which is the only
 honest state for it to be in. That guarantee extends to the write itself:
 the SVG is written to a temporary sibling file and atomically replaces
 the destination only once it is completely and correctly on disk (see
-`_write_atomically`) -- a plain write that only fails partway through
+atomic_write.write_atomically) -- a plain write that only fails partway through
 (disk full, process killed) would otherwise leave a truncated file
 sitting where a previously good rendering used to be, silently breaking
 the same "failure means no mutation" guarantee at the I/O layer instead
@@ -66,12 +66,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from atomic_write import write_atomically  # noqa: E402
 from validate_witness import load_results_by_witness  # noqa: E402
 from validate_witness import snake_case  # noqa: E402
 from witness_renderer import RendererError  # noqa: E402
@@ -92,35 +91,6 @@ def output_path_for(concept: str, query: str) -> str:
     witness spec to declare, computed the same way so the two can never
     silently diverge."""
     return f"docs/witnesses/{snake_case(concept)}.{query}.svg"
-
-
-def _write_atomically(destination: Path, content: str) -> None:
-    """Write `content` to `destination` such that any failure partway
-    through -- disk full, process killed, an interrupted syscall -- leaves
-    whatever was already at `destination` completely untouched, never
-    truncated or partially overwritten.
-
-    Writes to a temporary file in the SAME directory as `destination`
-    first (a cross-filesystem temp dir would make the final replace a
-    copy, not a rename, reopening exactly the window this exists to
-    close), flushes and fsyncs it, then atomically replaces the
-    destination with `os.replace` -- POSIX guarantees that call is atomic
-    for a rename within one filesystem, so a reader can only ever observe
-    the old complete file or the new complete file, never a mixture."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, destination)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
 
 
 def generate(workspace: Path, witness_id: str, renderer_name: str) -> dict:
@@ -157,7 +127,7 @@ def generate(workspace: Path, witness_id: str, renderer_name: str) -> dict:
 
     path = output_path_for(result_document["concept"], result_document["query"])
     destination = workspace / path
-    _write_atomically(destination, rendered.svg)
+    write_atomically(destination, rendered.svg)
 
     return {
         "path": path,

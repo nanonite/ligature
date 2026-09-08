@@ -203,17 +203,38 @@ Implemented now, against schemas that actually exist:
             measures only one distinct value, and `coverage_region`
             inconsistent with `fixture_family` workspace-wide (reuses
             validate_witness.py's own check_family_consistency rather
-            than reimplementing it). Both WARN, never a hard Stage-4/CI
-            block -- the gate table's own "block at promotion if
-            unresolved" names a promotion-time enforcement point that
-            does not exist yet for witness specs, so this gate's job is
-            to make the finding impossible to miss: it exits with a
-            THIRD, distinct code, mirroring gate-r1-g16's own
-            EXIT_DECISION_REQUIRED tier, never collapsing into a clean 0
-            or the same exit code a real block uses. An ambiguous
-            witness_id (imported from gate-g19's own collection) still
-            blocks outright -- a structural identity problem, not a
-            degeneracy one.
+            than reimplementing it). Both WARN as this gate's own
+            report: not a hard Stage-4/CI block, since `gate-g20` alone
+            is a fresh recomputation with no promotion attached to it;
+            it exits with a THIRD, distinct code, mirroring
+            gate-r1-g16's own EXIT_DECISION_REQUIRED tier, never
+            collapsing into a clean 0 or the same exit code a real
+            block uses. The SAME findings are promoted from WARN to
+            ERROR at `approve()` time for a witness spec promotion --
+            `specs/_witnesses/*.json` is a recognized artifact type
+            there (chainlink #31's own promotion wiring), so "warn
+            early, block at promotion if unresolved" is one mechanism,
+            not two. An ambiguous witness_id (imported from gate-g19's
+            own collection) still blocks outright here regardless --
+            a structural identity problem, not a degeneracy one.
+  generate-feature-ledger  Stage 4.5's feature ledger generator
+            (plan.md §16.4, chainlink #34): a GENERATED, READ-ONLY
+            projection at ci/results/feature_ledger.json, one entry per
+            DECLARED (witness_required: true) feature. Reuses G18/G19/G20
+            for real (including G19's own live regeneration dispatch)
+            rather than re-deriving their dispositions, so this is a
+            fresh recomputation every run, never a cache of a stale one.
+            The two-column discipline plan.md §16.4 names is the whole
+            reason this exists: `implementation_observed` (a weak
+            liveness fact -- the body executed and produced a stable,
+            non-degenerate value) and `assurance_status` (the contract
+            is established) are never inferred from each other.
+            `assurance_status` is currently always `unsupported` -- see
+            scripts/generate_feature_ledger.py's own module docstring
+            for why no mechanical link between a witnessed query and a
+            pipeline obligation exists yet. Refuses to write a
+            schema-invalid result; atomic write, same guarantee
+            chainlink #28 established for a witness rendering.
   validate-gold-set  G1a/G1b over human gold sets (plan.md §5.2's
             independence argument, chainlink #26): schema, naming, and
             the scope/provenance discipline -- every edge's caller must
@@ -304,6 +325,8 @@ from gate_g19 import gate_workspace as gate_g19_workspace  # noqa: E402
 from gate_g19 import report_findings as report_g19_findings  # noqa: E402
 from gate_g20 import gate_workspace as gate_g20_workspace  # noqa: E402
 from gate_g20 import report_findings as report_g20_findings  # noqa: E402
+from generate_feature_ledger import GenerationError as FeatureLedgerGenerationError  # noqa: E402
+from generate_feature_ledger import write_ledger as write_feature_ledger  # noqa: E402
 from gate_g9 import check_bridges as check_bridges_g9  # noqa: E402
 from gate_g9 import gate_workspace as gate_g9_workspace  # noqa: E402
 from gate_g9 import report_findings as report_g9_findings  # noqa: E402
@@ -1080,6 +1103,28 @@ def cmd_gate_g20(args: argparse.Namespace) -> int:
     return report_g20_findings(findings, discovered, workspace)
 
 
+def cmd_generate_feature_ledger(args: argparse.Namespace) -> int:
+    """Stage 4.5's feature ledger generator (chainlink #34, plan.md
+    §16.4): a GENERATED, READ-ONLY projection at
+    ci/results/feature_ledger.json, one entry per declared
+    (witness_required: true) feature, reusing G18/G19/G20 for real
+    rather than re-deriving their dispositions. Never consulted by
+    satisfies()/assurance/closure computation; refuses to write a
+    schema-invalid result rather than ever producing one."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    try:
+        destination = write_feature_ledger(workspace, descriptor)
+    except FeatureLedgerGenerationError as e:
+        raise PipelineError(str(e))
+    count = len(json.loads(destination.read_text())["features"])
+    if count == 0:
+        print(f"wrote {destination} (0 declared features -- nothing to check)")
+    else:
+        print(f"wrote {destination} ({count} declared feature(s))")
+    return 0
+
+
 def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
     """Stage 8A's R1 + G16 (chainlink #24). Exit codes are three-valued,
     matching plan.md §9.1's own three dispositions: 0 pass, 1 blocked
@@ -1799,7 +1844,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "gate-g19 (Stage 8A/CI witness determinism: regenerate, compare value_hash, never "
         "render_hash, chainlink #30), "
         "gate-g20 (Stage 4.5 degeneracy: must-vary vs constant, fixture-family/coverage_region "
-        "consistency, warn -- block at promotion if unresolved, chainlink #31)"
+        "consistency, warn -- block at promotion if unresolved, chainlink #31), "
+        "generate-feature-ledger (Stage 4.5 generated projection over G18/G19/G20, "
+        "implementation_observed vs assurance_status never merged, chainlink #34)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -2019,6 +2066,12 @@ def main(argv: list[str]) -> int:
         help="Stage 4.5: G20 -- must-vary vs constant, fixture-family consistency, warn (#31)",
     )
     gate_g20_p.set_defaults(func=cmd_gate_g20)
+
+    generate_feature_ledger_p = sub.add_parser(
+        "generate-feature-ledger",
+        help="Stage 4.5: generate ci/results/feature_ledger.json from G18/G19/G20 (#34)",
+    )
+    generate_feature_ledger_p.set_defaults(func=cmd_generate_feature_ledger)
 
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)

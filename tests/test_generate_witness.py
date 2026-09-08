@@ -29,6 +29,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import atomic_write  # noqa: E402
 import generate_witness  # noqa: E402
 from generate_witness import (  # noqa: E402
     EXIT_GENERATION_FAILED,
@@ -204,13 +205,13 @@ class AtomicWriteTest(GenerationTestCase):
         self.assertEqual(len(list(self.svg_dir().iterdir())), 1)
 
     def test_a_failure_during_the_write_leaves_no_stray_temp_file(self):
-        with patch("generate_witness.os.fsync", side_effect=OSError("disk full")):
+        with patch("atomic_write.os.fsync", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
         self.assertEqual(self.tmp_files(), [])
 
     def test_a_failure_during_the_write_does_not_create_a_truncated_destination(self):
-        with patch("generate_witness.os.fsync", side_effect=OSError("disk full")):
+        with patch("atomic_write.os.fsync", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
         self.assertFalse((self.workspace / "docs" / "witnesses" / "task_queue.load_factor.svg").exists())
@@ -219,7 +220,7 @@ class AtomicWriteTest(GenerationTestCase):
         first = generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
         before = (self.workspace / first["path"]).read_bytes()
         self.write_result(load_factor_result([0.9, 0.9, 0.9, 0.9]))
-        with patch("generate_witness.os.fsync", side_effect=OSError("disk full")):
+        with patch("atomic_write.os.fsync", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
         after = (self.workspace / first["path"]).read_bytes()
@@ -232,20 +233,20 @@ class AtomicWriteTest(GenerationTestCase):
         # directly against the low-level helper rather than only
         # inferring it from cleanup behaviour.
         seen_dirs = []
-        real_mkstemp = generate_witness.tempfile.mkstemp
+        real_mkstemp = atomic_write.tempfile.mkstemp
 
         def spy(*args, **kwargs):
             seen_dirs.append(kwargs.get("dir"))
             return real_mkstemp(*args, **kwargs)
 
-        with patch("generate_witness.tempfile.mkstemp", side_effect=spy):
+        with patch("atomic_write.tempfile.mkstemp", side_effect=spy):
             generate(self.workspace, "W-TQ-LOAD-FACTOR", "scalar_field_svg")
         destination = self.workspace / "docs" / "witnesses" / "task_queue.load_factor.svg"
         self.assertEqual(seen_dirs, [destination.parent])
 
 
 class WriteAtomicallyUnitTest(unittest.TestCase):
-    """`_write_atomically` on its own, away from the rest of generation."""
+    """`atomic_write.write_atomically` on its own, away from the rest of generation."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -255,26 +256,26 @@ class WriteAtomicallyUnitTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_content_round_trips(self):
-        generate_witness._write_atomically(self.destination, "<svg>hello</svg>")
+        atomic_write.write_atomically(self.destination, "<svg>hello</svg>")
         self.assertEqual(self.destination.read_text(), "<svg>hello</svg>")
 
     def test_creates_parent_directories(self):
         nested = Path(self._tmp.name) / "a" / "b" / "out.svg"
-        generate_witness._write_atomically(nested, "x")
+        atomic_write.write_atomically(nested, "x")
         self.assertEqual(nested.read_text(), "x")
 
     def test_a_failure_leaves_no_temp_file_and_propagates(self):
-        with patch("generate_witness.os.fsync", side_effect=OSError("boom")):
+        with patch("atomic_write.os.fsync", side_effect=OSError("boom")):
             with self.assertRaises(OSError):
-                generate_witness._write_atomically(self.destination, "content")
+                atomic_write.write_atomically(self.destination, "content")
         self.assertEqual(list(self.destination.parent.glob("*.tmp")), [])
         self.assertFalse(self.destination.exists())
 
     def test_a_failure_does_not_disturb_a_pre_existing_file(self):
         self.destination.write_text("original")
-        with patch("generate_witness.os.fsync", side_effect=OSError("boom")):
+        with patch("atomic_write.os.fsync", side_effect=OSError("boom")):
             with self.assertRaises(OSError):
-                generate_witness._write_atomically(self.destination, "replacement")
+                atomic_write.write_atomically(self.destination, "replacement")
         self.assertEqual(self.destination.read_text(), "original")
 
 

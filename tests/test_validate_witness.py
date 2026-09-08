@@ -445,7 +445,15 @@ class WorkspaceTest(unittest.TestCase):
         (self.crate_root / "specs" / "task_queue.json").write_text(json.dumps(spec))
         self.assertTrue(any("is already used by" in f for f in self.crate_findings()))
 
-    def test_a_family_whose_members_disagree_about_its_region_is_rejected(self):
+    def test_a_family_whose_members_disagree_about_its_region_is_not_this_validators_job(self):
+        # External review, chainlink #31, medium severity: validate_crate()
+        # used to call check_family_consistency() itself, hard-failing
+        # this defect as G1b/error right here at ordinary Stage 4
+        # validation -- before gate_g20.py's own G20 could ever report
+        # the identical defect as its intended Stage 4.5 warning. One
+        # defect must not carry two disagreeing dispositions. G20 is now
+        # the only caller (see tests/test_gate_g20.py's own coverage of
+        # this exact scenario, at WARN severity, workspace-wide).
         second = witness_spec()
         second["witness_id"] = "W-TQ-DEPTH"
         second["query"] = "depth"
@@ -458,7 +466,7 @@ class WorkspaceTest(unittest.TestCase):
         )
         (self.crate_root / "specs" / "task_queue.json").write_text(json.dumps(spec))
         findings = self.crate_findings()
-        self.assertTrue(any("disagree about the region" in f for f in findings))
+        self.assertFalse(any("disagree about the region" in f for f in findings))
 
     def test_a_mislocated_witness_is_found_and_rejected_by_location(self):
         stray = self.crate_root / "not_specs" / "_witnesses"

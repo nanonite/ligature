@@ -388,7 +388,18 @@ def check_family_consistency(specs: list[tuple[Path, dict]]) -> list[Finding]:
     checkable property is internal consistency: two witnesses in one
     family that disagree about the region the family covers cannot both
     be right, and a later degeneracy check would be testing against a
-    declaration that contradicts itself."""
+    declaration that contradicts itself.
+
+    Kept here, alongside check_unique_ids, since it is naturally a
+    witness-collection-level check -- but chainlink #31's gate_g20.py is
+    its only caller now, at WARN severity, workspace-wide. Neither
+    validate_crate() nor validate() call it any more (external review,
+    medium severity: they used to, which hard-failed this exact defect
+    as G1b/error at ordinary Stage 4 validation before G20 could ever
+    report it as its own Stage 4.5 warning -- one defect must not carry
+    two disagreeing dispositions). The "G1b" gate tag on the Finding
+    below is vestigial from that history; gate_g20.py discards it and
+    always re-tags its own copy "G20"."""
     regions: dict[str, tuple[Path, str]] = {}
     findings: list[Finding] = []
     for path, data in specs:
@@ -443,7 +454,17 @@ def validate_crate(
     discover-then-reject shape every validate_<type>.py module uses, and
     for the same reason: anchoring the scan to only the canonical
     directory would stop a mislocated witness from being wrongly trusted
-    AND from ever being looked at."""
+    AND from ever being looked at.
+
+    Does NOT call check_family_consistency (external review, chainlink
+    #31, medium severity: it used to, which hard-failed a same-crate
+    fixture-family/coverage_region disagreement as G1b/error right here
+    at ordinary Stage 4 validation -- before gate_g20.py's own G20 could
+    ever report the identical defect as its intended Stage 4.5 WARNING.
+    One defect, two disagreeing dispositions, is not the two-stage
+    lifecycle the gate table describes. gate_g20.py is this check's only
+    caller now, workspace-wide rather than per-crate, since a
+    fixture_family name carries no crate namespace to scope it by)."""
     canonical_resolved = canonical_dir.resolve()
     validator = load_validator()
     findings: list[Finding] = []
@@ -465,14 +486,15 @@ def validate_crate(
             valid.append((path, json.loads(path.read_text())))
 
     findings.extend(check_unique_ids(valid))
-    findings.extend(check_family_consistency(valid))
     return findings
 
 
 def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]:
     """Standalone CLI entry: an unanchored recursive scan, since this CLI
     has no crate-boundary concept to derive one from (the same position
-    scripts/validate_interaction.py's own standalone CLI is in)."""
+    scripts/validate_interaction.py's own standalone CLI is in). Does
+    NOT call check_family_consistency either -- see validate_crate()'s
+    own docstring; gate_g20.py is its only caller now."""
     validator = load_validator()
     findings: list[Finding] = []
     valid: list[tuple[Path, dict]] = []
@@ -482,7 +504,6 @@ def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]
         if not any(f.severity == "error" for f in file_findings):
             valid.append((path, json.loads(path.read_text())))
     findings.extend(check_unique_ids(valid))
-    findings.extend(check_family_consistency(valid))
     return findings
 
 

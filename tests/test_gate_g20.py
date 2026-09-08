@@ -147,6 +147,26 @@ class MustVaryTest(GateTestCase):
         self.assertEqual(findings, [])
         self.assertEqual(discovered, 1)
 
+    def test_a_stale_result_under_a_different_fixture_is_not_trusted(self):
+        # External review, high severity: an earlier version joined
+        # solely on witness_id, so a stale result left over from an
+        # earlier fixture_id revision -- self-consistent, but never
+        # actually about the CURRENT spec -- could make a currently
+        # constant witness pass simply because the stale result happens
+        # to vary. The identity check must catch this before
+        # value_domain is ever trusted.
+        self.ws.write_concept_spec()
+        self.ws.write_witness()
+        stale = varying_result(fixture_id="FX-SOME-OTHER-FIXTURE")
+        self.ws.write_result(stale)
+        findings, discovered = self.gate()
+        self.assertEqual(discovered, 1)
+        self.assertTrue(
+            any("does not match the current witness spec" in e and "fixture_id" in e
+                for e in self.by_severity(findings, "warn"))
+        )
+        self.assertEqual(self.by_severity(findings, "error"), [])
+
 
 class FixtureFamilyConsistencyTest(GateTestCase):
     def setUp(self):

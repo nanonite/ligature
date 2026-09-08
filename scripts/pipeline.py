@@ -355,9 +355,11 @@ from validate_gold_set import gold_set_dir_for as _gold_set_dir_for  # noqa: E40
 from validate_gold_set import validate_workspace as validate_gold_set_workspace  # noqa: E402
 from validate_witness import count_discovered as _count_witnesses  # noqa: E402
 from validate_witness import count_results as _count_witness_results  # noqa: E402
+from validate_witness import load_validator as load_witness_validator  # noqa: E402
 from validate_witness import validate_crate as validate_witness_crate  # noqa: E402
 from validate_witness import validate_results as validate_witness_results  # noqa: E402
 from validate_witness import witness_dir_for as _witness_dir_for  # noqa: E402
+from gate_g20 import validate_witness_for_approval  # noqa: E402
 from generate_witness import GenerationError  # noqa: E402
 from generate_witness import generate as generate_witness  # noqa: E402
 from validate_conflict_resolution import load_draft_validator as load_conflict_resolution_draft_validator  # noqa: E402
@@ -1296,7 +1298,18 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     through to a `.yaml` path -- despite every schema/docstring in this
     codebase documenting `*.json` as the canonical extension for all three
     artifact types. Reproduced end to end via `approve`. Fixed by refusing
-    any non-.json target up front, before the directory match even runs."""
+    any non-.json target up front, before the directory match even runs.
+
+    A SIXTH review pass (chainlink #31) added witness specs at
+    <crate_dir>/specs/_witnesses/*.json: `specs/_witnesses/` was not a
+    recognized artifact type at all, so a witness could never be
+    promoted through `approve()`, and G20's own "warn now, block at
+    promotion if unresolved" gate-table disposition had nothing on the
+    promotion side to plug into. Unlike every other branch here, this
+    one's validate_fn (gate_g20.validate_witness_for_approval) needs the
+    WHOLE workspace, not just the one document being promoted -- G20's
+    checks are inherently cross-witness the same way G9/G14/G18/G19 are,
+    which none of this dispatcher's other validators have needed before."""
     if target.suffix != ".json":
         raise PipelineError(
             f"target {target} is not a .json file -- this pipeline only "
@@ -1351,13 +1364,27 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
                 _boundary_dir_for(crate, workspace), boundary_specs_search_root
             )
             return lambda path, data: validate_bridge_data(path, data, validator, boundaries_by_id)
+        if resolved_parent == _witness_dir_for(crate, workspace):
+            # chainlink #31: unlike every branch above, this validate_fn
+            # needs the WHOLE workspace, not just this one document --
+            # G20's degeneracy checks (must-vary vs constant, cross-witness
+            # fixture-family consistency) are inherently workspace-scoped,
+            # the same way G9/G14/G18/G19 are and no other approve()-time
+            # validator here has needed to be. workspace/descriptor are
+            # already in scope in this function and simply close over them.
+            validator = load_witness_validator()
+            specs_search_root = _specs_search_root_for(target, workspace, descriptor)
+            return lambda path, data: validate_witness_for_approval(
+                path, data, validator, specs_search_root, workspace, descriptor
+            )
     raise PipelineError(
         f"no validator recognizes target {target} -- this pipeline only "
         "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
         "interactions at <crate_dir>/specs/_interactions/*.json, exemptions "
         "at <crate_dir>/specs/_exemptions/*.json, protocol-debt records at "
         "<crate_dir>/specs/_protocol_debt/*.json, bridges at "
-        "<crate_dir>/specs/_bridges/*.json, and conflict-resolution records "
+        "<crate_dir>/specs/_bridges/*.json, witnesses at "
+        "<crate_dir>/specs/_witnesses/*.json, and conflict-resolution records "
         "at specs/_conflicts/*.json (workspace-level) today. Evidence records at "
         "evidence/*.json (workspace-level) are a valid draft target but are never "
         "approved -- they carry no review block, so approve() cannot promote them. "

@@ -2599,6 +2599,86 @@ class WitnessIntegrationTest(unittest.TestCase):
         self.assertFalse((self.workspace / "docs" / "witnesses").exists())
 
 
+class CmdApproveWitnessIntegrationTest(unittest.TestCase):
+    """approve() wired for witness specs (chainlink #31, external review):
+    specs/_witnesses/ was not a recognized artifact type at all, so a
+    witness could never be promoted through approve(), and G20's own
+    "warn now, block at promotion if unresolved" gate-table disposition
+    had nothing on the promotion side to plug into. Same underlying
+    workspace tests/test_validate_witness.py's WorkspaceTest builds: one
+    concept spec, one already-promoted valid witness (varying result,
+    matching hash), re-approved here as its own draft."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_validate_witness import WorkspaceTest, witness_spec  # noqa: E402
+
+        self._case = WorkspaceTest("run")
+        self._case.setUp()
+        self.workspace = self._case.workspace
+        self._witness_spec = witness_spec
+        descriptor = json.loads(
+            (ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text()
+        )
+        descriptor["crates"] = [
+            {"crate_dir": "crates/scheduler", "contracts_crate": "contracts", "specs_search_root": "crates"}
+        ]
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        self.target = self.workspace / "crates" / "scheduler" / "specs" / "_witnesses" / "task_queue.load_factor.json"
+
+    def tearDown(self):
+        self._case.tearDown()
+
+    def _run(self, *args) -> int:
+        return pipeline.main([
+            "--workspace", str(self.workspace),
+            "--descriptor", str(self.descriptor_path),
+            *args,
+        ])
+
+    def _write_draft(self, spec: dict) -> None:
+        draft = dict(spec)
+        draft.pop("review", None)
+        self.target.with_suffix(".json.draft").write_text(json.dumps(draft))
+
+    def test_a_valid_witness_over_a_varying_result_is_approved(self):
+        self._write_draft(self._witness_spec())
+        rc = self._run("approve", str(self.target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
+        self.assertEqual(rc, 0)
+
+    def test_a_witness_declaring_must_vary_over_a_constant_result_is_refused(self):
+        from witness_result import build_result, encode_grid  # noqa: E402
+
+        constant = build_result(
+            witness_id="W-TQ-LOAD-FACTOR", concept="TaskQueue", query="load_factor",
+            fixture_id="FX-QUEUE-BOTTOM-ROW", seed=0, renderer_actual="scalar_field_svg",
+            result=encode_grid(1, 4, [(0, 0, 0.5), (0, 1, 0.5), (0, 2, 0.5), (0, 3, 0.5)]),
+        )
+        self._case.write_result(constant)
+        self._write_draft(self._witness_spec())
+        rc = self._run("approve", str(self.target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
+        self.assertEqual(rc, 1)
+
+    def test_a_schema_invalid_witness_draft_is_refused_before_g20_even_runs(self):
+        broken = self._witness_spec()
+        del broken["determinism"]
+        self._write_draft(broken)
+        rc = self._run("approve", str(self.target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
+        self.assertEqual(rc, 1)
+
+    def test_a_witness_under_a_typo_directory_is_refused_not_silently_approved(self):
+        typo_dir = self.workspace / "crates" / "scheduler" / "specs" / "_witness"
+        typo_dir.mkdir(parents=True)
+        target = typo_dir / "task_queue.load_factor.json"
+        draft = self._witness_spec()
+        draft.pop("review", None)
+        target.with_suffix(".json.draft").write_text(json.dumps(draft))
+        rc = self._run("approve", str(target), "--reviewer", "alice", "--reviewed-at", "2026-09-08")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+
 class GoldSetIntegrationTest(unittest.TestCase):
     """validate-gold-set and measure-gold-set through pipeline.main()
     (chainlink #26), over the same workspace tests/test_measure_gold_set.py

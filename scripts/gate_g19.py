@@ -206,6 +206,39 @@ def regenerate_witness(
     return document, argv, completed.returncode, ""
 
 
+def identity_mismatches(spec: dict, document: dict) -> list[str]:
+    """Fields of `document` (a canonical result, freshly regenerated OR
+    read from disk) that disagree with what `spec` currently declares:
+    witness_id, concept, query, fixture_id, seed, and renderer_actual.
+
+    Factored out (external review, chainlink #31) so gate_g20.py can
+    apply the identical check to a STORED result before trusting its
+    value_domain for a degeneracy check -- G20 reads
+    load_results_by_witness()'s already-on-disk results rather than
+    regenerating, so nothing about G19's own fresh-dispatch design
+    protects it from a stale result left over from an earlier spec
+    revision (different fixture_id/seed/concept/query) that still
+    happens to validate against itself.
+
+    renderer_actual is included despite being excluded from value_hash
+    by design (§16.1's own "the same numbers from a different renderer
+    are the same fact" rule) -- nothing about a value_hash comparison
+    alone would ever catch a backend or a stale file reporting a
+    different, still schema-valid renderer instead. That is exactly the
+    declared/actual mismatch §16.2 makes a hard error at generation time
+    (chainlink #28's generate_witness.py); this check applies the
+    identical discipline wherever a result is trusted at all."""
+    expected_identity = {
+        "witness_id": spec["witness_id"],
+        "concept": spec["concept"],
+        "query": spec["query"],
+        "fixture_id": spec["fixture"]["fixture_id"],
+        "seed": spec["fixture"]["seed"],
+        "renderer_actual": spec["renderer"],
+    }
+    return sorted(field for field, expected in expected_identity.items() if document.get(field) != expected)
+
+
 def gate_workspace(workspace: Path, descriptor: dict, runner=subprocess.run) -> tuple[list[Finding], int]:
     """G19 proper. Returns (findings, witness specs checked)."""
     findings: list[Finding] = []
@@ -246,28 +279,7 @@ def gate_workspace(workspace: Path, descriptor: dict, runner=subprocess.run) -> 
             )
             continue
 
-        expected_identity = {
-            "witness_id": spec["witness_id"],
-            "concept": spec["concept"],
-            "query": spec["query"],
-            "fixture_id": spec["fixture"]["fixture_id"],
-            "seed": spec["fixture"]["seed"],
-            # renderer_actual too (external review, medium severity):
-            # it is excluded from value_hash by design (§16.1's own
-            # "the same numbers from a different renderer are the same
-            # fact" rule), so nothing about the hash comparison below
-            # would ever catch a backend that silently ignored
-            # --renderer and reported a different, still schema-valid
-            # renderer instead. That is exactly the declared/actual
-            # mismatch §16.2 makes a hard error at generation time
-            # (chainlink #28's generate_witness.py); this fresh
-            # regeneration gets the identical check rather than a gap
-            # where the excluded-from-hash field goes unchecked.
-            "renderer_actual": spec["renderer"],
-        }
-        mismatched = [
-            field for field, expected in expected_identity.items() if document.get(field) != expected
-        ]
+        mismatched = identity_mismatches(spec, document)
         if mismatched:
             findings.append(
                 Finding(

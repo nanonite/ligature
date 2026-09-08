@@ -11,45 +11,60 @@ spec carries its own `determinism.value_hash` claim, and every one of
 them is checked, the same way G9 checks every promoted bridge rather
 than only the ones a manifest happens to reference.
 
-What "regenerate" means here
------------------------------
-There is no generic pluggable "witness producer backend" in the project
-descriptor (unlike `verifier_backends` for chainlink #47) -- a
-witness's value comes from evaluating a real query on a real fixture,
-which this repository cannot do generically the way `check-bridges`
-dispatches to a configured verifier command. Regeneration is therefore
-the same split chainlink #47 already drew between `check_bridges()`
-(generates) and `gate_workspace()` (checks): something upstream of this
-gate -- a real project's CI step, or in this repository's own tests,
-the stand-in producer (`tests/fixtures/witnesses/stand_in_producer.py`)
--- re-runs the fixture and writes a fresh canonical result to
-`ci/results/witnesses/<witness_id>.json`. This gate is purely the
-"compare" half. A witness spec with no corresponding result on disk has
-nothing to check its determinism claim against, which is exactly as
-blocking as a stale one: `byte-identical-across-runs` is not
-established by a run that never happened.
+A first version of this gate compared a witness spec's declared
+value_hash against whatever canonical result already happened to sit at
+ci/results/witnesses/<witness_id>.json, trusting that "regeneration"
+had occurred somewhere upstream (external review, high severity, twice
+over):
+
+  * nothing enforced that the file was ever actually refreshed -- if a
+    producer's real behavior drifted but CI never re-ran it, the stale
+    file still matched the promoted hash and the gate passed. An
+    unenforced upstream step establishes nothing.
+  * the join was on witness_id alone. A spec's fixture_id, seed,
+    concept or query could change while its declared value_hash stayed
+    untouched, and a stale result with the OLD identity would still be
+    accepted as "the" result for the new spec.
+
+Fixed by making regeneration unconditional and internal to this gate,
+the way `verifier_backends` dispatch is external-but-mandatory for G9:
+`witness_backend` (project descriptor, chainlink #30) names ONE
+pluggable command. `gate_workspace()` invokes it FRESH, every run, for
+every genuinely valid witness spec, passing that spec's OWN current
+`--witness-id`/`--concept`/`--query`/`--fixture-id`/`--seed`/`--renderer`
+as arguments -- so a regenerated result's identity is constructed FROM
+the current spec and cannot silently drift from it. With no backend
+configured, nothing was actually re-evaluated this run, and the gate
+blocks rather than falling back to trusting a file on disk. As defense
+in depth against a misbehaving backend that ignores its own arguments,
+the regenerated document's own identity fields are still compared
+against the spec before its hash is trusted at all.
+
+This gate deliberately does not persist the regenerated result to
+ci/results/witnesses/ -- gates in this codebase check, they do not
+mutate normative or generated artifacts as a side effect (gate_g9.py's
+own gate_workspace() draws the identical line against check_bridges()).
+Keeping that artifact current for chainlink #28's renderer remains a
+separate workflow.
 
 Reusing the existing hashing and validation contracts
 --------------------------------------------------------
-`validate_witness.py`'s own `load_results_by_witness` already applies
-the "genuinely valid, not just present" bar to every canonical result:
-its own G1a/G1b recomputes `value_hash` from the raw hashed fields
-(witness_id, concept, query, fixture_id, seed, result) via
-`witness_result.py`'s `compute_value_hash`, and rejects the file
-outright on disagreement. By the time a result comes out of
-`load_results_by_witness`, its own `value_hash` field is therefore
-already guaranteed to equal that recomputation -- this gate does not
-re-hash anything itself; it reads that already-validated field and
-compares it against the witness spec's own normative
+The regenerated document is validated with `validate_witness.py`'s own
+`validate_result_data` -- the same G1a/G1b bar `load_results_by_witness`
+applies to a stored result, including the value_hash/value_domain
+recomputation via `witness_result.py`'s `compute_value_hash`. This gate
+never re-implements that hashing; it only reads the already-validated
+`value_hash` field off a document that has just been proven internally
+self-consistent, and compares it against the witness spec's normative
 `determinism.value_hash`. `render_hash` is never read anywhere in this
-module -- not compared, not touched -- which a test proves directly
-(a changed `render_hash` alone must never block) rather than by
-absence.
+module -- not compared, not touched -- which a test proves directly (a
+changed `render_hash` alone must never block) rather than by absence.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,9 +72,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scan_summary import pass_line  # noqa: E402
 from validate_witness import find_witness_files  # noqa: E402
-from validate_witness import load_results_by_witness  # noqa: E402
+from validate_witness import load_result_validator  # noqa: E402
 from validate_witness import load_validator as load_witness_validator  # noqa: E402
 from validate_witness import validate_data as validate_witness_data  # noqa: E402
+from validate_witness import validate_result_data  # noqa: E402
 from validate_witness import witness_dir_for  # noqa: E402
 
 EXIT_OK = 0
@@ -82,13 +98,18 @@ def collect_valid_witness_specs(descriptor: dict, workspace: Path) -> tuple[dict
     """Every genuinely valid witness spec in the workspace, keyed by
     witness_id -- validate_witness.py's own G1a/G1b/G2 bar, crate by
     crate the same way its CLI does (a witness's canonical directory
-    and its query cross-reference are both crate-scoped). A witness_id
-    found valid under more than one crate is ambiguous -- excluded, not
-    first-wins, the same "ambiguous, never first-wins" choice
-    gate_g18.py already makes for a (concept, query) pair and gate_g14.py
-    makes for a cross-crate bridge_id collision."""
+    and its query cross-reference are both crate-scoped).
+
+    A witness_id found valid in more than one FILE is ambiguous --
+    excluded, not first-wins, whether the duplicates sit in the same
+    crate or different ones (external review, medium severity: an
+    earlier version only compared the set of owning CRATE NAMES, so two
+    valid files in the SAME crate both silently fell through to
+    whichever sorted first). The same "ambiguous, never first-wins"
+    choice gate_g18.py already makes for a (concept, query) pair and
+    gate_g14.py makes for a cross-crate bridge_id collision."""
     validator = load_witness_validator()
-    by_id: dict[str, list[tuple[str, dict]]] = {}
+    by_id: dict[str, list[dict]] = {}
     for crate in descriptor["crates"]:
         crate_root = (workspace / crate["crate_dir"]).resolve()
         if not crate_root.is_dir():
@@ -107,54 +128,132 @@ def collect_valid_witness_specs(descriptor: dict, workspace: Path) -> tuple[dict
             file_findings = validate_witness_data(path, data, validator, specs_search_root)
             if any(f.severity == "error" for f in file_findings):
                 continue
-            by_id.setdefault(data["witness_id"], []).append((crate["crate_dir"], data))
+            by_id.setdefault(data["witness_id"], []).append(data)
 
     specs: dict[str, dict] = {}
     findings: list[Finding] = []
     for witness_id, entries in sorted(by_id.items()):
-        crates = sorted({crate_dir for crate_dir, _ in entries})
-        if len(crates) > 1:
+        if len(entries) > 1:
             findings.append(
                 Finding(
                     "G19", witness_id,
-                    "a genuinely valid witness spec for this witness_id exists under more than one "
-                    f"crate ({', '.join(crates)}) -- which one is authoritative cannot be determined",
+                    f"{len(entries)} genuinely valid witness specs declare this witness_id -- which "
+                    "one is authoritative cannot be determined",
                 )
             )
             continue
-        specs[witness_id] = entries[0][1]
+        specs[witness_id] = entries[0]
     return specs, findings
 
 
-def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[Finding], int]:
+def regenerate_witness(
+    spec: dict, backend: dict, runner=subprocess.run
+) -> tuple[dict | None, list[str], int, str]:
+    """Invoke the configured witness_backend command fresh, passing the
+    identifying fields FROM THE CURRENT SPEC as CLI arguments -- so a
+    freshly regenerated result's identity is constructed from those
+    exact values rather than read back from some other, possibly stale,
+    source. Returns (document, argv, exit_code, error); document is
+    None for every failure mode, the same shape gate_g9.py's dispatch()
+    uses for the identical reason: a producer that failed to run has
+    not established anything, and treating that as a value would turn
+    an infrastructure problem into a determinism claim."""
+    argv = backend["command"].split() + [
+        "--witness-id", spec["witness_id"],
+        "--concept", spec["concept"],
+        "--query", spec["query"],
+        "--fixture-id", spec["fixture"]["fixture_id"],
+        "--seed", str(spec["fixture"]["seed"]),
+        "--renderer", spec["renderer"],
+    ]
+    try:
+        completed = runner(argv, capture_output=True, text=True)
+    except OSError as e:
+        return None, argv, -1, f"could not invoke {argv[0]!r}: {e}"
+    if completed.returncode != 0:
+        return None, argv, completed.returncode, (
+            f"exited {completed.returncode}: {(completed.stderr or '').strip()[:400]}"
+        )
+    try:
+        document = json.loads(completed.stdout)
+    except json.JSONDecodeError as e:
+        return None, argv, completed.returncode, f"output was not JSON: {e}"
+    if not isinstance(document, dict):
+        return None, argv, completed.returncode, "output was not a JSON object"
+    return document, argv, completed.returncode, ""
+
+
+def gate_workspace(workspace: Path, descriptor: dict, runner=subprocess.run) -> tuple[list[Finding], int]:
     """G19 proper. Returns (findings, witness specs checked)."""
     findings: list[Finding] = []
 
     specs, spec_findings = collect_valid_witness_specs(descriptor, workspace)
     findings.extend(spec_findings)
-    results = load_results_by_witness(workspace)
+    backend = descriptor.get("witness_backend")
+    result_validator = load_result_validator()
 
     for witness_id, spec in sorted(specs.items()):
-        result = results.get(witness_id)
-        if result is None:
+        if backend is None:
             findings.append(
                 Finding(
                     "G19", witness_id,
-                    "no genuinely valid canonical result at ci/results/witnesses/ to regenerate and "
-                    "check the determinism claim against -- byte-identical-across-runs is not "
-                    "established by a run that never happened",
+                    "no witness_backend configured in the project descriptor -- a determinism claim "
+                    "cannot be verified without an actual regeneration this run, so this gate cannot "
+                    "record a pass for a query that was never re-evaluated",
                 )
             )
             continue
-        declared = spec["determinism"]["value_hash"]
-        regenerated = result["value_hash"]
-        if declared != regenerated:
+
+        document, _, _, error = regenerate_witness(spec, backend, runner)
+        if document is None:
+            findings.append(
+                Finding("G19", witness_id, f"witness_backend failed to regenerate this witness: {error}")
+            )
+            continue
+
+        result_findings = validate_result_data(Path(f"{witness_id}.json"), document, result_validator)
+        result_errors = [f for f in result_findings if f.severity == "error"]
+        if result_errors:
             findings.append(
                 Finding(
                     "G19", witness_id,
-                    f"determinism.value_hash {declared} does not match the regenerated result's "
-                    f"value_hash {regenerated} -- the declared byte-identical-across-runs claim does "
-                    "not hold; render_hash is never part of this comparison",
+                    "the regenerated result is not genuinely valid: "
+                    + "; ".join(f.reason for f in result_errors),
+                )
+            )
+            continue
+
+        expected_identity = {
+            "witness_id": spec["witness_id"],
+            "concept": spec["concept"],
+            "query": spec["query"],
+            "fixture_id": spec["fixture"]["fixture_id"],
+            "seed": spec["fixture"]["seed"],
+        }
+        mismatched = [
+            field for field, expected in expected_identity.items() if document.get(field) != expected
+        ]
+        if mismatched:
+            findings.append(
+                Finding(
+                    "G19", witness_id,
+                    f"the regenerated result's {', '.join(sorted(mismatched))} does not match the "
+                    "current witness spec -- witness_backend ignored (or was passed) arguments other "
+                    "than what this spec currently declares, so its value_hash cannot be trusted as "
+                    "this witness's determinism check",
+                )
+            )
+            continue
+
+        declared = spec["determinism"]["value_hash"]
+        regenerated_hash = document["value_hash"]
+        if declared != regenerated_hash:
+            findings.append(
+                Finding(
+                    "G19", witness_id,
+                    f"determinism.value_hash {declared} does not match the regenerated value_hash "
+                    f"{regenerated_hash} -- the declared byte-identical-across-runs claim does not "
+                    "hold; render_hash is never part of this comparison",
                 )
             )
 

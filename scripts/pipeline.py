@@ -180,19 +180,23 @@ Implemented now, against schemas that actually exist:
             rather than resolved from whichever sorted first.
   gate-g19  Stage 8A/CI's witness determinism gate (plan.md §16.2,
             chainlink #30): every genuinely valid witness spec's
-            declared `determinism.value_hash` must match its current
-            canonical result's `value_hash` at ci/results/witnesses/ --
-            "regenerated" in the sense that something upstream of this
-            gate re-ran the fixture producer, the same split chainlink
-            #47 draws between check-bridges (generates) and gate-g9
-            (checks). `render_hash` is never read here: a determinism
-            claim is about the measured VALUE, not the rendering, and a
-            changed `render_hash` alone must never block. Reuses
-            validate_witness.py's own G1a/G1b/G2 bar and its
-            `load_results_by_witness` (which already recomputes and
-            rejects a self-inconsistent result) rather than re-hashing
-            anything. A witness spec with no corresponding result
-            blocks: a run that never happened establishes nothing.
+            declared `determinism.value_hash` must match a FRESH
+            regeneration's `value_hash` -- regeneration is unconditional
+            and internal to this gate, dispatched to the project
+            descriptor's `witness_backend` command every run, passing
+            that spec's own current witness_id/concept/query/fixture_id
+            /seed/renderer as arguments so a regenerated result's
+            identity is constructed from the current spec and checked
+            against it before its hash is ever trusted. With no backend
+            configured, nothing was actually re-evaluated this run and
+            the gate blocks -- an earlier version instead trusted
+            whatever canonical result already sat on disk, which an
+            external review found let a stale file outlive a producer's
+            real behavior change and pass regardless. `render_hash` is
+            never read here: a determinism claim is about the measured
+            VALUE, not the rendering, and a changed `render_hash` alone
+            must never block. Reuses validate_witness.py's own G1a/G1b
+            result validation rather than re-hashing anything.
   validate-gold-set  G1a/G1b over human gold sets (plan.md §5.2's
             independence argument, chainlink #26): schema, naming, and
             the scope/provenance discipline -- every edge's caller must
@@ -1032,10 +1036,10 @@ def cmd_gate_g18(args: argparse.Namespace) -> int:
 
 
 def cmd_gate_g19(args: argparse.Namespace) -> int:
-    """Stage 8A/CI's G19 (chainlink #30): regenerate and compare each
-    genuinely valid witness spec's declared determinism.value_hash
-    against its current canonical result -- never render_hash
-    (plan.md §16.2)."""
+    """Stage 8A/CI's G19 (chainlink #30): dispatch the descriptor's
+    witness_backend fresh for every genuinely valid witness spec and
+    compare the regenerated value_hash against determinism.value_hash
+    -- never render_hash (plan.md §16.2)."""
     descriptor = load_project_descriptor(args.descriptor)
     workspace = _require_workspace_root_exists(args.workspace)
     findings, discovered = gate_g19_workspace(workspace, descriptor)

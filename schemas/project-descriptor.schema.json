@@ -184,6 +184,21 @@
         }
       }
     },
+    "witness_backend": {
+      "type": "object",
+      "description": "plan.md §16.2 / chainlink #30 -- pluggable witness producer dispatch, one command, exactly as verifier_backends is pluggable dispatch for #47. `pipeline.py gate-g19` invokes this command fresh for every genuinely valid witness spec, appending --witness-id, --concept, --query, --fixture-id, --seed and --renderer taken from that spec's OWN current fields -- so a regenerated result's identity cannot silently disagree with what the spec currently declares, it was constructed from those exact values. The command must print one JSON canonical result object on stdout, matching docs/witness-result-schema.json (the same contract tests/fixtures/witnesses/stand_in_producer.py already implements). Optional and deliberately absent by default: with no backend configured, G19 cannot verify a determinism claim against an actual run and blocks -- a query that was never re-evaluated must never produce a pass.",
+      "additionalProperties": false,
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Invocation, split on whitespace; --witness-id/--concept/--query/--fixture-id/--seed/--renderer are appended."
+        }
+      }
+    },
     "compatibility_policy": {
       "type": "object",
       "required": [

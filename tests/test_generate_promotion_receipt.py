@@ -20,6 +20,7 @@ from generate_promotion_receipt import (  # noqa: E402
     required_witness_paths,
 )
 from review_checkpoint import ApprovalRefused  # noqa: E402
+from validate_promotion_receipt import RequiredWitnessError  # noqa: E402
 from validate_promotion_receipt import load_validator, validate_file  # noqa: E402
 from validate_witness import witness_promotion_digest  # noqa: E402
 
@@ -915,6 +916,73 @@ class WitnessPromotionIntegrityTest(unittest.TestCase):
         # silently swept in either.
         target_path = self._accept()
         self.assertTrue(target_path.exists())
+
+    def test_a_concept_spec_with_no_cluster_field_fails_closed(self):
+        """External review, high severity: owning_cluster_for()'s own
+        'unknown' fallback for a missing cluster field would silently
+        exclude a declared feature from every cluster's required set --
+        removing cluster, then removing the witness from the accepted
+        set, used to yield zero findings. This pipeline never runs
+        concept-to-code's own JSON Schema validator against a concept
+        spec, so a missing `cluster` is a real, reachable state."""
+        concept = json.loads((self.workspace / TASK_QUEUE_CONCEPT_PATH).read_text())
+        del concept["cluster"]
+        _write_json(self.workspace, TASK_QUEUE_CONCEPT_PATH, concept)
+
+        with self.assertRaises(RequiredWitnessError):
+            required_witness_paths(DESCRIPTOR, self.workspace, "scheduling")
+
+        # The full attack: cluster removed, THEN the witness omitted --
+        # must still refuse, not silently produce a receipt.
+        with self.assertRaises(PromotionReceiptError):
+            self._accept(artifact_paths=self.artifact_paths[:-1])
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_a_concept_spec_that_becomes_unreadable_after_declaration_fails_closed(self):
+        """Defense in depth for the same fail-closed rule. A concept
+        spec that is invalid JSON (or unreadable) OUTRIGHT is already
+        excluded at collect_declared_features()'s own discovery step --
+        gate_g18.py's own "genuinely valid, not just present" bar --
+        so it never reaches required_witness_paths()'s own cluster
+        loop at all; this reproduces the only way that loop's own
+        read actually can fail: a race between discovery's read and
+        this function's own second one."""
+        from unittest.mock import patch
+        concept_path = str((self.workspace / TASK_QUEUE_CONCEPT_PATH).resolve())
+        real_read_text = Path.read_text
+        calls = {"count": 0}
+
+        def flaky_read_text(path_self, *args, **kwargs):
+            if str(path_self) == concept_path:
+                calls["count"] += 1
+                if calls["count"] > 1:
+                    raise OSError("simulated read failure on second read")
+            return real_read_text(path_self, *args, **kwargs)
+
+        with patch.object(Path, "read_text", flaky_read_text):
+            with self.assertRaises(RequiredWitnessError):
+                required_witness_paths(DESCRIPTOR, self.workspace, "scheduling")
+
+    def test_a_symlinked_generated_svg_path_is_still_refused(self):
+        """External review, medium severity: classifying a generated
+        review projection by its RESOLVED identity alone let a symlink
+        planted at the canonical docs/witnesses/*.svg location, but
+        pointing outside it, bypass refusal entirely -- the resolved
+        target's own parent directory is not docs/witnesses, so the
+        old resolved-only check missed it, accepted it as an ordinary
+        byte-hashed artifact, and its later target change then revoked
+        an unrelated promotion."""
+        (self.workspace / "docs" / "witnesses").mkdir(parents=True)
+        ordinary = self.workspace / "ordinary_file.txt"
+        ordinary.write_text("not a witness rendering")
+        decoy = self.workspace / "docs" / "witnesses" / "task_queue.load_factor.svg"
+        decoy.symlink_to(ordinary)
+
+        with self.assertRaises(PromotionReceiptError) as caught:
+            compute_artifact_manifest(
+                self.workspace, ["docs/witnesses/task_queue.load_factor.svg"], DESCRIPTOR
+            )
+        self.assertIn("review projection", str(caught.exception))
 
     def test_witness_schema_version_is_derived_only_from_a_genuinely_valid_canonical_witness(self):
         stray = witness_spec()

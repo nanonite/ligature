@@ -68,6 +68,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -77,7 +78,6 @@ from gate_g18 import collect_declared_features  # noqa: E402
 from gate_g18 import collect_valid_witnesses  # noqa: E402
 from gate_g19 import collect_valid_witness_entries  # noqa: E402
 from generate_feature_ledger import LEDGER_RELATIVE_PATH  # noqa: E402
-from generate_feature_ledger import owning_cluster_for  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -272,7 +272,24 @@ def _witness_svg_dir(workspace_root: Path) -> Path:
     return (workspace_root / "docs" / "witnesses").resolve()
 
 
-def is_generated_review_projection(workspace_root: Path, resolved: Path) -> bool:
+def _looks_like_witness_svg_or_ledger_path(entry_path: str) -> bool:
+    """Classification by the manifest's own STATED path, never
+    filesystem-resolved -- a symlink planted AT the canonical
+    generated-projection location (docs/witnesses/*.svg, or the exact
+    feature-ledger path) but pointing OUTSIDE it must not be able to
+    escape refusal just because its resolved target sits elsewhere.
+    Purely lexical: `entry_path` is already guaranteed workspace-
+    relative with no ".."/absolute segments by the syntactic checks
+    that run before this one (in both callers), so a plain
+    PurePosixPath split is meaningful and safe here without touching
+    the filesystem at all."""
+    parts = PurePosixPath(entry_path).parts
+    if len(parts) == 3 and parts[0] == "docs" and parts[1] == "witnesses" and parts[2].endswith(".svg"):
+        return True
+    return parts == LEDGER_RELATIVE_PATH
+
+
+def is_generated_review_projection(workspace_root: Path, entry_path: str, resolved: Path) -> bool:
     """plan.md §16.6: generated witness SVGs, the contact sheet, and
     the feature ledger (ci/results/feature_ledger.json,
     generate_feature_ledger.LEDGER_RELATIVE_PATH) are review
@@ -283,7 +300,22 @@ def is_generated_review_projection(workspace_root: Path, resolved: Path) -> bool
     listing one, so including the contact sheet in artifact_manifest
     silently made promotion acceptance gate on a picture regenerating,
     contradicting this section's own "review projections, never
-    promotion inputs" boundary."""
+    promotion inputs" boundary.
+
+    A second review pass, medium severity: classifying by RESOLVED
+    identity alone let a symlink planted at the canonical
+    generated-projection location (e.g. a manifest entry literally
+    named docs/witnesses/task_queue.load_factor.svg) but pointing
+    OUTSIDE it bypass this refusal entirely -- the resolved target's
+    own parent directory is not docs/witnesses, so the resolved-only
+    check missed it, the artifact was accepted and byte-hashed as
+    ordinary, and changing the symlink's target then revoked an
+    unrelated promotion. Classification now also checks the
+    manifest's own stated path
+    (_looks_like_witness_svg_or_ledger_path, purely lexical) --
+    either signal alone is sufficient to refuse."""
+    if _looks_like_witness_svg_or_ledger_path(entry_path):
+        return True
     if resolved.parent == _witness_svg_dir(workspace_root) and resolved.suffix == ".svg":
         return True
     if resolved == (workspace_root / Path(*LEDGER_RELATIVE_PATH)).resolve():
@@ -310,13 +342,24 @@ def required_witness_paths(descriptor: dict, workspace_root: Path, cluster: str)
     Scoped to `cluster` (external review, medium severity: an earlier
     version was workspace-wide, requiring witnesses belonging to
     unrelated clusters -- a concept spec's top-level `cluster` field is
-    required by vendor/concept-to-code's own schema and already read
-    the identical way by generate_feature_ledger.owning_cluster_for(),
-    reused here rather than re-derived). Only a declared feature whose
-    OWNING CONCEPT SPEC's own `cluster` equals `cluster` is required;
-    a feature declared in a different cluster imposes no requirement on
-    this promotion, and `collect_valid_witnesses`'s own ambiguity check
-    is scoped to the cluster-filtered key set for the same reason.
+    required by vendor/concept-to-code's own schema). Only a declared
+    feature whose OWNING CONCEPT SPEC's own `cluster` equals `cluster`
+    is required; a feature declared in a different cluster imposes no
+    requirement on this promotion, and `collect_valid_witnesses`'s own
+    ambiguity check is scoped to the cluster-filtered key set for the
+    same reason.
+
+    Cluster attribution fails closed, deliberately NOT reusing
+    generate_feature_ledger.owning_cluster_for() (a second review pass,
+    high severity): that function's own "unknown" fallback for a
+    missing `cluster` field is the honest, correct answer for a
+    DISPLAY-only reader with nothing to gate on it, but the wrong
+    answer here -- an unreadable concept spec, or one missing `cluster`
+    entirely, would otherwise silently exclude its own declared feature
+    from every cluster's required set (this pipeline never runs
+    concept-to-code's own JSON Schema validator against a concept spec,
+    so this is a real, reachable state, not a theoretical one).
+    RequiredWitnessError is raised outright instead.
 
     Built by iterating the cluster-filtered DECLARED set, never
     `witnesses` itself -- `collect_valid_witnesses` returns every
@@ -326,11 +369,12 @@ def required_witness_paths(descriptor: dict, workspace_root: Path, cluster: str)
     queries too.
 
     Raises RequiredWitnessError for an ambiguous declaration, an
-    ambiguously resolved witness, or a declared feature (within this
-    cluster) with no genuinely valid witness at all -- a promotion
-    cannot represent a feature it cannot even locate, and every one of
-    those is exactly the "applicable witness spec is missing / invalid
-    / ambiguous" fail-closed condition plan.md §16.5 requires."""
+    unreadable or cluster-less concept spec, an ambiguously resolved
+    witness, or a declared feature (within this cluster) with no
+    genuinely valid witness at all -- a promotion cannot represent a
+    feature it cannot even locate, and every one of those is exactly
+    the "applicable witness spec is missing / invalid / ambiguous"
+    fail-closed condition plan.md §16.5 requires."""
     declared, declare_findings = collect_declared_features(descriptor, workspace_root)
     ambiguous_declarations = [f for f in declare_findings if f.severity == "error"]
     if ambiguous_declarations:
@@ -343,9 +387,38 @@ def required_witness_paths(descriptor: dict, workspace_root: Path, cluster: str)
     for key, spec_path in declared.items():
         try:
             concept_data = json.loads(spec_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if owning_cluster_for(concept_data) == cluster:
+        except (OSError, json.JSONDecodeError) as e:
+            # External review, high severity: silently `continue`-ing
+            # past an unreadable concept spec here excluded its own
+            # declared feature from EVERY cluster's required set --
+            # exactly as unsafe as owning_cluster_for()'s own honest
+            # "unknown" fallback below, since either one lets a feature
+            # quietly stop being required for any promotion at all.
+            # Cluster attribution for a witness_required feature must
+            # fail closed, not be skipped.
+            raise RequiredWitnessError(
+                f"declared (witness_required: true) feature {key[0]}.{key[1]}'s own concept spec "
+                f"{spec_path} could not be read to determine its owning cluster: {e}"
+            )
+        declared_cluster = concept_data.get("cluster")
+        if not isinstance(declared_cluster, str) or not declared_cluster:
+            # owning_cluster_for()'s own "unknown" fallback is the
+            # right, honest answer for a DISPLAY-only reader
+            # (generate_feature_ledger.py) that has nothing to gate on
+            # it -- it is the wrong answer here, where "unknown" would
+            # silently exclude the feature from this (and every other)
+            # promotion's required witness set. This pipeline does not
+            # run concept-to-code's own JSON Schema validator against a
+            # concept spec (see docs/concept-to-code-witness-required-schema.json's
+            # own note), so a missing `cluster` field is a real,
+            # reachable state, not a theoretical one.
+            raise RequiredWitnessError(
+                f"declared (witness_required: true) feature {key[0]}.{key[1]}'s own concept spec "
+                f"{spec_path} does not declare a `cluster` -- cluster attribution cannot be skipped "
+                "or default to 'unknown', since either would silently exclude the feature from every "
+                "promotion's required witness set"
+            )
+        if declared_cluster == cluster:
             cluster_declared[key] = spec_path
 
     witnesses, witness_findings = collect_valid_witnesses(descriptor, workspace_root, set(cluster_declared))
@@ -482,7 +555,7 @@ def check_artifact_manifest(
             )
             continue
 
-        if is_generated_review_projection(workspace_root, resolved):
+        if is_generated_review_projection(workspace_root, entry_path, resolved):
             findings.append(
                 Finding(
                     "7.1", path,

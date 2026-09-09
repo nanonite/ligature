@@ -337,6 +337,56 @@ class WitnessArtifactManifestTest(unittest.TestCase):
             [str(f) for f in findings],
         )
 
+    def test_a_concept_spec_with_no_cluster_field_fails_closed(self):
+        """External review, high severity: owning_cluster_for()'s own
+        'unknown' fallback for a missing cluster field would silently
+        exclude a declared feature from every cluster's required set --
+        removing cluster from the concept spec, then removing the
+        witness from artifact_manifest, used to yield zero findings
+        even with the descriptor supplied."""
+        specs_dir = self.workspace / "crates" / "scheduler" / "specs"
+        concept = json.loads((specs_dir / "task_queue.json").read_text())
+        del concept["cluster"]
+        (specs_dir / "task_queue.json").write_text(json.dumps(concept))
+
+        (self.workspace / "docs").mkdir()
+        content = b"reliance policy\n"
+        (self.workspace / "docs" / "reliance-policy.md").write_bytes(content)
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = [
+            {"path": "docs/reliance-policy.md", "hash": "sha256:" + hashlib.sha256(content).hexdigest()},
+        ]
+        findings = self._validate(receipt)
+        self.assertTrue(
+            any(f.gate == "7.1" and "cannot determine the required witness set" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_a_symlinked_generated_svg_manifest_entry_is_still_refused(self):
+        """External review, medium severity: classifying a generated
+        review projection by its RESOLVED identity alone let a symlink
+        planted at the canonical docs/witnesses/*.svg location, but
+        pointing outside it, bypass refusal entirely."""
+        (self.workspace / "docs" / "witnesses").mkdir(parents=True)
+        ordinary = self.workspace / "ordinary_file.txt"
+        ordinary_bytes = b"not a witness rendering"
+        ordinary.write_bytes(ordinary_bytes)
+        decoy = self.workspace / "docs" / "witnesses" / "decoy.svg"
+        decoy.symlink_to(ordinary)
+
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = list(self.receipt["artifact_manifest"]) + [
+            {
+                "path": "docs/witnesses/decoy.svg",
+                "hash": "sha256:" + hashlib.sha256(ordinary_bytes).hexdigest(),
+            },
+        ]
+        findings = self._validate(receipt)
+        self.assertTrue(
+            any(f.gate == "7.1" and "review projection" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
     def test_a_plain_byte_hash_of_the_witness_file_is_rejected(self):
         """Proves the comparison is genuinely against the promotion
         digest, not silently falling back to a byte hash for a witness

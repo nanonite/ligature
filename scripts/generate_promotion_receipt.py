@@ -258,7 +258,7 @@ def compute_artifact_manifest(
         seen_resolved[resolved] = entry_path
         if not resolved.is_file():
             raise PromotionReceiptError(f"artifact path {entry_path!r} does not exist")
-        if is_generated_review_projection(workspace_root, resolved):
+        if is_generated_review_projection(workspace_root, entry_path, resolved):
             raise PromotionReceiptError(
                 f"artifact path {entry_path!r} is a generated review projection (a witness rendering, "
                 "the contact sheet, or the feature ledger) -- plan.md §16.6: these are review "

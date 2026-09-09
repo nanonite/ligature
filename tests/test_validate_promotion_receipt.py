@@ -247,6 +247,8 @@ class WitnessArtifactManifestTest(unittest.TestCase):
         specs_dir = self.workspace / "crates" / "scheduler" / "specs"
         (specs_dir / "_witnesses").mkdir(parents=True)
         concept = concept_spec()
+        concept["cluster"] = "scheduling"
+        concept["queries"][0]["witness_required"] = True
         (specs_dir / "task_queue.json").write_text(json.dumps(concept))
         self.spec = witness_spec()
         (specs_dir / "_witnesses" / "task_queue.load_factor.json").write_text(json.dumps(self.spec))
@@ -274,6 +276,66 @@ class WitnessArtifactManifestTest(unittest.TestCase):
     def test_the_correct_promotion_digest_passes(self):
         findings = self._validate()
         self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_omitting_the_required_witness_entry_is_rejected(self):
+        """External review, high severity: the completeness calculation
+        (required_witness_paths) must be shared with the validator, not
+        enforced only during accept_promotion() -- removing the
+        required witness entry from an otherwise valid receipt used to
+        produce zero findings, even with the descriptor supplied."""
+        (self.workspace / "docs").mkdir()
+        content = b"reliance policy\n"
+        (self.workspace / "docs" / "reliance-policy.md").write_bytes(content)
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = [
+            {"path": "docs/reliance-policy.md", "hash": "sha256:" + hashlib.sha256(content).hexdigest()},
+        ]
+        findings = self._validate(receipt)
+        self.assertTrue(
+            any(
+                f.gate == "7.1" and "not included in this promotion's artifact_manifest" in f.reason
+                and WITNESS_RELATIVE_PATH in f.reason
+                for f in findings
+            ),
+            [str(f) for f in findings],
+        )
+
+    def test_completeness_is_skipped_without_a_descriptor(self):
+        """The same optionality every other witness-aware check in this
+        module already has: with no descriptor at all, the required set
+        cannot be computed, so a receipt omitting the witness entirely
+        is not flagged for completeness (though a witness-shaped entry
+        that IS present would still fail closed, per
+        _witness_promotion_hash_if_applicable's own behavior)."""
+        (self.workspace / "docs").mkdir()
+        content = b"reliance policy\n"
+        (self.workspace / "docs" / "reliance-policy.md").write_bytes(content)
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = [
+            {"path": "docs/reliance-policy.md", "hash": "sha256:" + hashlib.sha256(content).hexdigest()},
+        ]
+        findings = self._validate(receipt, descriptor=None)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_completeness_is_scoped_to_the_receipts_own_cluster(self):
+        """A witness declared in a different cluster than the receipt's
+        own must not be required -- required_witness_paths() itself is
+        cluster-scoped, and check_required_witnesses() passes the
+        receipt's own `cluster` field through, not a hardcoded one."""
+        (self.workspace / "docs").mkdir()
+        content = b"reliance policy\n"
+        (self.workspace / "docs" / "reliance-policy.md").write_bytes(content)
+        receipt = dict(self.receipt)
+        receipt["cluster"] = "other-cluster"
+        receipt["artifact_manifest"] = [
+            {"path": "docs/reliance-policy.md", "hash": "sha256:" + hashlib.sha256(content).hexdigest()},
+        ]
+        findings = self._validate(receipt)
+        self.assertFalse(
+            any(f.gate == "7.1" and "not included in this promotion's artifact_manifest" in f.reason
+                for f in findings),
+            [str(f) for f in findings],
+        )
 
     def test_a_plain_byte_hash_of_the_witness_file_is_rejected(self):
         """Proves the comparison is genuinely against the promotion
@@ -359,7 +421,10 @@ class StandaloneCliDescriptorTest(unittest.TestCase):
             workspace = Path(tmp.name)
             specs_dir = workspace / "crates" / "scheduler" / "specs"
             (specs_dir / "_witnesses").mkdir(parents=True)
-            (specs_dir / "task_queue.json").write_text(json.dumps(concept_spec()))
+            concept = concept_spec()
+            concept["cluster"] = "scheduling"
+            concept["queries"][0]["witness_required"] = True
+            (specs_dir / "task_queue.json").write_text(json.dumps(concept))
             spec = witness_spec()
             (specs_dir / "_witnesses" / "task_queue.load_factor.json").write_text(json.dumps(spec))
             (workspace / "project-descriptor.json").write_text(json.dumps(WITNESS_DESCRIPTOR))

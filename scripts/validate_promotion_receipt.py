@@ -31,6 +31,23 @@ scripts/validate_work_package.py's did:
     this requires an optional project descriptor (see below); every
     other artifact keeps the original plain-byte-hash comparison
     unconditionally.
+  - Every declared (witness_required: true) feature belonging to the
+    receipt's own cluster must have its witness represented in
+    artifact_manifest -- check_required_witnesses(), sharing
+    required_witness_paths() verbatim with
+    generate_promotion_receipt.py's own accept_promotion() (external
+    review, high severity: an earlier version enforced this only at
+    generation time; a receipt hand-edited afterward to drop a required
+    entry produced zero findings on validation, even with a descriptor
+    supplied).
+  - A generated witness SVG, the contact sheet, or the feature ledger
+    (plan.md §16.6: review projections, never promotion inputs) is
+    refused outright if listed in artifact_manifest at all --
+    is_generated_review_projection() -- rather than silently accepted
+    as an ordinary byte-hashed artifact (external review, medium
+    severity: an earlier version accepted these, so listing the
+    contact sheet made promotion acceptance gate on a picture
+    regenerating).
 
 Every check besides witness recognition needs only workspace_root,
 which is never optional -- no "missing search root" class of gap to
@@ -56,6 +73,11 @@ import yaml
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gate_g18 import collect_declared_features  # noqa: E402
+from gate_g18 import collect_valid_witnesses  # noqa: E402
+from gate_g19 import collect_valid_witness_entries  # noqa: E402
+from generate_feature_ledger import LEDGER_RELATIVE_PATH  # noqa: E402
+from generate_feature_ledger import owning_cluster_for  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -77,6 +99,19 @@ class Finding:
 
     def __str__(self) -> str:
         return f"[{self.gate}/{self.severity}] {self.path}: {self.reason}"
+
+
+class RequiredWitnessError(Exception):
+    """Raised by required_witness_paths() when the required witness set
+    itself cannot be determined: an ambiguous declaration, an
+    ambiguously resolved witness, or a declared feature with no
+    genuinely valid witness at all. generate_promotion_receipt.py
+    catches this and re-raises it as its own PromotionReceiptError, its
+    established public contract; check_required_witnesses() below
+    catches it directly and turns it into an ordinary Finding, matching
+    this module's own "return findings, never raise" idiom. One shared
+    exception type rather than two independent ones, so both callers
+    fail on the identical condition."""
 
 
 def load_schema() -> dict:
@@ -227,6 +262,162 @@ def _witness_promotion_hash_if_applicable(
     return None, None
 
 
+def _witness_svg_dir(workspace_root: Path) -> Path:
+    """docs/witnesses/ -- workspace-level (not crate-scoped), the fixed
+    location every generated witness rendering (generate_witness.py's
+    own output_path_for convention) AND the contact sheet
+    (generate_contact_sheet.py's _contact_sheet.svg, chainlink #32)
+    live at. There is no other legitimate use of this directory --
+    every file directly under it is machine-generated."""
+    return (workspace_root / "docs" / "witnesses").resolve()
+
+
+def is_generated_review_projection(workspace_root: Path, resolved: Path) -> bool:
+    """plan.md §16.6: generated witness SVGs, the contact sheet, and
+    the feature ledger (ci/results/feature_ledger.json,
+    generate_feature_ledger.LEDGER_RELATIVE_PATH) are review
+    projections, never promotion inputs -- they must never be
+    recognized as an ordinary artifact_manifest entry, at all. External
+    review, medium severity: an earlier version accepted these as
+    plain byte-hashed artifacts with nothing stopping a caller from
+    listing one, so including the contact sheet in artifact_manifest
+    silently made promotion acceptance gate on a picture regenerating,
+    contradicting this section's own "review projections, never
+    promotion inputs" boundary."""
+    if resolved.parent == _witness_svg_dir(workspace_root) and resolved.suffix == ".svg":
+        return True
+    if resolved == (workspace_root / Path(*LEDGER_RELATIVE_PATH)).resolve():
+        return True
+    return False
+
+
+def required_witness_paths(descriptor: dict, workspace_root: Path, cluster: str) -> dict[str, Path]:
+    """Every declared (witness_required: true) feature belonging to
+    `cluster`'s own canonical witness spec, workspace-relative path ->
+    resolved path (chainlink #35). Discovery is reused verbatim from
+    chainlink #29/#30's own descriptor-backed helpers --
+    gate_g18.collect_declared_features/collect_valid_witnesses
+    (declared, ambiguity-resolved) and
+    gate_g19.collect_valid_witness_entries (path lookup) -- never a new
+    glob or a first-wins resolution. Shared verbatim between
+    generate_promotion_receipt.py (generation) and this module
+    (validation, check_required_witnesses below) -- external review,
+    high severity: an earlier version existed only in the generator,
+    so a receipt that started complete but was later hand-edited to
+    drop a required witness entry produced zero findings on
+    validation, even with a descriptor supplied.
+
+    Scoped to `cluster` (external review, medium severity: an earlier
+    version was workspace-wide, requiring witnesses belonging to
+    unrelated clusters -- a concept spec's top-level `cluster` field is
+    required by vendor/concept-to-code's own schema and already read
+    the identical way by generate_feature_ledger.owning_cluster_for(),
+    reused here rather than re-derived). Only a declared feature whose
+    OWNING CONCEPT SPEC's own `cluster` equals `cluster` is required;
+    a feature declared in a different cluster imposes no requirement on
+    this promotion, and `collect_valid_witnesses`'s own ambiguity check
+    is scoped to the cluster-filtered key set for the same reason.
+
+    Built by iterating the cluster-filtered DECLARED set, never
+    `witnesses` itself -- `collect_valid_witnesses` returns every
+    genuinely valid, unambiguous witness in the workspace regardless of
+    whether its own query was ever declared `witness_required`, so
+    iterating it directly would require witnesses for undeclared
+    queries too.
+
+    Raises RequiredWitnessError for an ambiguous declaration, an
+    ambiguously resolved witness, or a declared feature (within this
+    cluster) with no genuinely valid witness at all -- a promotion
+    cannot represent a feature it cannot even locate, and every one of
+    those is exactly the "applicable witness spec is missing / invalid
+    / ambiguous" fail-closed condition plan.md §16.5 requires."""
+    declared, declare_findings = collect_declared_features(descriptor, workspace_root)
+    ambiguous_declarations = [f for f in declare_findings if f.severity == "error"]
+    if ambiguous_declarations:
+        raise RequiredWitnessError(
+            "cannot compute the required witness set over an ambiguous declared feature set: "
+            + "; ".join(str(f) for f in ambiguous_declarations)
+        )
+
+    cluster_declared: dict[tuple[str, str], Path] = {}
+    for key, spec_path in declared.items():
+        try:
+            concept_data = json.loads(spec_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if owning_cluster_for(concept_data) == cluster:
+            cluster_declared[key] = spec_path
+
+    witnesses, witness_findings = collect_valid_witnesses(descriptor, workspace_root, set(cluster_declared))
+    ambiguous_witnesses = [f for f in witness_findings if f.severity == "error"]
+    if ambiguous_witnesses:
+        raise RequiredWitnessError(
+            "cannot compute the required witness set over an ambiguously resolved witness: "
+            + "; ".join(str(f) for f in ambiguous_witnesses)
+        )
+
+    missing = sorted(
+        f"{concept}.{query}" for concept, query in cluster_declared if (concept, query) not in witnesses
+    )
+    if missing:
+        raise RequiredWitnessError(
+            f"declared (witness_required: true) feature(s) in cluster {cluster!r} have no genuinely "
+            "valid witness spec, so none can be represented in artifact_manifest: " + ", ".join(missing)
+        )
+
+    entries_by_key = {
+        (data["concept"], data["query"]): resolved_path
+        for resolved_path, data in collect_valid_witness_entries(descriptor, workspace_root)
+    }
+
+    workspace_resolved = workspace_root.resolve()
+    required: dict[str, Path] = {}
+    for key in cluster_declared:
+        resolved_path = entries_by_key[key]
+        required[str(resolved_path.relative_to(workspace_resolved))] = resolved_path
+    return required
+
+
+def check_required_witnesses(
+    path: Path, data: dict, workspace_root: Path, descriptor: dict | None
+) -> list[Finding]:
+    """chainlink #35, external review, high severity: the completeness
+    calculation (which witnesses THIS promotion must include) must be
+    shared with the validator, not enforced only during
+    accept_promotion() -- required_witness_paths() above is the single
+    shared computation. Skipped (not an error) only when no descriptor
+    at all is available -- the same optionality every other
+    witness-aware check in this module already has (see the module
+    docstring); when a descriptor IS supplied, completeness is checked
+    for real, closing the exact gap the external review reproduced
+    ("even with the descriptor supplied")."""
+    if descriptor is None:
+        return []
+    try:
+        required = required_witness_paths(descriptor, workspace_root, data["cluster"])
+    except RequiredWitnessError as e:
+        return [Finding("7.1", path, f"cannot determine the required witness set: {e}")]
+
+    workspace_resolved = workspace_root.resolve()
+    included_resolved: set[Path] = set()
+    for entry in data["artifact_manifest"]:
+        try:
+            included_resolved.add((workspace_root / entry["path"]).resolve())
+        except OSError:
+            continue
+
+    missing = sorted(rel for rel, resolved_path in required.items() if resolved_path not in included_resolved)
+    if not missing:
+        return []
+    return [
+        Finding(
+            "7.1", path,
+            "declared (witness_required: true) feature(s) have a genuinely valid witness spec that is "
+            "not included in this promotion's artifact_manifest: " + ", ".join(missing),
+        )
+    ]
+
+
 def check_artifact_manifest(
     path: Path, data: dict, workspace_root: Path, descriptor: dict | None = None
 ) -> list[Finding]:
@@ -291,6 +482,18 @@ def check_artifact_manifest(
             )
             continue
 
+        if is_generated_review_projection(workspace_root, resolved):
+            findings.append(
+                Finding(
+                    "7.1", path,
+                    f"artifact_manifest lists {entry_path!r}, a generated review projection (a "
+                    "witness rendering, the contact sheet, or the feature ledger) -- plan.md §16.6: "
+                    "these are review projections, never promotion inputs, and must never be listed "
+                    "in artifact_manifest",
+                )
+            )
+            continue
+
         witness_hash, witness_finding = _witness_promotion_hash_if_applicable(
             descriptor, workspace_root, entry_path, resolved
         )
@@ -343,6 +546,7 @@ def validate_data(
     findings: list[Finding] = []
     findings.extend(check_naming(path, data, workspace_root))
     findings.extend(check_artifact_manifest(path, data, workspace_root, descriptor))
+    findings.extend(check_required_witnesses(path, data, workspace_root, descriptor))
     return findings
 
 

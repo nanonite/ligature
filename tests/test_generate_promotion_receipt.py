@@ -675,13 +675,21 @@ TASK_QUEUE_WITNESS_PATH = "crates/scheduler/specs/_witnesses/task_queue.load_fac
 TASK_QUEUE_CONCEPT_PATH = "crates/scheduler/specs/task_queue.json"
 
 
-def _write_declared_feature(workspace: Path, witness_overrides: dict | None = None) -> None:
+def _write_declared_feature(
+    workspace: Path, witness_overrides: dict | None = None, cluster: str = "scheduling"
+) -> None:
     """A declared (witness_required: true) TaskQueue.load_factor feature
     plus its genuinely valid witness spec, under DESCRIPTOR's own
     crates/scheduler crate -- reused by every witness-promotion-integrity
-    test below rather than re-derived per test."""
+    test below rather than re-derived per test. `cluster` (chainlink
+    #35's own required completeness scoping) is written onto the
+    concept spec's own top-level `cluster` field, matching
+    generate_feature_ledger.owning_cluster_for()'s reading of it --
+    without this, required_witness_paths() would attribute the feature
+    to no cluster at all ("unknown") and never require it."""
     concept = concept_spec()
     concept["queries"][0]["witness_required"] = True
+    concept["cluster"] = cluster
     _write_json(workspace, TASK_QUEUE_CONCEPT_PATH, concept)
     witness = witness_spec()
     if witness_overrides:
@@ -773,6 +781,7 @@ class WitnessPromotionIntegrityTest(unittest.TestCase):
         _write_descriptor(self.workspace, other_descriptor)
         other_concept = concept_spec()
         other_concept["queries"][0]["witness_required"] = True
+        other_concept["cluster"] = "scheduling"
         _write_json(self.workspace, "crates/other/specs/task_queue.json", other_concept)
         _write_json(self.workspace, "crates/other/specs/_witnesses/task_queue.load_factor.json", witness_spec())
         with self.assertRaises(PromotionReceiptError):
@@ -829,17 +838,22 @@ class WitnessPromotionIntegrityTest(unittest.TestCase):
         findings = validate_file(target_path, load_validator(), self.workspace, DESCRIPTOR)
         self.assertEqual(findings, [], [str(f) for f in findings])
 
-    def test_generated_svg_contact_sheet_and_ledger_bytes_are_not_promotion_gating_inputs(self):
-        """plan.md §16.6's own boundary: generated witness SVGs,
-        docs/witnesses/_contact_sheet.svg, and ci/results/feature_ledger.json
-        are review projections, never promotion inputs. required_witness_paths()
-        must never name any of them, and including one in artifact_paths
-        must hash it as an ORDINARY artifact (plain bytes), never as a
-        witness spec -- it does not sit under a canonical _witnesses/
-        directory at all."""
-        required = required_witness_paths(DESCRIPTOR, self.workspace)
+    def test_required_witness_paths_never_names_a_generated_projection(self):
+        required = required_witness_paths(DESCRIPTOR, self.workspace, "scheduling")
         self.assertEqual(set(required), {TASK_QUEUE_WITNESS_PATH})
 
+    def test_generated_svg_contact_sheet_and_ledger_bytes_are_refused_as_promotion_inputs(self):
+        """plan.md §16.6's own boundary: generated witness SVGs,
+        docs/witnesses/_contact_sheet.svg, and ci/results/feature_ledger.json
+        are review projections, never promotion inputs. External review,
+        medium severity: an earlier version silently accepted these as
+        ordinary byte-hashed artifacts once a caller listed them --
+        proving they got hashed at all is proof they WERE gating (the
+        opposite of what this test used to claim), since a receipt
+        listing one would then have its acceptance revoked whenever
+        that picture or the ledger regenerated. compute_artifact_manifest
+        must instead refuse to include any of them, outright, before
+        computing anything."""
         (self.workspace / "docs" / "witnesses").mkdir(parents=True)
         svg_bytes = b"<svg></svg>"
         (self.workspace / "docs" / "witnesses" / "task_queue.load_factor.svg").write_bytes(svg_bytes)
@@ -848,27 +862,59 @@ class WitnessPromotionIntegrityTest(unittest.TestCase):
         ledger_bytes = b'{"schema_version": "1.0", "generated_from": {}, "features": []}'
         (self.workspace / "ci" / "results" / "feature_ledger.json").write_bytes(ledger_bytes)
 
-        manifest = compute_artifact_manifest(
-            self.workspace,
-            [
-                "docs/witnesses/task_queue.load_factor.svg",
-                "docs/witnesses/_contact_sheet.svg",
-                "ci/results/feature_ledger.json",
+        for offending_path in (
+            "docs/witnesses/task_queue.load_factor.svg",
+            "docs/witnesses/_contact_sheet.svg",
+            "ci/results/feature_ledger.json",
+        ):
+            with self.assertRaises(PromotionReceiptError) as caught:
+                compute_artifact_manifest(self.workspace, [offending_path], DESCRIPTOR)
+            self.assertIn("review projection", str(caught.exception))
+
+    def test_accept_promotion_refuses_a_listed_contact_sheet_end_to_end(self):
+        (self.workspace / "docs" / "witnesses").mkdir(parents=True)
+        (self.workspace / "docs" / "witnesses" / "_contact_sheet.svg").write_bytes(b"<svg></svg>")
+        with self.assertRaises(PromotionReceiptError):
+            self._accept(artifact_paths=self.artifact_paths + ["docs/witnesses/_contact_sheet.svg"])
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_a_declared_feature_in_a_different_cluster_is_not_required(self):
+        """External review, medium severity: an earlier version computed
+        the required set workspace-wide, ignoring cluster, so a
+        promotion for "scheduling" wrongly required witnesses belonging
+        to unrelated clusters. A concept spec's own top-level `cluster`
+        field -- already read the identical way by
+        generate_feature_ledger.owning_cluster_for(), reused here rather
+        than re-derived -- is what scopes the requirement."""
+        other_concept = {
+            "concept": "OtherConcept",
+            "cluster": "other-cluster",
+            "queries": [
+                {
+                    "english": "An unrelated query.", "rust_sig": "fn other_query(&self) -> f64",
+                    "pure": True, "witness_required": True,
+                },
             ],
-            DESCRIPTOR,
+            "constraints": [],
+        }
+        _write_json(self.workspace, "crates/scheduler/specs/other_concept.json", other_concept)
+        other_witness = witness_spec()
+        other_witness["witness_id"] = "W-OC-OTHER-QUERY"
+        other_witness["concept"] = "OtherConcept"
+        other_witness["query"] = "other_query"
+        other_witness["output"]["path"] = "docs/witnesses/other_concept.other_query.svg"
+        _write_json(
+            self.workspace, "crates/scheduler/specs/_witnesses/other_concept.other_query.json", other_witness
         )
-        import hashlib
-        by_path = {e["path"]: e["hash"] for e in manifest}
-        self.assertEqual(
-            by_path["docs/witnesses/task_queue.load_factor.svg"],
-            "sha256:" + hashlib.sha256(svg_bytes).hexdigest(),
-        )
-        self.assertEqual(
-            by_path["docs/witnesses/_contact_sheet.svg"], "sha256:" + hashlib.sha256(svg_bytes).hexdigest()
-        )
-        self.assertEqual(
-            by_path["ci/results/feature_ledger.json"], "sha256:" + hashlib.sha256(ledger_bytes).hexdigest()
-        )
+
+        required = required_witness_paths(DESCRIPTOR, self.workspace, "scheduling")
+        self.assertEqual(set(required), {TASK_QUEUE_WITNESS_PATH})
+
+        # Accepting "scheduling" succeeds without ever including the
+        # other-cluster witness -- it is not required, and is not
+        # silently swept in either.
+        target_path = self._accept()
+        self.assertTrue(target_path.exists())
 
     def test_witness_schema_version_is_derived_only_from_a_genuinely_valid_canonical_witness(self):
         stray = witness_spec()

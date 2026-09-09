@@ -103,9 +103,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gate_g18 import collect_declared_features  # noqa: E402
-from gate_g18 import collect_valid_witnesses  # noqa: E402
-from gate_g19 import collect_valid_witness_entries  # noqa: E402
 from project_descriptor import boundary_dir_for  # noqa: E402
 from project_descriptor import conflict_dir_for  # noqa: E402
 from project_descriptor import evidence_dir_for  # noqa: E402
@@ -128,7 +125,10 @@ from validate_exemption import valid_exemption_interaction_ids_from_crate  # noq
 from validate_interaction import load_interactions_by_id  # noqa: E402
 from validate_interaction import load_validator as _load_interaction_validator  # noqa: E402
 from validate_interaction import validate_data as _validate_interaction_data  # noqa: E402
+from validate_promotion_receipt import RequiredWitnessError  # noqa: E402
+from validate_promotion_receipt import is_generated_review_projection  # noqa: E402
 from validate_promotion_receipt import load_validator  # noqa: E402
+from validate_promotion_receipt import required_witness_paths  # noqa: E402
 from validate_promotion_receipt import validate_data  # noqa: E402
 from validate_protocol_debt import load_validator as _load_protocol_debt_validator  # noqa: E402
 from validate_protocol_debt import validate_data as _validate_protocol_debt_data  # noqa: E402
@@ -258,71 +258,15 @@ def compute_artifact_manifest(
         seen_resolved[resolved] = entry_path
         if not resolved.is_file():
             raise PromotionReceiptError(f"artifact path {entry_path!r} does not exist")
+        if is_generated_review_projection(workspace_root, resolved):
+            raise PromotionReceiptError(
+                f"artifact path {entry_path!r} is a generated review projection (a witness rendering, "
+                "the contact sheet, or the feature ledger) -- plan.md §16.6: these are review "
+                "projections, never promotion inputs, and must never be listed in artifact_manifest"
+            )
         witness_hash = _witness_promotion_hash_if_applicable(descriptor, workspace_root, entry_path, resolved)
         manifest.append({"path": entry_path, "hash": witness_hash or _sha256(resolved)})
     return manifest
-
-
-def required_witness_paths(descriptor: dict, workspace_root: Path) -> dict[str, Path]:
-    """Every declared (witness_required: true) feature's own canonical
-    witness spec, workspace-relative path -> resolved path (chainlink
-    #35). Discovery is reused verbatim from chainlink #29/#30's own
-    descriptor-backed helpers -- gate_g18.collect_declared_features/
-    collect_valid_witnesses (declared, ambiguity-resolved) and
-    gate_g19.collect_valid_witness_entries (path lookup) -- never a new
-    glob or a first-wins resolution.
-
-    For a `(concept, query)` key present in collect_valid_witnesses()'s
-    own returned dict, exactly one (path, data) pair in
-    collect_valid_witness_entries() names it: collect_valid_witnesses()
-    already excludes (rather than picks from) any key with more than
-    one owning crate, and a genuinely valid witness's filename is
-    already required (validate_witness.check_naming) to be
-    <snake_case(concept)>.<query>.json, which makes two files in the
-    SAME canonical directory resolving to the same key impossible by
-    construction. This function does not re-derive that guarantee; it
-    relies on it.
-
-    Raises PromotionReceiptError outright for an ambiguous declaration,
-    an ambiguously resolved witness, or a declared feature with no
-    genuinely valid witness at all -- a promotion cannot represent a
-    feature it cannot even locate, and every one of those is exactly
-    the "applicable witness spec is missing / invalid / ambiguous"
-    fail-closed condition plan.md §16.5 requires."""
-    declared, declare_findings = collect_declared_features(descriptor, workspace_root)
-    ambiguous_declarations = [f for f in declare_findings if f.severity == "error"]
-    if ambiguous_declarations:
-        raise PromotionReceiptError(
-            "cannot compute the required witness set over an ambiguous declared feature set: "
-            + "; ".join(str(f) for f in ambiguous_declarations)
-        )
-
-    witnesses, witness_findings = collect_valid_witnesses(descriptor, workspace_root, set(declared))
-    ambiguous_witnesses = [f for f in witness_findings if f.severity == "error"]
-    if ambiguous_witnesses:
-        raise PromotionReceiptError(
-            "cannot compute the required witness set over an ambiguously resolved witness: "
-            + "; ".join(str(f) for f in ambiguous_witnesses)
-        )
-
-    missing = sorted(f"{concept}.{query}" for concept, query in declared if (concept, query) not in witnesses)
-    if missing:
-        raise PromotionReceiptError(
-            "declared (witness_required: true) feature(s) have no genuinely valid witness spec, so "
-            "none can be represented in artifact_manifest: " + ", ".join(missing)
-        )
-
-    entries_by_key = {
-        (data["concept"], data["query"]): resolved_path
-        for resolved_path, data in collect_valid_witness_entries(descriptor, workspace_root)
-    }
-
-    workspace_resolved = workspace_root.resolve()
-    required: dict[str, Path] = {}
-    for key in witnesses:
-        resolved_path = entries_by_key[key]
-        required[str(resolved_path.relative_to(workspace_resolved))] = resolved_path
-    return required
 
 
 def compute_promotion_id(cluster: str) -> str:
@@ -644,11 +588,14 @@ def accept_promotion(
     all if an artifact path, an artifact's own validity (including its
     real cross-file gates), the policy document, or -- chainlink #35 --
     the required witness set is bad: every declared (witness_required:
-    true) feature's own genuinely valid, unambiguous witness spec
-    (required_witness_paths(), reusing chainlink #29/#30's own
-    descriptor-backed discovery) must be present in `artifact_paths`,
-    or generation refuses outright rather than producing a receipt that
-    silently omits evidence that was part of what was reviewed. Refuses
+    true) feature belonging to `cluster` and having its own genuinely
+    valid, unambiguous witness spec (validate_promotion_receipt.
+    required_witness_paths(), reusing chainlink #29/#30's own
+    descriptor-backed discovery and shared verbatim with that module's
+    own validator so the two can never disagree about completeness)
+    must be present in `artifact_paths`, or generation refuses outright
+    rather than producing a receipt that silently omits evidence that
+    was part of what was reviewed. Refuses
     (ApprovalRefused) without writing anything if the assembled receipt
     fails the real validator. Once past both checks, the audit entry and
     the receipt write happen as one transaction: the audit append is
@@ -669,7 +616,10 @@ def accept_promotion(
 
     descriptor = load_project_descriptor(descriptor_path)
 
-    required_witnesses = required_witness_paths(descriptor, workspace_root)
+    try:
+        required_witnesses = required_witness_paths(descriptor, workspace_root, cluster)
+    except RequiredWitnessError as e:
+        raise PromotionReceiptError(str(e))
     missing_witnesses = sorted(set(required_witnesses) - set(artifact_paths))
     if missing_witnesses:
         raise PromotionReceiptError(

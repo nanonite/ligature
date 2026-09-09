@@ -1535,6 +1535,7 @@ class CmdAcceptPromotionWitnessIntegrationTest(unittest.TestCase):
         (specs_dir / "_witnesses").mkdir(parents=True)
         concept = concept_spec()
         concept["queries"][0]["witness_required"] = True
+        concept["cluster"] = "scheduling"
         (specs_dir / "task_queue.json").write_text(json.dumps(concept))
         self.witness_path = "crates/scheduler/specs/_witnesses/task_queue.load_factor.json"
         (specs_dir / "_witnesses" / "task_queue.load_factor.json").write_text(json.dumps(witness_spec()))
@@ -1612,6 +1613,33 @@ class CmdAcceptPromotionWitnessIntegrationTest(unittest.TestCase):
         spec = json.loads(witness_path.read_text())
         spec["fixture"]["fixture_id"] = "FX-CHANGED"
         witness_path.write_text(json.dumps(spec))
+
+        validate_rc = pipeline.main(
+            ["--workspace", str(self.workspace), "validate-promotion", str(receipt_path)]
+        )
+        self.assertEqual(validate_rc, 1)
+
+    def test_hand_editing_the_receipt_to_drop_the_witness_entry_fails_validate_promotion(self):
+        """External review, high severity: the completeness calculation
+        must be shared with the validator, not enforced only during
+        accept-promotion -- a receipt that was complete at generation
+        time but is later hand-edited to remove the required witness
+        entry must not silently revalidate."""
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 0)
+        receipt_path = self.workspace / "specs" / "_promotions" / "scheduling.json"
+
+        data = json.loads(receipt_path.read_text())
+        data["artifact_manifest"] = [
+            e for e in data["artifact_manifest"] if e["path"] != self.witness_path
+        ]
+        receipt_path.write_text(json.dumps(data))
 
         validate_rc = pipeline.main(
             ["--workspace", str(self.workspace), "validate-promotion", str(receipt_path)]

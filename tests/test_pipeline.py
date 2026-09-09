@@ -3125,6 +3125,18 @@ class Stage8cClosureIntegrationTest(unittest.TestCase):
         code, printed = self._run("gate-g14")
         self.assertEqual(code, 1, printed)
 
+    def test_gate_g14_names_an_invalid_profile_through_the_cli(self):
+        """chainlink #49: an invalid closure artifact must be named, not
+        silently dropped -- through the real pipeline.py CLI path."""
+        profile_path = self.workspace / "specs" / "_closure" / "scheduler-core.json"
+        data = json.loads(profile_path.read_text())
+        data["conditions"]["owning_verifier"] = "kani"  # G17: deductive + kani is invalid
+        profile_path.write_text(json.dumps(data))
+        code, printed = self._run("gate-g14")
+        self.assertEqual(code, 1, printed)
+        self.assertIn("ignored as invalid", printed)
+        self.assertIn("pipeline.py validate-closure", printed)
+
     def test_status_lists_the_new_stage_8c_commands(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):

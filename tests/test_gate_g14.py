@@ -851,6 +851,95 @@ class ReportingTest(GateTestCase):
             self.assertEqual(main([str(self.ws.root)]), EXIT_OK)
 
 
+class InvalidClosureArtifactDiagnosticsTest(GateTestCase):
+    """chainlink #49: an invalid closure artifact is fail-closed excluded
+    from closure computation, but must not be dropped silently -- a
+    workspace finding names the file and points to validate-closure."""
+
+    def test_invalid_profile_is_named_explicitly(self):
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda d: d["conditions"].update({"owning_verifier": "kani"}),  # closure_kind stays
+        )  # deductive -- G17: a Kani-owned cluster can never claim deductive closure.
+        outcomes, workspace_findings = self.ws.outcomes()
+        self.assertEqual(outcomes, [])
+        reasons = [str(f) for f in workspace_findings]
+        self.assertTrue(
+            any("scheduler-core.json" in r and "ignored as invalid" in r for r in reasons), reasons
+        )
+        self.assertTrue(any("pipeline.py validate-closure" in r for r in reasons), reasons)
+
+    def test_invalid_degradation_record_is_named_while_condition_findings_remain(self):
+        self.ws.write(
+            "crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json",
+            bridge_spec(protocol_class="non-pairwise"),
+        )
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda d: d["conditions"].update({"protocol_class_all_pairwise": False}),
+        )
+        record = valid_degradation()
+        record["failed_conditions"] = ["protocol_class_all_pairwise"]
+        del record["affected_edges"]  # schema-required field missing -- G1a invalid
+        self.ws.write("specs/_closure/scheduler-core.degradation.json", record)
+
+        outcome, workspace_findings = self.ws.cluster()
+
+        self.assertEqual(outcome.status, "blocked")
+        self.assertTrue(
+            any("protocol_class_all_pairwise" in e for e in self.errors(outcome)),
+            "the real closure-condition finding must stay visible, not be swallowed by the "
+            "invalid-degradation diagnostic",
+        )
+        reasons = [str(f) for f in workspace_findings]
+        self.assertTrue(
+            any("scheduler-core.degradation.json" in r and "ignored as invalid" in r for r in reasons),
+            reasons,
+        )
+
+    def test_valid_degradation_without_valid_profile_retains_existing_diagnostic(self):
+        (self.ws.root / "specs" / "_closure" / "scheduler-core.json").unlink()
+        self.ws.write("specs/_closure/scheduler-core.degradation.json", valid_degradation())
+
+        outcomes, workspace_findings = self.ws.outcomes()
+
+        self.assertEqual(outcomes, [])
+        reasons = [str(f) for f in workspace_findings]
+        self.assertTrue(any("has a degradation record but no valid closure profile" in r for r in reasons))
+        self.assertFalse(any("ignored as invalid" in r for r in reasons), reasons)
+
+    def test_valid_profile_degradation_pair_has_no_invalid_artifact_finding(self):
+        self.ws.write(
+            "crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json",
+            bridge_spec(protocol_class="non-pairwise"),
+        )
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda d: d["conditions"].update({"protocol_class_all_pairwise": False}),
+        )
+        record = valid_degradation()
+        record["failed_conditions"] = ["protocol_class_all_pairwise"]
+        self.ws.write("specs/_closure/scheduler-core.degradation.json", record)
+
+        outcome, workspace_findings = self.ws.cluster()
+
+        self.assertEqual(workspace_findings, [])
+        self.assertEqual(outcome.status, "degraded")
+
+    def test_malformed_profile_never_reaches_gate_cluster(self):
+        """A profile missing nearly every required field would crash
+        gate_cluster() on its first dict access if it were ever passed
+        through -- reaching outcomes == [] with no exception is itself
+        the proof it never got there."""
+        self.ws.write(
+            "specs/_closure/scheduler-core.json",
+            {"schema_version": "1.0", "cluster": "scheduler-core"},
+        )
+        outcomes, workspace_findings = self.ws.outcomes()
+        self.assertEqual(outcomes, [])
+        self.assertTrue(any("ignored as invalid" in str(f) for f in workspace_findings))
+
+
 class GraphAlgorithmTest(unittest.TestCase):
     """The closure machinery itself, away from any workspace."""
 

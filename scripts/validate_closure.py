@@ -379,25 +379,56 @@ def closure_dir_for(workspace: Path) -> Path:
     return (workspace / "specs" / CANONICAL_DIR_NAME).resolve()
 
 
-def load_cluster_artifacts(workspace: Path) -> dict[str, dict[str, tuple[Path, dict]]]:
-    """Every fully valid (zero error-severity finding) closure artifact in
-    the canonical directory, indexed by cluster then kind -- the "must be
-    genuinely valid, not just present" bar every cross-reference in this
-    pipeline applies. scripts/gate_g14.py consumes this, so a
-    schema-invalid or misnamed profile can never reach the closure
-    computation and be treated as a declaration of anything."""
+def _scan_cluster_artifacts(
+    workspace: Path,
+) -> tuple[dict[str, dict[str, tuple[Path, dict]]], list[Path]]:
+    """The single validation pass shared by load_cluster_artifacts() and
+    load_cluster_artifacts_with_invalid() -- one scan, so recovering the
+    "why was this excluded" diagnostic (chainlink #49) never means
+    validating a candidate artifact twice. Returns the valid-artifact
+    index exactly as load_cluster_artifacts() has always returned it,
+    plus the sorted paths of every canonical closure artifact excluded
+    because its own validation produced an error-severity finding
+    (schema-invalid, malformed JSON, unreadable, misnamed -- anything
+    validate_file() flags)."""
     canonical = closure_dir_for(workspace)
     result: dict[str, dict[str, tuple[Path, dict]]] = {}
+    invalid: list[Path] = []
     if not canonical.is_dir():
-        return result
+        return result, invalid
     validators = load_validators()
     for path in sorted(p for p in canonical.iterdir() if p.is_file()):
         if any(f.severity == "error" for f in validate_file(path, validators)):
+            invalid.append(path)
             continue
         data = json.loads(path.read_text())
         kind = "degradation" if is_degradation_path(path) else "profile"
         result.setdefault(data["cluster"], {}).setdefault(kind, (path, data))
+    return result, invalid
+
+
+def load_cluster_artifacts(workspace: Path) -> dict[str, dict[str, tuple[Path, dict]]]:
+    """Every fully valid (zero error-severity finding) closure artifact in
+    the canonical directory, indexed by cluster then kind -- the "must be
+    genuinely valid, not just present" bar every cross-reference in this
+    pipeline applies. scripts/gate_g14.py, gate_g9.py, and
+    generate_feature_ledger.py all consume this, so a schema-invalid or
+    misnamed profile can never reach the closure computation and be
+    treated as a declaration of anything."""
+    result, _ = _scan_cluster_artifacts(workspace)
     return result
+
+
+def load_cluster_artifacts_with_invalid(
+    workspace: Path,
+) -> tuple[dict[str, dict[str, tuple[Path, dict]]], list[Path]]:
+    """load_cluster_artifacts()'s identical index, plus the paths of every
+    canonical closure artifact it silently excluded. chainlink #49:
+    gate_g14.py's gate_workspace() uses this (instead of
+    load_cluster_artifacts()) to surface one finding per excluded
+    artifact -- fail-closed exclusion from closure computation is
+    correct, but dropping the reason on the floor is not."""
+    return _scan_cluster_artifacts(workspace)
 
 
 def validate(root: Path) -> list[Finding]:

@@ -83,7 +83,7 @@ from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
 from validate_callsites import load_reports as load_callsite_reports  # noqa: E402
 from validate_closure import CONDITION_KEYS  # noqa: E402
 from validate_closure import closure_dir_for  # noqa: E402
-from validate_closure import load_cluster_artifacts  # noqa: E402
+from validate_closure import load_cluster_artifacts_with_invalid  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
 
 DOCS = Path(__file__).resolve().parent.parent / "docs"
@@ -1100,7 +1100,16 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[ClusterOutco
     """Every cluster with a valid closure profile. Workspace-level
     findings (unreadable manifests, ambiguous providers) are returned
     separately: they are not any one cluster's fault, and attributing
-    them to whichever cluster happened to be first would be arbitrary."""
+    them to whichever cluster happened to be first would be arbitrary.
+
+    chainlink #49: a closure artifact excluded by
+    load_cluster_artifacts_with_invalid() because its own validation
+    produced an error-severity finding still gets a workspace finding
+    naming it -- fail-closed exclusion from closure computation is
+    correct (validate_closure.py's own "genuinely valid, not just
+    present" bar), but dropping the reason on the floor is not. Reuses
+    validate_closure.py's own single validation pass rather than
+    re-validating each artifact here to recover the diagnostic."""
     workspace_findings: list[Finding] = []
 
     manifests, manifest_findings = load_manifests(workspace)
@@ -1119,7 +1128,15 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[ClusterOutco
         unresolved_medium_plus = None
 
     outcomes: list[ClusterOutcome] = []
-    artifacts = load_cluster_artifacts(workspace)
+    artifacts, invalid_artifacts = load_cluster_artifacts_with_invalid(workspace)
+    for path in invalid_artifacts:
+        workspace_findings.append(
+            Finding(
+                "G14", str(path),
+                "ignored as invalid and excluded from closure computation -- run "
+                "`pipeline.py validate-closure` for the detailed finding(s) that invalidated it",
+            )
+        )
     for cluster in sorted(artifacts):
         entry = artifacts[cluster]
         if "profile" not in entry:

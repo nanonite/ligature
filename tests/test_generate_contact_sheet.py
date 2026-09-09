@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import generate_contact_sheet as gcs  # noqa: E402
+import witness_renderer  # noqa: E402
 from test_generate_feature_ledger import Workspace  # noqa: E402
 from test_generate_feature_ledger import descriptor_with  # noqa: E402
 from test_generate_feature_ledger import happy_path_witness_and_rendering  # noqa: E402
@@ -200,13 +201,19 @@ class SvgValidityTest(GateTestCase):
         root = ET.fromstring(svg)
         self.assertTrue(root.tag.endswith("svg"))
 
-    def test_the_embedded_witness_image_round_trips_the_real_rendering_bytes(self):
+    def test_the_embedded_witness_image_is_freshly_rendered_not_the_stale_on_disk_file(self):
         self.ws.write_concept_spec()
         happy_path_witness_and_rendering(self.ws)
         svg = self.generate()
-        original = (self.root / "docs" / "witnesses" / "task_queue.load_factor.svg").read_bytes()
         encoded = svg.split("base64,", 1)[1].split('"', 1)[0]
-        self.assertEqual(base64.b64decode(encoded), original)
+        embedded = base64.b64decode(encoded)
+
+        baseline = run_producer()
+        expected = witness_renderer.render("scalar_field_svg", baseline["result"]).svg.encode("utf-8")
+        self.assertEqual(embedded, expected)
+
+        stale_stub = (self.root / "docs" / "witnesses" / "task_queue.load_factor.svg").read_bytes()
+        self.assertNotEqual(embedded, stale_stub)
 
     def test_special_characters_in_a_panel_label_are_escaped_not_injected(self):
         malicious = 'TaskQueue.<script>&"evil"'
@@ -215,6 +222,72 @@ class SvgValidityTest(GateTestCase):
         self.assertIn("&lt;script&gt;", fragment)
         self.assertIn("&amp;", fragment)
         self.assertIn("&quot;evil&quot;", fragment)
+
+
+class ThumbnailFreshnessTest(GateTestCase):
+    """External review, high severity: an earlier version embedded
+    whatever bytes already sat at the witness's output.path, trusting
+    witness_present alone -- a stale or unrelated on-disk SVG, or a
+    file that was not valid SVG at all, was embedded beside an
+    honestly green status row with nothing to say otherwise. The fix
+    renders the thumbnail from the SAME fresh document determinism/
+    degeneracy were computed from whenever one exists, and validates
+    the on-disk fallback (only reached when no witness_backend is
+    configured) as well-formed SVG before ever trusting it."""
+
+    def test_a_stale_unrelated_on_disk_svg_is_not_embedded_when_a_fresh_document_exists(self):
+        self.ws.write_concept_spec()
+        happy_path_witness_and_rendering(self.ws)
+        stale = '<svg xmlns="http://www.w3.org/2000/svg"><text>unrelated old rendering</text></svg>'
+        (self.root / "docs" / "witnesses" / "task_queue.load_factor.svg").write_text(stale)
+
+        svg = self.generate()
+        self.assertIn("determinism: pass", svg)
+        encoded = svg.split("base64,", 1)[1].split('"', 1)[0]
+        embedded = base64.b64decode(encoded).decode("utf-8")
+        self.assertNotIn("unrelated old rendering", embedded)
+
+    def test_an_on_disk_file_that_is_not_svg_does_not_get_embedded_when_a_fresh_document_exists(self):
+        self.ws.write_concept_spec()
+        happy_path_witness_and_rendering(self.ws)
+        (self.root / "docs" / "witnesses" / "task_queue.load_factor.svg").write_text("not an svg at all")
+
+        svg = self.generate()
+        self.assertIn("determinism: pass", svg)
+        # A fresh document WAS available, so this must be the genuine
+        # rendering, not the garbage on disk and not a silent placeholder.
+        self.assertIn("data:image/svg+xml;base64,", svg)
+        encoded = svg.split("base64,", 1)[1].split('"', 1)[0]
+        embedded = base64.b64decode(encoded)
+        self.assertTrue(gcs._is_well_formed_svg(embedded))
+        self.assertNotIn(b"not an svg at all", embedded)
+
+    def test_no_backend_and_invalid_on_disk_content_falls_back_to_the_placeholder(self):
+        # The "at minimum" floor: with no witness_backend configured
+        # there is no fresh document to render from at all, but an
+        # invalid on-disk file must still never be embedded.
+        self.ws.write_concept_spec()
+        happy_path_witness_and_rendering(self.ws)
+        (self.root / "docs" / "witnesses" / "task_queue.load_factor.svg").write_text("not an svg at all")
+        no_backend = descriptor_with("crates/scheduler")
+
+        svg = self.generate(no_backend)
+        self.assertIn("determinism: not-checked", svg)
+        self.assertIn("rendering unavailable", svg)
+        self.assertNotIn("data:image/svg+xml;base64,", svg)
+
+    def test_no_backend_and_a_genuinely_valid_on_disk_svg_is_still_embedded(self):
+        # The positive case for the on-disk fallback: with no fresh
+        # document to prefer, a genuinely well-formed on-disk rendering
+        # is still shown rather than treated as untrustworthy by default.
+        self.ws.write_concept_spec()
+        happy_path_witness_and_rendering(self.ws)
+        no_backend = descriptor_with("crates/scheduler")
+
+        svg = self.generate(no_backend)
+        self.assertIn("determinism: not-checked", svg)
+        self.assertIn("data:image/svg+xml;base64,", svg)
+        self.assertNotIn("rendering unavailable", svg)
 
 
 class AmbiguousDeclarationTest(GateTestCase):

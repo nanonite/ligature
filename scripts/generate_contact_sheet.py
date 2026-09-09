@@ -53,20 +53,55 @@ mistaken for the other:
     two-column discipline, extended from a JSON field pair to a visual
     one.
 
-Witness rendering: embedded, not linked
--------------------------------------------
-Each feature's own generated witness SVG (`docs/witnesses/<concept>.
-<query>.svg`, chainlink #28) is embedded directly as a base64
-`data:image/svg+xml` `<image>` when `witness_present` is true (the
-identical bar G18 already checked: a genuinely valid witness, an
-on-disk rendering, unambiguous) -- never a relative file reference,
-so the contact sheet stays a single self-contained artifact that does
-not break if opened from a different location or if the underlying
-witness file moves. `witness_present: false` -- and any read failure,
-belt-and-suspenders -- renders an explicit dashed-border "rendering
-unavailable" placeholder box instead. The panel itself is never
-dropped for a missing rendering: coverage of the declared feature set
-must stay visible even when what is being reported is absence.
+Witness rendering: embedded, and rendered from the SAME fresh
+evaluation the status columns come from
+-----------------------------------------------------------------------
+Each panel's thumbnail is embedded directly as a base64
+`data:image/svg+xml` `<image>`, never a relative file reference, so
+the contact sheet stays a single self-contained artifact -- but WHAT
+gets embedded is not simply "whatever bytes happen to already sit at
+the witness's output.path" (external review, high severity: an
+earlier version did exactly that, trusting `witness_present` alone as
+license to read and embed the on-disk file unverified. Reproduced two
+ways: a currently-passing witness whose on-disk SVG was stale/
+unrelated to what the fresh regeneration actually measured, embedded
+as-is beside an honestly green status row; and a currently-passing
+witness whose output.path did not even contain valid SVG, embedded
+as-is with no placeholder). Fixed as follows, in order of preference:
+
+  1. Whenever `evaluate_ledger()`'s own per-feature evaluation
+     produced a genuinely valid, identity-matching regenerated
+     `document` (the SAME document determinism/degeneracy were
+     computed from -- `FeatureEvaluation.document`, see
+     generate_feature_ledger.py), the thumbnail is RENDERED FRESH from
+     it: `witness_renderer.render(witness["renderer"], document
+     ["result"])`. This is the identical dispatch chainlink #28's own
+     `generate_witness.py` makes, over data already in memory -- no
+     subprocess, no second witness_backend execution, so this never
+     doubles the (potentially expensive, potentially side-effecting)
+     external regeneration `evaluate_ledger()` already ran once.
+     `identity_mismatches()` (applied inside `check_witness_determinism`
+     before `document` is ever returned non-None) already guarantees
+     `document["renderer_actual"] == witness["renderer"]`, so this
+     dispatch is never a declared/actual mismatch by construction; a
+     `RendererError` regardless (a misbehaving backend's result
+     content did not actually match its own declared kind) falls back
+     to the placeholder rather than propagating, exactly like a
+     missing rendering.
+  2. Only when no fresh document exists at all (no `witness_backend`
+     configured -- determinism itself is honestly `not-checked` in
+     this case too) does this module fall back to the on-disk file at
+     `witness["output"]["path"]` -- and even then, it is never trusted
+     blindly: the bytes must parse as well-formed XML with an `<svg>`
+     root before being embedded, or the placeholder is used instead.
+     This is the "at minimum" floor: a `witness_backend`-less workspace
+     cannot prove the CONTENT is current, but it can still refuse to
+     embed something that is not even a picture.
+  3. `witness_present: false`, or `witness` is `None`, or every case
+     above fails: an explicit dashed-border "rendering unavailable"
+     placeholder box. The panel itself is never dropped for a missing
+     or untrustworthy rendering -- coverage of the declared feature set
+     must stay visible even when what is being reported is absence.
 
 Never a promotion input
 ---------------------------
@@ -91,20 +126,18 @@ over identical workspace state produce byte-identical SVG text.
 
 Reuses rather than duplicates
 ---------------------------------
-`generate_feature_ledger.generate_ledger`/`load_validator` for every
-status fact; `gate_g18.collect_declared_features`/
-`collect_valid_witnesses` (the same functions `generate_ledger` itself
-calls) to look up each declared feature's own witness `output.path` --
-the ledger schema deliberately carries no path field (a generated
-projection's own §16.4 columns are exactly the six facts listed above,
-nothing about file locations), so this is the natural, minimal second
-lookup rather than widening the ledger schema for one consumer;
-`atomic_write.write_atomically` for the same "failure means no
-mutation" I/O guarantee chainlink #28 established; `xml_escape.
-escape_xml_text` (chainlink #32, factored out of `witness_renderer.py`'s
-own private `_escape` rather than duplicated a second time -- the
-identical "one module imports another's helper" precedent
-`atomic_write.py` already set).
+`generate_feature_ledger.evaluate_ledger`/`load_validator` for every
+status fact AND every witness/document pair a panel needs -- the
+single shared evaluation snapshot described above, never a second
+`witness_backend` dispatch; `witness_renderer.render`/`RendererError`
+(chainlink #28) to render a thumbnail from a fresh document exactly
+the way `generate_witness.py` itself does; `atomic_write.
+write_atomically` for the same "failure means no mutation" I/O
+guarantee chainlink #28 established; `xml_escape.escape_xml_text`
+(chainlink #32, factored out of `witness_renderer.py`'s own private
+`_escape` rather than duplicated a second time -- the identical "one
+module imports another's helper" precedent `atomic_write.py` already
+set).
 """
 from __future__ import annotations
 
@@ -113,15 +146,16 @@ import base64
 import json
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from atomic_write import write_atomically  # noqa: E402
-from gate_g18 import collect_declared_features  # noqa: E402
-from gate_g18 import collect_valid_witnesses  # noqa: E402
 from generate_feature_ledger import GenerationError  # noqa: E402
-from generate_feature_ledger import generate_ledger  # noqa: E402
+from generate_feature_ledger import evaluate_ledger  # noqa: E402
 from generate_feature_ledger import load_validator as load_ledger_validator  # noqa: E402
+from witness_renderer import RendererError  # noqa: E402
+from witness_renderer import render  # noqa: E402
 from xml_escape import escape_xml_text  # noqa: E402
 
 CONTACT_SHEET_RELATIVE_PATH = ("docs", "witnesses", "_contact_sheet.svg")
@@ -295,6 +329,38 @@ def _wrap_svg(width: int, height: int, body: str) -> str:
     )
 
 
+def _is_well_formed_svg(raw: bytes) -> bool:
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return False
+    return root.tag.endswith("svg")
+
+
+def _thumbnail_bytes_for(evaluation, workspace: Path) -> bytes | None:
+    """See this module's own docstring ("Witness rendering: embedded,
+    and rendered from the SAME fresh evaluation the status columns come
+    from") for why this is not a plain `read_bytes()` of
+    `witness["output"]["path"]`."""
+    if not evaluation.entry["witness_present"] or evaluation.witness is None:
+        return None
+    witness = evaluation.witness
+
+    if evaluation.document is not None:
+        try:
+            output = render(witness["renderer"], evaluation.document["result"])
+        except RendererError:
+            return None
+        return output.svg.encode("utf-8")
+
+    rendering_path = workspace / witness["output"]["path"]
+    try:
+        raw = rendering_path.read_bytes()
+    except OSError:
+        return None
+    return raw if _is_well_formed_svg(raw) else None
+
+
 def generate_contact_sheet(workspace: Path, descriptor: dict, runner=subprocess.run) -> tuple[str, int]:
     """Returns (svg_text, declared_feature_count). Raises GenerationError
     -- the SAME exception `generate_feature_ledger.generate_ledger` and
@@ -303,7 +369,12 @@ def generate_contact_sheet(workspace: Path, descriptor: dict, runner=subprocess.
     generated ledger that fails its own schema, the identical
     "genuinely valid, not just present" bar `write_ledger` already
     applies before ever writing one to disk)."""
-    ledger = generate_ledger(workspace, descriptor, runner=runner)
+    evaluations, generated_from = evaluate_ledger(workspace, descriptor, runner=runner)
+    ledger = {
+        "schema_version": "1.0",
+        "generated_from": generated_from,
+        "features": [evaluation.entry for evaluation in evaluations],
+    }
     errors = list(load_ledger_validator().iter_errors(ledger))
     if errors:
         raise GenerationError(
@@ -311,31 +382,20 @@ def generate_contact_sheet(workspace: Path, descriptor: dict, runner=subprocess.
             f"it: {errors[0].message}"
         )
 
-    declared, _ = collect_declared_features(descriptor, workspace)
-    witnesses, _ = collect_valid_witnesses(descriptor, workspace, set(declared))
-
     panels: list[str] = []
     y = BANNER_HEIGHT + MARGIN
-    for feature in ledger["features"]:
-        concept, query = feature["feature"].split(".", 1)
-        witness = witnesses.get((concept, query))
-        svg_bytes = None
-        if feature["witness_present"] and witness is not None:
-            rendering_path = workspace / witness["output"]["path"]
-            try:
-                svg_bytes = rendering_path.read_bytes()
-            except OSError:
-                svg_bytes = None
-        panels.append(panel_svg(y, feature, svg_bytes))
+    for evaluation in evaluations:
+        svg_bytes = _thumbnail_bytes_for(evaluation, workspace)
+        panels.append(panel_svg(y, evaluation.entry, svg_bytes))
         y += PANEL_HEIGHT + PANEL_GAP
 
-    if not ledger["features"]:
+    if not evaluations:
         panels.append(_empty_panel_svg(y))
         y += PANEL_HEIGHT + PANEL_GAP
 
     body = _banner_svg(SHEET_WIDTH) + "".join(panels)
     svg = _wrap_svg(SHEET_WIDTH, y, body)
-    return svg, len(ledger["features"])
+    return svg, len(evaluations)
 
 
 def write_contact_sheet(workspace: Path, descriptor: dict, runner=subprocess.run) -> tuple[Path, int]:

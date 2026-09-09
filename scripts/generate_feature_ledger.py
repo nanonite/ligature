@@ -109,6 +109,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -220,11 +221,43 @@ def closure_kind_for(cluster: str, closure_artifacts: dict) -> str:
     return entry["profile"][1]["closure_kind"]
 
 
-def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) -> dict:
-    """Build the ledger dict (not yet validated or written). Runs the
-    real G18/G19/G20 checks -- including G19's real regeneration
-    dispatch when a witness_backend is configured -- so this is a fresh
-    recomputation every time, never a cache of a previous run.
+@dataclass(frozen=True)
+class FeatureEvaluation:
+    """One declared feature's full evaluation snapshot -- the ledger
+    entry dict PLUS the exact witness spec and freshly regenerated
+    canonical result (`document`, or None whenever nothing trustworthy
+    was regenerated this run) that entry was computed from.
+
+    Exists so a second consumer -- generate_contact_sheet.py -- can
+    render a witness's thumbnail from the IDENTICAL fresh document
+    determinism/degeneracy were computed from, rather than either
+    re-dispatching the witness_backend a second time (expensive, and a
+    second real-world execution could itself behave differently) or
+    reading whatever bytes happen to already sit at the witness's
+    output.path on disk, unverified (external review, high severity:
+    an earlier version of the contact sheet did exactly that, so a
+    stale or entirely unrelated on-disk SVG -- or a file that was not
+    valid SVG at all -- was embedded beside an honestly green status
+    row with nothing to say otherwise)."""
+
+    entry: dict
+    witness: dict | None
+    document: dict | None
+
+
+def evaluate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) -> tuple[list[FeatureEvaluation], dict]:
+    """The single evaluation pass every ledger-shaped consumer builds
+    on: one G18/G19/G20 pass per declared feature -- including G19's
+    real regeneration dispatch when a witness_backend is configured --
+    so this is a fresh recomputation every call, never a cache of a
+    previous run, and never re-run a second time per witness by a
+    caller that only needs a DIFFERENT projection of the same facts.
+
+    Returns (evaluations, generated_from) -- `generated_from` is the
+    three-hash block generate_ledger()'s own schema requires; kept
+    separate from `evaluations` because it is over workspace-wide
+    artifact sets (every valid witness spec, every valid assurance
+    report), not a per-feature fact.
 
     Raises GenerationError outright when collect_declared_features()
     itself reports an ambiguous declaration (external review, medium
@@ -249,7 +282,7 @@ def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) ->
     g18_error_subjects = {f.subject for f in g18_findings if f.severity == "error"}
     ambiguous_witness_ids = {f.subject for f in g19_spec_findings}
 
-    features: list[dict] = []
+    evaluations: list[FeatureEvaluation] = []
     concept_spec_paths: set[Path] = set()
 
     for (concept, query), spec_path in sorted(declared.items()):
@@ -259,6 +292,7 @@ def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) ->
         witness = witnesses.get((concept, query))
         witness_id = witness["witness_id"] if witness else None
         witness_present = witness is not None and feature_id not in g18_error_subjects
+        document: dict | None = None
 
         if witness_id is None:
             determinism = "not-checked"
@@ -317,7 +351,7 @@ def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) ->
         owning_cluster = owning_cluster_for(concept_data)
         closure_kind = closure_kind_for(owning_cluster, closure_artifacts)
 
-        features.append({
+        entry = {
             "feature": feature_id,
             "witness_required": True,
             "witness_present": witness_present,
@@ -327,7 +361,8 @@ def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) ->
             "assurance_status": resolve_assurance_status(concept, query),
             "owning_cluster": owning_cluster,
             "closure_kind": closure_kind,
-        })
+        }
+        evaluations.append(FeatureEvaluation(entry=entry, witness=witness, document=document))
 
     concept_entries: list[tuple[str, dict]] = []
     for path in sorted(concept_spec_paths):
@@ -360,14 +395,25 @@ def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) ->
             continue
         assurance_entries.append((_relative(report_path, workspace), data))
 
+    generated_from = {
+        "concept_specs_hash": _hash_documents(concept_entries),
+        "witness_specs_hash": _hash_documents(witness_entries),
+        "assurance_results_hash": _hash_documents(assurance_entries),
+    }
+    return evaluations, generated_from
+
+
+def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) -> dict:
+    """Build the ledger dict (not yet validated or written) -- the
+    `entry` half of `evaluate_ledger()`'s own evaluation snapshot,
+    unpacked into the shape docs/feature-ledger-schema.json describes.
+    See `evaluate_ledger()` for what actually runs; this function adds
+    nothing of its own."""
+    evaluations, generated_from = evaluate_ledger(workspace, descriptor, runner=runner)
     return {
         "schema_version": "1.0",
-        "generated_from": {
-            "concept_specs_hash": _hash_documents(concept_entries),
-            "witness_specs_hash": _hash_documents(witness_entries),
-            "assurance_results_hash": _hash_documents(assurance_entries),
-        },
-        "features": features,
+        "generated_from": generated_from,
+        "features": [evaluation.entry for evaluation in evaluations],
     }
 
 

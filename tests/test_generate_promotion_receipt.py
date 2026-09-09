@@ -963,6 +963,46 @@ class WitnessPromotionIntegrityTest(unittest.TestCase):
             with self.assertRaises(RequiredWitnessError):
                 required_witness_paths(DESCRIPTOR, self.workspace, "scheduling")
 
+    def test_a_schema_invalid_cluster_string_fails_closed(self):
+        """External review, high severity: a non-empty-but-out-of-grammar
+        cluster value (e.g. "SCHEDULING", uppercase) passed an
+        isinstance-and-non-empty check, but no schema-valid receipt
+        `cluster` (docs/promotion-receipt-schema.json's own
+        ^[a-z][a-z0-9-]*$) could ever equal it -- the feature was
+        silently excluded from every promotion's required set forever,
+        the identical bug the missing-cluster fix closed, reached
+        through a different input shape."""
+        concept = json.loads((self.workspace / TASK_QUEUE_CONCEPT_PATH).read_text())
+        concept["cluster"] = "SCHEDULING"
+        _write_json(self.workspace, TASK_QUEUE_CONCEPT_PATH, concept)
+
+        with self.assertRaises(RequiredWitnessError):
+            required_witness_paths(DESCRIPTOR, self.workspace, "scheduling")
+
+        with self.assertRaises(PromotionReceiptError):
+            self._accept(artifact_paths=self.artifact_paths[:-1])
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_a_concept_spec_that_is_not_a_json_object_fails_closed(self):
+        """Low severity: valid JSON that parses to something other than
+        an object (e.g. a bare array) must raise RequiredWitnessError,
+        not AttributeError from calling .get() on a list."""
+        from unittest.mock import patch
+        concept_path = str((self.workspace / TASK_QUEUE_CONCEPT_PATH).resolve())
+        real_read_text = Path.read_text
+        calls = {"count": 0}
+
+        def flaky_read_text(path_self, *args, **kwargs):
+            if str(path_self) == concept_path:
+                calls["count"] += 1
+                if calls["count"] > 1:
+                    return "[]"
+            return real_read_text(path_self, *args, **kwargs)
+
+        with patch.object(Path, "read_text", flaky_read_text):
+            with self.assertRaises(RequiredWitnessError):
+                required_witness_paths(DESCRIPTOR, self.workspace, "scheduling")
+
     def test_a_symlinked_generated_svg_path_is_still_refused(self):
         """External review, medium severity: classifying a generated
         review projection by its RESOLVED identity alone let a symlink

@@ -65,6 +65,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,6 +89,20 @@ from validate_witness import witness_dir_for  # noqa: E402
 from validate_witness import witness_promotion_digest  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "promotion-receipt-schema.json"
+
+CLUSTER_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
+"""The exact grammar docs/promotion-receipt-schema.json's own `cluster`
+field is constrained to (and schemas/project-descriptor.schema.json's
+own `cluster` field, the same convention). A concept spec's `cluster`
+must match this too before required_witness_paths() ever compares it
+against a receipt's own `cluster` -- external review, high severity: a
+concept spec declaring an out-of-grammar value (e.g. "SCHEDULING",
+uppercase) is a non-empty string, so an isinstance-and-non-empty check
+alone let it pass, but no schema-valid receipt `cluster` could EVER
+equal it, silently excluding the feature from every promotion's
+required set forever -- the identical "quietly stop being required"
+bug the missing-cluster fix already closed, reached through a
+different, still-reachable input shape."""
 
 
 @dataclass
@@ -400,8 +415,25 @@ def required_witness_paths(descriptor: dict, workspace_root: Path, cluster: str)
                 f"declared (witness_required: true) feature {key[0]}.{key[1]}'s own concept spec "
                 f"{spec_path} could not be read to determine its owning cluster: {e}"
             )
+        if not isinstance(concept_data, dict):
+            # External review, low severity: the defensive second-read
+            # branch above only guards json.loads() itself raising --
+            # valid JSON that parses to something other than an object
+            # (an array, a string, a number) would otherwise reach
+            # concept_data.get("cluster") and raise AttributeError
+            # instead of failing closed the same way every other bad
+            # shape here does. Primarily a discovery/read-race
+            # scenario, same as the OSError/JSONDecodeError branch
+            # above (a concept spec that is not a JSON object at all is
+            # already excluded at collect_declared_features()'s own
+            # discovery step), but the fail-closed branch must handle
+            # it consistently regardless.
+            raise RequiredWitnessError(
+                f"declared (witness_required: true) feature {key[0]}.{key[1]}'s own concept spec "
+                f"{spec_path} is not a JSON object -- cluster attribution cannot be skipped"
+            )
         declared_cluster = concept_data.get("cluster")
-        if not isinstance(declared_cluster, str) or not declared_cluster:
+        if not isinstance(declared_cluster, str) or not CLUSTER_PATTERN.fullmatch(declared_cluster):
             # owning_cluster_for()'s own "unknown" fallback is the
             # right, honest answer for a DISPLAY-only reader
             # (generate_feature_ledger.py) that has nothing to gate on
@@ -411,12 +443,19 @@ def required_witness_paths(descriptor: dict, workspace_root: Path, cluster: str)
             # run concept-to-code's own JSON Schema validator against a
             # concept spec (see docs/concept-to-code-witness-required-schema.json's
             # own note), so a missing `cluster` field is a real,
-            # reachable state, not a theoretical one.
+            # reachable state, not a theoretical one -- and neither is
+            # a schema-invalid one (external review, high severity): a
+            # non-empty string like "SCHEDULING" passed an
+            # isinstance-and-non-empty check, but no schema-valid
+            # receipt `cluster` (docs/promotion-receipt-schema.json's
+            # own `^[a-z][a-z0-9-]*$`) could ever equal it, so the
+            # feature was silently excluded from every promotion's
+            # required set forever, not just this one.
             raise RequiredWitnessError(
                 f"declared (witness_required: true) feature {key[0]}.{key[1]}'s own concept spec "
-                f"{spec_path} does not declare a `cluster` -- cluster attribution cannot be skipped "
-                "or default to 'unknown', since either would silently exclude the feature from every "
-                "promotion's required witness set"
+                f"{spec_path} does not declare a `cluster` matching {CLUSTER_PATTERN.pattern!r} -- "
+                "cluster attribution cannot be skipped, defaulted to 'unknown', or trusted from a "
+                "value no schema-valid receipt cluster could ever match"
             )
         if declared_cluster == cluster:
             cluster_declared[key] = spec_path

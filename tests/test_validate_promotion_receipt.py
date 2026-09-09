@@ -362,6 +362,32 @@ class WitnessArtifactManifestTest(unittest.TestCase):
             [str(f) for f in findings],
         )
 
+    def test_a_schema_invalid_cluster_string_fails_closed(self):
+        """External review, high severity: a non-empty-but-out-of-grammar
+        cluster value (e.g. "SCHEDULING", uppercase) passed an
+        isinstance-and-non-empty check, but no schema-valid receipt
+        `cluster` (docs/promotion-receipt-schema.json's own
+        ^[a-z][a-z0-9-]*$) could ever equal it -- setting the concept
+        spec's own cluster to "SCHEDULING" and removing the witness
+        entry again used to produce zero findings."""
+        specs_dir = self.workspace / "crates" / "scheduler" / "specs"
+        concept = json.loads((specs_dir / "task_queue.json").read_text())
+        concept["cluster"] = "SCHEDULING"
+        (specs_dir / "task_queue.json").write_text(json.dumps(concept))
+
+        (self.workspace / "docs").mkdir()
+        content = b"reliance policy\n"
+        (self.workspace / "docs" / "reliance-policy.md").write_bytes(content)
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = [
+            {"path": "docs/reliance-policy.md", "hash": "sha256:" + hashlib.sha256(content).hexdigest()},
+        ]
+        findings = self._validate(receipt)
+        self.assertTrue(
+            any(f.gate == "7.1" and "cannot determine the required witness set" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
     def test_a_symlinked_generated_svg_manifest_entry_is_still_refused(self):
         """External review, medium severity: classifying a generated
         review projection by its RESOLVED identity alone let a symlink

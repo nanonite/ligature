@@ -1692,6 +1692,32 @@ class CmdValidateWorkPackageIntegrationTest(unittest.TestCase):
         finally:
             bad_manifest.unlink()
 
+    def test_manifest_with_witness_mitigation_above_low_risk_fails_through_the_cli(self):
+        """plan.md §12/§16.5 (chainlink #36): G6 must be reachable through
+        the real pipeline.py CLI path, not just the library-level
+        validate_data() call the other tests here exercise."""
+        data = json.loads((WP_FIXTURE_ROOT / "ci" / "manifest" / "WP-SCHED-001.json").read_text())
+        entry = data["definition_of_done"]["trusted_assumptions"][0]
+        entry["risk"] = "high"
+        entry["mitigations"] = [
+            {"kind": "witness", "reference": "specs/_witnesses/scheduler_dispatch.json"},
+            {"kind": "human-risk-acceptance", "reference": "PROM-SCHED-001"},
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            bad_manifest = Path(f.name)
+        try:
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                rc = self._run(
+                    str(bad_manifest), "--specs-search-root", str(WP_FIXTURE_ROOT / "crates" / "scheduler" / "specs")
+                )
+            self.assertEqual(rc, 1)
+            self.assertIn("G6", buffer.getvalue())
+            self.assertIn("acceptable at risk tier low only", buffer.getvalue())
+        finally:
+            bad_manifest.unlink()
+
 
 class LoadProjectDescriptorTest(unittest.TestCase):
     def test_valid_descriptor_loads(self):

@@ -72,6 +72,14 @@ implements the Rust code -- this schema IS the interface spec for
     coverage (the same product-automaton engine, not a second matcher)
     -- this adds only "the renderer's own entries must be present and
     correctly covered," nothing new to the underlying machinery.
+  - a witness-kind mitigation is rejected unless its assumption's risk is
+    low, even alongside a stronger mitigation on the same entry, and a
+    low-risk witness still requires its own human-risk-acceptance
+    mitigation beside it (plan.md §12/§16.5, chainlink #36):
+    check_witness_mitigation_risk_tier, gate G6. witness is already a
+    schema-valid mitigation kind (docs/work-package-manifest-schema.json);
+    this is the missing cross-field composition rule G1a's per-item
+    schema cannot express on its own.
 
 Accepts both .json and .yaml/.yml manifests -- plan.md §10's own worked
 example is `ci/manifest/WP-MCMC-004.yaml`.
@@ -554,6 +562,54 @@ def check_trusted_assumptions(
     return findings
 
 
+def check_witness_mitigation_risk_tier(path: Path, data: dict) -> list[Finding]:
+    """plan.md §12/§16.5 (chainlink #36): `witness` is a typed mitigation
+    kind acceptable at risk tier low only -- an example, one fixture
+    wide, strictly weaker than an example-test, property test, or proof.
+    Reject a witness-kind mitigation on any assumption whose risk is
+    medium, high, or critical, even when a stronger mitigation (test,
+    proof, human-risk-acceptance, ...) is also present on the same
+    entry -- an inappropriate-tier witness is itself the defect; a
+    stronger sibling mitigation does not excuse it.
+
+    At risk low, this section's own requirement is "issue + explicit
+    acceptance": the issue half is already structurally required via
+    assumption_ref.tracking_issue, and the explicit-acceptance half is
+    the existing human-risk-acceptance mitigation kind. A witness never
+    stands in for that acceptance by itself -- it augments, it does not
+    replace, so a low-risk witness mitigation still requires its own
+    human-risk-acceptance mitigation alongside it on the same entry.
+    This reuses the existing field rather than inventing a new authority
+    mechanism."""
+    findings: list[Finding] = []
+    for entry in data["definition_of_done"]["trusted_assumptions"]:
+        kinds = [m["kind"] for m in entry["mitigations"]]
+        if "witness" not in kinds:
+            continue
+        risk = entry["risk"]
+        boundary_id = entry["assumption_ref"]["boundary_id"]
+        if risk != "low":
+            findings.append(
+                Finding(
+                    "G6", path,
+                    f"assumption_ref {boundary_id!r} has a witness-kind mitigation but risk "
+                    f"{risk!r} -- witness is acceptable at risk tier low only (plan.md "
+                    "§12/§16.5); a stronger mitigation present alongside it does not excuse this",
+                )
+            )
+            continue
+        if "human-risk-acceptance" not in kinds:
+            findings.append(
+                Finding(
+                    "G6", path,
+                    f"assumption_ref {boundary_id!r} has a witness-kind mitigation at risk low "
+                    "but no human-risk-acceptance mitigation -- a witness does not by itself "
+                    "satisfy this risk tier's explicit-acceptance requirement (plan.md §12)",
+                )
+            )
+    return findings
+
+
 def check_promotion_reference(path: Path, data: dict) -> list[Finding]:
     return [
         Finding(
@@ -596,6 +652,7 @@ def validate_data(
     findings.extend(check_gate_integrity(path, data, workspace_root))
     findings.extend(check_witness_renderer_integrity(path, data, workspace_root))
     findings.extend(check_trusted_assumptions(path, data, specs_search_root, allowed_boundary_dirs))
+    findings.extend(check_witness_mitigation_risk_tier(path, data))
     findings.extend(check_promotion_reference(path, data))
     findings.extend(check_write_set_coverage_of_functions(path, data))
     return findings

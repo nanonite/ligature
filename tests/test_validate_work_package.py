@@ -329,6 +329,91 @@ class TrustedAssumptionResolutionTest(unittest.TestCase):
         self.assertEqual(errors_of(findings), [])
 
 
+class WitnessMitigationRiskTierTest(unittest.TestCase):
+    """plan.md §12/§16.5 (chainlink #36): witness is a typed mitigation
+    kind acceptable at risk tier low only, and even there it augments
+    rather than replaces the explicit human-risk-acceptance this
+    section's own low-tier requirement already needs."""
+
+    def test_low_risk_witness_accepted_with_required_low_tier_acceptance(self):
+        data = load_valid()
+        entry = data["definition_of_done"]["trusted_assumptions"][0]
+        entry["risk"] = "low"
+        entry["mitigations"] = [
+            {"kind": "witness", "reference": "specs/_witnesses/scheduler_dispatch.json"},
+            {"kind": "human-risk-acceptance", "reference": "PROM-SCHED-001"},
+        ]
+        findings = run(data)
+        self.assertEqual(errors_of(findings), [], [str(f) for f in errors_of(findings)])
+
+    def test_low_risk_witness_without_human_risk_acceptance_is_rejected(self):
+        """A witness never silently stands in for the explicit human
+        acceptance this risk tier already requires -- it must be present
+        alongside it, not replaced by it."""
+        data = load_valid()
+        entry = data["definition_of_done"]["trusted_assumptions"][0]
+        entry["risk"] = "low"
+        entry["mitigations"] = [
+            {"kind": "witness", "reference": "specs/_witnesses/scheduler_dispatch.json"},
+        ]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("no human-risk-acceptance mitigation" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_witness_rejected_at_medium(self):
+        data = load_valid()
+        entry = data["definition_of_done"]["trusted_assumptions"][0]
+        entry["risk"] = "medium"
+        entry["mitigations"] = [
+            {"kind": "witness", "reference": "specs/_witnesses/scheduler_dispatch.json"},
+        ]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("acceptable at risk tier low only" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_witness_rejected_at_high_even_alongside_a_test_and_human_risk_acceptance(self):
+        data = load_valid()
+        entry = data["definition_of_done"]["trusted_assumptions"][0]
+        entry["risk"] = "high"
+        entry["mitigations"] = [
+            {"kind": "witness", "reference": "specs/_witnesses/scheduler_dispatch.json"},
+            {"kind": "test", "reference": "tests/scheduler_dispatch_order.rs"},
+            {"kind": "human-risk-acceptance", "reference": "PROM-SCHED-001"},
+        ]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("acceptable at risk tier low only" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_witness_rejected_at_critical_even_alongside_a_proof(self):
+        data = load_valid()
+        entry = data["definition_of_done"]["trusted_assumptions"][0]
+        entry["risk"] = "critical"
+        entry["mitigations"] = [
+            {"kind": "witness", "reference": "specs/_witnesses/scheduler_dispatch.json"},
+            {"kind": "proof", "reference": "proofs/scheduler_dispatch.lean"},
+        ]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("acceptable at risk tier low only" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_non_witness_mitigation_behavior_is_unchanged(self):
+        """The canonical fixture's own high-risk assumption (test +
+        human-risk-acceptance, no witness) must stay exactly as valid as
+        it was before this check existed."""
+        findings = run(load_valid())
+        self.assertEqual(errors_of(findings), [], [str(f) for f in errors_of(findings)])
+
+    def test_unknown_mitigation_kind_remains_schema_invalid(self):
+        data = load_valid()
+        entry = data["definition_of_done"]["trusted_assumptions"][0]
+        entry["mitigations"] = [
+            {"kind": "not-a-real-kind", "reference": "whatever"},
+        ]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any(f.gate == "G1a" for f in errors), [str(f) for f in errors])
+
+
 class StandaloneCliBoundaryDirChoiceTest(unittest.TestCase):
     """External review, medium severity: pipeline.py correctly supplies
     descriptor-derived boundary directories, but validate_work_package.py's

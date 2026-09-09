@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 ### Fixed
+- gate-g14 silently skips invalid closure artifacts instead of saying why (#49)
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed

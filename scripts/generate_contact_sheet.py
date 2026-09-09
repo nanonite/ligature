@@ -88,15 +88,29 @@ as-is with no placeholder). Fixed as follows, in order of preference:
      content did not actually match its own declared kind) falls back
      to the placeholder rather than propagating, exactly like a
      missing rendering.
-  2. Only when no fresh document exists at all (no `witness_backend`
-     configured -- determinism itself is honestly `not-checked` in
-     this case too) does this module fall back to the on-disk file at
-     `witness["output"]["path"]` -- and even then, it is never trusted
-     blindly: the bytes must parse as well-formed XML with an `<svg>`
-     root before being embedded, or the placeholder is used instead.
-     This is the "at minimum" floor: a `witness_backend`-less workspace
-     cannot prove the CONTENT is current, but it can still refuse to
-     embed something that is not even a picture.
+  2. Only when NOTHING was checked at all this run (`document is None`
+     AND `determinism: not-checked` -- i.e. no `witness_backend`
+     configured) does this module fall back to the on-disk file at
+     `witness["output"]["path"]`. A checked-and-FAILED regeneration (a
+     real dispatch failure, an invalid result, or a mismatched
+     identity -- `determinism: fail`, also `document is None`) does
+     NOT fall back to disk: it gets the same placeholder a missing
+     rendering gets, since a backend that was actually invoked and
+     could not be trusted this run says nothing honest about whatever
+     happens to already sit on disk from some earlier, possibly
+     different, run (external review, low severity: an earlier version
+     fell back to disk for EVERY `document is None` case, silently
+     widening the fallback beyond this stated scope). And even in the
+     genuine no-backend case, the on-disk bytes are never trusted
+     blindly: they must parse as well-formed XML whose root is an
+     EXACT `svg` local name under the real SVG namespace -- well-formed
+     XML alone is not enough, since `<notsvg/>` and `<x:foosvg
+     xmlns:x="urn:not-svg"/>` both parse cleanly but are not SVG
+     (external review, medium severity: an earlier `root.tag.
+     endswith("svg")` check accepted both). This is the "at minimum"
+     floor: a `witness_backend`-less workspace cannot prove the CONTENT
+     is current, but it can still refuse to embed something that is
+     not even a picture.
   3. `witness_present: false`, or `witness` is `None`, or every case
      above fails: an explicit dashed-border "rendering unavailable"
      placeholder box. The panel itself is never dropped for a missing
@@ -329,19 +343,42 @@ def _wrap_svg(width: int, height: int, body: str) -> str:
     )
 
 
+SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+SVG_ROOT_TAG = f"{{{SVG_NAMESPACE}}}svg"
+
+
 def _is_well_formed_svg(raw: bytes) -> bool:
+    """Well-formed XML is not enough on its own -- `<notsvg/>` and
+    `<x:foosvg xmlns:x="urn:not-svg"/>` both parse cleanly but are not
+    SVG. The root must be an EXACT `svg` local name under the real SVG
+    namespace (`SVG_NAMESPACE`) -- or, for the unprefixed, no-namespace
+    documents this codebase's own `witness_renderer.py` templates
+    always declare a namespace on (so this branch exists for foreign
+    input, not for anything this pipeline itself ever produces), an
+    exact unprefixed `svg` local name with no namespace at all."""
     try:
         root = ET.fromstring(raw)
     except ET.ParseError:
         return False
-    return root.tag.endswith("svg")
+    return root.tag == SVG_ROOT_TAG or root.tag == "svg"
 
 
 def _thumbnail_bytes_for(evaluation, workspace: Path) -> bytes | None:
     """See this module's own docstring ("Witness rendering: embedded,
     and rendered from the SAME fresh evaluation the status columns come
     from") for why this is not a plain `read_bytes()` of
-    `witness["output"]["path"]`."""
+    `witness["output"]["path"]`.
+
+    The on-disk fallback below fires ONLY when nothing was checked at
+    all this run (`determinism: not-checked` -- no `witness_backend`
+    configured), never for a checked-and-failed regeneration (a real
+    dispatch failure, an invalid result, or a mismatched identity all
+    leave `document` `None` too, but with `determinism: fail`, not
+    `not-checked` -- `evaluate_ledger()`'s own distinction). A backend
+    that was actually invoked and could not be trusted this run gets
+    the SAME honest placeholder a missing rendering gets, rather than
+    silently reusing whatever rendering happens to already be on disk
+    from some earlier, possibly different, run."""
     if not evaluation.entry["witness_present"] or evaluation.witness is None:
         return None
     witness = evaluation.witness
@@ -352,6 +389,9 @@ def _thumbnail_bytes_for(evaluation, workspace: Path) -> bytes | None:
         except RendererError:
             return None
         return output.svg.encode("utf-8")
+
+    if evaluation.entry["determinism"] != "not-checked":
+        return None
 
     rendering_path = workspace / witness["output"]["path"]
     try:

@@ -104,7 +104,14 @@ class MissingStatesTest(GateTestCase):
         self.assertIn("witness: absent", svg)
         self.assertNotIn("data:image/svg+xml;base64,", svg)
 
-    def test_a_failed_regeneration_still_shows_the_existing_rendering(self):
+    def test_a_failed_regeneration_falls_back_to_the_placeholder_not_the_stale_disk_file(self):
+        # External review, low severity: a checked-and-FAILED
+        # regeneration (document is None, but determinism: fail, not
+        # not-checked) must not silently reuse whatever happens to
+        # already sit on disk -- only a genuine "nothing was checked at
+        # all" (no witness_backend) falls back that far. A real backend
+        # that was invoked and could not be trusted this run gets the
+        # same honest placeholder a missing rendering gets.
         self.ws.write_concept_spec()
         happy_path_witness_and_rendering(self.ws)
         broken_backend = descriptor_with(
@@ -114,9 +121,11 @@ class MissingStatesTest(GateTestCase):
         self.assertIn("determinism: fail", svg)
         self.assertIn("degeneracy: not-checked", svg)
         # witness_present is still true (spec + rendering both exist on
-        # disk) -- a failed regeneration must not hide what IS there.
+        # disk) -- the panel itself must stay, even though its
+        # thumbnail cannot be trusted this run.
         self.assertIn("witness: present", svg)
-        self.assertIn("data:image/svg+xml;base64,", svg)
+        self.assertIn("rendering unavailable", svg)
+        self.assertNotIn("data:image/svg+xml;base64,", svg)
 
     def test_no_backend_configured_still_shows_the_existing_rendering(self):
         self.ws.write_concept_spec()
@@ -288,6 +297,38 @@ class ThumbnailFreshnessTest(GateTestCase):
         self.assertIn("determinism: not-checked", svg)
         self.assertIn("data:image/svg+xml;base64,", svg)
         self.assertNotIn("rendering unavailable", svg)
+
+    def test_a_well_formed_but_wrong_element_root_is_rejected(self):
+        # External review, medium severity: well-formed XML alone is
+        # not "valid SVG" -- an earlier `root.tag.endswith("svg")`
+        # check accepted a plain, unrelated `<notsvg/>` root.
+        self.assertFalse(gcs._is_well_formed_svg(b"<notsvg/>"))
+
+    def test_a_foreign_namespaced_root_whose_local_name_merely_ends_in_svg_is_rejected(self):
+        # The exact case named in the review: a foreign namespace whose
+        # local name happens to end in "svg" (`endswith("svg")` matched
+        # this too) is not the real SVG namespace and must be refused.
+        self.assertFalse(
+            gcs._is_well_formed_svg(b'<x:foosvg xmlns:x="urn:not-svg"/>')
+        )
+
+    def test_no_backend_falls_back_to_the_placeholder_for_a_spoofed_root_on_disk(self):
+        self.ws.write_concept_spec()
+        happy_path_witness_and_rendering(self.ws)
+        (self.root / "docs" / "witnesses" / "task_queue.load_factor.svg").write_text(
+            '<x:foosvg xmlns:x="urn:not-svg"/>'
+        )
+        no_backend = descriptor_with("crates/scheduler")
+
+        svg = self.generate(no_backend)
+        self.assertIn("determinism: not-checked", svg)
+        self.assertIn("rendering unavailable", svg)
+        self.assertNotIn("data:image/svg+xml;base64,", svg)
+
+    def test_a_genuine_svg_namespaced_root_is_accepted(self):
+        self.assertTrue(
+            gcs._is_well_formed_svg(b'<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+        )
 
 
 class AmbiguousDeclarationTest(GateTestCase):

@@ -458,6 +458,9 @@ from validate_promotion_receipt import validate_file as validate_promotion_file 
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
+from select_pilot_cluster import EXIT_NO_ELIGIBLE as _PILOT_EXIT_NO_ELIGIBLE  # noqa: E402
+from select_pilot_cluster import render_report as _render_pilot_report  # noqa: E402
+from select_pilot_cluster import select_pilot  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
@@ -1111,6 +1114,19 @@ def cmd_gate_g14(args: argparse.Namespace) -> int:
         )
     outcomes, workspace_findings = gate_g14_workspace(workspace, descriptor)
     return report_g14_outcomes(outcomes, workspace_findings)
+
+
+def cmd_select_pilot_cluster(args: argparse.Namespace) -> int:
+    """Pilot-cluster selection rubric (chainlink #4, plan.md §14):
+    mechanized, verifier-agnostic ranking of every candidate cluster
+    reachable from the descriptor's own crates, applied fresh to
+    whichever project's descriptor and workspace are supplied -- never a
+    fixed-name table."""
+    descriptor = load_project_descriptor(args.descriptor)
+    workspace = _require_workspace_root_exists(args.workspace)
+    candidates, ranked, findings = select_pilot(workspace, descriptor)
+    print(_render_pilot_report(candidates, ranked, findings))
+    return 0 if ranked else _PILOT_EXIT_NO_ELIGIBLE
 
 
 def cmd_gate_g18(args: argparse.Namespace) -> int:
@@ -1917,7 +1933,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         "implementation_observed vs assurance_status never merged, chainlink #34), "
         "generate-contact-sheet (Stage 4.5 review surface with the ∃-witness evidence banner, "
         "traffic-light witness/determinism/degeneracy columns kept visually distinct from a "
-        "never-green assurance_status/closure_kind column, chainlink #32)"
+        "never-green assurance_status/closure_kind column, chainlink #32), "
+        "select-pilot-cluster (plan.md §14 mechanized, verifier-agnostic first-pilot-cluster "
+        "ranking, chainlink #4)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -2119,6 +2137,12 @@ def main(argv: list[str]) -> int:
         help="Stage 8C: G14 transitive closure + CG6 discharge, per cluster (chainlink #25)",
     )
     gate_g14_p.set_defaults(func=cmd_gate_g14)
+
+    select_pilot_cluster_p = sub.add_parser(
+        "select-pilot-cluster",
+        help="plan.md §14: mechanized, verifier-agnostic first-pilot-cluster ranking (chainlink #4)",
+    )
+    select_pilot_cluster_p.set_defaults(func=cmd_select_pilot_cluster)
 
     gate_g18_p = sub.add_parser(
         "gate-g18",

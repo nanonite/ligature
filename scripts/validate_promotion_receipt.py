@@ -22,11 +22,26 @@ scripts/validate_work_package.py's did:
   - One-way references: no artifact the receipt lists may itself carry a
     promotion_id field (plan.md §7.1: normative artifacts carry review
     blocks and never a promotion_id; only generated reports cite one).
+  - A canonical crate-scoped witness spec (<crate_dir>/specs/_witnesses/
+    *.json) is hashed with validate_witness.witness_promotion_digest
+    (canonical JSON over the spec, output.render_hash excluded) instead
+    of a plain byte hash (plan.md §16.5, chainlink #35) -- a
+    rendering-only regeneration must never revoke acceptance, while a
+    fixture or determinism.value_hash change still does. Recognizing
+    this requires an optional project descriptor (see below); every
+    other artifact keeps the original plain-byte-hash comparison
+    unconditionally.
 
-No optional context and no escape-hatch flags: unlike assumption-ref
-resolution in validate_work_package.py, every check here only needs
-workspace_root, which is never optional, so there is no "missing search
-root" class of gap to guard against and nothing to silently degrade.
+Every check besides witness recognition needs only workspace_root,
+which is never optional -- no "missing search root" class of gap to
+guard against there. Witness recognition alone takes an OPTIONAL
+descriptor (unlike validate_work_package.py's mandatory-choice
+boundary-directory flags, since most receipts have no witnesses at
+all): omitted, and no artifact_manifest entry sits under a directory
+literally named "_witnesses", this module's original,
+witness-unaware behavior is reproduced exactly; omitted while such an
+entry IS present, that entry fails closed rather than being silently
+trusted as an ordinary byte-hashed artifact or silently ignored.
 """
 from __future__ import annotations
 
@@ -41,7 +56,14 @@ import yaml
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from project_descriptor import ProjectDescriptorError  # noqa: E402
+from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
+from validate_witness import CANONICAL_DIR_NAME as WITNESS_DIR_NAME  # noqa: E402
+from validate_witness import load_validator as load_witness_validator  # noqa: E402
+from validate_witness import validate_data as validate_witness_data  # noqa: E402
+from validate_witness import witness_dir_for  # noqa: E402
+from validate_witness import witness_promotion_digest  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "promotion-receipt-schema.json"
 
@@ -148,7 +170,66 @@ def _load_structured_artifact(resolved: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def check_artifact_manifest(path: Path, data: dict, workspace_root: Path) -> list[Finding]:
+def _witness_promotion_hash_if_applicable(
+    descriptor: dict | None, workspace_root: Path, entry_path: str, resolved: Path
+) -> tuple[str | None, Finding | None]:
+    """Mirrors generate_promotion_receipt.py's own function of the same
+    name exactly (chainlink #35) -- the SAME rule
+    (validate_witness.witness_promotion_digest, validated first with
+    validate_witness.py's own G1a/G1b/G2) must decide what "the
+    witness's promotion-relevant content" means on both the generation
+    and the validation side, or the two could silently disagree about
+    what invalidates a receipt.
+
+    Returns (hash_or_None, finding_or_None): a non-None finding means
+    "fail closed here, do not fall back to an ordinary byte hash" --
+    used for a path that LOOKS like a witness (its parent directory is
+    literally named "_witnesses") but cannot be trusted as one: no
+    descriptor to confirm crate anchoring, a directory that doesn't
+    match any declared crate's canonical witness_dir_for, or a spec
+    that fails its own validator."""
+    looks_like_witness = resolved.parent.name == WITNESS_DIR_NAME
+    if descriptor is None:
+        if looks_like_witness:
+            return None, Finding(
+                "7.1", resolved,
+                f"{entry_path!r} sits under a {WITNESS_DIR_NAME!r} directory but no project "
+                "descriptor was supplied to confirm it is a real crate's canonical witness directory",
+            )
+        return None, None
+
+    for crate in descriptor["crates"]:
+        if resolved.parent != witness_dir_for(crate, workspace_root):
+            continue
+        specs_search_root = workspace_root / crate["specs_search_root"]
+        try:
+            data = json.loads(resolved.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            return None, Finding("7.1", resolved, f"{entry_path!r} is not readable JSON: {e}")
+        if not isinstance(data, dict):
+            return None, Finding("7.1", resolved, f"{entry_path!r} is not a JSON object")
+        witness_findings = validate_witness_data(resolved, data, load_witness_validator(), specs_search_root)
+        errors = [f for f in witness_findings if f.severity == "error"]
+        if errors:
+            return None, Finding(
+                "7.1", resolved,
+                f"{entry_path!r} does not pass its own witness validator: "
+                + "; ".join(f.reason for f in errors),
+            )
+        return witness_promotion_digest(data), None
+
+    if looks_like_witness:
+        return None, Finding(
+            "7.1", resolved,
+            f"{entry_path!r} sits under a {WITNESS_DIR_NAME!r} directory but not at any declared "
+            "crate's own canonical witness directory",
+        )
+    return None, None
+
+
+def check_artifact_manifest(
+    path: Path, data: dict, workspace_root: Path, descriptor: dict | None = None
+) -> list[Finding]:
     findings: list[Finding] = []
     workspace_resolved = workspace_root.resolve()
     receipt_resolved = path.resolve()
@@ -210,7 +291,14 @@ def check_artifact_manifest(path: Path, data: dict, workspace_root: Path) -> lis
             )
             continue
 
-        actual = _sha256(resolved)
+        witness_hash, witness_finding = _witness_promotion_hash_if_applicable(
+            descriptor, workspace_root, entry_path, resolved
+        )
+        if witness_finding is not None:
+            findings.append(witness_finding)
+            continue
+
+        actual = witness_hash or _sha256(resolved)
         if actual != entry["hash"]:
             findings.append(
                 Finding(
@@ -235,14 +323,26 @@ def check_artifact_manifest(path: Path, data: dict, workspace_root: Path) -> lis
     return findings
 
 
-def validate_data(path: Path, data: dict, validator: Draft202012Validator, workspace_root: Path) -> list[Finding]:
+def validate_data(
+    path: Path, data: dict, validator: Draft202012Validator, workspace_root: Path,
+    descriptor: dict | None = None,
+) -> list[Finding]:
+    """`descriptor` (chainlink #35, optional and backward-compatible)
+    recognizes canonical crate-scoped witness specs in
+    artifact_manifest and checks them with
+    validate_witness.witness_promotion_digest instead of a plain byte
+    hash -- see check_artifact_manifest/_witness_promotion_hash_if_applicable.
+    Omitting it reproduces this function's original, witness-unaware
+    behavior exactly, except that a `_witnesses`-shaped path is then
+    refused rather than silently trusted (see that function's own
+    docstring)."""
     g1a = gate_g1a(path, data, validator)
     if g1a:
         return g1a
 
     findings: list[Finding] = []
     findings.extend(check_naming(path, data, workspace_root))
-    findings.extend(check_artifact_manifest(path, data, workspace_root))
+    findings.extend(check_artifact_manifest(path, data, workspace_root, descriptor))
     return findings
 
 
@@ -253,22 +353,42 @@ def _load_receipt(path: Path) -> dict:
     return json.loads(text)
 
 
-def validate_file(path: Path, validator: Draft202012Validator, workspace_root: Path) -> list[Finding]:
+def validate_file(
+    path: Path, validator: Draft202012Validator, workspace_root: Path, descriptor: dict | None = None
+) -> list[Finding]:
     try:
         data = _load_receipt(path)
     except (json.JSONDecodeError, yaml.YAMLError) as e:
         return [Finding("G1a", path, f"invalid {path.suffix or 'JSON'}: {e}")]
-    return validate_data(path, data, validator, workspace_root)
+    return validate_data(path, data, validator, workspace_root, descriptor)
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("receipt", type=Path, help="Path to a promotion receipt .json or .yaml file")
     parser.add_argument("--workspace-root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--descriptor",
+        type=Path,
+        default=None,
+        help="Project descriptor, to recognize canonical crate-scoped witness specs in "
+        "artifact_manifest (chainlink #35). Defaults to <workspace-root>/project-descriptor.json "
+        "if that file exists; omitted entirely (no witness recognition) if it does not, so a "
+        "workspace with no witnesses needs no descriptor.",
+    )
     args = parser.parse_args(argv)
 
+    descriptor = None
+    descriptor_path = args.descriptor or (args.workspace_root / "project-descriptor.json")
+    if args.descriptor is not None or descriptor_path.is_file():
+        try:
+            descriptor = load_project_descriptor(descriptor_path)
+        except (ProjectDescriptorError, OSError, json.JSONDecodeError) as e:
+            print(f"error: cannot read project descriptor {descriptor_path}: {e}", file=sys.stderr)
+            return 2
+
     validator = load_validator()
-    findings = validate_file(args.receipt, validator, args.workspace_root)
+    findings = validate_file(args.receipt, validator, args.workspace_root, descriptor)
 
     if not findings:
         print("OK: promotion receipt passes G1a and §7.1 checks")

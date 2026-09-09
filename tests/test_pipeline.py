@@ -1491,6 +1491,134 @@ class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
         self.assertEqual(data["schema_versions"], {"boundary": "1.0"})
 
 
+class CmdAcceptPromotionWitnessIntegrationTest(unittest.TestCase):
+    """chainlink #35, exercised end to end through pipeline.main() --
+    accept-promotion (witness completeness + promotion-digest hashing)
+    then validate-promotion (the same digest, recognized consistently).
+    Deliberately no boundary contract in this fixture: validate_boundary_contracts.py's
+    own unfiltered concept-spec scan would otherwise also match the
+    witness spec's own top-level `concept` field as a second "TaskQueue"
+    declaration -- unrelated to this issue, a witness-only accepted set
+    is sufficient to exercise every path here."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_validate_witness import concept_spec, witness_spec  # noqa: E402
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "project-descriptor.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "project": {"name": "repro", "crate_naming_convention": "^repro-[a-z]+"},
+            "mode": "greenfield",
+            "crates": [
+                {
+                    "crate_dir": "crates/scheduler",
+                    "contracts_crate": "contracts",
+                    "specs_search_root": "crates/scheduler/specs",
+                }
+            ],
+            "verifier_policy": {"default": "creusot"},
+            "compatibility_policy": {"reliance_policy_path": "docs/reliance-policy.md"},
+            "write_set": {"allowed_roots": [], "protected_roots": []},
+            "gate_integrity": [],
+            "review": {"reviewer": "repro", "reviewed_at": "2026-08-27"},
+        }))
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "reliance-policy.md").write_text(
+            "# Reliance policy\n\n"
+            "Schema version this policy targets: `1.0`.\n"
+            "Owner: `platform-team`.\n"
+            "Policy version: `reliance-policy@1.2`\n"
+        )
+        specs_dir = self.workspace / "crates" / "scheduler" / "specs"
+        (specs_dir / "_witnesses").mkdir(parents=True)
+        concept = concept_spec()
+        concept["queries"][0]["witness_required"] = True
+        (specs_dir / "task_queue.json").write_text(json.dumps(concept))
+        self.witness_path = "crates/scheduler/specs/_witnesses/task_queue.load_factor.json"
+        (specs_dir / "_witnesses" / "task_queue.load_factor.json").write_text(json.dumps(witness_spec()))
+        self.artifacts = ["docs/reliance-policy.md", self.witness_path]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args):
+        return pipeline.main(["--workspace", str(self.workspace), "accept-promotion", *args])
+
+    def test_accept_then_validate_promotion_recognize_the_witness_consistently(self):
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+            "--accepted-at", "2026-09-08",
+        )
+        self.assertEqual(rc, 0)
+
+        receipt_path = self.workspace / "specs" / "_promotions" / "scheduling.json"
+        data = json.loads(receipt_path.read_text())
+        self.assertEqual(data["schema_versions"], {"witness": "1.0"})
+
+        validate_rc = pipeline.main(
+            ["--workspace", str(self.workspace), "validate-promotion", str(receipt_path)]
+        )
+        self.assertEqual(validate_rc, 0)
+
+    def test_omitting_the_witness_from_the_accepted_set_is_refused(self):
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_render_hash_only_change_still_validates_after_acceptance(self):
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 0)
+        receipt_path = self.workspace / "specs" / "_promotions" / "scheduling.json"
+
+        witness_path = self.workspace / self.witness_path
+        spec = json.loads(witness_path.read_text())
+        spec["output"]["render_hash"] = "sha256:" + "6" * 64
+        witness_path.write_text(json.dumps(spec))
+
+        validate_rc = pipeline.main(
+            ["--workspace", str(self.workspace), "validate-promotion", str(receipt_path)]
+        )
+        self.assertEqual(validate_rc, 0)
+
+    def test_fixture_change_after_acceptance_fails_validate_promotion(self):
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 0)
+        receipt_path = self.workspace / "specs" / "_promotions" / "scheduling.json"
+
+        witness_path = self.workspace / self.witness_path
+        spec = json.loads(witness_path.read_text())
+        spec["fixture"]["fixture_id"] = "FX-CHANGED"
+        witness_path.write_text(json.dumps(spec))
+
+        validate_rc = pipeline.main(
+            ["--workspace", str(self.workspace), "validate-promotion", str(receipt_path)]
+        )
+        self.assertEqual(validate_rc, 1)
+
+
 class CmdValidateWorkPackageIntegrationTest(unittest.TestCase):
     """Exercised through pipeline.main() end to end, matching the pattern
     used for validate/approve -- not just the underlying library call."""

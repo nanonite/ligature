@@ -425,5 +425,111 @@ class StandaloneCliBoundaryDirChoiceTest(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class WitnessRendererIntegrityTest(unittest.TestCase):
+    """chainlink #35: the witness renderer implementation
+    (scripts/witness_renderer.py, scripts/xml_escape.py) must have its
+    own gate_integrity entry, be covered by protected_write_set, and
+    never be covered by allowed_write_set -- all G13 pre-flight,
+    unconditional for every manifest."""
+
+    def test_valid_manifest_has_both_renderer_paths_pinned_and_protected(self):
+        findings = run(load_valid())
+        self.assertFalse(any("witness renderer" in f.reason for f in errors_of(findings)), [str(f) for f in findings])
+
+    def test_missing_renderer_gate_integrity_entry_is_rejected(self):
+        data = load_valid()
+        data["gate_integrity"] = [
+            e for e in data["gate_integrity"] if e["runner"] != "scripts/witness_renderer.py"
+        ]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(
+            any(
+                f.gate == "G13" and "missing a required entry" in f.reason and "witness_renderer.py" in f.reason
+                for f in errors
+            ),
+            [str(f) for f in errors],
+        )
+
+    def test_missing_xml_escape_helper_entry_is_rejected(self):
+        """The transitive helper must be pinned too -- witness_renderer.py
+        imports it directly for its own text escaping, so a
+        modification there can change rendered evidence without
+        touching witness_renderer.py's own hash."""
+        data = load_valid()
+        data["gate_integrity"] = [e for e in data["gate_integrity"] if e["runner"] != "scripts/xml_escape.py"]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(
+            any(
+                f.gate == "G13" and "missing a required entry" in f.reason and "xml_escape.py" in f.reason
+                for f in errors
+            ),
+            [str(f) for f in errors],
+        )
+
+    def test_renderer_hash_drift_is_rejected(self):
+        data = load_valid()
+        for entry in data["gate_integrity"]:
+            if entry["runner"] == "scripts/witness_renderer.py":
+                entry["hash"] = "sha256:" + "0" * 64
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(
+            any(f.gate == "G13" and "hash mismatch" in f.reason and "witness_renderer.py" in f.reason for f in errors),
+            [str(f) for f in errors],
+        )
+
+    def test_renderer_path_escaping_the_workspace_is_rejected(self):
+        data = load_valid()
+        for entry in data["gate_integrity"]:
+            if entry["runner"] == "scripts/witness_renderer.py":
+                entry["runner"] = "../outside_workspace_secret.py"
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any("escapes the workspace" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_renderer_not_covered_by_protected_write_set_is_rejected(self):
+        data = load_valid()
+        data["write_policy"]["protected_write_set"] = [
+            p for p in data["write_policy"]["protected_write_set"] if p != "scripts/**"
+        ]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(
+            any(
+                f.gate == "G13" and "not covered by protected_write_set" in f.reason
+                and "witness_renderer.py" in f.reason
+                for f in errors
+            ),
+            [str(f) for f in errors],
+        )
+
+    def test_renderer_covered_by_allowed_write_set_is_rejected(self):
+        data = load_valid()
+        data["write_policy"]["allowed_write_set"] = list(data["write_policy"]["allowed_write_set"]) + [
+            "scripts/witness_renderer.py"
+        ]
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(
+            any(
+                f.gate == "G13" and "covered by allowed_write_set" in f.reason
+                and "witness_renderer.py" in f.reason
+                for f in errors
+            ),
+            [str(f) for f in errors],
+        )
+
+    def test_a_broad_protected_pattern_genuinely_proven_to_cover_the_renderer_passes(self):
+        """'scripts/**' must satisfy coverage because the real
+        glob-overlap engine proves it does -- not because the pattern
+        merely looks broad. The canonical fixture already relies on
+        this; this test names the guarantee directly."""
+        from validate_work_package import _patterns_can_overlap
+        self.assertTrue(_patterns_can_overlap("scripts/**", "scripts/witness_renderer.py"))
+        self.assertTrue(_patterns_can_overlap("scripts/**", "scripts/xml_escape.py"))
+
+
 if __name__ == "__main__":
     unittest.main()

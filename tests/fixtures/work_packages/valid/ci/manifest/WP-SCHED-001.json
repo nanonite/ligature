@@ -16,7 +16,9 @@
     "features": ["default"]
   },
   "gate_integrity": [
-    { "runner": "scripts/dummy_gate.py", "hash": "sha256:197f698dddc62228b983ae82546c6d59eda35172edff0565a5b87ea614947a06" }
+    { "runner": "scripts/dummy_gate.py", "hash": "sha256:197f698dddc62228b983ae82546c6d59eda35172edff0565a5b87ea614947a06" },
+    { "runner": "scripts/witness_renderer.py", "hash": "sha256:6c247cd00353807bbc4572e058a2c6792237ef809be655331928450b045dfcbf" },
+    { "runner": "scripts/xml_escape.py", "hash": "sha256:c6b9dca42ff19a5e1b8d62991898f0b57678823e41c820850b8d9619f66142af" }
   ],
   "write_policy": {
     "allowed_write_set": ["crates/scheduler/src/", "crates/scheduler/tests/"],

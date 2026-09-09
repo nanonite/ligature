@@ -26,13 +26,23 @@ Implemented now, against schemas that actually exist:
             work-package manifest. Standalone, not routed through
             draft/approve -- a manifest is machine-generated at Stage 7
             from already-promoted content, not LLM-drafted and
-            human-reviewed the way a boundary contract is.
+            human-reviewed the way a boundary contract is. G13 also
+            requires the witness renderer implementation (chainlink
+            #35, plan.md §16.5): scripts/witness_renderer.py and its
+            direct helper scripts/xml_escape.py each need their own
+            gate_integrity entry, protected_write_set coverage, and no
+            allowed_write_set coverage -- unconditional for every
+            manifest, project-agnostic.
   validate-promotion  Stage 4.5's schema + §7.1 checks (#15) over a
             promotion receipt: every artifact_manifest path is workspace-
             anchored, every declared hash is verified against the real
             file, the receipt is never in its own manifest, and no listed
             artifact carries a promotion_id back (references are
-            one-way). Standalone, not routed through draft/approve --
+            one-way). A canonical crate-scoped witness spec (chainlink
+            #35) is hashed with its promotion-digest instead -- a
+            rendering-only output.render_hash change never revokes
+            acceptance, a fixture or determinism.value_hash change
+            still does. Standalone, not routed through draft/approve --
             the receipt's reviewer/accepted_at fields are top-level, not
             the nested review: {} shape approve() writes.
   accept-promotion  Stage 4.5's own generator (#45): loads the real
@@ -49,7 +59,12 @@ Implemented now, against schemas that actually exist:
             for real, fail-closed, not degraded to non-blocking info
             findings. Artifact kind is matched against the descriptor's
             own canonical directories, not merely a directory sharing a
-            kind's basename. policy_version is read from the accepted
+            kind's basename -- "witness" is a recognized kind too
+            (chainlink #35), and every declared (witness_required: true)
+            feature's own genuinely valid, unambiguous witness spec
+            (reusing G18/G19's own descriptor-backed discovery) must be
+            in the accepted set or generation refuses outright.
+            policy_version is read from the accepted
             policy document's own content (its exactly-one "Policy
             version: <name>@<major>.<minor>" marker line,
             docs/reliance-policy.template.md), not supplied as a
@@ -641,8 +656,16 @@ def cmd_validate_work_package(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_promotion(args: argparse.Namespace) -> int:
+    # Optional, not required: most receipts have no witnesses at all,
+    # and this fixture-level workspace may have no project descriptor
+    # (chainlink #35). Loaded only when it genuinely exists, so a
+    # witness-free workspace's behavior is unchanged; when it DOES
+    # exist, canonical crate-scoped witness specs in artifact_manifest
+    # are recognized and hashed with the witness promotion-digest
+    # instead of a plain byte hash (plan.md §16.5).
+    descriptor = load_project_descriptor(args.descriptor) if args.descriptor.is_file() else None
     validator = load_promotion_validator()
-    findings = validate_promotion_file(args.receipt, validator, args.workspace)
+    findings = validate_promotion_file(args.receipt, validator, args.workspace, descriptor)
 
     if not findings:
         print("OK: promotion receipt passes G1a and §7.1 checks")

@@ -57,6 +57,21 @@ implements the Rust code -- this schema IS the interface spec for
     validator's three claimed mechanical guarantees.
   - harness names contain no wildcard characters (schema-enforced,
     exact_harness_name $def).
+  - the witness renderer implementation (scripts/witness_renderer.py,
+    plus scripts/xml_escape.py -- a direct helper it imports for its
+    own text escaping, closing the transitive gap) has its own
+    gate_integrity entry, is covered by protected_write_set, and is
+    NOT covered by allowed_write_set (plan.md §16.5, chainlink #35):
+    check_witness_renderer_integrity, unconditional for every manifest
+    and project-agnostic (these are this pipeline's own fixed
+    implementation paths, the same role scripts/closure_gate.py etc.
+    already play in plan.md §10's own worked example -- never a
+    project's concept/cluster/crate/witness_id). Reuses
+    check_gate_integrity for hash/containment (already runs against
+    every present entry) and _patterns_can_overlap for write-set
+    coverage (the same product-automaton engine, not a second matcher)
+    -- this adds only "the renderer's own entries must be present and
+    correctly covered," nothing new to the underlying machinery.
 
 Accepts both .json and .yaml/.yml manifests -- plan.md §10's own worked
 example is `ci/manifest/WP-MCMC-004.yaml`.
@@ -329,6 +344,92 @@ def check_gate_integrity(path: Path, data: dict, workspace_root: Path) -> list[F
     return findings
 
 
+WITNESS_RENDERER_INTEGRITY_PATHS = ("scripts/witness_renderer.py", "scripts/xml_escape.py")
+
+
+def _pattern_covers_path(pattern: str, concrete_path: str) -> bool:
+    """Whether a workspace-relative glob PATTERN (allowed_write_set's or
+    protected_write_set's own grammar) covers a concrete, literal path
+    -- reuses _patterns_can_overlap's own product-automaton engine
+    rather than a second matcher: a literal path's own "language" is the
+    singleton set containing itself, so pattern/literal coverage is
+    exactly pattern/pattern overlap with the literal side unable to
+    wildcard. This is the same engine chainlink #14's own review chain
+    hardened to correctly match "scripts/**" against something nested
+    more than one segment deep -- reused here, not re-derived, so a
+    broad pattern's coverage claim is proven, not assumed."""
+    return _patterns_can_overlap(pattern, concrete_path)
+
+
+def check_witness_renderer_integrity(path: Path, data: dict, workspace_root: Path) -> list[Finding]:
+    """plan.md §16.5 (chainlink #35): the witness renderer is
+    gate-adjacent code -- an implementing agent able to edit it
+    unchecked could make a wrong feature's evidence look right, the
+    same reasoning every other pinned gate implementation in this
+    schema's own gate_integrity worked example (plan.md §10) already
+    gets. Project-agnostic: WITNESS_RENDERER_INTEGRITY_PATHS names THIS
+    PIPELINE's own fixed implementation files (the same role
+    scripts/closure_gate.py etc. already play there), never a
+    downstream project's own concept/cluster/crate/witness_id.
+    scripts/xml_escape.py is included alongside scripts/witness_renderer.py
+    because witness_renderer.py imports it directly for its own text
+    escaping -- a modification there can change rendered evidence just
+    as surely as one to witness_renderer.py itself, closing the
+    transitive integrity gap rather than pinning only the entrypoint.
+
+    Three independent, unconditional requirements, all G13 pre-flight,
+    for EVERY work-package manifest (not conditional on whether this
+    particular package's own obligations happen to touch witnesses --
+    the other pinned gate implementations aren't conditional on package
+    scope either):
+      1. Each path has its own gate_integrity entry. Hash correctness
+         and workspace/symlink containment for whatever IS present are
+         already checked for real by check_gate_integrity, which runs
+         against every present entry regardless of runner name -- this
+         adds only the "must be present at all" half, which nothing
+         else in this schema enforces for ANY runner today.
+      2. Each path is covered by protected_write_set -- a real
+         glob-overlap check (_pattern_covers_path), not merely "some
+         pattern looks broad enough."
+      3. Neither path is covered by allowed_write_set -- gate-adjacent
+         code must never be writable by the implementing agent,
+         regardless of whether protected_write_set also covers it."""
+    findings: list[Finding] = []
+    integrity_runners = {entry["runner"] for entry in data["gate_integrity"]}
+    allowed = data["write_policy"]["allowed_write_set"]
+    protected = data["write_policy"]["protected_write_set"]
+
+    for runner in WITNESS_RENDERER_INTEGRITY_PATHS:
+        if runner not in integrity_runners:
+            findings.append(
+                Finding(
+                    "G13", path,
+                    f"gate_integrity is missing a required entry for the witness renderer "
+                    f"implementation {runner!r}",
+                )
+            )
+        if not any(_pattern_covers_path(pattern, runner) for pattern in protected):
+            findings.append(
+                Finding(
+                    "G13", path,
+                    f"{runner!r} (witness renderer implementation) is not covered by "
+                    "protected_write_set -- gate-adjacent code must be protected, not merely "
+                    "hash-pinned",
+                )
+            )
+        overlapping_allowed = [pattern for pattern in allowed if _pattern_covers_path(pattern, runner)]
+        if overlapping_allowed:
+            findings.append(
+                Finding(
+                    "G13", path,
+                    f"{runner!r} (witness renderer implementation) is covered by allowed_write_set "
+                    f"({', '.join(sorted(overlapping_allowed))}) -- gate-adjacent code must never be "
+                    "writable by the implementing agent",
+                )
+            )
+    return findings
+
+
 def check_trusted_assumptions(
     path: Path,
     data: dict,
@@ -493,6 +594,7 @@ def validate_data(
     findings.extend(check_write_set_anchoring(path, data))
     findings.extend(check_write_set_disjointness(path, data))
     findings.extend(check_gate_integrity(path, data, workspace_root))
+    findings.extend(check_witness_renderer_integrity(path, data, workspace_root))
     findings.extend(check_trusted_assumptions(path, data, specs_search_root, allowed_boundary_dirs))
     findings.extend(check_promotion_reference(path, data))
     findings.extend(check_write_set_coverage_of_functions(path, data))

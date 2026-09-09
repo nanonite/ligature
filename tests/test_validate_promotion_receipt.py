@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import tempfile
@@ -8,6 +9,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_promotion_receipt import validate_data, validate_file, load_validator  # noqa: E402
+from validate_witness import witness_promotion_digest  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tests"))
+from test_validate_witness import concept_spec, witness_spec  # noqa: E402
 
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "promotions" / "valid"
 RECEIPT_PATH = FIXTURE_ROOT / "specs" / "_promotions" / "scheduling.json"
@@ -205,6 +210,182 @@ class StandaloneCliMainTest(unittest.TestCase):
             [str(RECEIPT_PATH), "--workspace-root", "/tmp"]
         )
         self.assertEqual(rc, 1)
+
+
+WITNESS_DESCRIPTOR = {
+    "schema_version": "1.0",
+    "project": {"name": "repro", "crate_naming_convention": "^repro-[a-z]+"},
+    "mode": "greenfield",
+    "crates": [
+        {
+            "crate_dir": "crates/scheduler",
+            "contracts_crate": "contracts",
+            "specs_search_root": "crates/scheduler/specs",
+        }
+    ],
+    "verifier_policy": {"default": "creusot"},
+    "compatibility_policy": {"reliance_policy_path": "docs/reliance-policy.md"},
+    "write_set": {"allowed_roots": [], "protected_roots": []},
+    "gate_integrity": [],
+    "review": {"reviewer": "repro", "reviewed_at": "2026-08-27"},
+}
+
+WITNESS_RELATIVE_PATH = "crates/scheduler/specs/_witnesses/task_queue.load_factor.json"
+
+
+class WitnessArtifactManifestTest(unittest.TestCase):
+    """chainlink #35: check_artifact_manifest recognizes a canonical
+    crate-scoped witness spec and compares its promotion-digest hash
+    (validate_witness.witness_promotion_digest) instead of a plain byte
+    hash. Self-contained tempdir fixture -- deliberately not the shared
+    tests/fixtures/promotions/valid/ tree, which has no witnesses and no
+    project descriptor at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        specs_dir = self.workspace / "crates" / "scheduler" / "specs"
+        (specs_dir / "_witnesses").mkdir(parents=True)
+        concept = concept_spec()
+        (specs_dir / "task_queue.json").write_text(json.dumps(concept))
+        self.spec = witness_spec()
+        (specs_dir / "_witnesses" / "task_queue.load_factor.json").write_text(json.dumps(self.spec))
+        self.receipt_path = self.workspace / "specs" / "_promotions" / "scheduling.json"
+        self.receipt_path.parent.mkdir(parents=True)
+        self.receipt = {
+            "schema": "promotion-receipt/1.0",
+            "promotion_id": "PROM-SCHEDULING-001",
+            "cluster": "scheduling",
+            "reviewer": "alice",
+            "policy_version": "reliance-policy@1.0",
+            "schema_versions": {"witness": "1.0"},
+            "accepted_at": "2026-09-08",
+            "artifact_manifest": [
+                {"path": WITNESS_RELATIVE_PATH, "hash": witness_promotion_digest(self.spec)},
+            ],
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _validate(self, receipt=None, descriptor=WITNESS_DESCRIPTOR):
+        return validate_data(self.receipt_path, receipt or self.receipt, load_validator(), self.workspace, descriptor)
+
+    def test_the_correct_promotion_digest_passes(self):
+        findings = self._validate()
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_a_plain_byte_hash_of_the_witness_file_is_rejected(self):
+        """Proves the comparison is genuinely against the promotion
+        digest, not silently falling back to a byte hash for a witness
+        entry: the RAW file's own byte hash must NOT satisfy this check."""
+        byte_hash = "sha256:" + hashlib.sha256(json.dumps(self.spec).encode()).hexdigest()
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = [{"path": WITNESS_RELATIVE_PATH, "hash": byte_hash}]
+        findings = self._validate(receipt)
+        self.assertTrue(any("acceptance is revoked" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_render_hash_only_change_on_disk_still_passes(self):
+        changed = dict(self.spec)
+        changed["output"] = dict(self.spec["output"])
+        changed["output"]["render_hash"] = "sha256:" + "4" * 64
+        (self.workspace / WITNESS_RELATIVE_PATH).write_text(json.dumps(changed))
+        findings = self._validate()
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_fixture_id_change_on_disk_revokes_acceptance(self):
+        changed = json.loads(json.dumps(self.spec))
+        changed["fixture"]["fixture_id"] = "FX-CHANGED"
+        (self.workspace / WITNESS_RELATIVE_PATH).write_text(json.dumps(changed))
+        findings = self._validate()
+        self.assertTrue(any("acceptance is revoked" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_an_invalid_witness_spec_fails_closed(self):
+        broken = dict(self.spec)
+        del broken["determinism"]
+        (self.workspace / WITNESS_RELATIVE_PATH).write_text(json.dumps(broken))
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = [{"path": WITNESS_RELATIVE_PATH, "hash": witness_promotion_digest(broken)}]
+        findings = self._validate(receipt)
+        self.assertTrue(any("witness validator" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_witness_shaped_path_with_no_descriptor_fails_closed(self):
+        findings = self._validate(descriptor=None)
+        self.assertTrue(
+            any("no project descriptor was supplied" in f.reason for f in findings), [str(f) for f in findings]
+        )
+
+    def test_witness_shaped_path_outside_any_declared_crate_fails_closed(self):
+        stray_dir = self.workspace / "junk" / "_witnesses"
+        stray_dir.mkdir(parents=True)
+        (stray_dir / "task_queue.load_factor.json").write_text(json.dumps(self.spec))
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = [
+            {"path": "junk/_witnesses/task_queue.load_factor.json", "hash": witness_promotion_digest(self.spec)},
+        ]
+        findings = self._validate(receipt)
+        self.assertTrue(
+            any("not at any declared crate's own canonical witness directory" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_a_non_witness_path_is_unaffected_by_a_descriptor_being_present(self):
+        """Backward compatibility: an ordinary artifact (not under a
+        directory literally named _witnesses) keeps the exact plain
+        byte-hash comparison regardless of whether a descriptor is
+        supplied."""
+        (self.workspace / "docs").mkdir()
+        content = b"reliance policy\n"
+        (self.workspace / "docs" / "reliance-policy.md").write_bytes(content)
+        receipt = dict(self.receipt)
+        receipt["artifact_manifest"] = [
+            {"path": WITNESS_RELATIVE_PATH, "hash": witness_promotion_digest(self.spec)},
+            {"path": "docs/reliance-policy.md", "hash": "sha256:" + hashlib.sha256(content).hexdigest()},
+        ]
+        findings = self._validate(receipt)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+
+class StandaloneCliDescriptorTest(unittest.TestCase):
+    """The standalone CLI's own --descriptor flag and its soft default
+    (chainlink #35): existing witness-free fixtures must behave
+    identically whether or not the flag is passed."""
+
+    def test_default_descriptor_path_is_used_when_present(self):
+        import validate_promotion_receipt
+
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            workspace = Path(tmp.name)
+            specs_dir = workspace / "crates" / "scheduler" / "specs"
+            (specs_dir / "_witnesses").mkdir(parents=True)
+            (specs_dir / "task_queue.json").write_text(json.dumps(concept_spec()))
+            spec = witness_spec()
+            (specs_dir / "_witnesses" / "task_queue.load_factor.json").write_text(json.dumps(spec))
+            (workspace / "project-descriptor.json").write_text(json.dumps(WITNESS_DESCRIPTOR))
+            receipt_path = workspace / "specs" / "_promotions" / "scheduling.json"
+            receipt_path.parent.mkdir(parents=True)
+            receipt_path.write_text(json.dumps({
+                "schema": "promotion-receipt/1.0",
+                "promotion_id": "PROM-SCHEDULING-001",
+                "cluster": "scheduling",
+                "reviewer": "alice",
+                "policy_version": "reliance-policy@1.0",
+                "schema_versions": {"witness": "1.0"},
+                "accepted_at": "2026-09-08",
+                "artifact_manifest": [
+                    {"path": WITNESS_RELATIVE_PATH, "hash": witness_promotion_digest(spec)},
+                ],
+            }))
+            rc = validate_promotion_receipt.main([str(receipt_path), "--workspace-root", str(workspace)])
+            self.assertEqual(rc, 0)
+        finally:
+            tmp.cleanup()
+
+    def test_witness_free_fixture_is_unaffected_by_missing_descriptor(self):
+        import validate_promotion_receipt
+        rc = validate_promotion_receipt.main([str(RECEIPT_PATH), "--workspace-root", str(FIXTURE_ROOT)])
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":

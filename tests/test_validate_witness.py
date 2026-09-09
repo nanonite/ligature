@@ -25,6 +25,7 @@ from validate_witness import (  # noqa: E402
     validate_draft_data,
     validate_result_data,
     witness_dir_for,
+    witness_promotion_digest,
 )
 from witness_result import build_result, encode_grid, witness_result_dir_for  # noqa: E402
 
@@ -516,6 +517,72 @@ class WorkspaceTest(unittest.TestCase):
             )
         ]
         self.assertEqual(findings, [])
+
+
+class WitnessPromotionDigestTest(unittest.TestCase):
+    """chainlink #35: the shared promotion-integrity hash rule -- one
+    definition, reused verbatim by generate_promotion_receipt.py and
+    validate_promotion_receipt.py."""
+
+    def test_render_hash_alone_does_not_change_the_digest(self):
+        spec = witness_spec()
+        original = witness_promotion_digest(spec)
+        changed = copy.deepcopy(spec)
+        changed["output"]["render_hash"] = "sha256:" + "9" * 64
+        self.assertEqual(witness_promotion_digest(changed), original)
+
+    def test_output_path_change_does_change_the_digest(self):
+        spec = witness_spec()
+        original = witness_promotion_digest(spec)
+        changed = copy.deepcopy(spec)
+        changed["output"]["path"] = "docs/witnesses/task_queue.other.svg"
+        self.assertNotEqual(witness_promotion_digest(changed), original)
+
+    def test_fixture_id_change_does_change_the_digest(self):
+        spec = witness_spec()
+        original = witness_promotion_digest(spec)
+        changed = copy.deepcopy(spec)
+        changed["fixture"]["fixture_id"] = "FX-OTHER"
+        self.assertNotEqual(witness_promotion_digest(changed), original)
+
+    def test_seed_change_does_change_the_digest(self):
+        spec = witness_spec()
+        original = witness_promotion_digest(spec)
+        changed = copy.deepcopy(spec)
+        changed["fixture"]["seed"] = 99
+        self.assertNotEqual(witness_promotion_digest(changed), original)
+
+    def test_expectation_change_does_change_the_digest(self):
+        spec = witness_spec()
+        original = witness_promotion_digest(spec)
+        changed = copy.deepcopy(spec)
+        changed["expectation"]["coverage_region"] = "full-grid"
+        self.assertNotEqual(witness_promotion_digest(changed), original)
+
+    def test_renderer_identity_change_does_change_the_digest(self):
+        spec = witness_spec()
+        original = witness_promotion_digest(spec)
+        changed = copy.deepcopy(spec)
+        changed["output"]["renderer_actual"] = "series_svg"
+        self.assertNotEqual(witness_promotion_digest(changed), original)
+
+    def test_value_hash_change_does_change_the_digest(self):
+        spec = witness_spec()
+        original = witness_promotion_digest(spec)
+        changed = copy.deepcopy(spec)
+        changed["determinism"]["value_hash"] = "sha256:" + "7" * 64
+        self.assertNotEqual(witness_promotion_digest(changed), original)
+
+    def test_is_deterministic_across_construction_order(self):
+        spec = witness_spec()
+        reordered = json.loads(json.dumps(spec))  # round-trips through dict insertion order
+        self.assertEqual(witness_promotion_digest(spec), witness_promotion_digest(reordered))
+
+    def test_does_not_mutate_its_input(self):
+        spec = witness_spec()
+        before = copy.deepcopy(spec)
+        witness_promotion_digest(spec)
+        self.assertEqual(spec, before)
 
 
 if __name__ == "__main__":

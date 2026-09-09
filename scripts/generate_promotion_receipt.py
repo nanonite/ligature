@@ -103,6 +103,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gate_g18 import collect_declared_features  # noqa: E402
+from gate_g18 import collect_valid_witnesses  # noqa: E402
+from gate_g19 import collect_valid_witness_entries  # noqa: E402
 from project_descriptor import boundary_dir_for  # noqa: E402
 from project_descriptor import conflict_dir_for  # noqa: E402
 from project_descriptor import evidence_dir_for  # noqa: E402
@@ -130,6 +133,11 @@ from validate_promotion_receipt import validate_data  # noqa: E402
 from validate_protocol_debt import load_validator as _load_protocol_debt_validator  # noqa: E402
 from validate_protocol_debt import validate_data as _validate_protocol_debt_data  # noqa: E402
 from validate_protocol_debt import valid_interaction_ids_from_crate  # noqa: E402
+from validate_witness import CANONICAL_DIR_NAME as _WITNESS_DIR_NAME  # noqa: E402
+from validate_witness import load_validator as _load_witness_validator  # noqa: E402
+from validate_witness import validate_data as _validate_witness_data  # noqa: E402
+from validate_witness import witness_dir_for  # noqa: E402
+from validate_witness import witness_promotion_digest  # noqa: E402
 
 
 class PromotionReceiptError(Exception):
@@ -145,7 +153,66 @@ def _sha256(file_path: Path) -> str:
     return "sha256:" + hashlib.sha256(file_path.read_bytes()).hexdigest()
 
 
-def compute_artifact_manifest(workspace_root: Path, artifact_paths: list[str]) -> list[dict]:
+def _witness_promotion_hash_if_applicable(
+    descriptor: dict | None, workspace_root: Path, entry_path: str, resolved: Path
+) -> str | None:
+    """None means "not a witness artifact -- use the ordinary byte
+    hash." A non-None return is `validate_witness.witness_promotion_digest`,
+    computed only after confirming the spec is genuinely valid (G1a/G1b,
+    and G2 with the owning crate's real specs_search_root) at its real
+    canonical crate directory -- never trusted merely because its path
+    happens to end in the right shape (plan.md §16.5, chainlink #35).
+
+    Fails closed (PromotionReceiptError), rather than silently falling
+    back to an ordinary byte hash, for anything that LOOKS like a
+    witness (its immediate parent directory is literally named
+    "_witnesses", validate_witness.py's own CANONICAL_DIR_NAME) but
+    isn't genuinely one: no descriptor was supplied to confirm crate
+    anchoring at all; the directory doesn't match any declared crate's
+    real canonical witness_dir_for (outside its canonical directory);
+    or the spec fails validate_witness.py's own G1a/G1b/G2 bar."""
+    looks_like_witness = resolved.parent.name == _WITNESS_DIR_NAME
+    if descriptor is None:
+        if looks_like_witness:
+            raise PromotionReceiptError(
+                f"artifact path {entry_path!r} sits under a {_WITNESS_DIR_NAME!r} directory but no "
+                "project descriptor was supplied to confirm it is a real crate's canonical witness "
+                "directory -- refusing to treat it as an ordinary artifact"
+            )
+        return None
+
+    for crate in descriptor["crates"]:
+        if resolved.parent != witness_dir_for(crate, workspace_root):
+            continue
+        specs_search_root = workspace_root / crate["specs_search_root"]
+        try:
+            data = json.loads(resolved.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise PromotionReceiptError(f"witness spec {entry_path!r} is not readable JSON: {e}")
+        if not isinstance(data, dict):
+            raise PromotionReceiptError(f"witness spec {entry_path!r} is not a JSON object")
+        findings = _validate_witness_data(resolved, data, _load_witness_validator(), specs_search_root)
+        errors = [f for f in findings if f.severity == "error"]
+        if errors:
+            raise PromotionReceiptError(
+                f"witness spec {entry_path!r} does not pass its own witness validator, refusing to "
+                "accept it into this promotion or trust its content:\n"
+                + "\n".join(f"  - {f}" for f in errors)
+            )
+        return witness_promotion_digest(data)
+
+    if looks_like_witness:
+        raise PromotionReceiptError(
+            f"artifact path {entry_path!r} sits under a {_WITNESS_DIR_NAME!r} directory but not at "
+            "any declared crate's own canonical witness directory -- a witness spec outside its "
+            "canonical directory is refused, not silently treated as an ordinary artifact"
+        )
+    return None
+
+
+def compute_artifact_manifest(
+    workspace_root: Path, artifact_paths: list[str], descriptor: dict | None = None
+) -> list[dict]:
     """Deterministically compute artifact_manifest entries for
     `artifact_paths` (workspace-relative strings) -- the exact accepted
     set, no globs, no implicit discovery (plan.md §7.1: "the manifest
@@ -158,7 +225,17 @@ def compute_artifact_manifest(workspace_root: Path, artifact_paths: list[str]) -
     A bad path (escapes the workspace, aliases another entry, doesn't
     exist) is a hard failure here, not a finding to report later --
     there is no "generate first, let the validator catch it" step for a
-    path that was never valid to begin with."""
+    path that was never valid to begin with.
+
+    `descriptor` (chainlink #35, optional and backward-compatible --
+    omitting it reproduces this function's original, witness-unaware
+    behavior exactly) recognizes canonical crate-scoped witness specs
+    and hashes them with `validate_witness.witness_promotion_digest`
+    instead of a plain byte hash, so a rendering-only regeneration
+    (output.render_hash alone changing) never invalidates the receipt
+    while a fixture or determinism.value_hash change still does. Every
+    other artifact keeps the exact byte-hash behavior this function has
+    always had."""
     workspace_resolved = workspace_root.resolve()
     manifest: list[dict] = []
     seen_resolved: dict[Path, str] = {}
@@ -181,8 +258,71 @@ def compute_artifact_manifest(workspace_root: Path, artifact_paths: list[str]) -
         seen_resolved[resolved] = entry_path
         if not resolved.is_file():
             raise PromotionReceiptError(f"artifact path {entry_path!r} does not exist")
-        manifest.append({"path": entry_path, "hash": _sha256(resolved)})
+        witness_hash = _witness_promotion_hash_if_applicable(descriptor, workspace_root, entry_path, resolved)
+        manifest.append({"path": entry_path, "hash": witness_hash or _sha256(resolved)})
     return manifest
+
+
+def required_witness_paths(descriptor: dict, workspace_root: Path) -> dict[str, Path]:
+    """Every declared (witness_required: true) feature's own canonical
+    witness spec, workspace-relative path -> resolved path (chainlink
+    #35). Discovery is reused verbatim from chainlink #29/#30's own
+    descriptor-backed helpers -- gate_g18.collect_declared_features/
+    collect_valid_witnesses (declared, ambiguity-resolved) and
+    gate_g19.collect_valid_witness_entries (path lookup) -- never a new
+    glob or a first-wins resolution.
+
+    For a `(concept, query)` key present in collect_valid_witnesses()'s
+    own returned dict, exactly one (path, data) pair in
+    collect_valid_witness_entries() names it: collect_valid_witnesses()
+    already excludes (rather than picks from) any key with more than
+    one owning crate, and a genuinely valid witness's filename is
+    already required (validate_witness.check_naming) to be
+    <snake_case(concept)>.<query>.json, which makes two files in the
+    SAME canonical directory resolving to the same key impossible by
+    construction. This function does not re-derive that guarantee; it
+    relies on it.
+
+    Raises PromotionReceiptError outright for an ambiguous declaration,
+    an ambiguously resolved witness, or a declared feature with no
+    genuinely valid witness at all -- a promotion cannot represent a
+    feature it cannot even locate, and every one of those is exactly
+    the "applicable witness spec is missing / invalid / ambiguous"
+    fail-closed condition plan.md §16.5 requires."""
+    declared, declare_findings = collect_declared_features(descriptor, workspace_root)
+    ambiguous_declarations = [f for f in declare_findings if f.severity == "error"]
+    if ambiguous_declarations:
+        raise PromotionReceiptError(
+            "cannot compute the required witness set over an ambiguous declared feature set: "
+            + "; ".join(str(f) for f in ambiguous_declarations)
+        )
+
+    witnesses, witness_findings = collect_valid_witnesses(descriptor, workspace_root, set(declared))
+    ambiguous_witnesses = [f for f in witness_findings if f.severity == "error"]
+    if ambiguous_witnesses:
+        raise PromotionReceiptError(
+            "cannot compute the required witness set over an ambiguously resolved witness: "
+            + "; ".join(str(f) for f in ambiguous_witnesses)
+        )
+
+    missing = sorted(f"{concept}.{query}" for concept, query in declared if (concept, query) not in witnesses)
+    if missing:
+        raise PromotionReceiptError(
+            "declared (witness_required: true) feature(s) have no genuinely valid witness spec, so "
+            "none can be represented in artifact_manifest: " + ", ".join(missing)
+        )
+
+    entries_by_key = {
+        (data["concept"], data["query"]): resolved_path
+        for resolved_path, data in collect_valid_witness_entries(descriptor, workspace_root)
+    }
+
+    workspace_resolved = workspace_root.resolve()
+    required: dict[str, Path] = {}
+    for key in witnesses:
+        resolved_path = entries_by_key[key]
+        required[str(resolved_path.relative_to(workspace_resolved))] = resolved_path
+    return required
 
 
 def compute_promotion_id(cluster: str) -> str:
@@ -233,6 +373,8 @@ def _locate_artifact(descriptor: dict, workspace_root: Path, resolved: Path) -> 
             return "exemption", crate
         if resolved.parent == protocol_debt_dir_for(crate, workspace_root):
             return "protocol_debt", crate
+        if resolved.parent == witness_dir_for(crate, workspace_root):
+            return "witness", crate
     return None
 
 
@@ -295,6 +437,14 @@ def _validate_accepted_artifact(
         )
 
     assert crate is not None  # every other kind is crate-scoped by _locate_artifact's own contract
+    if kind == "witness":
+        # No cross-file context needed (unlike boundary/interaction/
+        # exemption/protocol_debt) -- validate_witness.py's own G2 needs
+        # only the owning crate's specs_search_root, not
+        # interactions_by_id/coverage sets, so _crate_context()'s
+        # heavier per-crate graph is not built for this kind.
+        specs_search_root = workspace_root / crate["specs_search_root"]
+        return _validate_witness_data(path, data, _load_witness_validator(), specs_search_root)
     context = _crate_context(crate, workspace_root, crate_context_cache)
     if kind == "boundary":
         return _validate_boundary_data(path, data, _load_boundary_validator(), context["specs_search_root"])
@@ -492,7 +642,13 @@ def accept_promotion(
 
     Refuses (PromotionReceiptError) before touching the filesystem at
     all if an artifact path, an artifact's own validity (including its
-    real cross-file gates), or the policy document is bad; refuses
+    real cross-file gates), the policy document, or -- chainlink #35 --
+    the required witness set is bad: every declared (witness_required:
+    true) feature's own genuinely valid, unambiguous witness spec
+    (required_witness_paths(), reusing chainlink #29/#30's own
+    descriptor-backed discovery) must be present in `artifact_paths`,
+    or generation refuses outright rather than producing a receipt that
+    silently omits evidence that was part of what was reviewed. Refuses
     (ApprovalRefused) without writing anything if the assembled receipt
     fails the real validator. Once past both checks, the audit entry and
     the receipt write happen as one transaction: the audit append is
@@ -513,8 +669,16 @@ def accept_promotion(
 
     descriptor = load_project_descriptor(descriptor_path)
 
+    required_witnesses = required_witness_paths(descriptor, workspace_root)
+    missing_witnesses = sorted(set(required_witnesses) - set(artifact_paths))
+    if missing_witnesses:
+        raise PromotionReceiptError(
+            "declared (witness_required: true) feature(s) have a genuinely valid witness spec that "
+            "is not included in this promotion's accepted artifact set: " + ", ".join(missing_witnesses)
+        )
+
     target_path = workspace_root / "specs" / "_promotions" / f"{cluster}.json"
-    artifact_manifest = compute_artifact_manifest(workspace_root, artifact_paths)
+    artifact_manifest = compute_artifact_manifest(workspace_root, artifact_paths, descriptor)
     schema_versions = compute_schema_versions(workspace_root, descriptor, artifact_paths)
     policy_version = extract_policy_version(workspace_root, policy_path)
     promotion_id = compute_promotion_id(cluster)
@@ -529,7 +693,7 @@ def accept_promotion(
     )
 
     validator = load_validator()
-    findings = validate_data(target_path, receipt, validator, workspace_root)
+    findings = validate_data(target_path, receipt, validator, workspace_root, descriptor)
     errors = [f for f in findings if getattr(f, "severity", "error") == "error"]
     if errors:
         raise ApprovalRefused(

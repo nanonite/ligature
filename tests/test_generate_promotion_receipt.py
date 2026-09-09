@@ -17,9 +17,14 @@ from generate_promotion_receipt import (  # noqa: E402
     compute_promotion_id,
     compute_schema_versions,
     extract_policy_version,
+    required_witness_paths,
 )
 from review_checkpoint import ApprovalRefused  # noqa: E402
 from validate_promotion_receipt import load_validator, validate_file  # noqa: E402
+from validate_witness import witness_promotion_digest  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tests"))
+from test_validate_witness import concept_spec, witness_spec  # noqa: E402
 
 DESCRIPTOR = {
     "schema_version": "1.0",
@@ -664,6 +669,214 @@ class AcceptPromotionTest(unittest.TestCase):
         data = json.loads(second.read_text())
         self.assertEqual(data["accepted_at"], "2026-09-06")
         self.assertEqual(data["promotion_id"], "PROM-SCHEDULING-001")
+
+
+TASK_QUEUE_WITNESS_PATH = "crates/scheduler/specs/_witnesses/task_queue.load_factor.json"
+TASK_QUEUE_CONCEPT_PATH = "crates/scheduler/specs/task_queue.json"
+
+
+def _write_declared_feature(workspace: Path, witness_overrides: dict | None = None) -> None:
+    """A declared (witness_required: true) TaskQueue.load_factor feature
+    plus its genuinely valid witness spec, under DESCRIPTOR's own
+    crates/scheduler crate -- reused by every witness-promotion-integrity
+    test below rather than re-derived per test."""
+    concept = concept_spec()
+    concept["queries"][0]["witness_required"] = True
+    _write_json(workspace, TASK_QUEUE_CONCEPT_PATH, concept)
+    witness = witness_spec()
+    if witness_overrides:
+        witness.update(witness_overrides)
+    _write_json(workspace, TASK_QUEUE_WITNESS_PATH, witness)
+
+
+class WitnessPromotionIntegrityTest(unittest.TestCase):
+    """chainlink #35: witness specs and their determinism.value_hash
+    join artifact_manifest -- a fixture or value change invalidates the
+    receipt, output.render_hash alone never does, and a declared feature
+    with no properly-included witness refuses generation outright."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        _write_descriptor(self.workspace)
+        # Deliberately no boundary contract in this fixture:
+        # validate_boundary_contracts.py's own G2+ concept-spec scan
+        # (specs_search_root.glob("**/*.json"), unfiltered by
+        # underscore-prefixed directories) would otherwise also match
+        # the witness spec's own top-level `concept` field as a SECOND
+        # "TaskQueue" concept spec and report it ambiguous -- a latent
+        # gap in that unrelated module, out of this issue's scope to
+        # fix. A witness-only accepted set is sufficient here:
+        # compute_schema_versions only needs ONE recognized kind to
+        # produce a non-empty schema_versions, and "witness" now
+        # qualifies on its own.
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "reliance-policy.md").write_text(POLICY_TEXT)
+        _write_declared_feature(self.workspace)
+        self.artifact_paths = [
+            "docs/reliance-policy.md",
+            TASK_QUEUE_WITNESS_PATH,
+        ]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _accept(self, **overrides):
+        kwargs = dict(
+            workspace_root=self.workspace,
+            cluster="scheduling",
+            reviewer="alice",
+            policy_path="docs/reliance-policy.md",
+            artifact_paths=self.artifact_paths,
+            accepted_at="2026-09-08",
+        )
+        kwargs.update(overrides)
+        return accept_promotion(**kwargs)
+
+    def test_a_valid_promotion_containing_the_required_witness_spec_passes(self):
+        target_path = self._accept()
+        data = json.loads(target_path.read_text())
+        witness_entry = next(e for e in data["artifact_manifest"] if e["path"] == TASK_QUEUE_WITNESS_PATH)
+        self.assertEqual(witness_entry["hash"], witness_promotion_digest(witness_spec()))
+        self.assertEqual(data["schema_versions"]["witness"], "1.0")
+        findings = validate_file(target_path, load_validator(), self.workspace, DESCRIPTOR)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_omitting_the_required_witness_spec_is_refused(self):
+        with self.assertRaises(PromotionReceiptError) as caught:
+            self._accept(artifact_paths=self.artifact_paths[:-1])
+        self.assertIn(TASK_QUEUE_WITNESS_PATH, str(caught.exception))
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_a_declared_feature_with_no_witness_at_all_is_refused(self):
+        (self.workspace / TASK_QUEUE_WITNESS_PATH).unlink()
+        with self.assertRaises(PromotionReceiptError):
+            self._accept(artifact_paths=self.artifact_paths[:-1])
+
+    def test_an_invalid_witness_spec_is_refused(self):
+        broken = witness_spec()
+        del broken["determinism"]
+        _write_json(self.workspace, TASK_QUEUE_WITNESS_PATH, broken)
+        with self.assertRaises(PromotionReceiptError):
+            self._accept()
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_an_ambiguously_resolved_witness_is_refused(self):
+        """Two genuinely valid witness specs declaring the same
+        witness_id under different crates -- gate_g19.collect_valid_witness_entries'
+        own ambiguity handling, reused rather than re-derived, must
+        still catch this."""
+        other_descriptor = dict(DESCRIPTOR)
+        other_descriptor["crates"] = list(DESCRIPTOR["crates"]) + [
+            {"crate_dir": "crates/other", "contracts_crate": "contracts", "specs_search_root": "crates/other/specs"}
+        ]
+        _write_descriptor(self.workspace, other_descriptor)
+        other_concept = concept_spec()
+        other_concept["queries"][0]["witness_required"] = True
+        _write_json(self.workspace, "crates/other/specs/task_queue.json", other_concept)
+        _write_json(self.workspace, "crates/other/specs/_witnesses/task_queue.load_factor.json", witness_spec())
+        with self.assertRaises(PromotionReceiptError):
+            self._accept()
+
+    def test_fixture_id_change_revokes_acceptance(self):
+        target_path = self._accept()
+        original = target_path.read_bytes()
+        spec = witness_spec()
+        spec["fixture"]["fixture_id"] = "FX-CHANGED"
+        _write_json(self.workspace, TASK_QUEUE_WITNESS_PATH, spec)
+        findings = validate_file(target_path, load_validator(), self.workspace, DESCRIPTOR)
+        self.assertTrue(any("acceptance is revoked" in f.reason for f in findings), [str(f) for f in findings])
+        self.assertEqual(target_path.read_bytes(), original)
+
+    def test_seed_change_revokes_acceptance(self):
+        target_path = self._accept()
+        spec = witness_spec()
+        spec["fixture"]["seed"] = 42
+        _write_json(self.workspace, TASK_QUEUE_WITNESS_PATH, spec)
+        findings = validate_file(target_path, load_validator(), self.workspace, DESCRIPTOR)
+        self.assertTrue(any("acceptance is revoked" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_expectation_change_revokes_acceptance(self):
+        target_path = self._accept()
+        spec = witness_spec()
+        spec["expectation"]["coverage_region"] = "full-grid"
+        _write_json(self.workspace, TASK_QUEUE_WITNESS_PATH, spec)
+        findings = validate_file(target_path, load_validator(), self.workspace, DESCRIPTOR)
+        self.assertTrue(any("acceptance is revoked" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_renderer_identity_change_revokes_acceptance(self):
+        target_path = self._accept()
+        spec = witness_spec()
+        spec["renderer"] = "series_svg"
+        spec["expectation"]["renderer"] = "series_svg"
+        spec["output"]["renderer_actual"] = "series_svg"
+        _write_json(self.workspace, TASK_QUEUE_WITNESS_PATH, spec)
+        findings = validate_file(target_path, load_validator(), self.workspace, DESCRIPTOR)
+        self.assertTrue(any("acceptance is revoked" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_determinism_value_hash_change_revokes_acceptance(self):
+        target_path = self._accept()
+        spec = witness_spec(value_hash="sha256:" + "5" * 64)
+        _write_json(self.workspace, TASK_QUEUE_WITNESS_PATH, spec)
+        findings = validate_file(target_path, load_validator(), self.workspace, DESCRIPTOR)
+        self.assertTrue(any("acceptance is revoked" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_render_hash_alone_does_not_revoke_acceptance(self):
+        target_path = self._accept()
+        spec = witness_spec()
+        spec["output"]["render_hash"] = "sha256:" + "3" * 64
+        _write_json(self.workspace, TASK_QUEUE_WITNESS_PATH, spec)
+        findings = validate_file(target_path, load_validator(), self.workspace, DESCRIPTOR)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_generated_svg_contact_sheet_and_ledger_bytes_are_not_promotion_gating_inputs(self):
+        """plan.md §16.6's own boundary: generated witness SVGs,
+        docs/witnesses/_contact_sheet.svg, and ci/results/feature_ledger.json
+        are review projections, never promotion inputs. required_witness_paths()
+        must never name any of them, and including one in artifact_paths
+        must hash it as an ORDINARY artifact (plain bytes), never as a
+        witness spec -- it does not sit under a canonical _witnesses/
+        directory at all."""
+        required = required_witness_paths(DESCRIPTOR, self.workspace)
+        self.assertEqual(set(required), {TASK_QUEUE_WITNESS_PATH})
+
+        (self.workspace / "docs" / "witnesses").mkdir(parents=True)
+        svg_bytes = b"<svg></svg>"
+        (self.workspace / "docs" / "witnesses" / "task_queue.load_factor.svg").write_bytes(svg_bytes)
+        (self.workspace / "docs" / "witnesses" / "_contact_sheet.svg").write_bytes(svg_bytes)
+        (self.workspace / "ci" / "results").mkdir(parents=True)
+        ledger_bytes = b'{"schema_version": "1.0", "generated_from": {}, "features": []}'
+        (self.workspace / "ci" / "results" / "feature_ledger.json").write_bytes(ledger_bytes)
+
+        manifest = compute_artifact_manifest(
+            self.workspace,
+            [
+                "docs/witnesses/task_queue.load_factor.svg",
+                "docs/witnesses/_contact_sheet.svg",
+                "ci/results/feature_ledger.json",
+            ],
+            DESCRIPTOR,
+        )
+        import hashlib
+        by_path = {e["path"]: e["hash"] for e in manifest}
+        self.assertEqual(
+            by_path["docs/witnesses/task_queue.load_factor.svg"],
+            "sha256:" + hashlib.sha256(svg_bytes).hexdigest(),
+        )
+        self.assertEqual(
+            by_path["docs/witnesses/_contact_sheet.svg"], "sha256:" + hashlib.sha256(svg_bytes).hexdigest()
+        )
+        self.assertEqual(
+            by_path["ci/results/feature_ledger.json"], "sha256:" + hashlib.sha256(ledger_bytes).hexdigest()
+        )
+
+    def test_witness_schema_version_is_derived_only_from_a_genuinely_valid_canonical_witness(self):
+        stray = witness_spec()
+        _write_json(self.workspace, "junk/_witnesses/task_queue.load_factor.json", stray)
+        versions = compute_schema_versions(
+            self.workspace, DESCRIPTOR, self.artifact_paths + ["junk/_witnesses/task_queue.load_factor.json"]
+        )
+        self.assertEqual(versions["witness"], "1.0")
 
 
 if __name__ == "__main__":

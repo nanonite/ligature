@@ -66,6 +66,8 @@ result is still `unsupported`.
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -136,6 +138,35 @@ def load_draft_validator() -> Draft202012Validator:
 
 def load_result_validator() -> Draft202012Validator:
     return make_validator(load_result_schema())
+
+
+def witness_promotion_digest(data: dict) -> str:
+    """The promotion-integrity hash for a witness spec (plan.md §16.5,
+    chainlink #35): canonical JSON (sorted keys, compact separators,
+    the same canonical-json-v1 style scripts/witness_result.py's own
+    result hashing and generate_feature_ledger.py's own artifact
+    hashing already use) over the ENTIRE witness spec with only
+    `output.render_hash` excluded.
+
+    `render_hash` is change-tracking only and never gates promotion
+    (plan.md §16.1) -- a rendering-only regeneration (a renderer-library
+    formatting change, a re-run producing the identical picture) must
+    never revoke promotion acceptance. Nothing else is excluded: fixture
+    identity (`fixture.fixture_id`/`fixture.seed`), `renderer`,
+    `expectation`, `output.path`, `output.renderer_actual`, and the
+    normative `determinism.value_hash` all stay covered, so a fixture or
+    value change DOES invalidate the receipt, exactly as plan.md §16.5
+    requires -- this is a targeted exclusion of one non-normative field,
+    not a general weakening of what "the witness's content" means.
+
+    Reused verbatim by both generate_promotion_receipt.py (receipt
+    generation) and validate_promotion_receipt.py (receipt validation)
+    so the two can never silently disagree about what invalidates a
+    witness's entry in artifact_manifest."""
+    reduced = copy.deepcopy(data)
+    reduced.get("output", {}).pop("render_hash", None)
+    canonical = json.dumps(reduced, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def witness_dir_for(crate: dict, workspace: Path) -> Path:

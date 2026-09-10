@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
-- Authoritative implementation inventory (docs/implementation-inventory.json, schema v1.0) with a filesystem/argparse drift test, replacing the stale "53 tests / M0-M1" summary: 1379 passing tests (173 subtests), 32 registered CLI commands, 40 runtime modules, M0-M4 all complete (#55)
+- Authoritative implementation inventory (docs/implementation-inventory.json, schema v1.0) with a filesystem/argparse drift test, replacing the stale "53 tests / M0-M1" summary: 1389 passing tests (173 subtests), 32 registered CLI commands, 40 runtime modules, M0-M4 all complete (#55)
 - Central vendored-runtime-resource registry, scripts/vendored_resources.py (#55)
 - Stable public CLI grammar v1.0 (docs/cli-contract.md): `init doctor version status check validate gate draft approve migrate report`, with a complete 32/32 legacy-command disposition mapping and the `status`-stub-to-`doctor` retirement plan (#55)
 - Versioned `ligature status --json` and `ligature check --json` output contracts (schemas/project-state.schema.json, schemas/consolidated-check.schema.json, both v1.0), specified (not implemented) for #56, with a regression test proving the old capability summary cannot satisfy the new schema (#55)
@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - #55 round 4 (external review of round 3's own fixes): the vendored-resource registry never connected call sites to registry keys (an unused entry or a call naming an unregistered key could evade detection) and the bypass detector recognized only pathlib `/`-chains -- added a bidirectional call-site-vs-registry check and broadened the bypass detector to joinpath()/os.path.join()/single-argument Path()/general non-docstring string literals, verified against six separate injected-drift scenarios
 - #55 round 4: `action_id` was schema-open to any well-formed kebab-case string (confirmed with `invented-unstable-action`, which validated) -- closed to a v1.0 `enum` of the four values the contract actually defines
 - #55 round 4: `command`'s description claimed it "may become null" for an automated-command action while the schema conditional always required it non-null, and docs/cli-contract.md's own prose repeated the same contradiction -- both false claims removed
+- #55 round 5 (external review of round 4's own broadened detector): `Path("vendor") / "pkg" / "file.json"` still evaded the bypass detector -- the `/`-chain scanner never inspects the call at its own chain base, and the `Path(...)` check only matched an argument *containing* "vendor/", not one *equal to* "vendor" -- reproduced directly (empty result), fixed by also flagging an exact "vendor" argument; added a permanent unit-test class (VendorBypassDetectorUnitTest, 9 tests against synthetic scripts) and made a dynamic (non-literal) vendored_resource_path() argument fail the build instead of being silently skipped
 - gate-g14 silently skips invalid closure artifacts instead of saying why (#49)
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 

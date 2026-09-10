@@ -23,6 +23,7 @@ import ast
 import json
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -221,8 +222,13 @@ def _vendor_bypass_offenses_in(script: Path) -> list[str]:
        of its string arguments, OR a single argument that already
        contains "vendor/<segment>" (`joinpath("vendor", "x")`,
        `os.path.join("vendor/x")`).
-    3. A `Path(...)` call whose argument is a single string containing
-       "vendor/<segment>" (`Path("vendor/concept-to-code/x")`).
+    3. A `Path(...)` call whose argument is EITHER exactly "vendor"
+       (`Path("vendor")`, typically the base of a `/`-chain continuing
+       outside the call -- `Path("vendor") / "pkg" / "x"` -- which form 1
+       alone does not catch, since `_path_join_segments` only walks the
+       chain's own `/` nodes and treats the call at its base as opaque,
+       never inspecting that call's own argument) OR a single string
+       containing "vendor/<segment>" (`Path("vendor/concept-to-code/x")`).
     4. Any OTHER non-docstring string constant anywhere in the file
        (including inside an f-string's literal segments) matching
        `vendor/<segment>` -- the catch-all for constructions 1-3 don't
@@ -232,7 +238,11 @@ def _vendor_bypass_offenses_in(script: Path) -> list[str]:
     Docstrings are excluded (see _docstring_constant_ids) -- this is a
     real, deliberate scope boundary: prose mentioning a vendor/ path by
     name does not construct one. Everything else is in scope; round 3's
-    review found the previous version of this check only covered form 1."""
+    review found the previous version of this check only covered form 1;
+    round 4 found form 3 didn't catch `Path("vendor")` alone (only
+    `Path("vendor/x")`), missing exactly the hybrid chain example above --
+    confirmed directly (`_vendor_bypass_offenses_in` returned `[]` for it)
+    before the `a == "vendor"` branch below was added."""
     tree = ast.parse(script.read_text())
     docstring_ids = _docstring_constant_ids(tree)
     offenses: list[str] = []
@@ -259,7 +269,7 @@ def _vendor_bypass_offenses_in(script: Path) -> list[str]:
                     offenses.append(f"{func.attr}() call: {args}")
             elif is_path_call:
                 args = _call_string_args(node)
-                if any("vendor/" in a for a in args):
+                if any(a == "vendor" or "vendor/" in a for a in args):
                     offenses.append(f"Path() call: {args}")
 
         elif (
@@ -273,16 +283,23 @@ def _vendor_bypass_offenses_in(script: Path) -> list[str]:
     return offenses
 
 
-def _vendored_resource_path_call_keys_in(script: Path) -> set[str]:
-    """Every literal key name passed to vendored_resource_path(...) (bare
-    or module-qualified, e.g. vendored_resources.vendored_resource_path)
-    in this ONE script. A dynamic (non-literal) argument can't be
-    resolved statically and is skipped -- there is no such call anywhere
-    in this codebase today; if one is ever added, it falls outside what
-    this particular check can verify, same honest limitation as any
-    static analysis."""
+def _vendored_resource_path_call_sites_in(script: Path) -> tuple[set[str], list[str]]:
+    """Every vendored_resource_path(...) call site in this ONE script
+    (bare or module-qualified, e.g. vendored_resources.vendored_resource_path),
+    split into (literal_keys, dynamic_call_descriptions). A call whose
+    first argument is not a plain string constant -- a variable, an
+    f-string, a concatenation -- cannot be resolved statically, and
+    round-4 external review correctly flagged that the previous version
+    of this scanner silently SKIPPED such a call instead of treating it
+    as a finding: a dynamic argument defeats the entire point of a
+    registry whose contract is "every access is a literal, auditable key"
+    just as surely as bypassing the registry altogether does. There is no
+    such call anywhere in this codebase today; if one is ever added, this
+    function reports it as a dynamic call site rather than staying silent
+    about it, and the test below fails the build on any non-empty list."""
     tree = ast.parse(script.read_text())
     keys: set[str] = set()
+    dynamic: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -290,9 +307,13 @@ def _vendored_resource_path_call_keys_in(script: Path) -> set[str]:
         is_call = (isinstance(func, ast.Name) and func.id == "vendored_resource_path") or (
             isinstance(func, ast.Attribute) and func.attr == "vendored_resource_path"
         )
-        if is_call and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+        if not is_call:
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
             keys.add(node.args[0].value)
-    return keys
+        else:
+            dynamic.append(f"{script.name}:{node.lineno}")
+    return keys, dynamic
 
 
 class VendoredResourceRegistryTest(unittest.TestCase):
@@ -343,7 +364,8 @@ class VendoredResourceRegistryTest(unittest.TestCase):
         entry is exactly as much drift as a missing one)."""
         called_keys: set[str] = set()
         for script in (ROOT / "scripts").glob("*.py"):
-            called_keys |= _vendored_resource_path_call_keys_in(script)
+            keys, _dynamic = _vendored_resource_path_call_sites_in(script)
+            called_keys |= keys
         registered_keys = set(vendored_resources.VENDORED_RESOURCES)
         self.assertEqual(
             called_keys - registered_keys, set(),
@@ -354,13 +376,30 @@ class VendoredResourceRegistryTest(unittest.TestCase):
             f"registered but never called from any scripts/*.py call site: {sorted(registered_keys - called_keys)}",
         )
 
+    def test_no_dynamic_vendored_resource_path_arguments(self):
+        """Round-4 external review: a call site whose argument can't be
+        resolved statically was previously SKIPPED by the key-matching
+        check above, silently -- which defeats the registry's whole
+        premise (every access is a literal, auditable key) exactly as
+        much as bypassing it outright. Fails the build instead."""
+        dynamic_sites: list[str] = []
+        for script in (ROOT / "scripts").glob("*.py"):
+            _keys, dynamic = _vendored_resource_path_call_sites_in(script)
+            dynamic_sites.extend(dynamic)
+        self.assertEqual(
+            dynamic_sites, [],
+            f"vendored_resource_path() called with a non-literal argument at: {dynamic_sites} "
+            f"-- every call must pass a literal string key",
+        )
+
     def test_no_other_script_bypasses_the_registry(self):
         """The registry is only durable if it's the ONE place a "vendor"
         path segment gets constructed or embedded. Verified directly
-        (round 3, then again round 4 with the broadened detector): a
-        scratch script re-adding a bypass -- first a pathlib `/`-chain,
-        then separately a bare `Path("vendor/x")` string literal -- was
-        confirmed to trip this test before being removed."""
+        across three rounds: a scratch script re-adding a bypass -- a
+        pathlib `/`-chain, a bare `Path("vendor/x")` string literal, a
+        `joinpath()`/`os.path.join()` call, and (round 4's own finding)
+        `Path("vendor") / "pkg" / "x"`'s hybrid form -- was confirmed to
+        trip this test each time before being removed."""
         offenders = {}
         for script in (ROOT / "scripts").glob("*.py"):
             if script.name == "vendored_resources.py":
@@ -373,6 +412,74 @@ class VendoredResourceRegistryTest(unittest.TestCase):
             f"these scripts construct or embed a path through a 'vendor' segment instead of calling "
             f"vendored_resources.vendored_resource_path(): {offenders}",
         )
+
+
+class VendorBypassDetectorUnitTest(unittest.TestCase):
+    """Unit-level tests of `_vendor_bypass_offenses_in` itself, against
+    synthetic scripts written to a temp directory -- independent of
+    whatever scripts/*.py currently contains, so each known bypass form
+    (and each known NON-bypass form) is pinned permanently, not just
+    exercised incidentally by whatever real code happens to exist today.
+
+    `test_hybrid_path_call_base_is_detected` is the round-4 external
+    review's own reported repro: `Path("vendor") / "pkg" / "file.json"`
+    reproduced directly and confirmed `_vendor_bypass_offenses_in`
+    returned `[]` for it before the `Path(...)` call check was widened
+    from "argument contains vendor/" to "argument equals vendor, or
+    contains vendor/"."""
+
+    def _offenses_for(self, source: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "scratch.py"
+            script.write_text(source)
+            return _vendor_bypass_offenses_in(script)
+
+    def test_hybrid_path_call_base_is_detected(self):
+        offenses = self._offenses_for(
+            'from pathlib import Path\nX = Path("vendor") / "pkg" / "file.json"\n'
+        )
+        self.assertTrue(offenses, "Path(\"vendor\") / \"pkg\" / \"file.json\" was not detected")
+
+    def test_plain_binop_chain_is_detected(self):
+        offenses = self._offenses_for(
+            'from pathlib import Path\nX = Path(__file__) / "vendor" / "pkg" / "file.json"\n'
+        )
+        self.assertTrue(offenses)
+
+    def test_single_arg_path_call_is_detected(self):
+        offenses = self._offenses_for('from pathlib import Path\nX = Path("vendor/pkg/file.json")\n')
+        self.assertTrue(offenses)
+
+    def test_joinpath_call_is_detected(self):
+        offenses = self._offenses_for(
+            'from pathlib import Path\nX = Path(__file__).joinpath("vendor", "pkg", "file.json")\n'
+        )
+        self.assertTrue(offenses)
+
+    def test_os_path_join_call_is_detected(self):
+        offenses = self._offenses_for('import os\nX = os.path.join("vendor", "pkg", "file.json")\n')
+        self.assertTrue(offenses)
+
+    def test_bare_string_literal_is_detected(self):
+        offenses = self._offenses_for('X = "vendor/pkg/file.json"\n')
+        self.assertTrue(offenses)
+
+    def test_docstring_mention_is_not_detected(self):
+        offenses = self._offenses_for(
+            '"""Validated against vendor/concept-to-code/schemas/spec.schema.json."""\nX = 1\n'
+        )
+        self.assertEqual(offenses, [])
+
+    def test_registry_style_call_is_not_detected(self):
+        offenses = self._offenses_for(
+            'from vendored_resources import vendored_resource_path\n'
+            'X = vendored_resource_path("concept_to_code_spec_schema")\n'
+        )
+        self.assertEqual(offenses, [])
+
+    def test_unrelated_path_is_not_detected(self):
+        offenses = self._offenses_for('from pathlib import Path\nX = Path(__file__) / "docs" / "foo.json"\n')
+        self.assertEqual(offenses, [])
 
 
 class CountsConsistencyTest(unittest.TestCase):

@@ -141,9 +141,27 @@
         "promoted_hash": {
           "type": ["string", "null"],
           "pattern": "^sha256:[0-9a-f]{64}$",
-          "description": "The hash recorded at promotion time, present whenever lifecycle is 'promoted' or 'stale-by-hash-drift' so the two can be compared without a second lookup."
+          "description": "The hash recorded at promotion time, present whenever lifecycle is 'promoted' or 'stale-by-hash-drift' so the two can be compared without a second lookup. Required by the conditionals below whenever lifecycle is one of those two values; absent (the key not present at all) otherwise -- there is no promotion-time hash to report for a never-promoted or absent artifact."
         }
-      }
+      },
+      "allOf": [
+        {
+          "description": "lifecycle 'absent' <=> content_hash null. An absent artifact has no bytes to hash; every other declared lifecycle (including 'invalid') implies the file was read and does have a real hash.",
+          "if": { "properties": { "lifecycle": { "const": "absent" } } },
+          "then": { "properties": { "content_hash": { "const": null } } },
+          "else": {
+            "if": { "properties": { "lifecycle": { "const": "unknown" } } },
+            "then": {},
+            "else": { "properties": { "content_hash": { "type": "string" } }, "required": ["content_hash"] }
+          }
+        },
+        {
+          "description": "promoted_hash is required (and non-null) exactly when lifecycle is 'promoted' or 'stale-by-hash-drift', and must be absent otherwise -- it does not exist to report for a lifecycle that was never promoted.",
+          "if": { "properties": { "lifecycle": { "enum": ["promoted", "stale-by-hash-drift"] } } },
+          "then": { "required": ["promoted_hash"], "properties": { "promoted_hash": { "type": "string" } } },
+          "else": { "not": { "required": ["promoted_hash"] } }
+        }
+      ]
     },
 
     "obligation": {
@@ -172,7 +190,7 @@
       "required": ["dimension", "status"],
       "additionalProperties": false,
       "properties": {
-        "dimension": { "type": "string", "minLength": 1, "description": "e.g. 'formal', 'differential', 'witness', 'harness-tested' -- plan.md §8.1's claim/evidence/result/scope/trust/support split names the vocabulary; this schema does not close it since #56 owns the real enumeration." },
+        "dimension": { "type": "string", "minLength": 1, "description": "e.g. 'formal', 'differential', 'harness-tested', 'human-review' -- plan.md §8.1's claim/evidence/result/scope/trust/support split names the vocabulary; this schema does not close it since #56 owns the real enumeration. Deliberately does NOT include 'witness': a witness is a typed MITIGATION acceptable only at risk tier low (plan.md §16), never itself an assurance dimension a stronger obligation can rely on achieving -- see generated_observations.witness_summaries, which is where a witness's own determinism/degeneracy observation lives, structurally separate from this array." },
         "status": { "type": "string", "enum": ["achieved", "missing", "degraded", "unknown"] }
       }
     },

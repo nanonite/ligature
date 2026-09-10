@@ -779,6 +779,11 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_contract_consistency.py",
+      "kind": "drift",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_exit_code_contract.py",
       "kind": "unit",
       "disposition": "test-only"
@@ -1117,11 +1122,11 @@
       "runtime-required": 67,
       "documentation": 11,
       "installed-template": 3,
-      "test-only": 57,
+      "test-only": 58,
       "vendored-runtime": 1
     },
-    "total_entries": 139,
-    "test_count": 44,
+    "total_entries": 140,
+    "test_count": 45,
     "registered_cli_command_count": 32
   },
   "documentation_and_templates": [

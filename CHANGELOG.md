@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
-- Authoritative implementation inventory (docs/implementation-inventory.json, schema v1.0) with a filesystem/argparse drift test, replacing the stale "53 tests / M0-M1" summary: 1333 passing tests (154 subtests), 32 registered CLI commands, 39 runtime modules, M0-M4 all complete (#55)
+- Authoritative implementation inventory (docs/implementation-inventory.json, schema v1.0) with a filesystem/argparse drift test, replacing the stale "53 tests / M0-M1" summary: 1356 passing tests (159 subtests), 32 registered CLI commands, 39 runtime modules, M0-M4 all complete (#55)
 - Stable public CLI grammar v1.0 (docs/cli-contract.md): `init doctor version status check validate gate draft approve migrate report`, with a complete 32/32 legacy-command disposition mapping and the `status`-stub-to-`doctor` retirement plan (#55)
 - Versioned `ligature status --json` and `ligature check --json` output contracts (schemas/project-state.schema.json, schemas/consolidated-check.schema.json, both v1.0), specified (not implemented) for #56, with a regression test proving the old capability summary cannot satisfy the new schema (#55)
 - Reconciled exit-code contract (docs/exit-code-contract.md) and a pure precedence resolver, scripts/exit_codes.py (#55)
@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Workspace-wide assumption-identity collision check across boundary contracts (#6)
 
 ### Fixed
+- #55 round 2 (external review): `check` was simultaneously specified as read-only and as internally running three writing commands -- resolved in favor of read-only; `check` may now only *recommend* extract-c-static/check-bridges/render-witness via `next_action`, never run them (docs/cli-contract.md, docs/trust-and-compatibility-boundaries.md)
+- #55 round 2: the `status`/`doctor` split promised the OLD capability meaning under `status` "through product version 1.x" while the same document's grammar table already assigned `status` to project state at v1.0 -- resolved by reserving `status` for project state unconditionally from the first packaged release
+- #55 round 2: `report <report-id>` was listed as read-only in one section and as writing files in another -- resolved by documenting per-report-id write behavior (only `report pilot-cluster` is read-only)
+- #55 round 2: the vendored-resource drift test hard-coded "exactly one" file and its pathname instead of deriving it from code -- replaced with an AST-based scanner over scripts/*.py, verified to catch an injected drift
+- #55 round 2: project-state.schema.json's lifecycle/content_hash/promoted_hash relationship was prose-only and unenforced, and listed `witness` as an example assurance dimension, contradicting the witness-vs-assurance separation -- both fixed with schema conditionals and a corrected example, covered by new tests
 - gate-g14 silently skips invalid closure artifacts instead of saying why (#49)
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 

@@ -19,6 +19,7 @@ this suite deliberately does not require.
 """
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import unittest
@@ -160,30 +161,93 @@ class TestAndFixtureDriftTest(unittest.TestCase):
             self.assertEqual(e["disposition"], "test-only", e["path"])
 
 
+def _path_join_segments(node: ast.AST) -> list[str] | None:
+    """Unwind a chain of `x / "a" / "b" / ...` BinOp(Div) nodes into an
+    ordered list of the right-hand string segments. Returns None if any
+    segment in the chain isn't a plain string literal (a dynamic segment
+    can't be resolved statically, so such a chain is not a candidate)."""
+    segments: list[str] = []
+    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        right = node.right
+        if not (isinstance(right, ast.Constant) and isinstance(right.value, str)):
+            return None
+        segments.insert(0, right.value)
+        node = node.left
+    return segments
+
+
+def _vendor_file_references_in(script: Path) -> set[str]:
+    """Every workspace-relative vendor/ file path this ONE script
+    constructs via a pathlib `/`-chain that passes through a literal
+    "vendor" segment and resolves to a real file on disk. Static analysis
+    only, over the actual `ast.BinOp(op=Div)` join pattern every current
+    vendor/ reference in this codebase uses (see
+    scripts/select_pilot_cluster.py) -- it does not execute the script and
+    would not catch a reference built by string concatenation,
+    os.path.join, or an f-string. That is a real, honest scope limit, not
+    a silent one: it is documented here, and is still strictly more than
+    the single hard-coded path this test asserted before this fix."""
+    tree = ast.parse(script.read_text())
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            segments = _path_join_segments(node)
+            if not segments or "vendor" not in segments:
+                continue
+            suffix = segments[segments.index("vendor"):]
+            candidate = ROOT.joinpath(*suffix)
+            if candidate.is_file():
+                found.add("/".join(suffix))
+    return found
+
+
+def _scan_all_vendor_file_references() -> set[str]:
+    found: set[str] = set()
+    for script in (ROOT / "scripts").glob("*.py"):
+        found |= _vendor_file_references_in(script)
+    return found
+
+
 class VendoredAssetDriftTest(unittest.TestCase):
-    """Only checks the ONE file scripts/select_pilot_cluster.py actually
-    opens at runtime exists where the inventory says it does -- see
-    scripts/select_pilot_cluster.py's own SPEC_SCHEMA_PATH-equivalent
-    constant. Does not attempt to enumerate the whole vendored submodule
-    tree (it is explicitly out-of-distribution; see the inventory's own
-    'documentation' disposition for the rest of vendor/concept-to-code)."""
+    """Bidirectionally derives every workspace-relative vendor/ file
+    reference scripts/*.py actually constructs (via AST over the real
+    source, not the inventory's own say-so) and compares it against the
+    inventory's required_at_runtime set. Catches BOTH directions of
+    drift: code referencing a vendor file the inventory doesn't know
+    about (omission), and the inventory claiming a file no scripts/*.py
+    reference was found for (staleness) -- a prior version of this test
+    only asserted a hard-coded count and pathname, which a new runtime
+    reference could have silently evaded on both sides at once."""
 
-    def test_the_one_runtime_required_vendored_file_exists(self):
-        inventory = _load_inventory()
-        required = [
-            e for e in inventory["vendored_runtime_assets"]
-            if e["required_at_runtime"] is True
-        ]
-        self.assertEqual(len(required), 1, required)
-        path = ROOT / required[0]["path"]
-        self.assertTrue(path.is_file(), f"{path} does not exist on disk")
-
-    def test_only_the_expected_path_is_marked_required(self):
+    def test_scanned_vendor_references_match_inventory_required_set(self):
         inventory = _load_inventory()
         required_paths = {
             e["path"] for e in inventory["vendored_runtime_assets"] if e["required_at_runtime"]
         }
-        self.assertEqual(required_paths, {"vendor/concept-to-code/schemas/spec.schema.json"})
+        scanned = _scan_all_vendor_file_references()
+        self.assertEqual(
+            scanned - required_paths, set(),
+            f"scripts/*.py reference vendor file(s) the inventory does not mark required_at_runtime: {sorted(scanned - required_paths)}",
+        )
+        self.assertEqual(
+            required_paths - scanned, set(),
+            f"inventory marks required_at_runtime but no scripts/*.py reference was found: {sorted(required_paths - scanned)}",
+        )
+
+    def test_the_scanner_actually_finds_the_known_reference(self):
+        """Sanity check that the scanner isn't vacuously passing because
+        it finds nothing at all -- if THIS fails, the scanner itself is
+        broken, not the inventory."""
+        self.assertIn(
+            "vendor/concept-to-code/schemas/spec.schema.json",
+            _scan_all_vendor_file_references(),
+        )
+
+    def test_required_files_exist_on_disk(self):
+        inventory = _load_inventory()
+        for e in inventory["vendored_runtime_assets"]:
+            if e["required_at_runtime"]:
+                self.assertTrue((ROOT / e["path"]).is_file(), f"{e['path']} does not exist on disk")
 
 
 class CountsConsistencyTest(unittest.TestCase):

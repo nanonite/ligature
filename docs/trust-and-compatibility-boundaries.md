@@ -45,13 +45,20 @@ reclassified. Its stability guarantee is "drift-tested," not "frozen."
 
 ## 4. Which commands are read-only
 
-`status`, `check`, every `validate <kind>`, every `gate <gate-id>`, every
-`report <report-id>`, and `doctor`/`version` (once implemented). None of
-these write to the workspace under any circumstances. This is enforced
-today by construction (none of the corresponding `cmd_*` functions call
-any write path) and will be schema-enforced going forward for `check` via
-`consolidated-check.schema.json`'s required `mutated_workspace: false`
-field.
+`status`, `check`, every `validate <kind>`, every `gate <gate-id>`, and
+`doctor`/`version` (once implemented). None of these write to the
+workspace under any circumstances. This is enforced today by construction
+(none of the corresponding `cmd_*` functions call any write path) and is
+schema-enforced going forward for `check` via
+`consolidated-check.schema.json`'s required `mutated_workspace: const
+false` field — which also means `check` may never internally invoke
+`extract-c-static`/`check-bridges`/`render-witness` (docs/cli-contract.md
+§7), since those write; `check` can only *recommend* running one of them
+via `next_action`, never run it itself.
+
+`report <report-id>` is **not** in this read-only list — see §5. Three of
+its four report-ids write a generated projection file; only
+`report pilot-cluster` is genuinely read-only.
 
 ## 5. Which operations may write, and under what authority
 
@@ -61,11 +68,26 @@ field.
 | `approve <op>` | promotes a draft (attaches `review`) | `--reviewer` (required, human identity) |
 | `init` (#58) | installs owned files into a target repo | operator running the command; must not silently overwrite user-owned content |
 | `migrate` (#59) | rewrites legacy references to registry form | operator running the command, staged (phase A-D per #59), never rewrites a reviewed artifact without its own human checkpoint |
+| `report feature-ledger` | `ci/results/feature_ledger.json` | none required — a generated projection, always safe to regenerate/overwrite |
+| `report contact-sheet` | `docs/witnesses/_contact_sheet.svg` | none required — same as above |
+| `report gold-set-measurement` | `ci/results/gold_set/` (default; `--no-write` suppresses it) | none required — same as above |
 
-No other command writes. `report <report-id>` generators
-(`generate-feature-ledger`, `generate-contact-sheet`) write only to
-`ci/results/`/`docs/witnesses/_contact_sheet.svg` — generated,
-read-only-by-humans projections, never a reviewed/promoted artifact.
+`report pilot-cluster` writes nothing (stdout only) and belongs in §4's
+read-only list in every respect except that it shares the `report` verb
+with three operations that do write — `report` as a *verb* is therefore
+mixed-authority by report-id, not uniformly read-only or uniformly
+writing; docs/cli-contract.md §6 gives the per-report-id breakdown.
+
+None of the three `report` writes is a reviewed/promoted artifact —
+`is_generated_review_projection()` (§16.5/§16.6) already refuses to let
+any of these three be listed in a promotion's own `artifact_manifest`.
+`extract-c-static`/`check-bridges`/`render-witness`
+(docs/cli-contract.md §7) also write — `ci/results/c_static/`,
+`ci/results/bridge_checks/`, a witness's declared `output.path`
+respectively — under the same no-authority-required, always-regenerable
+discipline as the `report` writes above; they are omitted from this
+table only because they are not top-level verbs (§7), not because they
+don't write.
 
 ## 6. `status`/`check` cannot approve or promote
 

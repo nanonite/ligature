@@ -62,10 +62,25 @@ class ProjectStateSchemaTest(unittest.TestCase):
 
     def test_artifact_lifecycle_accepts_unknown(self):
         """Explicit unknown/not-checked states must never become a schema
-        rejection -- missing information is a valid, honest report."""
+        rejection -- missing information is a valid, honest report. Also
+        drops promoted_hash: an artifact whose lifecycle could not be
+        determined has no business claiming a promotion-time hash either
+        (see the lifecycle conditionals test class below)."""
         doc = self._load("project-state.mixed.example.json")
         doc["artifacts"][0]["lifecycle"] = "unknown"
         doc["artifacts"][0]["content_hash"] = None
+        del doc["artifacts"][0]["promoted_hash"]
+        errors = list(self.validator.iter_errors(doc))
+        self.assertEqual(errors, [], [e.message for e in errors])
+
+    def test_artifact_lifecycle_unknown_still_accepts_a_real_content_hash(self):
+        """'unknown' means lifecycle could not be determined -- it does not
+        mean the hash is unavailable too; a real hash may coexist with an
+        unknown lifecycle (e.g. the file was readable and hashable but its
+        promotion-manifest lookup failed)."""
+        doc = self._load("project-state.mixed.example.json")
+        doc["artifacts"][0]["lifecycle"] = "unknown"
+        del doc["artifacts"][0]["promoted_hash"]
         errors = list(self.validator.iter_errors(doc))
         self.assertEqual(errors, [], [e.message for e in errors])
 
@@ -117,6 +132,89 @@ class ProjectStateSchemaTest(unittest.TestCase):
         doc = self._load("project-state.empty.example.json")
         doc["gate_integrity"]["state"] = "totally-fine-trust-me"
         self.assertTrue(list(self.validator.iter_errors(doc)))
+
+
+class ArtifactLifecycleInvariantTest(unittest.TestCase):
+    """Chainlink #55 review finding (medium): the lifecycle/content_hash/
+    promoted_hash relationships were prose-only -- nothing in the schema
+    actually enforced them, so an artifact record with 'absent' lifecycle
+    and a real content_hash, or 'draft' lifecycle and a null content_hash,
+    validated anyway. These tests prove the conditional rules added to the
+    `artifact` $def actually reject every such combination, not just that
+    the two hand-authored examples happen to be internally consistent."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.schema = json.loads(SCHEMA_PATH.read_text())
+        cls.validator = make_validator(cls.schema)
+
+    def _artifact(self, **overrides):
+        base = {
+            "artifact_id": "X",
+            "kind": "boundary",
+            "path": "specs/_boundaries/X.json",
+            "content_hash": "sha256:" + "a" * 64,
+            "lifecycle": "validated",
+        }
+        base.update(overrides)
+        return base
+
+    def _errors(self, artifact):
+        doc = json.loads((EXAMPLES_DIR / "project-state.empty.example.json").read_text())
+        doc["artifacts"] = [artifact]
+        return list(self.validator.iter_errors(doc))
+
+    def test_absent_with_a_real_content_hash_is_rejected(self):
+        artifact = self._artifact(lifecycle="absent", content_hash="sha256:" + "a" * 64)
+        self.assertTrue(self._errors(artifact))
+
+    def test_absent_with_null_content_hash_is_accepted(self):
+        artifact = self._artifact(lifecycle="absent", content_hash=None)
+        self.assertEqual(self._errors(artifact), [])
+
+    def test_draft_with_null_content_hash_is_rejected(self):
+        artifact = self._artifact(lifecycle="draft", content_hash=None)
+        self.assertTrue(self._errors(artifact))
+
+    def test_invalid_with_null_content_hash_is_rejected(self):
+        """'invalid' still means the file was read and hashed -- only
+        'absent' may have a null hash."""
+        artifact = self._artifact(lifecycle="invalid", content_hash=None)
+        self.assertTrue(self._errors(artifact))
+
+    def test_validated_with_a_real_content_hash_is_accepted(self):
+        artifact = self._artifact(lifecycle="validated", content_hash="sha256:" + "a" * 64)
+        self.assertEqual(self._errors(artifact), [])
+
+    def test_promoted_without_promoted_hash_is_rejected(self):
+        artifact = self._artifact(lifecycle="promoted")
+        self.assertTrue(self._errors(artifact))
+
+    def test_stale_by_hash_drift_without_promoted_hash_is_rejected(self):
+        artifact = self._artifact(lifecycle="stale-by-hash-drift")
+        self.assertTrue(self._errors(artifact))
+
+    def test_promoted_with_promoted_hash_is_accepted(self):
+        artifact = self._artifact(lifecycle="promoted", promoted_hash="sha256:" + "b" * 64)
+        self.assertEqual(self._errors(artifact), [])
+
+    def test_validated_with_a_promoted_hash_present_is_rejected(self):
+        """promoted_hash must not exist at all for a lifecycle that was
+        never promoted -- a leftover/stale promoted_hash on a merely
+        'validated' artifact is exactly the kind of contradictory state
+        this conditional exists to catch."""
+        artifact = self._artifact(lifecycle="validated", promoted_hash="sha256:" + "b" * 64)
+        self.assertTrue(self._errors(artifact))
+
+    def test_unknown_lifecycle_permits_either_null_or_real_content_hash(self):
+        for content_hash in (None, "sha256:" + "a" * 64):
+            with self.subTest(content_hash=content_hash):
+                artifact = self._artifact(lifecycle="unknown", content_hash=content_hash)
+                self.assertEqual(self._errors(artifact), [])
+
+    def test_unknown_lifecycle_still_forbids_promoted_hash(self):
+        artifact = self._artifact(lifecycle="unknown", promoted_hash="sha256:" + "b" * 64)
+        self.assertTrue(self._errors(artifact))
 
 
 class OldCapabilitySummaryCannotSatisfySchemaTest(unittest.TestCase):

@@ -215,7 +215,7 @@ def discover_concepts(descriptor: dict, workspace: Path) -> tuple[dict[str, Conc
                     Finding(
                         "PILOT", str(path),
                         f"candidate concept spec for {data['concept']!r} is schema-invalid against "
-                        f"vendor/concept-to-code/schemas/spec.schema.json ({len(errors)} finding(s)): "
+                        f"{CONCEPT_SPEC_SCHEMA_PATH} ({len(errors)} finding(s)): "
                         f"{errors[0].message}",
                     )
                 )

@@ -136,12 +136,12 @@
         "description": { "type": "string", "minLength": 1 },
         "action_id": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
-          "description": "The STABLE, versioned identifier for what this action does -- required whenever kind is 'automated-command'. THIS is the machine-consumable contract surface, not `command` below (round-3 external review: an earlier revision let `command` be the only identifier offered, while pointing at legacy flat command names docs/cli-contract.md §7 itself declares unversioned and changeable without notice -- a consumer keying off `command` had nothing stable to key off at all). docs/cli-contract.md §7 defines the action_id vocabulary this contract commits to for the three internal operations `check` may recommend: `refresh-c-static`, `refresh-bridge-checks`, `refresh-witness`. Additional action_ids are expected as #56 implements more of `check`'s own recommendation logic; this field is not a closed enum here because #56 owns the full vocabulary, but every value it does define is itself versioned exactly like the rest of this contract -- unlike `command`."
+          "enum": ["refresh-c-static", "refresh-bridge-checks", "refresh-witness", "author-interaction"],
+          "description": "The STABLE, versioned identifier for what this action does -- required whenever kind is 'automated-command'. THIS is the machine-consumable contract surface, not `command` below (round-3 external review: an earlier revision let `command` be the only identifier offered, while pointing at legacy flat command names docs/cli-contract.md §7 itself declares unversioned and changeable without notice -- a consumer keying off `command` had nothing stable to key off at all). Closed to an `enum` as of v1.0 (round-4 external review: an open pattern let any invented kebab-case string validate, which is not actually a versioned vocabulary -- `refresh-*` for the three internal operations, `author-interaction` for the example in schemas/examples/consolidated-check.blocked.example.json) -- docs/cli-contract.md §7 is this enum's own documentation, not a separate, looser source of truth. Extending this list is an additive, minor schema-version change (new value, nothing removed or renarrowed) exactly like adding an artifact-kind or gate-id elsewhere in this contract; #56 is expected to add more as `check`'s own recommendation logic grows, each one landing here at the same time it lands in docs/cli-contract.md, never before."
         },
         "command": {
           "type": ["string", "null"],
-          "description": "A best-effort LITERAL CLI invocation for human/script convenience only -- explicitly NOT a stability guarantee and NOT something automated tooling may parse or pattern-match (key off `action_id` instead). May be non-null even when it currently names a legacy flat command whose shape carries no compatibility promise (docs/cli-contract.md §7); may become null in a later run of the identical `action_id` if no stable literal invocation exists at that time. Required to be present (string or null) on every next_action; required non-null specifically when kind is 'automated-command' (see the conditional below) -- that requirement is about the field being POPULATED today, not about its value being a stable target to depend on."
+          "description": "A best-effort LITERAL CLI invocation for human/script convenience only -- explicitly NOT a stability guarantee and NOT something automated tooling may parse or pattern-match (key off `action_id` instead). May be non-null even when it currently names a legacy flat command whose shape carries no compatibility promise (docs/cli-contract.md §7). Required to be present (string or null) on every next_action; required NON-NULL specifically when kind is 'automated-command', unconditionally -- there is no case where an automated-command next_action may omit a literal command, only a case where that literal is not itself a stability guarantee (round-4 external review: an earlier revision of this description claimed command could still become null for an automated-command action, which directly contradicted the conditional two lines below that always requires it non-null; that claim is removed, not the requirement)."
         }
       },
       "allOf": [
@@ -150,7 +150,6 @@
           "then": {
             "required": ["action_id", "command"],
             "properties": {
-              "action_id": { "type": "string", "minLength": 1 },
               "command": { "type": "string", "minLength": 1 }
             }
           }

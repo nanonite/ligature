@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -162,16 +163,14 @@ class TestAndFixtureDriftTest(unittest.TestCase):
             self.assertEqual(e["disposition"], "test-only", e["path"])
 
 
+_VENDOR_PATH_LITERAL_RE = re.compile(r"vendor/[\w.\-]+(?:/[\w.\-]+)*")
+
+
 def _path_join_segments(node: ast.AST) -> list[str] | None:
     """Unwind a chain of `x / "a" / "b" / ...` BinOp(Div) nodes into an
     ordered list of the right-hand string segments. Returns None if any
     segment in the chain isn't a plain string literal (a dynamic segment
-    can't be resolved statically, so such a chain is not a candidate).
-    Used only as a BYPASS detector below, not as the source of truth for
-    what's required -- see vendored_resources.py's own module docstring
-    for why (round-3 external review: a pattern-matching scanner over one
-    join syntax is inherently incomplete -- joinpath(), os.path.join(), an
-    f-string, or a future importlib.resources call all evade it)."""
+    can't be resolved statically, so such a chain is not a candidate)."""
     segments: list[str] = []
     while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         right = node.right
@@ -182,20 +181,118 @@ def _path_join_segments(node: ast.AST) -> list[str] | None:
     return segments
 
 
-def _vendor_segment_appears_in(script: Path) -> bool:
-    """True if this ONE script constructs a pathlib `/`-chain containing a
-    literal "vendor" segment anywhere -- used only to catch a script
-    OTHER than vendored_resources.py bypassing the registry, not to
-    determine what's required. A script legitimately calling
-    vendored_resource_path() does not trip this (it references the
-    registry function, not a "vendor" string literal)."""
+def _call_string_args(node: ast.Call) -> list[str]:
+    return [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+
+
+def _docstring_constant_ids(tree: ast.AST) -> set[int]:
+    """id() of every Constant node that IS a module/function/class
+    docstring -- excluded from the literal-string bypass check below,
+    since prose like 'validated against the real, vendored
+    `vendor/concept-to-code/schemas/spec.schema.json`' legitimately names
+    the file for a human reader without constructing a path. This is a
+    deliberate, narrow carve-out: it does not exempt an ordinary string
+    constant used as a runtime value (an f-string building an error
+    message that embeds the same path text, for instance, is NOT a
+    docstring and is still caught -- see the round-3 fix to
+    select_pilot_cluster.py's own error message, rewritten to interpolate
+    the resolved path object instead of repeating the literal string, so
+    it no longer trips this same check it used to fail)."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if (
+                node.body
+                and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)
+            ):
+                ids.add(id(node.body[0].value))
+    return ids
+
+
+def _vendor_bypass_offenses_in(script: Path) -> list[str]:
+    """Every way this ONE script could construct or embed a path through a
+    "vendor" segment WITHOUT going through vendored_resource_path():
+
+    1. A pathlib `/`-chain with "vendor" as one segment
+       (`Path(...) / "vendor" / ...`).
+    2. A `.joinpath(...)` or `os.path.join(...)` call with "vendor" as one
+       of its string arguments, OR a single argument that already
+       contains "vendor/<segment>" (`joinpath("vendor", "x")`,
+       `os.path.join("vendor/x")`).
+    3. A `Path(...)` call whose argument is a single string containing
+       "vendor/<segment>" (`Path("vendor/concept-to-code/x")`).
+    4. Any OTHER non-docstring string constant anywhere in the file
+       (including inside an f-string's literal segments) matching
+       `vendor/<segment>` -- the catch-all for constructions 1-3 don't
+       cover (a bare `x = "vendor/foo/bar.json"` assignment, for
+       instance).
+
+    Docstrings are excluded (see _docstring_constant_ids) -- this is a
+    real, deliberate scope boundary: prose mentioning a vendor/ path by
+    name does not construct one. Everything else is in scope; round 3's
+    review found the previous version of this check only covered form 1."""
     tree = ast.parse(script.read_text())
+    docstring_ids = _docstring_constant_ids(tree)
+    offenses: list[str] = []
+
     for node in ast.walk(tree):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             segments = _path_join_segments(node)
             if segments and "vendor" in segments:
-                return True
-    return False
+                offenses.append(f"path-join chain: {'/'.join(segments)}")
+
+        elif isinstance(node, ast.Call):
+            func = node.func
+            is_joinpath = isinstance(func, ast.Attribute) and func.attr == "joinpath"
+            is_os_path_join = (
+                isinstance(func, ast.Attribute)
+                and func.attr == "join"
+                and isinstance(func.value, ast.Attribute)
+                and func.value.attr == "path"
+            )
+            is_path_call = isinstance(func, ast.Name) and func.id == "Path"
+            if is_joinpath or is_os_path_join:
+                args = _call_string_args(node)
+                if "vendor" in args or any("vendor/" in a for a in args):
+                    offenses.append(f"{func.attr}() call: {args}")
+            elif is_path_call:
+                args = _call_string_args(node)
+                if any("vendor/" in a for a in args):
+                    offenses.append(f"Path() call: {args}")
+
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstring_ids
+            and _VENDOR_PATH_LITERAL_RE.search(node.value)
+        ):
+            offenses.append(f"string literal: {node.value!r}")
+
+    return offenses
+
+
+def _vendored_resource_path_call_keys_in(script: Path) -> set[str]:
+    """Every literal key name passed to vendored_resource_path(...) (bare
+    or module-qualified, e.g. vendored_resources.vendored_resource_path)
+    in this ONE script. A dynamic (non-literal) argument can't be
+    resolved statically and is skipped -- there is no such call anywhere
+    in this codebase today; if one is ever added, it falls outside what
+    this particular check can verify, same honest limitation as any
+    static analysis."""
+    tree = ast.parse(script.read_text())
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        is_call = (isinstance(func, ast.Name) and func.id == "vendored_resource_path") or (
+            isinstance(func, ast.Attribute) and func.attr == "vendored_resource_path"
+        )
+        if is_call and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            keys.add(node.args[0].value)
+    return keys
 
 
 class VendoredResourceRegistryTest(unittest.TestCase):
@@ -203,10 +300,15 @@ class VendoredResourceRegistryTest(unittest.TestCase):
     TRUTH for "what's required," which is exactly the syntax-specific,
     existence-gated approach the review flagged. scripts/vendored_resources.py
     is now that source of truth instead -- an explicit, hand-maintained
-    registry every runtime call site is expected to go through. These
-    tests check the registry against the inventory (bidirectionally, by
-    content, not by scanning code for a particular join pattern) and
-    separately confirm no OTHER script bypasses it."""
+    registry every runtime call site is expected to go through. Round 4
+    found this class still didn't connect call sites to the registry (an
+    unused registry entry, or a call naming an unregistered key, could
+    both go unnoticed) and that the bypass detector recognized only the
+    pathlib `/`-chain form. Both are fixed here: `test_registry_keys_
+    match_call_sites` closes the first gap, and `_vendor_bypass_offenses_in`
+    (used by `test_no_other_script_bypasses_the_registry`) now covers
+    joinpath(), os.path.join(), single-argument Path(...), and a general
+    non-docstring string-literal scan, not just the one join syntax."""
 
     def test_registry_matches_inventory_required_set(self):
         inventory = _load_inventory()
@@ -232,19 +334,43 @@ class VendoredResourceRegistryTest(unittest.TestCase):
         with self.assertRaises(vendored_resources.UnregisteredVendoredResourceError):
             vendored_resources.vendored_resource_path("not-a-real-resource-name")
 
+    def test_registry_keys_match_call_sites(self):
+        """Bidirectional: every vendored_resource_path("key") call site
+        across scripts/*.py must name a key that's actually registered
+        (an unregistered key would raise at runtime -- caught here
+        statically, before that), and every registered key must be
+        called from at least one real call site (an unused registry
+        entry is exactly as much drift as a missing one)."""
+        called_keys: set[str] = set()
+        for script in (ROOT / "scripts").glob("*.py"):
+            called_keys |= _vendored_resource_path_call_keys_in(script)
+        registered_keys = set(vendored_resources.VENDORED_RESOURCES)
+        self.assertEqual(
+            called_keys - registered_keys, set(),
+            f"vendored_resource_path() called with unregistered key(s): {sorted(called_keys - registered_keys)}",
+        )
+        self.assertEqual(
+            registered_keys - called_keys, set(),
+            f"registered but never called from any scripts/*.py call site: {sorted(registered_keys - called_keys)}",
+        )
+
     def test_no_other_script_bypasses_the_registry(self):
         """The registry is only durable if it's the ONE place a "vendor"
-        path segment gets constructed. Verified directly (round 3): a
-        scratch script re-adding `Path(__file__) / "vendor" / ...` was
+        path segment gets constructed or embedded. Verified directly
+        (round 3, then again round 4 with the broadened detector): a
+        scratch script re-adding a bypass -- first a pathlib `/`-chain,
+        then separately a bare `Path("vendor/x")` string literal -- was
         confirmed to trip this test before being removed."""
-        offenders = [
-            script.name
-            for script in (ROOT / "scripts").glob("*.py")
-            if script.name != "vendored_resources.py" and _vendor_segment_appears_in(script)
-        ]
+        offenders = {}
+        for script in (ROOT / "scripts").glob("*.py"):
+            if script.name == "vendored_resources.py":
+                continue
+            offenses = _vendor_bypass_offenses_in(script)
+            if offenses:
+                offenders[script.name] = offenses
         self.assertEqual(
-            offenders, [],
-            f"these scripts construct their own path through a 'vendor' segment instead of calling "
+            offenders, {},
+            f"these scripts construct or embed a path through a 'vendor' segment instead of calling "
             f"vendored_resources.vendored_resource_path(): {offenders}",
         )
 

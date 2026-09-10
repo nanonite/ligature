@@ -146,5 +146,39 @@ class NextActionStableIdentifierConsistencyTest(unittest.TestCase):
         self.assertIn("MUST branch on `action_id`, never", normalized)
 
 
+class ActionIdVocabularyConsistencyTest(unittest.TestCase):
+    """Round-4 external review, two findings against round 3's own fix:
+    (a) action_id was schema-open to any kebab-case string -- an invented
+    value not in docs/cli-contract.md §7's table still validated; (b) the
+    `command` field's description claimed it "may become null" for an
+    automated-command action while the schema's own conditional always
+    required it non-null -- a direct self-contradiction. Both resolved:
+    action_id is now a closed `enum`, and the false nullability claim is
+    removed from both the schema description and this doc's own prose."""
+
+    def test_schema_action_id_is_a_closed_enum(self):
+        action_id_field = CONSOLIDATED_CHECK_SCHEMA["$defs"]["next_action"]["properties"]["action_id"]
+        self.assertIn("enum", action_id_field)
+        self.assertNotIn("pattern", action_id_field)
+
+    def test_schema_enum_matches_cli_contract_table(self):
+        """The schema's enum and the doc's table must name the exact same
+        set -- one governing the other silently is exactly the kind of
+        two-sources-of-truth gap this whole test file exists to prevent."""
+        schema_enum = set(CONSOLIDATED_CHECK_SCHEMA["$defs"]["next_action"]["properties"]["action_id"]["enum"])
+        section_7 = CLI_CONTRACT.split("## 7. Internal operations", 1)[1]
+        section_7 = section_7.split("## 8.", 1)[0]
+        for action_id in schema_enum:
+            with self.subTest(action_id=action_id):
+                self.assertIn(f"`{action_id}`", section_7)
+
+    def test_cli_contract_no_longer_says_command_may_be_null(self):
+        self.assertNotIn('command may be non-null, may be null', CLI_CONTRACT)
+
+    def test_cli_contract_states_command_always_present_for_automated_command(self):
+        normalized = " ".join(CLI_CONTRACT.split())
+        self.assertIn("never omitted or null for this kind", normalized)
+
+
 if __name__ == "__main__":
     unittest.main()

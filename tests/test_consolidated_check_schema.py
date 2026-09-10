@@ -96,6 +96,46 @@ class ConsolidatedCheckSchemaTest(unittest.TestCase):
                 mutated["next_action"]["action_id"] = bad
                 self.assertTrue(list(self.validator.iter_errors(mutated)))
 
+    def test_action_id_rejects_an_invented_but_well_formed_value(self):
+        """Round-4 external review: action_id was schema-open to ANY
+        kebab-case string, including one this contract never defined --
+        confirmed directly with 'invented-unstable-action', which
+        validated. Now a closed enum (v1.0): a well-formed but undefined
+        action_id must be rejected exactly like a malformed one."""
+        doc = self._load("consolidated-check.blocked.example.json")
+        doc["next_action"]["action_id"] = "invented-unstable-action"
+        errors = list(self.validator.iter_errors(doc))
+        self.assertTrue(errors, "schema accepted an action_id outside the v1.0 enum")
+
+    def test_command_description_no_longer_claims_it_can_be_null_for_automated_command(self):
+        """Round-4 external review: the description said command 'may
+        become null in a later run of the identical action_id', directly
+        contradicting the conditional two lines below that always
+        requires it non-null for kind: automated-command. The false claim
+        is removed from the description; the requirement itself is
+        unchanged (see test_automated_command_next_action_requires_a_command_string)."""
+        command_field = self.schema["$defs"]["next_action"]["properties"]["command"]
+        self.assertNotIn("may become null", command_field["description"])
+
+    def test_automated_command_command_is_always_non_null_regardless_of_action_id(self):
+        doc = self._load("consolidated-check.refresh-recommended.example.json")
+        doc["next_action"]["command"] = None
+        errors = list(self.validator.iter_errors(doc))
+        self.assertTrue(errors, "schema accepted a null command for an automated-command next_action")
+
+    def test_every_defined_action_id_is_accepted(self):
+        """The flip side of closing the vocabulary: every value the
+        contract DOES define must still validate -- a closed enum that
+        was closed too tightly would be just as wrong as an open one."""
+        schema_enum = self.schema["$defs"]["next_action"]["properties"]["action_id"]["enum"]
+        doc = self._load("consolidated-check.blocked.example.json")
+        for action_id in schema_enum:
+            with self.subTest(action_id=action_id):
+                mutated = json.loads(json.dumps(doc))
+                mutated["next_action"]["action_id"] = action_id
+                errors = list(self.validator.iter_errors(mutated))
+                self.assertEqual(errors, [])
+
     def test_refresh_recommended_example_uses_a_refresh_action_id(self):
         """docs/cli-contract.md §7 defines refresh-c-static/
         refresh-bridge-checks/refresh-witness as the stable action_ids

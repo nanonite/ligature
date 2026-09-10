@@ -165,20 +165,32 @@ nothing stable to key off after all. Resolved by splitting the two
 concerns `schemas/consolidated-check.schema.json`'s `next_action` now
 exposes separately:
 
-| stable `action_id` (versioned, part of this contract) | what it recommends | today's `command` value (advisory only, not covered by any stability promise) |
+| stable `action_id` (v1.0, closed `enum`) | what it recommends | today's `command` value (advisory only, not covered by any stability promise) |
 |---|---|---|
 | `refresh-c-static` | run `extract-c-static` | `ligature extract-c-static [...args]` |
 | `refresh-bridge-checks` | run `check-bridges` | `ligature check-bridges` |
 | `refresh-witness` | run `render-witness` | `ligature render-witness <witness_id> --renderer <...>` |
+| `author-interaction` | draft an interaction spec (see `schemas/examples/consolidated-check.blocked.example.json`) | `ligature draft interaction <target>` |
 
 `action_id` is required whenever `next_action.kind` is `automated-command`
-and forbidden otherwise; `command` may be non-null, may be null, and may
-change shape between runs of the identical `action_id` — automated
-tooling consuming `check --json` output MUST branch on `action_id`, never
-parse or pattern-match `command`. The three action_ids above are the ones
-this contract defines today; #56 is expected to add more as `check`'s own
-recommendation logic grows (e.g. for `validate`/`gate`/`approve`
-follow-ups), each one just as versioned as everything else here.
+and forbidden otherwise, and is schema-closed to exactly the four values
+above as of v1.0 (round-4 external review: an earlier revision left this
+field an open pattern, which let any well-formed but undefined string —
+`invented-unstable-action` was the confirmed repro — validate; that is
+not actually a versioned vocabulary, so it's closed with a JSON Schema
+`enum` instead). `command` is always present and non-null whenever `kind`
+is `automated-command` — its VALUE carries no stability guarantee and may
+point at a legacy flat name that changes shape, but the field itself is
+never omitted or null for this kind (a still-earlier revision of this
+paragraph claimed `command` "may be null" here too, which directly
+contradicted the schema's own conditional; that claim is removed, not the
+requirement). Automated tooling consuming `check --json` output MUST
+branch on `action_id`, never parse or pattern-match `command`. Extending
+this enum with a new value is an additive, minor schema-version change,
+same discipline as any other enumeration in this contract; #56 is
+expected to add more as `check`'s own recommendation logic grows (e.g.
+for further `validate`/`gate`/`approve` follow-ups), each one landing
+here and in the schema together, never one without the other.
 
 The three flat commands themselves are **not** promoted to stable public
 API by this contract — no removal version is promised because they are

@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
-- Authoritative implementation inventory (docs/implementation-inventory.json, schema v1.0) with a filesystem/argparse drift test, replacing the stale "53 tests / M0-M1" summary: 1370 passing tests (165 subtests), 32 registered CLI commands, 40 runtime modules, M0-M4 all complete (#55)
+- Authoritative implementation inventory (docs/implementation-inventory.json, schema v1.0) with a filesystem/argparse drift test, replacing the stale "53 tests / M0-M1" summary: 1379 passing tests (173 subtests), 32 registered CLI commands, 40 runtime modules, M0-M4 all complete (#55)
 - Central vendored-runtime-resource registry, scripts/vendored_resources.py (#55)
 - Stable public CLI grammar v1.0 (docs/cli-contract.md): `init doctor version status check validate gate draft approve migrate report`, with a complete 32/32 legacy-command disposition mapping and the `status`-stub-to-`doctor` retirement plan (#55)
 - Versioned `ligature status --json` and `ligature check --json` output contracts (schemas/project-state.schema.json, schemas/consolidated-check.schema.json, both v1.0), specified (not implemented) for #56, with a regression test proving the old capability summary cannot satisfy the new schema (#55)
@@ -25,6 +25,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - #55 round 3: `dimension: "witness"` still validated with zero errors despite the schema's own description saying witness doesn't belong in achieved_assurance -- added `not: {const: "witness"}`, reproduced the reported repro directly as a regression test
 - #55 round 3: the vendored-resource drift test was still syntax-specific (AST pattern matching) and existence-gated -- replaced with an explicit registry (scripts/vendored_resources.py) as the source of truth; the AST scan is now only a bypass detector, verified against both an injected registry omission and an injected bypass
 - #55 round 3: project-state.schema.json's content_hash description said null was allowed only for 'absent' while the conditionals (correctly) also allow it for 'unknown' -- description corrected to match
+- #55 round 4 (external review of round 3's own fixes): the vendored-resource registry never connected call sites to registry keys (an unused entry or a call naming an unregistered key could evade detection) and the bypass detector recognized only pathlib `/`-chains -- added a bidirectional call-site-vs-registry check and broadened the bypass detector to joinpath()/os.path.join()/single-argument Path()/general non-docstring string literals, verified against six separate injected-drift scenarios
+- #55 round 4: `action_id` was schema-open to any well-formed kebab-case string (confirmed with `invented-unstable-action`, which validated) -- closed to a v1.0 `enum` of the four values the contract actually defines
+- #55 round 4: `command`'s description claimed it "may become null" for an automated-command action while the schema conditional always required it non-null, and docs/cli-contract.md's own prose repeated the same contradiction -- both false claims removed
 - gate-g14 silently skips invalid closure artifacts instead of saying why (#49)
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 

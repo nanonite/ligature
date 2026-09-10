@@ -72,15 +72,56 @@ class ConsolidatedCheckSchemaTest(unittest.TestCase):
         doc["next_action"]["command"] = None
         self.assertTrue(list(self.validator.iter_errors(doc)))
 
+    def test_automated_command_next_action_requires_an_action_id(self):
+        """Round-3 external review: `command` alone was the only
+        machine-consumable identifier next_action offered, while pointing
+        at legacy flat command names the contract itself declares
+        unversioned -- action_id is now the required, stable surface."""
+        doc = self._load("consolidated-check.blocked.example.json")
+        del doc["next_action"]["action_id"]
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+    def test_automated_command_action_id_must_be_a_nonempty_string(self):
+        doc = self._load("consolidated-check.blocked.example.json")
+        doc["next_action"]["action_id"] = ""
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+    def test_action_id_rejects_uppercase_and_underscores(self):
+        """Pattern is the same kebab-case style every other stable
+        identifier in this contract uses (gate-id, report-id, etc)."""
+        doc = self._load("consolidated-check.blocked.example.json")
+        for bad in ("Author_Interaction", "author_interaction", "AUTHOR-INTERACTION"):
+            with self.subTest(action_id=bad):
+                mutated = json.loads(json.dumps(doc))
+                mutated["next_action"]["action_id"] = bad
+                self.assertTrue(list(self.validator.iter_errors(mutated)))
+
+    def test_refresh_recommended_example_uses_a_refresh_action_id(self):
+        """docs/cli-contract.md §7 defines refresh-c-static/
+        refresh-bridge-checks/refresh-witness as the stable action_ids
+        for the three internal operations check may recommend but never
+        runs -- this example is that exact scenario."""
+        doc = self._load("consolidated-check.refresh-recommended.example.json")
+        errors = list(self.validator.iter_errors(doc))
+        self.assertEqual(errors, [])
+        self.assertEqual(doc["next_action"]["action_id"], "refresh-c-static")
+
     def test_human_decision_next_action_forbids_a_command_string(self):
         doc = self._load("consolidated-check.blocked.example.json")
         doc["next_action"]["kind"] = "human-decision"
         doc["next_action"]["command"] = "ligature gate g14"
         self.assertTrue(list(self.validator.iter_errors(doc)))
 
+    def test_human_decision_next_action_forbids_an_action_id(self):
+        doc = self._load("consolidated-check.blocked.example.json")
+        doc["next_action"]["kind"] = "human-decision"
+        doc["next_action"]["command"] = None
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
     def test_human_decision_next_action_with_null_command_is_valid(self):
         doc = self._load("consolidated-check.blocked.example.json")
         doc["next_action"]["kind"] = "human-decision"
+        del doc["next_action"]["action_id"]
         doc["next_action"]["command"] = None
         errors = list(self.validator.iter_errors(doc))
         self.assertEqual(errors, [])

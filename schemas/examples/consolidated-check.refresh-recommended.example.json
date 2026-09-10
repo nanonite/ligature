@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "mutated_workspace": false,
+  "gates": [
+    { "gate_id": "r1-g16", "outcome": "blocked", "reason": "no C_static reports at ci/results/c_static/ -- run extract-c-static first" }
+  ],
+  "findings": [],
+  "next_action": {
+    "kind": "automated-command",
+    "action_id": "refresh-c-static",
+    "description": "gate r1-g16 needs C_static reports that do not exist yet. This is the specific scenario docs/cli-contract.md §7 governs: check may recommend this refresh, it never runs it -- the stable part of this recommendation is action_id, not the literal command below, which names today's legacy flat command and carries no compatibility guarantee of its own.",
+    "command": "ligature extract-c-static --target x86_64-unknown-linux-gnu"
+  },
+  "change_request_stubs": [],
+  "result": { "exit_code": 0, "conditions": [] }
+}

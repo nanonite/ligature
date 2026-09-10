@@ -19,6 +19,7 @@
   ],
   "next_action": {
     "kind": "automated-command",
+    "action_id": "author-interaction",
     "description": "Author or update the interaction spec covering crate_a::scheduler::dispatch, then re-run gate r1-g16.",
     "command": "ligature draft interaction crate_a/specs/_interactions/scheduler-dispatch.json"
   },

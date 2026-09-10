@@ -152,21 +152,43 @@ three promises simultaneously, so this contract now commits to exactly
 one: `check` reads, it never writes. When a gate's prerequisite data is
 missing or stale, `check` reports that gate's `outcome` as `blocked` with
 a `reason` naming the specific missing prerequisite, and — when nothing
-more severe is already blocking — may *recommend* running the refresh
-command via `next_action` (`kind: automated-command`, `command: "ligature
-<the flat legacy name>"` today, its future stable form once one exists).
-Recommending a command is not running it; the operator (human or an
-outer orchestration layer that is explicitly not `check` itself) decides
-whether to run it.
+more severe is already blocking — may *recommend* running the refresh via
+`next_action` (`kind: automated-command`). Recommending a command is not
+running it; the operator (human or an outer orchestration layer that is
+explicitly not `check` itself) decides whether to run it.
 
-They are **not** promoted to stable public API by this contract — no
-removal version is promised because they are not being deprecated, they
-are being kept as the only way to actually perform the refresh `check`
-can merely name. Their existing flat names keep working (CI matrices that
-parallelize C_static extraction by target triple, for instance, still
-need direct invocation) but that surface is explicitly unversioned: it
-may change shape without notice, and is not covered by §9's
-alias-removal policy.
+**The stable part of that recommendation is `action_id`, not `command`.**
+A round-3 external review found the first version of this fix still
+pointed the ONLY machine-consumable field (`command`) at these same three
+unversioned flat names — a consumer trying to key off next_action had
+nothing stable to key off after all. Resolved by splitting the two
+concerns `schemas/consolidated-check.schema.json`'s `next_action` now
+exposes separately:
+
+| stable `action_id` (versioned, part of this contract) | what it recommends | today's `command` value (advisory only, not covered by any stability promise) |
+|---|---|---|
+| `refresh-c-static` | run `extract-c-static` | `ligature extract-c-static [...args]` |
+| `refresh-bridge-checks` | run `check-bridges` | `ligature check-bridges` |
+| `refresh-witness` | run `render-witness` | `ligature render-witness <witness_id> --renderer <...>` |
+
+`action_id` is required whenever `next_action.kind` is `automated-command`
+and forbidden otherwise; `command` may be non-null, may be null, and may
+change shape between runs of the identical `action_id` — automated
+tooling consuming `check --json` output MUST branch on `action_id`, never
+parse or pattern-match `command`. The three action_ids above are the ones
+this contract defines today; #56 is expected to add more as `check`'s own
+recommendation logic grows (e.g. for `validate`/`gate`/`approve`
+follow-ups), each one just as versioned as everything else here.
+
+The three flat commands themselves are **not** promoted to stable public
+API by this contract — no removal version is promised because they are
+not being deprecated, they are being kept as the only way to actually
+perform the refresh `check` can merely name. Their existing flat names
+keep working (CI matrices that parallelize C_static extraction by target
+triple, for instance, still need direct invocation) but that surface is
+explicitly unversioned: it may change shape without notice, and is not
+covered by §9's alias-removal policy — this is exactly why `action_id`,
+not `command`, is the contract surface.
 
 ## 8. The `status` stub → `doctor`
 

@@ -114,10 +114,9 @@ from validate_closure import load_cluster_artifacts_with_invalid  # noqa: E402
 from validate_interaction import find_interaction_files  # noqa: E402
 from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
 from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
+from vendored_resources import vendored_resource_path  # noqa: E402
 
-CONCEPT_SPEC_SCHEMA_PATH = (
-    Path(__file__).resolve().parent.parent / "vendor" / "concept-to-code" / "schemas" / "spec.schema.json"
-)
+CONCEPT_SPEC_SCHEMA_PATH = vendored_resource_path("concept_to_code_spec_schema")
 
 # concept-to-code's own `verifier` enum is exactly {kani, creusot, verus}.
 # kani is bounded model checking; creusot/verus are deductive. This is a

@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 from schema_utils import make_validator  # noqa: E402
 import pipeline  # noqa: E402
+import vendored_resources  # noqa: E402
 
 INVENTORY_PATH = ROOT / "docs" / "implementation-inventory.json"
 INVENTORY_SCHEMA_PATH = ROOT / "schemas" / "implementation-inventory.schema.json"
@@ -165,7 +166,12 @@ def _path_join_segments(node: ast.AST) -> list[str] | None:
     """Unwind a chain of `x / "a" / "b" / ...` BinOp(Div) nodes into an
     ordered list of the right-hand string segments. Returns None if any
     segment in the chain isn't a plain string literal (a dynamic segment
-    can't be resolved statically, so such a chain is not a candidate)."""
+    can't be resolved statically, so such a chain is not a candidate).
+    Used only as a BYPASS detector below, not as the source of truth for
+    what's required -- see vendored_resources.py's own module docstring
+    for why (round-3 external review: a pattern-matching scanner over one
+    join syntax is inherently incomplete -- joinpath(), os.path.join(), an
+    f-string, or a future importlib.resources call all evade it)."""
     segments: list[str] = []
     while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         right = node.right
@@ -176,78 +182,71 @@ def _path_join_segments(node: ast.AST) -> list[str] | None:
     return segments
 
 
-def _vendor_file_references_in(script: Path) -> set[str]:
-    """Every workspace-relative vendor/ file path this ONE script
-    constructs via a pathlib `/`-chain that passes through a literal
-    "vendor" segment and resolves to a real file on disk. Static analysis
-    only, over the actual `ast.BinOp(op=Div)` join pattern every current
-    vendor/ reference in this codebase uses (see
-    scripts/select_pilot_cluster.py) -- it does not execute the script and
-    would not catch a reference built by string concatenation,
-    os.path.join, or an f-string. That is a real, honest scope limit, not
-    a silent one: it is documented here, and is still strictly more than
-    the single hard-coded path this test asserted before this fix."""
+def _vendor_segment_appears_in(script: Path) -> bool:
+    """True if this ONE script constructs a pathlib `/`-chain containing a
+    literal "vendor" segment anywhere -- used only to catch a script
+    OTHER than vendored_resources.py bypassing the registry, not to
+    determine what's required. A script legitimately calling
+    vendored_resource_path() does not trip this (it references the
+    registry function, not a "vendor" string literal)."""
     tree = ast.parse(script.read_text())
-    found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             segments = _path_join_segments(node)
-            if not segments or "vendor" not in segments:
-                continue
-            suffix = segments[segments.index("vendor"):]
-            candidate = ROOT.joinpath(*suffix)
-            if candidate.is_file():
-                found.add("/".join(suffix))
-    return found
+            if segments and "vendor" in segments:
+                return True
+    return False
 
 
-def _scan_all_vendor_file_references() -> set[str]:
-    found: set[str] = set()
-    for script in (ROOT / "scripts").glob("*.py"):
-        found |= _vendor_file_references_in(script)
-    return found
+class VendoredResourceRegistryTest(unittest.TestCase):
+    """Round-3 external review: the previous AST scanner was the SOURCE OF
+    TRUTH for "what's required," which is exactly the syntax-specific,
+    existence-gated approach the review flagged. scripts/vendored_resources.py
+    is now that source of truth instead -- an explicit, hand-maintained
+    registry every runtime call site is expected to go through. These
+    tests check the registry against the inventory (bidirectionally, by
+    content, not by scanning code for a particular join pattern) and
+    separately confirm no OTHER script bypasses it."""
 
-
-class VendoredAssetDriftTest(unittest.TestCase):
-    """Bidirectionally derives every workspace-relative vendor/ file
-    reference scripts/*.py actually constructs (via AST over the real
-    source, not the inventory's own say-so) and compares it against the
-    inventory's required_at_runtime set. Catches BOTH directions of
-    drift: code referencing a vendor file the inventory doesn't know
-    about (omission), and the inventory claiming a file no scripts/*.py
-    reference was found for (staleness) -- a prior version of this test
-    only asserted a hard-coded count and pathname, which a new runtime
-    reference could have silently evaded on both sides at once."""
-
-    def test_scanned_vendor_references_match_inventory_required_set(self):
+    def test_registry_matches_inventory_required_set(self):
         inventory = _load_inventory()
         required_paths = {
             e["path"] for e in inventory["vendored_runtime_assets"] if e["required_at_runtime"]
         }
-        scanned = _scan_all_vendor_file_references()
+        registered_paths = set(vendored_resources.VENDORED_RESOURCES.values())
         self.assertEqual(
-            scanned - required_paths, set(),
-            f"scripts/*.py reference vendor file(s) the inventory does not mark required_at_runtime: {sorted(scanned - required_paths)}",
+            registered_paths - required_paths, set(),
+            f"vendored_resources.py registers path(s) the inventory does not mark required_at_runtime: {sorted(registered_paths - required_paths)}",
         )
         self.assertEqual(
-            required_paths - scanned, set(),
-            f"inventory marks required_at_runtime but no scripts/*.py reference was found: {sorted(required_paths - scanned)}",
+            required_paths - registered_paths, set(),
+            f"inventory marks required_at_runtime but vendored_resources.py does not register it: {sorted(required_paths - registered_paths)}",
         )
 
-    def test_the_scanner_actually_finds_the_known_reference(self):
-        """Sanity check that the scanner isn't vacuously passing because
-        it finds nothing at all -- if THIS fails, the scanner itself is
-        broken, not the inventory."""
-        self.assertIn(
-            "vendor/concept-to-code/schemas/spec.schema.json",
-            _scan_all_vendor_file_references(),
-        )
+    def test_every_registered_resource_exists_on_disk(self):
+        for name in vendored_resources.VENDORED_RESOURCES:
+            path = vendored_resources.vendored_resource_path(name)
+            self.assertTrue(path.is_file(), f"registered resource {name!r} does not exist: {path}")
 
-    def test_required_files_exist_on_disk(self):
-        inventory = _load_inventory()
-        for e in inventory["vendored_runtime_assets"]:
-            if e["required_at_runtime"]:
-                self.assertTrue((ROOT / e["path"]).is_file(), f"{e['path']} does not exist on disk")
+    def test_unregistered_resource_name_raises(self):
+        with self.assertRaises(vendored_resources.UnregisteredVendoredResourceError):
+            vendored_resources.vendored_resource_path("not-a-real-resource-name")
+
+    def test_no_other_script_bypasses_the_registry(self):
+        """The registry is only durable if it's the ONE place a "vendor"
+        path segment gets constructed. Verified directly (round 3): a
+        scratch script re-adding `Path(__file__) / "vendor" / ...` was
+        confirmed to trip this test before being removed."""
+        offenders = [
+            script.name
+            for script in (ROOT / "scripts").glob("*.py")
+            if script.name != "vendored_resources.py" and _vendor_segment_appears_in(script)
+        ]
+        self.assertEqual(
+            offenders, [],
+            f"these scripts construct their own path through a 'vendor' segment instead of calling "
+            f"vendored_resources.vendored_resource_path(): {offenders}",
+        )
 
 
 class CountsConsistencyTest(unittest.TestCase):

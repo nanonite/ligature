@@ -580,6 +580,12 @@
       "summary": "Work-package manifest validation (plan.md \u00a710/\u00a710.1, chainlink #14)."
     },
     {
+      "path": "scripts/vendored_resources.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "Chainlink #55 round 3: central, explicit registry of vendored runtime resources (today: the one concept-to-code spec schema select_pilot_cluster.py reads), replacing a syntax-specific AST scanner as the source of truth for what's required."
+    },
+    {
       "path": "scripts/witness_renderer.py",
       "role": "witness",
       "disposition": "runtime-required",
@@ -738,6 +744,11 @@
       "path": "schemas/examples/consolidated-check.blocked.example.json",
       "disposition": "documentation",
       "summary": "Blocking-finding-with-next-action shape for schemas/consolidated-check.schema.json."
+    },
+    {
+      "path": "schemas/examples/consolidated-check.refresh-recommended.example.json",
+      "disposition": "documentation",
+      "summary": "Chainlink #55 round 3: demonstrates check recommending (never running) one of the three internal refresh operations via next_action's stable action_id, not the unversioned command string."
     }
   ],
   "prompts": [
@@ -1056,7 +1067,7 @@
       "path": "vendor/concept-to-code/schemas/spec.schema.json",
       "disposition": "vendored-runtime",
       "required_at_runtime": true,
-      "reason": "Read directly by scripts/select_pilot_cluster.py (path built from Path(__file__).resolve().parent.parent, i.e. THIS repo's own root) to validate concept specs during pilot-cluster ranking. The only vendor/ file any scripts/*.py actually opens at runtime -- everything else under vendor/ is copied-not-imported logic or prose reference. #57 must replace this Path(__file__)-relative lookup with a packaged-resource abstraction before a distributed binary can run outside a ligature-workspace checkout; #57's own issue text names this exact gap."
+      "reason": "Registered in scripts/vendored_resources.py:VENDORED_RESOURCES (the sole authoritative declaration, chainlink #55 round 3) and read via vendored_resource_path() by scripts/select_pilot_cluster.py to validate concept specs during pilot-cluster ranking. The only vendor/ file any scripts/*.py actually needs at runtime -- everything else under vendor/ is copied-not-imported logic or prose reference. #57 must replace vendored_resource_path()'s own Path(__file__)-relative body with a packaged-resource abstraction before a distributed binary can run outside a ligature-workspace checkout; #57's own issue text names this exact gap. Call sites do not change when #57 lands, only this one function's body does."
     },
     {
       "path": "vendor/concept-to-code/emit_stubs.py",
@@ -1119,13 +1130,13 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 67,
-      "documentation": 11,
+      "runtime-required": 68,
+      "documentation": 12,
       "installed-template": 3,
       "test-only": 58,
       "vendored-runtime": 1
     },
-    "total_entries": 140,
+    "total_entries": 142,
     "test_count": 45,
     "registered_cli_command_count": 32
   },

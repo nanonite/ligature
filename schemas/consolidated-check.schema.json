@@ -134,19 +134,30 @@
           "description": "automated-command: check can name the exact next CLI invocation (e.g. `ligature gate g14 --cluster mcmc-chain`) that would make progress. human-decision: no command exists -- a person must decide something first (plan.md §7.2's authority split). external-authority-missing: the next step needs an approval/policy/authority this workspace does not have recorded at all. backend-unavailable: the next step needs an LLM backend or verifier dispatch target that isn't configured or didn't respond."
         },
         "description": { "type": "string", "minLength": 1 },
+        "action_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+          "description": "The STABLE, versioned identifier for what this action does -- required whenever kind is 'automated-command'. THIS is the machine-consumable contract surface, not `command` below (round-3 external review: an earlier revision let `command` be the only identifier offered, while pointing at legacy flat command names docs/cli-contract.md §7 itself declares unversioned and changeable without notice -- a consumer keying off `command` had nothing stable to key off at all). docs/cli-contract.md §7 defines the action_id vocabulary this contract commits to for the three internal operations `check` may recommend: `refresh-c-static`, `refresh-bridge-checks`, `refresh-witness`. Additional action_ids are expected as #56 implements more of `check`'s own recommendation logic; this field is not a closed enum here because #56 owns the full vocabulary, but every value it does define is itself versioned exactly like the rest of this contract -- unlike `command`."
+        },
         "command": {
           "type": ["string", "null"],
-          "description": "The literal next command to run, required to be non-null when kind is 'automated-command' and null otherwise (see the conditional below)."
+          "description": "A best-effort LITERAL CLI invocation for human/script convenience only -- explicitly NOT a stability guarantee and NOT something automated tooling may parse or pattern-match (key off `action_id` instead). May be non-null even when it currently names a legacy flat command whose shape carries no compatibility promise (docs/cli-contract.md §7); may become null in a later run of the identical `action_id` if no stable literal invocation exists at that time. Required to be present (string or null) on every next_action; required non-null specifically when kind is 'automated-command' (see the conditional below) -- that requirement is about the field being POPULATED today, not about its value being a stable target to depend on."
         }
       },
       "allOf": [
         {
           "if": { "properties": { "kind": { "const": "automated-command" } } },
-          "then": { "properties": { "command": { "type": "string", "minLength": 1 } }, "required": ["command"] }
+          "then": {
+            "required": ["action_id", "command"],
+            "properties": {
+              "action_id": { "type": "string", "minLength": 1 },
+              "command": { "type": "string", "minLength": 1 }
+            }
+          }
         },
         {
           "if": { "properties": { "kind": { "enum": ["human-decision", "external-authority-missing", "backend-unavailable"] } } },
-          "then": { "properties": { "command": { "const": null } }, "required": ["command"] }
+          "then": { "properties": { "command": { "const": null } }, "required": ["command"], "not": { "required": ["action_id"] } }
         }
       ]
     },

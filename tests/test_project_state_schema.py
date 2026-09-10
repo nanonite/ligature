@@ -113,6 +113,37 @@ class ProjectStateSchemaTest(unittest.TestCase):
         errors = list(self.validator.iter_errors(doc))
         self.assertEqual(errors, [])
 
+    def test_witness_is_rejected_as_an_achieved_assurance_dimension(self):
+        """Round-2 external review, round 3 finding: the schema's
+        DESCRIPTION said witness doesn't belong here, but nothing actually
+        enforced it -- {"dimension": "witness", "status": "achieved"}
+        validated with zero errors. This is the exact reported repro,
+        reproduced directly and now asserted to fail."""
+        doc = self._load("project-state.mixed.example.json")
+        doc["obligations"][0]["achieved_assurance"].append(
+            {"dimension": "witness", "status": "achieved"}
+        )
+        errors = list(self.validator.iter_errors(doc))
+        self.assertTrue(errors, "schema accepted 'witness' as an achieved assurance dimension")
+
+    def test_witness_is_rejected_as_a_required_assurance_dimension_too(self):
+        doc = self._load("project-state.mixed.example.json")
+        doc["obligations"][0]["required_assurance"].append(
+            {"dimension": "witness", "status": "missing"}
+        )
+        errors = list(self.validator.iter_errors(doc))
+        self.assertTrue(errors, "schema accepted 'witness' as a required assurance dimension")
+
+    def test_other_dimension_names_remain_open(self):
+        """The vocabulary itself stays open (#56 owns closing it) -- only
+        the one 'witness' collision is schema-forbidden."""
+        doc = self._load("project-state.mixed.example.json")
+        doc["obligations"][0]["achieved_assurance"].append(
+            {"dimension": "some-future-dimension-name", "status": "achieved"}
+        )
+        errors = list(self.validator.iter_errors(doc))
+        self.assertEqual(errors, [])
+
     def test_cluster_state_and_closure_kind_have_explicit_unknown(self):
         doc = self._load("project-state.mixed.example.json")
         doc["clusters"][0]["state"] = "unknown"

@@ -1,11 +1,14 @@
 """Cross-document consistency regression tests (chainlink #55 review
-round 2). The first round of #55's contracts had three internal
-contradictions that no schema or unit test caught -- each document was
-internally well-formed, but two documents (or a document and a schema)
-disagreed with each other about the same fact. These tests assert the
-specific resolved facts directly, in plain text, so a future edit that
-reintroduces any of the three contradictions fails immediately instead of
-needing another external review pass to notice.
+rounds 2 and 3). Round 2 found three internal contradictions no schema or
+unit test caught -- each document was internally well-formed, but two
+documents (or a document and a schema) disagreed with each other about the
+same fact. Round 3 found a fourth, subtler one: the round-2 FIX for
+`check`'s read-only status still pointed its only machine-consumable
+field (`command`) at command names this same contract declares
+unversioned, so the "fix" hadn't actually given a consumer anything
+stable to act on. These tests assert the specific resolved facts
+directly, in plain text, so a future edit can't reintroduce any of them
+without another external review pass to notice.
 """
 from __future__ import annotations
 
@@ -103,6 +106,44 @@ class ReportWriteAuthorityConsistencyTest(unittest.TestCase):
         section_6 = section_6.split("## 7.", 1)[0]
         self.assertIn("| writes?", section_6)
         self.assertIn("no — prints", section_6)
+
+
+class NextActionStableIdentifierConsistencyTest(unittest.TestCase):
+    """Round-3 defect: the round-2 fix for check's read-only status still
+    recommended the three internal operations via `next_action.command`
+    alone -- the exact three names §7 itself declares unversioned and
+    changeable without notice. A consumer had nothing stable to key off.
+    Resolution: `action_id` is now the required, stable, versioned
+    identifier for an automated-command next_action; `command` is
+    explicitly advisory-only and forbidden from being the sole
+    machine-consumable surface."""
+
+    def test_schema_requires_action_id_for_automated_command(self):
+        next_action_schema = CONSOLIDATED_CHECK_SCHEMA["$defs"]["next_action"]
+        automated_command_branch = next_action_schema["allOf"][0]
+        self.assertEqual(
+            automated_command_branch["if"]["properties"]["kind"]["const"], "automated-command"
+        )
+        self.assertIn("action_id", automated_command_branch["then"]["required"])
+
+    def test_schema_command_description_says_not_a_stability_guarantee(self):
+        command_field = CONSOLIDATED_CHECK_SCHEMA["$defs"]["next_action"]["properties"]["command"]
+        self.assertIn("NOT a stability guarantee", command_field["description"])
+
+    def test_schema_action_id_description_names_it_the_contract_surface(self):
+        action_id_field = CONSOLIDATED_CHECK_SCHEMA["$defs"]["next_action"]["properties"]["action_id"]
+        self.assertIn("machine-consumable contract surface", action_id_field["description"])
+
+    def test_cli_contract_defines_the_three_refresh_action_ids(self):
+        section_7 = CLI_CONTRACT.split("## 7. Internal operations", 1)[1]
+        section_7 = section_7.split("## 8.", 1)[0]
+        for action_id in ("refresh-c-static", "refresh-bridge-checks", "refresh-witness"):
+            with self.subTest(action_id=action_id):
+                self.assertIn(action_id, section_7)
+
+    def test_cli_contract_tells_consumers_to_branch_on_action_id_not_command(self):
+        normalized = " ".join(CLI_CONTRACT.split())
+        self.assertIn("MUST branch on `action_id`, never", normalized)
 
 
 if __name__ == "__main__":

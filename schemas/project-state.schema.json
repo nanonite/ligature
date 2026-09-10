@@ -131,7 +131,7 @@
         "content_hash": {
           "type": ["string", "null"],
           "pattern": "^sha256:[0-9a-f]{64}$",
-          "description": "null only when lifecycle is 'absent' -- every other lifecycle value requires a real hash, including 'invalid' (an invalid file still hashes)."
+          "description": "Required (a real hash, never null) for every declared lifecycle except 'absent' -- including 'invalid' (an invalid file still hashes). 'absent' requires content_hash to be null (the file has no bytes to hash); 'unknown' permits either, honestly: lifecycle could not be determined, but the file may still have been readable and hashable independently of that determination. See the `allOf` conditionals below, which are what actually enforces this, not this description on its own."
         },
         "lifecycle": {
           "type": "string",
@@ -190,7 +190,12 @@
       "required": ["dimension", "status"],
       "additionalProperties": false,
       "properties": {
-        "dimension": { "type": "string", "minLength": 1, "description": "e.g. 'formal', 'differential', 'harness-tested', 'human-review' -- plan.md §8.1's claim/evidence/result/scope/trust/support split names the vocabulary; this schema does not close it since #56 owns the real enumeration. Deliberately does NOT include 'witness': a witness is a typed MITIGATION acceptable only at risk tier low (plan.md §16), never itself an assurance dimension a stronger obligation can rely on achieving -- see generated_observations.witness_summaries, which is where a witness's own determinism/degeneracy observation lives, structurally separate from this array." },
+        "dimension": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "const": "witness" },
+          "description": "e.g. 'formal', 'differential', 'harness-tested', 'human-review' -- plan.md §8.1's claim/evidence/result/scope/trust/support split names the vocabulary; this schema does not close it since #56 owns the real enumeration -- EXCEPT for the one value schema-forbidden outright below. A prior revision only said 'witness' doesn't belong here in prose while the schema itself accepted any non-empty string, including literally 'witness' (external review, round 2: `{\"dimension\": \"witness\", \"status\": \"achieved\"}` validated with zero errors). `not: {const: witness}` makes that specific claim schema-rejected, not merely discouraged in a comment a future caller has no reason to read: a witness is a typed MITIGATION acceptable only at risk tier low (plan.md §16), never itself an assurance dimension a stronger obligation can rely on achieving -- see generated_observations.witness_summaries, which is where a witness's own determinism/degeneracy observation lives, structurally separate from this array. The broader vocabulary stays open (no enum) since #56 owns closing it; only this one collision is closed here."
+        },
         "status": { "type": "string", "enum": ["achieved", "missing", "degraded", "unknown"] }
       }
     },

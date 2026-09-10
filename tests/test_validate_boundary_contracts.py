@@ -191,8 +191,11 @@ class AssumptionIdentityCollisionTest(unittest.TestCase):
 
     def test_the_same_issue_and_hash_across_boundaries_is_not_a_collision(self):
         """plan.md §8.4's own first registry trigger, 'an assumption
-        spans boundaries' -- legitimate as long as the composite key
-        still resolves to one, identical assumption text everywhere."""
+        spans boundaries' -- left unflagged, but only because no
+        disagreement is observable, not because a matching hash proves
+        the underlying assumption text is actually identical (nothing
+        in this pipeline stores canonical assumption text to check
+        that against)."""
         boundaries = [
             boundary_with_assumption("a__to__b", "chainlink:713", HASH_A),
             boundary_with_assumption("c__to__d", "chainlink:713", HASH_A),

@@ -469,28 +469,43 @@ def load_boundaries_by_id(canonical_dir: Path, specs_search_root: Path | None = 
 
 
 def check_assumption_identity_collisions(boundaries: list[dict]) -> list[Finding]:
-    """chainlink #6: the smallest mechanism that fails closed on composite
-    assumption identity (`boundary_id`/`tracking_issue`/`assumption_hash`,
-    plan.md §8.4) without inventing a full registry.
+    """chainlink #6: catches one real, workspace-wide failure mode of
+    composite assumption identity (`boundary_id`/`tracking_issue`/
+    `assumption_hash`, plan.md §8.4) -- it is NOT the registry §8.4 says
+    becomes mandatory once an assumption spans boundaries, survives a
+    rename, or becomes a shared concept, and does not claim to be.
 
     G1b already enforces one `tracking_issue` per assumption WITHIN a
-    single boundary contract; nothing checks the same `tracking_issue`
-    ACROSS boundaries, workspace-wide. Two cases share that shape and
-    must be told apart:
+    single boundary contract; nothing checked the same `tracking_issue`
+    ACROSS boundaries, workspace-wide, before this. What this function
+    adds, precisely:
 
-      * the SAME `tracking_issue` naming the IDENTICAL `assumption_hash`
-        in more than one boundary is §8.4's own first registry trigger,
-        "an assumption spans boundaries" -- legitimate today, since the
-        composite key still resolves to one unambiguous assumption text
-        wherever it is cited.
       * the SAME `tracking_issue` naming DIFFERENT `assumption_hash`
-        values across boundaries is a genuine identity collision: the
-        issue number no longer names one assumption, and
-        `(boundary_id, tracking_issue, assumption_hash)` cannot
-        disambiguate which text a bare tracking_issue means without
-        already knowing the hash -- exactly the failure mode a registry
-        would exist to prevent, mechanically observed rather than
-        guessed at from a cluster-count heuristic.
+        values across boundaries IS mechanically decisive: whatever the
+        two hashes are supposed to mean, they disagree, and one issue
+        number cannot correctly name two different declared assumptions
+        at once. Reported as a hard error.
+      * the SAME `tracking_issue` naming the IDENTICAL `assumption_hash`
+        in more than one boundary is left unflagged -- but this is NOT
+        mechanically established shared identity, only the absence of a
+        detected contradiction. `docs/boundary-contract-schema.json`'s
+        own `assumption_ref` $def has exactly three fields (`boundary_id`,
+        `tracking_issue`, `assumption_hash`) and nowhere stores the
+        assumption's own canonical text; `assumption_hash` is a bare
+        declared string matching `^sha256:[0-9a-f]{64}$`, never
+        recomputed by any code in this pipeline from stored content. A
+        matching hash proves only that the same string was typed (or
+        copy-pasted) at each site -- it is exactly as trustworthy as the
+        human or model that typed it, not a cryptographic guarantee
+        that the underlying assumption text is identical.
+
+    This is real, useful, and narrower than a registry: it fails closed
+    on a disagreement the moment one is mechanically observable, while
+    being honest that it establishes nothing about agreement. Building
+    an actual registry (stable assumption IDs surviving rename/text-edit,
+    canonical text a hash could be recomputed against) remains open,
+    contingent on real project usage actually exhibiting §8.4's own
+    trigger conditions -- not decided or superseded here.
 
     Takes an already-discovered list of genuinely valid boundary bodies
     (the caller supplies these via `load_boundaries_by_id`, one call per

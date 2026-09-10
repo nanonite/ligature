@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/schemas/consolidated-check.schema.json",
+  "title": "Consolidated check — v1.0",
+  "description": "Chainlink #55/#56. The output contract for the future `ligature check --json`, specified here so #56 implements against a fixed shape. Not implemented by this task -- #56 owns the gate-discovery/consolidation engine this document describes the OUTPUT of. `mutated_workspace` is a required const-false field: check is read-only by construction (docs/trust-and-compatibility-boundaries.md), and this schema makes that guarantee machine-checkable rather than a claim only prose makes. Determinism: for two runs over byte-identical workspace contents and an identical installed product, every field in this document EXCEPT `run_metadata` (explicitly excluded, see its own description) must serialize to byte-identical JSON under `scripts/schema_utils.py`-style canonical dumping (sort_keys, fixed separators, trailing newline) -- tests/test_consolidated_check_schema.py checks this canonicalization property directly against fixture documents, not against a real check run (there is no real check run to test yet).",
+  "type": "object",
+  "required": [
+    "schema_version", "mutated_workspace", "gates", "findings",
+    "next_action", "change_request_stubs", "result"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+
+    "mutated_workspace": {
+      "type": "boolean",
+      "const": false,
+      "description": "Always false. check never approves, promotes, edits, or weakens anything -- this field exists so that guarantee is schema-enforced, not merely documented. A future check-adjacent command that DOES write (there is none today) would need its own schema, not a true value smuggled in here."
+    },
+
+    "run_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional. Wall-clock/host detail (started_at, duration_ms, invoking product version) that is real and useful but NOT part of the determinism guarantee above -- two runs over identical inputs produce different run_metadata by construction (different wall-clock time) while every other field must still match byte-for-byte. Consumers that need byte-identical comparison across runs must exclude this object first.",
+      "properties": {
+        "started_at": { "type": "string" },
+        "product_version": { "type": "string" }
+      }
+    },
+
+    "gates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/gate_run" },
+      "description": "One entry per gate-id in docs/cli-contract.md §3's vocabulary that check considered for this run -- including ones it decided NOT to run. A gate check never considered at all (e.g. one added to the CLI after this run) is simply absent; a gate check considered and not run always has a `skipped`/`blocked` entry with a `reason`."
+    },
+
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/consolidated_finding" }
+    },
+
+    "next_action": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/next_action" }
+      ],
+      "description": "Exactly zero (null) or one recommended next action -- never an array, never more than one. null means check found nothing actionable to recommend (which is NOT the same as 'clean': see `result.exit_code`, which can still be non-zero with next_action null, e.g. a human decision already recorded and nothing further to automate)."
+    },
+
+    "change_request_stubs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/change_request_stub" }
+    },
+
+    "result": {
+      "type": "object",
+      "required": ["exit_code", "conditions"],
+      "additionalProperties": false,
+      "description": "The exit-code contract (docs/exit-code-contract.md) applied to this run's own findings/gates/next_action -- makes the connection between the JSON body and the process exit code explicit and independently checkable rather than something only the process's own return value asserts.",
+      "properties": {
+        "exit_code": { "type": "integer", "enum": [0, 1, 2, 3, 4] },
+        "conditions": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["invalid_input", "blocking_findings", "backend_unavailable", "human_decision_required"] },
+          "uniqueItems": true,
+          "description": "The condition set scripts/exit_codes.py:resolve() was called with to produce exit_code -- present even when empty (exit_code 0)."
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "gate_run": {
+      "type": "object",
+      "required": ["gate_id", "outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "gate_id": { "type": "string", "minLength": 1 },
+        "outcome": { "type": "string", "enum": ["executed", "skipped", "not-applicable", "blocked"] },
+        "reason": {
+          "type": "string",
+          "description": "Required whenever outcome is skipped/not-applicable/blocked (see the conditional below) -- WHY, not just that. e.g. 'no closure profiles present' (not-applicable), 'blocked on extract-c-static: no C_static reports' (blocked)."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "const": "executed" } } },
+          "then": {}
+        },
+        {
+          "if": {
+            "properties": { "outcome": { "enum": ["skipped", "not-applicable", "blocked"] } }
+          },
+          "then": { "required": ["reason"] }
+        }
+      ]
+    },
+
+    "consolidated_finding": {
+      "type": "object",
+      "required": ["dedup_key", "gate_id", "severity", "subject", "reason", "authority", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "dedup_key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16,64}$",
+          "description": "Deterministic identity: a stable digest of (gate_id, subject, reason) or equivalent canonical fields -- the SAME underlying problem reported by two different gate runs (or re-derived on a second identical run) must produce the identical dedup_key, so consolidation can drop duplicates by key equality rather than fuzzy text matching."
+        },
+        "gate_id": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+        "subject": { "type": "string", "minLength": 1, "description": "The artifact path or id this finding is about." },
+        "reason": { "type": "string", "minLength": 1 },
+        "authority": {
+          "type": "string",
+          "enum": ["mechanized-gate", "human-decision-pending", "llm-advisory", "external-authority-missing", "backend-unavailable"],
+          "description": "What kind of source stands behind this finding -- a mechanized-gate finding is a deterministic, recomputed fact; llm-advisory is a model's suggestion, never authoritative on its own; human-decision-pending names a gap only a human checkpoint can close; external-authority-missing/backend-unavailable name findings that exist because something check needed wasn't reachable, not because a check ran and failed."
+        },
+        "provenance": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Which script/gate/function produced this, e.g. 'scripts/gate_r1_g16.py:gate_r1_g16_workspace'. Not frozen as public API (module names can change) -- this field exists for audit/debugging, not as a contract surface itself."
+        }
+      }
+    },
+
+    "next_action": {
+      "type": "object",
+      "required": ["kind", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["automated-command", "human-decision", "external-authority-missing", "backend-unavailable"],
+          "description": "automated-command: check can name the exact next CLI invocation (e.g. `ligature gate g14 --cluster mcmc-chain`) that would make progress. human-decision: no command exists -- a person must decide something first (plan.md §7.2's authority split). external-authority-missing: the next step needs an approval/policy/authority this workspace does not have recorded at all. backend-unavailable: the next step needs an LLM backend or verifier dispatch target that isn't configured or didn't respond."
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "command": {
+          "type": ["string", "null"],
+          "description": "The literal next command to run, required to be non-null when kind is 'automated-command' and null otherwise (see the conditional below)."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "automated-command" } } },
+          "then": { "properties": { "command": { "type": "string", "minLength": 1 } }, "required": ["command"] }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["human-decision", "external-authority-missing", "backend-unavailable"] } } },
+          "then": { "properties": { "command": { "const": null } }, "required": ["command"] }
+        }
+      ]
+    },
+
+    "change_request_stub": {
+      "type": "object",
+      "required": ["change_request_id", "target", "summary"],
+      "additionalProperties": false,
+      "description": "A machine-readable pointer toward opening a real change request -- not the request itself. check proposes; it never creates or approves one.",
+      "properties": {
+        "change_request_id": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

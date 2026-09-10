@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/schemas/implementation-inventory.schema.json",
+  "title": "Implementation inventory — v1.0",
+  "description": "Chainlink #55. The authoritative, machine-readable record of what this repository actually contains right now, replacing the stale '53 tests / M0-M1' prose summary #55 was opened to retire. This is a snapshot inventory, not a live report: docs/implementation-inventory.json is hand-curated (role + disposition are judgment calls a mechanical walk cannot make) and tests/test_inventory_drift.py fails the build the moment the repository's actual registered CLI surface or on-disk runtime-resource set disagrees with it -- so the inventory can go stale only by breaking CI, never silently. #56/#57/#58/#59 read this file and its sibling docs (docs/cli-contract.md, schemas/project-state.schema.json, schemas/consolidated-check.schema.json, docs/exit-code-contract.md) as their own required inputs; none of them re-derive this inventory from scratch.",
+  "type": "object",
+  "required": [
+    "inventory_version", "generated_from", "milestones", "gates", "cli_commands",
+    "python_modules", "schemas", "schema_examples", "prompts", "documentation_and_templates",
+    "tests", "fixtures", "vendored_runtime_assets", "never_release", "counts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "inventory_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Independent of product/schema/skill versions defined elsewhere (docs/cli-contract.md, schemas/project-state.schema.json, schemas/consolidated-check.schema.json) -- this document's own shape can change on its own schedule."
+    },
+    "generated_from": {
+      "type": "object",
+      "required": ["commit", "recorded_at"],
+      "additionalProperties": false,
+      "properties": {
+        "commit": { "type": "string", "description": "Git commit this inventory was authored against. Informational provenance only -- the drift test compares against the CURRENT working tree, not this commit, so a stale value here is a documentation nit, not a silent-pass risk." },
+        "recorded_at": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
+      }
+    },
+    "milestones": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/milestone" }
+    },
+    "gates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/gate" }
+    },
+    "cli_commands": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/cli_command" }
+    },
+    "python_modules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/python_module" }
+    },
+    "schemas": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/inventory_entry" }
+    },
+    "schema_examples": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/inventory_entry" }
+    },
+    "prompts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/inventory_entry" }
+    },
+    "documentation_and_templates": {
+      "type": "array",
+      "description": "docs/*.md entries: human-readable documentation and installed-template markdown that isn't a JSON Schema, so it doesn't belong in `schemas`.",
+      "items": { "$ref": "#/$defs/inventory_entry" }
+    },
+    "tests": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/test_entry" }
+    },
+    "fixtures": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fixture_entry" }
+    },
+    "vendored_runtime_assets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/vendored_asset" }
+    },
+    "never_release": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/never_release_entry" }
+    },
+    "counts": {
+      "type": "object",
+      "required": ["by_disposition", "total_entries", "test_count", "registered_cli_command_count"],
+      "additionalProperties": false,
+      "properties": {
+        "by_disposition": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "total_entries": { "type": "integer", "minimum": 0 },
+        "test_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of test FILES (tests/test_*.py), not pytest cases/subtests -- the drift test checks this against the filesystem; the completion report separately states the pytest case count from a live run, which this field does not claim to predict."
+        },
+        "registered_cli_command_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "disposition": {
+      "type": "string",
+      "enum": [
+        "runtime-required",
+        "installed-template",
+        "documentation",
+        "vendored-runtime",
+        "generated-projection",
+        "test-only",
+        "excluded"
+      ],
+      "description": "runtime-required: must ship in any working distribution. installed-template: copied into a target repo by `ligature init` (#58), not executed by the ligature binary itself. documentation: human-readable, informs but is not read by code. vendored-runtime: lives under vendor/ and IS read by runtime code. generated-projection: never hand-authored or shipped -- produced fresh from other artifacts, read-only output. test-only: exists solely to make the test suite exercise something; never installed or shipped. excluded: must never enter a release (caches, local state, secrets)."
+    },
+    "milestone": {
+      "type": "object",
+      "required": ["id", "title", "status", "closed_issue_count", "total_issue_count", "chainlink_milestone_id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^M[0-9]+$" },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["complete", "in-progress", "not-started"] },
+        "closed_issue_count": { "type": "integer", "minimum": 0 },
+        "total_issue_count": { "type": "integer", "minimum": 0 },
+        "chainlink_milestone_id": { "type": "integer", "description": "The `chainlink milestone show <id>` this was read from -- the authoritative source, not plan.md prose (plan.md never defines M0-M4 as tracked identifiers; it only refers to them informally)." }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": ["gate_id", "title", "stage", "implemented", "module"],
+      "additionalProperties": false,
+      "properties": {
+        "gate_id": { "type": "string", "pattern": "^(G[0-9]+[a-b]?\\+*( \\([a-z]+\\))?|R[0-9]+|CG[0-9]+)$" },
+        "title": { "type": "string", "minLength": 1 },
+        "stage": { "type": "string", "minLength": 1 },
+        "implemented": { "type": "boolean" },
+        "module": { "type": "string", "description": "scripts/*.py path this gate's mechanized check actually lives in. Not frozen as public API (plan.md's own instruction: do not freeze module/gate implementation names)." },
+        "cli_command": { "type": ["string", "null"], "description": "The flat pipeline.py subcommand that invokes this gate standalone, or null when the gate is checked inline inside a validate-* command rather than as its own subcommand." }
+      }
+    },
+    "cli_command": {
+      "type": "object",
+      "required": ["name", "func", "stable_mapping"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "description": "The exact string argparse registers today, per scripts/pipeline.py:build_parser()." },
+        "func": { "type": "string", "minLength": 1, "description": "The cmd_* handler function name. Not frozen as public API." },
+        "stable_mapping": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Cross-reference into docs/cli-contract.md's legacy-command mapping table -- the exact stable nested command, alias target, internal-operation note, or unsupported rationale. This is a pointer, not a duplicate of the contract; docs/cli-contract.md is the one place that mapping is spelled out in full."
+        }
+      }
+    },
+    "python_module": {
+      "type": "object",
+      "required": ["path", "role", "disposition"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "pattern": "^scripts/[a-zA-Z0-9_]+\\.py$" },
+        "role": {
+          "type": "string",
+          "enum": ["entrypoint", "gate", "validator", "generator", "witness", "helper", "shared-loader"]
+        },
+        "disposition": { "$ref": "#/$defs/disposition" },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "inventory_entry": {
+      "type": "object",
+      "required": ["path", "disposition"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "disposition": { "$ref": "#/$defs/disposition" },
+        "summary": { "type": "string" }
+      }
+    },
+    "test_entry": {
+      "type": "object",
+      "required": ["path", "kind", "disposition"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "pattern": "^tests/test_[a-zA-Z0-9_]+\\.py$" },
+        "kind": { "type": "string", "enum": ["unit", "schema", "drift", "regression"] },
+        "disposition": { "type": "string", "const": "test-only" }
+      }
+    },
+    "fixture_entry": {
+      "type": "object",
+      "required": ["path", "disposition", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "pattern": "^tests/fixtures/[a-zA-Z0-9_]+$" },
+        "disposition": { "type": "string", "const": "test-only" },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Explicitly distinguishes a runtime-shaped example (e.g. a valid/ subdirectory showing a real artifact shape) from a deliberate-failure or stand-in fixture (plan.md §2's deliberate-failure regression convention, chainlink #12) -- both are test-only, but for different reasons, and this field says which."
+        }
+      }
+    },
+    "vendored_asset": {
+      "type": "object",
+      "required": ["path", "disposition", "required_at_runtime", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "pattern": "^vendor/" },
+        "disposition": { "$ref": "#/$defs/disposition" },
+        "required_at_runtime": { "type": "boolean" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "never_release_entry": {
+      "type": "object",
+      "required": ["pattern", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "pattern": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

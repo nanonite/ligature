@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "product": { "name": "ligature", "version": "0.0.0-unreleased" },
+  "installation_manifest": {
+    "state": "not-initialized",
+    "installed_product_version": null,
+    "installed_schema_versions": {}
+  },
+  "descriptor": {
+    "state": "absent",
+    "path": "project-descriptor.json",
+    "mode": null,
+    "schema_version": null
+  },
+  "binary_identity": {
+    "verified": "unknown",
+    "content_hash": null,
+    "version": "0.0.0-unreleased"
+  },
+  "artifacts": [],
+  "obligations": [],
+  "clusters": [],
+  "open_findings": [],
+  "human_decisions": [],
+  "change_requests": [],
+  "gate_integrity": { "state": "unknown", "details": "no installation manifest present" },
+  "generated_observations": { "witness_summaries": [], "feature_ledger_generated_at": null }
+}

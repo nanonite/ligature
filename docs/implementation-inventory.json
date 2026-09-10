@@ -1,0 +1,1154 @@
+{
+  "inventory_version": "1.0",
+  "generated_from": {
+    "commit": "98e0f9d",
+    "recorded_at": "2026-09-10"
+  },
+  "milestones": [
+    {
+      "id": "M0",
+      "title": "Foundations",
+      "status": "complete",
+      "closed_issue_count": 10,
+      "total_issue_count": 10,
+      "chainlink_milestone_id": 1
+    },
+    {
+      "id": "M1",
+      "title": "Prototype A",
+      "status": "complete",
+      "closed_issue_count": 1,
+      "total_issue_count": 1,
+      "chainlink_milestone_id": 2
+    },
+    {
+      "id": "M2",
+      "title": "Ship-early value track",
+      "status": "complete",
+      "closed_issue_count": 1,
+      "total_issue_count": 1,
+      "chainlink_milestone_id": 3
+    },
+    {
+      "id": "M3",
+      "title": "I-schema closure",
+      "status": "complete",
+      "closed_issue_count": 7,
+      "total_issue_count": 7,
+      "chainlink_milestone_id": 4
+    },
+    {
+      "id": "M4",
+      "title": "Bridge & release closure",
+      "status": "complete",
+      "closed_issue_count": 6,
+      "total_issue_count": 6,
+      "chainlink_milestone_id": 5
+    }
+  ],
+  "gates": [
+    {
+      "gate_id": "G1a",
+      "title": "Schema validation",
+      "stage": "Stage 4 (every artifact type)",
+      "implemented": true,
+      "module": "scripts/validate_*.py (every validator, chainlink #9)",
+      "cli_command": null
+    },
+    {
+      "gate_id": "G1b",
+      "title": "Repo-semantics / naming-and-layout validation",
+      "stage": "Stage 4 (every artifact type)",
+      "implemented": true,
+      "module": "scripts/validate_*.py (every validator, chainlink #9)",
+      "cli_command": null
+    },
+    {
+      "gate_id": "G2+",
+      "title": "Role safety (boundary contracts)",
+      "stage": "Stage 4",
+      "implemented": true,
+      "module": "scripts/validate_boundary_contracts.py",
+      "cli_command": "validate"
+    },
+    {
+      "gate_id": "G2++",
+      "title": "Boundary-required interaction role cross-check",
+      "stage": "Stage 4",
+      "implemented": true,
+      "module": "scripts/validate_interaction.py",
+      "cli_command": "validate-interaction"
+    },
+    {
+      "gate_id": "G2 (bridge)",
+      "title": "Bridge boundary-role cross-check",
+      "stage": "Stage 4",
+      "implemented": true,
+      "module": "scripts/validate_bridge.py",
+      "cli_command": "validate-bridge"
+    },
+    {
+      "gate_id": "G2 (witness)",
+      "title": "Witness query-adequacy cross-check",
+      "stage": "Stage 4",
+      "implemented": true,
+      "module": "scripts/validate_witness.py",
+      "cli_command": "validate-witness"
+    },
+    {
+      "gate_id": "G9",
+      "title": "Bridge-check identity verification against a recompiled harness",
+      "stage": "Stage 8A",
+      "implemented": true,
+      "module": "scripts/gate_g9.py",
+      "cli_command": "gate-g9"
+    },
+    {
+      "gate_id": "G11",
+      "title": "Unresolved evidence conflicts block",
+      "stage": "Stage 4 (workspace-level)",
+      "implemented": true,
+      "module": "scripts/validate_conflict_resolution.py",
+      "cli_command": "validate-conflict-resolution"
+    },
+    {
+      "gate_id": "G14",
+      "title": "Transitive assurance closure per cluster",
+      "stage": "Stage 8C",
+      "implemented": true,
+      "module": "scripts/gate_g14.py",
+      "cli_command": "gate-g14"
+    },
+    {
+      "gate_id": "G15",
+      "title": "Protocol coverage (non-pairwise needs debt or bridge)",
+      "stage": "Stage 4",
+      "implemented": true,
+      "module": "scripts/validate_interaction.py",
+      "cli_command": "validate-interaction"
+    },
+    {
+      "gate_id": "G16",
+      "title": "Risk-tiered unresolved-call policy",
+      "stage": "Stage 8A",
+      "implemented": true,
+      "module": "scripts/gate_r1_g16.py",
+      "cli_command": "gate-r1-g16"
+    },
+    {
+      "gate_id": "G17",
+      "title": "Closure-profile / degradation-record consistency",
+      "stage": "Stage 8C",
+      "implemented": true,
+      "module": "scripts/validate_closure.py",
+      "cli_command": "validate-closure"
+    },
+    {
+      "gate_id": "G18",
+      "title": "Witness coverage over declared witness_required features",
+      "stage": "Stage 4",
+      "implemented": true,
+      "module": "scripts/gate_g18.py",
+      "cli_command": "gate-g18"
+    },
+    {
+      "gate_id": "G19",
+      "title": "Witness determinism (value_hash regeneration)",
+      "stage": "Stage 8A/CI",
+      "implemented": true,
+      "module": "scripts/gate_g19.py",
+      "cli_command": "gate-g19"
+    },
+    {
+      "gate_id": "G20",
+      "title": "Witness degeneracy (must-vary vs constant)",
+      "stage": "Stage 4.5",
+      "implemented": true,
+      "module": "scripts/gate_g20.py",
+      "cli_command": "gate-g20"
+    },
+    {
+      "gate_id": "R1",
+      "title": "C_static-to-I reconciliation",
+      "stage": "Stage 8A",
+      "implemented": true,
+      "module": "scripts/gate_r1_g16.py",
+      "cli_command": "gate-r1-g16"
+    },
+    {
+      "gate_id": "R2",
+      "title": "Eligible-interaction coverage by boundary or reviewed exemption",
+      "stage": "Stage 4",
+      "implemented": true,
+      "module": "scripts/validate_interaction.py",
+      "cli_command": "validate-interaction"
+    },
+    {
+      "gate_id": "CG3",
+      "title": "Generic-callee type universality (human-declared, presence-checked only)",
+      "stage": "Stage 8C",
+      "implemented": true,
+      "module": "scripts/gate_g14.py (reports declared-not-verified; no artifact carries the type information to check it)",
+      "cli_command": "gate-g14"
+    },
+    {
+      "gate_id": "CG6",
+      "title": "SCC well-foundedness discharge",
+      "stage": "Stage 8C",
+      "implemented": true,
+      "module": "scripts/gate_g14.py",
+      "cli_command": "gate-g14"
+    }
+  ],
+  "cli_commands": [
+    {
+      "name": "validate",
+      "func": "cmd_validate",
+      "stable_mapping": "validate boundary"
+    },
+    {
+      "name": "validate-interaction",
+      "func": "cmd_validate_interaction",
+      "stable_mapping": "validate interaction"
+    },
+    {
+      "name": "validate-exemption",
+      "func": "cmd_validate_exemption",
+      "stable_mapping": "validate exemption"
+    },
+    {
+      "name": "validate-protocol-debt",
+      "func": "cmd_validate_protocol_debt",
+      "stable_mapping": "validate protocol-debt"
+    },
+    {
+      "name": "validate-bridge",
+      "func": "cmd_validate_bridge",
+      "stable_mapping": "validate bridge"
+    },
+    {
+      "name": "validate-evidence",
+      "func": "cmd_validate_evidence",
+      "stable_mapping": "validate evidence"
+    },
+    {
+      "name": "validate-conflict-resolution",
+      "func": "cmd_validate_conflict_resolution",
+      "stable_mapping": "validate conflict-resolution"
+    },
+    {
+      "name": "validate-work-package",
+      "func": "cmd_validate_work_package",
+      "stable_mapping": "validate work-package"
+    },
+    {
+      "name": "validate-promotion",
+      "func": "cmd_validate_promotion",
+      "stable_mapping": "validate promotion"
+    },
+    {
+      "name": "accept-promotion",
+      "func": "cmd_accept_promotion",
+      "stable_mapping": "approve promotion"
+    },
+    {
+      "name": "draft",
+      "func": "cmd_draft",
+      "stable_mapping": "draft <artifact-kind> (already nested: stage/template_name are its own arguments)"
+    },
+    {
+      "name": "approve",
+      "func": "cmd_approve",
+      "stable_mapping": "approve draft"
+    },
+    {
+      "name": "approve-pair",
+      "func": "cmd_approve_pair",
+      "stable_mapping": "approve pair"
+    },
+    {
+      "name": "approve-exemption-pair",
+      "func": "cmd_approve_exemption_pair",
+      "stable_mapping": "approve exemption-pair"
+    },
+    {
+      "name": "extract-c-static",
+      "func": "cmd_extract_c_static",
+      "stable_mapping": "internal operation invoked by check (Stage 8A data refresh feeding gate r1-g16)"
+    },
+    {
+      "name": "validate-callsites",
+      "func": "cmd_validate_callsites",
+      "stable_mapping": "validate callsites"
+    },
+    {
+      "name": "gate-r1-g16",
+      "func": "cmd_gate_r1_g16",
+      "stable_mapping": "gate r1-g16"
+    },
+    {
+      "name": "render-witness",
+      "func": "cmd_render_witness",
+      "stable_mapping": "internal operation invoked by check (feeds gate g18/g19 and report generators)"
+    },
+    {
+      "name": "validate-witness",
+      "func": "cmd_validate_witness",
+      "stable_mapping": "validate witness"
+    },
+    {
+      "name": "validate-gold-set",
+      "func": "cmd_validate_gold_set",
+      "stable_mapping": "validate gold-set"
+    },
+    {
+      "name": "measure-gold-set",
+      "func": "cmd_measure_gold_set",
+      "stable_mapping": "report gold-set-measurement"
+    },
+    {
+      "name": "check-bridges",
+      "func": "cmd_check_bridges",
+      "stable_mapping": "internal operation invoked by check (Stage 8A bridge harness generation + verifier dispatch feeding gate g9)"
+    },
+    {
+      "name": "gate-g9",
+      "func": "cmd_gate_g9",
+      "stable_mapping": "gate g9"
+    },
+    {
+      "name": "validate-closure",
+      "func": "cmd_validate_closure",
+      "stable_mapping": "validate closure"
+    },
+    {
+      "name": "gate-g14",
+      "func": "cmd_gate_g14",
+      "stable_mapping": "gate g14"
+    },
+    {
+      "name": "select-pilot-cluster",
+      "func": "cmd_select_pilot_cluster",
+      "stable_mapping": "report pilot-cluster"
+    },
+    {
+      "name": "gate-g18",
+      "func": "cmd_gate_g18",
+      "stable_mapping": "gate g18"
+    },
+    {
+      "name": "gate-g19",
+      "func": "cmd_gate_g19",
+      "stable_mapping": "gate g19"
+    },
+    {
+      "name": "gate-g20",
+      "func": "cmd_gate_g20",
+      "stable_mapping": "gate g20"
+    },
+    {
+      "name": "generate-feature-ledger",
+      "func": "cmd_generate_feature_ledger",
+      "stable_mapping": "report feature-ledger"
+    },
+    {
+      "name": "generate-contact-sheet",
+      "func": "cmd_generate_contact_sheet",
+      "stable_mapping": "report contact-sheet"
+    },
+    {
+      "name": "status",
+      "func": "cmd_status",
+      "stable_mapping": "compatibility alias -> doctor (see docs/cli-contract.md's status-stub retirement note); removal target: product version 2.0.0 once #56 ships the real `ligature status`"
+    }
+  ],
+  "python_modules": [
+    {
+      "path": "scripts/atomic_write.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "Atomic text writes, shared across every generator that must honor write-set discipline."
+    },
+    {
+      "path": "scripts/bridge_harness.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "Bridge harness generation: compile a promoted bridge's typed logic to a verifier-dispatched check."
+    },
+    {
+      "path": "scripts/exit_codes.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "Chainlink #55's reconciled exit-code contract: a pure precedence resolver over docs/exit-code-contract.md's five conditions. Not yet called by any cmd_* -- specified here for #56/#57/#58 to adopt."
+    },
+    {
+      "path": "scripts/extract_c_static.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "Coarse C_static extraction: the minimum-viable realized-call extractor."
+    },
+    {
+      "path": "scripts/gate_g14.py",
+      "role": "gate",
+      "disposition": "runtime-required",
+      "summary": "G14: release closure over the transitive assurance dependency graph."
+    },
+    {
+      "path": "scripts/gate_g18.py",
+      "role": "gate",
+      "disposition": "runtime-required",
+      "summary": "G18: witness coverage gate."
+    },
+    {
+      "path": "scripts/gate_g19.py",
+      "role": "gate",
+      "disposition": "runtime-required",
+      "summary": "G19: witness determinism gate."
+    },
+    {
+      "path": "scripts/gate_g20.py",
+      "role": "gate",
+      "disposition": "runtime-required",
+      "summary": "G20: degenerate-witness gate against the declared expectation."
+    },
+    {
+      "path": "scripts/gate_g9.py",
+      "role": "gate",
+      "disposition": "runtime-required",
+      "summary": "G9: bridge checks -- generate, dispatch, and verify."
+    },
+    {
+      "path": "scripts/gate_r1_g16.py",
+      "role": "gate",
+      "disposition": "runtime-required",
+      "summary": "R1 and G16: reconciling realized calls (C_static) against intended interactions."
+    },
+    {
+      "path": "scripts/generate_contact_sheet.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "Contact sheet generator (chainlink #32): docs/witnesses/_contact_sheet.svg."
+    },
+    {
+      "path": "scripts/generate_feature_ledger.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "Feature ledger generator (chainlink #34): ci/results/feature_ledger.json."
+    },
+    {
+      "path": "scripts/generate_promotion_receipt.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "Deterministic promotion-receipt generation (plan.md \u00a77.1, chainlink #45)."
+    },
+    {
+      "path": "scripts/generate_witness.py",
+      "role": "witness",
+      "disposition": "runtime-required",
+      "summary": "Witness generation: dispatch a canonical result through the renderer contract."
+    },
+    {
+      "path": "scripts/measure_gold_set.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "Gold-set measurement: precision, recall, and omission."
+    },
+    {
+      "path": "scripts/pipeline.py",
+      "role": "entrypoint",
+      "disposition": "runtime-required",
+      "summary": "The pipeline CLI entrypoint (plan.md \u00a76.1, chainlink #37)."
+    },
+    {
+      "path": "scripts/project_descriptor.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "Shared project-descriptor loading (plan.md \u00a71.1)."
+    },
+    {
+      "path": "scripts/review_checkpoint.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "Human review/approval checkpoint (plan.md \u00a77.2, chainlink #39)."
+    },
+    {
+      "path": "scripts/satisfies.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "The satisfies() mechanism (plan.md \u00a78.5 step 4, chainlink #23)."
+    },
+    {
+      "path": "scripts/scan_summary.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "The one place a scanning validator's success line is written."
+    },
+    {
+      "path": "scripts/schema_utils.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "Shared JSON Schema validator construction (format_checker wired in once, everywhere)."
+    },
+    {
+      "path": "scripts/select_pilot_cluster.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "Pilot-cluster selection rubric (chainlink #4): plan.md \u00a714."
+    },
+    {
+      "path": "scripts/validate_boundary_contracts.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Boundary contract validation: G1a, G1b, G2+."
+    },
+    {
+      "path": "scripts/validate_boundary_naming.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Boundary-artifact naming and layout (plan.md \u00a72 / chainlink #8)."
+    },
+    {
+      "path": "scripts/validate_bridge.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Bridge specification validation: G1a, G1b, G2."
+    },
+    {
+      "path": "scripts/validate_callsites.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "C_static report validation: G1a, G1b."
+    },
+    {
+      "path": "scripts/validate_closure.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Closure-profile and degradation-record validation: G1a, G1b, G17."
+    },
+    {
+      "path": "scripts/validate_conflict_resolution.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Evidence conflict resolution validation: G1a, G1b, G11."
+    },
+    {
+      "path": "scripts/validate_evidence.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Evidence record validation: G1a, G1b."
+    },
+    {
+      "path": "scripts/validate_exemption.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Boundary-required exemption validation: G1a, G1b."
+    },
+    {
+      "path": "scripts/validate_gold_set.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Human gold-set validation: G1a, G1b."
+    },
+    {
+      "path": "scripts/validate_interaction.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Interaction (I) validation: G1a, G1b, computed eligibility, G2++, G15, R2."
+    },
+    {
+      "path": "scripts/validate_promotion_receipt.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Promotion receipt validation (plan.md \u00a77.1, chainlink #15)."
+    },
+    {
+      "path": "scripts/validate_protocol_debt.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Protocol-debt record validation: G1a, G1b."
+    },
+    {
+      "path": "scripts/validate_witness.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Witness validation: G1a, G1b, G2."
+    },
+    {
+      "path": "scripts/validate_work_package.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Work-package manifest validation (plan.md \u00a710/\u00a710.1, chainlink #14)."
+    },
+    {
+      "path": "scripts/witness_renderer.py",
+      "role": "witness",
+      "disposition": "runtime-required",
+      "summary": "The renderer contract: fail loudly, never substitute."
+    },
+    {
+      "path": "scripts/witness_result.py",
+      "role": "witness",
+      "disposition": "runtime-required",
+      "summary": "The canonical witness result: encoding, serialization, and value_hash."
+    },
+    {
+      "path": "scripts/xml_escape.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "Shared XML/SVG text escaping."
+    }
+  ],
+  "schemas": [
+    {
+      "path": "schemas/project-descriptor.schema.json",
+      "disposition": "runtime-required",
+      "summary": "Stage P0 project structure descriptor, plan.md \u00a71.1."
+    },
+    {
+      "path": "docs/achieved-assurance-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/assurance-report-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/boundary-contract-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/bridge-check-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/bridge-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/callsite-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/closure-profile-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/concept-to-code-witness-required-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/conflict-resolution-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/degradation-record-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/evidence-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/exemption-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/feature-ledger-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/gold-set-measurement-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/gold-set-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/implementation-inventory.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/interaction-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/promotion-receipt-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/protocol-debt-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/witness-result-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/witness-spec-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/work-package-manifest-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "schemas/implementation-inventory.schema.json",
+      "disposition": "documentation",
+      "summary": "Governs this inventory file itself; not read by any runtime code path."
+    },
+    {
+      "path": "schemas/project-state.schema.json",
+      "disposition": "runtime-required",
+      "summary": "Chainlink #55/#56: `ligature status --json` output contract, not yet implemented (that's #56)."
+    },
+    {
+      "path": "schemas/consolidated-check.schema.json",
+      "disposition": "runtime-required",
+      "summary": "Chainlink #55/#56: `ligature check --json` output contract, not yet implemented (that's #56)."
+    }
+  ],
+  "schema_examples": [
+    {
+      "path": "schemas/examples/project-descriptor.greenfield.example.json",
+      "disposition": "installed-template",
+      "summary": "Copied by `ligature init --mode greenfield` (#58); also exercised directly by tests/test_project_descriptor_schema.py."
+    },
+    {
+      "path": "schemas/examples/project-descriptor.port.example.json",
+      "disposition": "installed-template",
+      "summary": "Copied by `ligature init --mode port` (#58); also exercised directly by tests/test_project_descriptor_schema.py."
+    },
+    {
+      "path": "schemas/examples/project-state.empty.example.json",
+      "disposition": "documentation",
+      "summary": "Fresh/uninitialized-workspace shape for schemas/project-state.schema.json; not installed by init, exercised by tests/test_project_state_schema.py."
+    },
+    {
+      "path": "schemas/examples/project-state.mixed.example.json",
+      "disposition": "documentation",
+      "summary": "Partial-state shape (findings, unknowns, degraded cluster, stale-by-hash-drift artifact) for schemas/project-state.schema.json."
+    },
+    {
+      "path": "schemas/examples/consolidated-check.clean.example.json",
+      "disposition": "documentation",
+      "summary": "Zero-findings shape for schemas/consolidated-check.schema.json."
+    },
+    {
+      "path": "schemas/examples/consolidated-check.blocked.example.json",
+      "disposition": "documentation",
+      "summary": "Blocking-finding-with-next-action shape for schemas/consolidated-check.schema.json."
+    }
+  ],
+  "prompts": [
+    {
+      "path": "prompts/stage-0-evidence-intake.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-boundary-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-interaction-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    }
+  ],
+  "tests": [
+    {
+      "path": "tests/test_bridge_harness.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_cli_contract.py",
+      "kind": "drift",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_concept_to_code_witness_required_schema.py",
+      "kind": "schema",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_consolidated_check_schema.py",
+      "kind": "schema",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_exit_code_contract.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_extract_c_static.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_gate_g14.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_gate_g18.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_gate_g19.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_gate_g20.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_gate_g9.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_gate_r1_g16.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_generate_contact_sheet.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_generate_feature_ledger.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_generate_promotion_receipt.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_generate_witness.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_implementation_inventory_schema.py",
+      "kind": "schema",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_inventory_drift.py",
+      "kind": "drift",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_measure_gold_set.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_pipeline.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_project_descriptor_schema.py",
+      "kind": "schema",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_project_state_schema.py",
+      "kind": "schema",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_prompt_templates.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_prototype_a.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_review_checkpoint.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_satisfies.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_scan_summary.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_select_pilot_cluster.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_boundary_contracts.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_boundary_naming.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_bridge.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_callsites.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_closure.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_conflict_resolution.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_evidence.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_exemption.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_gold_set.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_interaction.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_promotion_receipt.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_protocol_debt.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_witness.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_validate_work_package.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_witness_renderer.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_witness_result.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "tests/fixtures/boundaries",
+      "disposition": "test-only",
+      "note": "Naming/layout convention fixtures (valid + 3 deliberate-invalid shapes) for validate_boundary_naming.py."
+    },
+    {
+      "path": "tests/fixtures/boundary_contracts",
+      "disposition": "test-only",
+      "note": "Boundary contract fixtures: one valid_crate/ plus deliberate-failure fixtures per finding (D2-D4, G1a/G1b/G2+), chainlink #12's regression convention."
+    },
+    {
+      "path": "tests/fixtures/bridges",
+      "disposition": "test-only",
+      "note": "Bridge spec fixtures: valid/, mislocated/, dangling_boundary/, and a verifier/ stand-in used by bridge_harness tests instead of a real Creusot/Kani/Verus toolchain."
+    },
+    {
+      "path": "tests/fixtures/callsites",
+      "disposition": "test-only",
+      "note": "A single crate_scheduler/ C_static report fixture."
+    },
+    {
+      "path": "tests/fixtures/conflict_resolution",
+      "disposition": "test-only",
+      "note": "valid/ and unresolved/ evidence conflict-resolution fixtures for G11."
+    },
+    {
+      "path": "tests/fixtures/evidence",
+      "disposition": "test-only",
+      "note": "valid/ and mislocated/ evidence-record fixtures."
+    },
+    {
+      "path": "tests/fixtures/exemptions",
+      "disposition": "test-only",
+      "note": "valid/, mislocated/, invalid_naming/ boundary-exemption fixtures."
+    },
+    {
+      "path": "tests/fixtures/gold_sets",
+      "disposition": "test-only",
+      "note": "valid/ human gold-set fixture used by both validate_gold_set and measure_gold_set tests."
+    },
+    {
+      "path": "tests/fixtures/interactions",
+      "disposition": "test-only",
+      "note": "valid/, mislocated/, invalid_mismatch/, uncovered_r2/ interaction fixtures."
+    },
+    {
+      "path": "tests/fixtures/promotions",
+      "disposition": "test-only",
+      "note": "valid/ promotion-receipt fixture."
+    },
+    {
+      "path": "tests/fixtures/protocol_debt",
+      "disposition": "test-only",
+      "note": "valid/, mislocated/, invalid_false_attestation/ protocol-debt fixtures."
+    },
+    {
+      "path": "tests/fixtures/witnesses",
+      "disposition": "test-only",
+      "note": "Contains stand_in_producer.py -- a deliberate TEST-ONLY stand-in for a real witness producer, never a runtime witness generator despite living next to real ones in scripts/."
+    },
+    {
+      "path": "tests/fixtures/work_packages",
+      "disposition": "test-only",
+      "note": "valid/ work-package manifest fixture."
+    }
+  ],
+  "vendored_runtime_assets": [
+    {
+      "path": "vendor/concept-to-code/schemas/spec.schema.json",
+      "disposition": "vendored-runtime",
+      "required_at_runtime": true,
+      "reason": "Read directly by scripts/select_pilot_cluster.py (path built from Path(__file__).resolve().parent.parent, i.e. THIS repo's own root) to validate concept specs during pilot-cluster ranking. The only vendor/ file any scripts/*.py actually opens at runtime -- everything else under vendor/ is copied-not-imported logic or prose reference. #57 must replace this Path(__file__)-relative lookup with a packaged-resource abstraction before a distributed binary can run outside a ligature-workspace checkout; #57's own issue text names this exact gap."
+    },
+    {
+      "path": "vendor/concept-to-code/emit_stubs.py",
+      "disposition": "documentation",
+      "required_at_runtime": false,
+      "reason": "Its snake_case() is copied verbatim into scripts/validate_boundary_contracts.py and referenced (not imported) elsewhere -- kept as the audit trail proving the copy matches the source, per this project's own concept-to-code boundary rule (never edit the submodule; report modifications in docs/concept-to-code-modifications.md)."
+    },
+    {
+      "path": "vendor/concept-to-code (all other files: PLAN.md, README.md, SKILL.md, docs/, prompts/, verifiers/, tests/, remaining schemas/, .git/)",
+      "disposition": "documentation",
+      "required_at_runtime": false,
+      "reason": "Git submodule pin retained for reference and audit purposes only (memory: never edit the vendored submodule). Not read by any scripts/*.py at runtime and must not be bundled into a #57 distribution."
+    }
+  ],
+  "never_release": [
+    {
+      "pattern": ".chainlink/issues.db",
+      "reason": "Local SQLite issue-tracker state; issues.json is the portable snapshot, per .chainlink/README.md."
+    },
+    {
+      "pattern": ".chainlink/last_test_run",
+      "reason": "Machine-local runtime cache (.chainlink/.gitignore already excludes it)."
+    },
+    {
+      "pattern": ".chainlink/agent.json",
+      "reason": "Machine-local agent identity (.chainlink/.gitignore already excludes it)."
+    },
+    {
+      "pattern": ".chainlink/rules.local/",
+      "reason": "Machine-local rule overrides, explicitly gitignored."
+    },
+    {
+      "pattern": "ci/results/",
+      "reason": "Generated per-run output (C_static reports, bridge checks, feature ledger, review log); already gitignored. Never a release asset -- it is regenerated by the pipeline it wasn't shipped with."
+    },
+    {
+      "pattern": "__pycache__/, *.pyc",
+      "reason": "Python bytecode caches, already gitignored."
+    },
+    {
+      "pattern": ".ruff_cache/",
+      "reason": "Linter cache, not committed to git (untracked) and must never enter a release."
+    },
+    {
+      "pattern": "tests/, tests/fixtures/",
+      "reason": "Test-only code and data (see the `tests` and `fixtures` inventory sections) -- exercises the pipeline, is never itself installed or shipped."
+    },
+    {
+      "pattern": "vendor/concept-to-code/.git/",
+      "reason": "Submodule's own nested git metadata; never a distribution asset regardless of whether the schema file it contains is vendored-runtime."
+    },
+    {
+      "pattern": "vendor/concept-to-code/__pycache__/",
+      "reason": "Bytecode cache inside the vendored submodule checkout."
+    },
+    {
+      "pattern": "any project-descriptor.json / policy doc / .env / credential file a target repository authors after `ligature init`",
+      "reason": "User-owned content belonging to a CONSUMER of this pipeline, never to ligature-workspace's own release artifact -- the #58 ownership-manifest split (owned vs. user-owned) applies here even though #58 itself is out of scope for #55."
+    }
+  ],
+  "counts": {
+    "by_disposition": {
+      "runtime-required": 67,
+      "documentation": 11,
+      "installed-template": 3,
+      "test-only": 57,
+      "vendored-runtime": 1
+    },
+    "total_entries": 139,
+    "test_count": 44,
+    "registered_cli_command_count": 32
+  },
+  "documentation_and_templates": [
+    {
+      "path": "docs/concept-to-code-modifications.md",
+      "disposition": "documentation",
+      "summary": "Tracks required/decided modifications to the vendored concept-to-code submodule -- the report artifact the project's own boundary rule requires instead of editing the submodule directly."
+    },
+    {
+      "path": "docs/reliance-policy.template.md",
+      "disposition": "installed-template",
+      "summary": "Governed policy-document template (plan.md \u00a77.2, chainlink #10); copied into a target repo by `ligature init`, then human-edited and referenced by accept-promotion's --policy-path."
+    },
+    {
+      "path": "docs/cli-contract.md",
+      "disposition": "documentation",
+      "summary": "Chainlink #55: stable CLI grammar v1.0 and the complete legacy-command-to-disposition mapping."
+    },
+    {
+      "path": "docs/exit-code-contract.md",
+      "disposition": "documentation",
+      "summary": "Chainlink #55: reconciled exit-code contract v1.0 and precedence rule."
+    },
+    {
+      "path": "docs/trust-and-compatibility-boundaries.md",
+      "disposition": "documentation",
+      "summary": "Chainlink #55: stable-API/read-only/write-authority boundaries and what's deferred to #56-#59."
+    }
+  ]
+}

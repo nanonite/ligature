@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "mutated_workspace": false,
+  "run_metadata": { "started_at": "2026-09-10T12:00:00Z", "product_version": "1.0.0" },
+  "gates": [
+    { "gate_id": "r1-g16", "outcome": "executed" },
+    { "gate_id": "g9", "outcome": "blocked", "reason": "check-bridges has not run: no ci/results/bridge_checks/ directory" }
+  ],
+  "findings": [
+    {
+      "dedup_key": "f0f0f0f0f0f0f0f0",
+      "gate_id": "r1-g16",
+      "severity": "critical",
+      "subject": "crate_a::scheduler::dispatch",
+      "reason": "definite cross-concept call absent from I",
+      "authority": "mechanized-gate",
+      "provenance": "scripts/gate_r1_g16.py:gate_r1_g16_workspace"
+    }
+  ],
+  "next_action": {
+    "kind": "automated-command",
+    "description": "Author or update the interaction spec covering crate_a::scheduler::dispatch, then re-run gate r1-g16.",
+    "command": "ligature draft interaction crate_a/specs/_interactions/scheduler-dispatch.json"
+  },
+  "change_request_stubs": [],
+  "result": { "exit_code": 1, "conditions": ["blocking_findings"] }
+}

@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/schemas/project-state.schema.json",
+  "title": "Project state — v1.0",
+  "description": "Chainlink #55/#56. The output contract for the future `ligature status --json`, specified here so #56 implements against a fixed shape rather than inventing one mid-build. This schema does not exist because #56 is implemented -- it is not; #56 remains the task that writes the code computing a document this schema can validate. Every enum in this schema that reports a checked condition also carries an explicit 'unknown'/'not-checked' member (never omitted, never collapsed into the nearest-looking pass value) so a status command that could not determine something reports that honestly instead of defaulting to clean. Witness/implementation OBSERVATIONS (what the code and its generated projections currently show) are kept in a separate `generated_observations` object from `assurance` (what is actually verified) everywhere this schema has both, per plan.md's own witness-vs-assurance discipline (G18/G19/G20, the feature ledger's implementation_observed vs assurance_status split) -- a status document that let a witness observation stand in for an assurance verdict would be exactly the conflation that discipline exists to prevent.",
+  "type": "object",
+  "required": [
+    "schema_version", "product", "installation_manifest", "descriptor",
+    "binary_identity", "artifacts", "obligations", "clusters",
+    "open_findings", "human_decisions", "change_requests",
+    "gate_integrity", "generated_observations"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+
+    "product": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "const": "ligature" },
+        "version": { "type": "string", "minLength": 1, "description": "The running product's own version, e.g. from #57's `ligature version`. Distinct from schema_version above -- this document's own shape can outlive several product releases." }
+      }
+    },
+
+    "installation_manifest": {
+      "type": "object",
+      "required": ["state", "installed_product_version", "installed_schema_versions"],
+      "additionalProperties": false,
+      "description": "#58's ownership manifest, read (not recomputed) by status. A workspace with no manifest at all is `not-initialized`, never silently reported as if every field below were clean.",
+      "properties": {
+        "state": { "type": "string", "enum": ["not-initialized", "current", "upgradable", "incompatible", "unknown"] },
+        "installed_product_version": { "type": ["string", "null"] },
+        "installed_schema_versions": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "schema name -> installed version, e.g. {\"project-state\": \"1.0\"}. Empty object when not-initialized."
+        }
+      }
+    },
+
+    "descriptor": {
+      "type": "object",
+      "required": ["state", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "type": "string", "enum": ["absent", "present-invalid", "present-valid", "unknown"] },
+        "path": { "type": "string" },
+        "mode": { "type": ["string", "null"], "enum": ["greenfield", "port", null] },
+        "schema_version": { "type": ["string", "null"] }
+      }
+    },
+
+    "binary_identity": {
+      "type": "object",
+      "required": ["verified", "content_hash", "version"],
+      "additionalProperties": false,
+      "description": "#57: the executable is the trusted adjudicator, not just the files it validated. `verified: unknown` is required (not `false`) when running from an unattested source checkout rather than a packaged build -- today's `python3 scripts/pipeline.py` invocation has no build hash to verify at all, which is a distinct state from 'verification ran and failed'.",
+      "properties": {
+        "verified": { "type": "string", "enum": ["true", "false", "unknown"] },
+        "content_hash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+
+    "obligations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/obligation" }
+    },
+
+    "clusters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/cluster" }
+    },
+
+    "open_findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding_ref" }
+    },
+
+    "human_decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/human_decision" }
+    },
+
+    "change_requests": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/change_request" }
+    },
+
+    "gate_integrity": {
+      "type": "object",
+      "required": ["state"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "type": "string", "enum": ["pinned", "unpinned", "drifted", "unknown"] },
+        "details": { "type": "string" }
+      }
+    },
+
+    "generated_observations": {
+      "type": "object",
+      "required": ["witness_summaries"],
+      "additionalProperties": false,
+      "description": "Implementation-observed projections (feature ledger, contact sheet, witness renders) -- explicitly NOT assurance. Never read as a pass/fail verdict by anything consuming this document.",
+      "properties": {
+        "witness_summaries": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/witness_summary" }
+        },
+        "feature_ledger_generated_at": { "type": ["string", "null"] }
+      }
+    }
+  },
+
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "required": ["artifact_id", "kind", "path", "content_hash", "lifecycle"],
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1, "description": "One of docs/cli-contract.md §2's artifact-kind values, e.g. 'boundary', 'interaction', 'bridge'." },
+        "path": { "type": "string", "minLength": 1 },
+        "content_hash": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "null only when lifecycle is 'absent' -- every other lifecycle value requires a real hash, including 'invalid' (an invalid file still hashes)."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": ["absent", "draft", "invalid", "validated", "promoted", "stale-by-hash-drift", "unknown"],
+          "description": "'unknown' is for a status run that could not determine lifecycle (e.g. a read error unrelated to the artifact's own validity) -- distinct from 'invalid', which means status COULD check it and it failed. 'stale-by-hash-drift' means a promoted artifact's on-disk content_hash no longer matches the hash recorded at promotion time."
+        },
+        "promoted_hash": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The hash recorded at promotion time, present whenever lifecycle is 'promoted' or 'stale-by-hash-drift' so the two can be compared without a second lookup."
+        }
+      }
+    },
+
+    "obligation": {
+      "type": "object",
+      "required": ["obligation_id", "required_assurance", "achieved_assurance"],
+      "additionalProperties": false,
+      "properties": {
+        "obligation_id": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$"
+        },
+        "required_assurance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assurance_dimension" },
+          "description": "Every dimension this obligation's own reliance declares as required. Dimensions are never merged/deduped into a single boolean -- an obligation requiring both 'formal' and 'differential' assurance and achieving only one is NOT 'partially satisfied', it is two separate dimension records, one achieved and one not."
+        },
+        "achieved_assurance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assurance_dimension" }
+        }
+      }
+    },
+
+    "assurance_dimension": {
+      "type": "object",
+      "required": ["dimension", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "dimension": { "type": "string", "minLength": 1, "description": "e.g. 'formal', 'differential', 'witness', 'harness-tested' -- plan.md §8.1's claim/evidence/result/scope/trust/support split names the vocabulary; this schema does not close it since #56 owns the real enumeration." },
+        "status": { "type": "string", "enum": ["achieved", "missing", "degraded", "unknown"] }
+      }
+    },
+
+    "cluster": {
+      "type": "object",
+      "required": ["cluster", "closure_kind", "state", "limitations"],
+      "additionalProperties": false,
+      "properties": {
+        "cluster": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "closure_kind": { "type": "string", "enum": ["deductive", "bounded", "unknown"] },
+        "state": { "type": "string", "enum": ["closes", "degraded", "blocked", "unknown"] },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Free-text per docs/degradation-record-schema.json's failed_conditions when state is 'degraded' or 'blocked'; empty array (not omitted) when 'closes' or 'unknown'."
+        }
+      }
+    },
+
+    "finding_ref": {
+      "type": "object",
+      "required": ["dedup_key", "gate_id", "severity", "subject", "summary"],
+      "additionalProperties": false,
+      "description": "A lighter pointer than consolidated-check.schema.json's own finding shape -- status reports THAT a finding is open, check owns full provenance/authority detail for a given run. dedup_key must match the same identity scheme consolidated-check.schema.json's findings use so a finding referenced from both documents is recognizably the same finding.",
+      "properties": {
+        "dedup_key": { "type": "string", "pattern": "^[0-9a-f]{16,64}$" },
+        "gate_id": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+        "subject": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "human_decision": {
+      "type": "object",
+      "required": ["decision_id", "subject", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "decision_id": { "type": "string", "minLength": 1 },
+        "subject": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["pending", "recorded"] },
+        "gate_id": { "type": ["string", "null"] }
+      }
+    },
+
+    "change_request": {
+      "type": "object",
+      "required": ["change_request_id", "status", "target", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "change_request_id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["proposed", "open"] },
+        "target": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "witness_summary": {
+      "type": "object",
+      "required": ["witness_id", "determinism", "degeneracy"],
+      "additionalProperties": false,
+      "description": "generated_observations only -- these are witness/implementation observations (G19 determinism, G20 degeneracy), deliberately never an assurance_status field. plan.md §16.3's contact sheet keeps this traffic-light column visually distinct from a never-green assurance column for the same reason.",
+      "properties": {
+        "witness_id": { "type": "string", "minLength": 1 },
+        "determinism": { "type": "string", "enum": ["deterministic", "nondeterministic", "unknown"] },
+        "degeneracy": { "type": "string", "enum": ["varies-as-expected", "degenerate", "unknown"] }
+      }
+    }
+  }
+}

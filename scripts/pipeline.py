@@ -1954,7 +1954,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str]) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the pipeline's argparse parser without running anything.
+
+    Split out from `main()` (chainlink #55) so the actual registered CLI
+    surface -- top-level flags, every subcommand, and each subcommand's own
+    arguments -- can be introspected by tooling (the inventory drift test,
+    future `#56`/`#58` nested-CLI wrappers) from the single place it is
+    defined, instead of that tooling re-declaring its own copy of this list
+    that could silently drift from what argparse actually dispatches."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--workspace", type=Path, default=Path("."))
     parser.add_argument(
@@ -2188,6 +2196,25 @@ def main(argv: list[str]) -> int:
     status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
     status_p.set_defaults(func=cmd_status)
 
+    return parser
+
+
+def registered_commands(parser: argparse.ArgumentParser | None = None) -> dict[str, argparse.ArgumentParser]:
+    """The actual registered {subcommand name: its own sub-parser}, read off
+    `build_parser()`'s own `argparse._SubParsersAction` rather than a
+    hand-maintained list -- the same introspection argparse itself uses for
+    shell-completion tooling. This is the single source of truth chainlink
+    #55's inventory drift test checks the documented CLI contract against."""
+    if parser is None:
+        parser = build_parser()
+    for action in parser._actions:  # noqa: SLF001 -- no public argparse API for this
+        if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+            return dict(action.choices)
+    raise AssertionError("parser has no subparsers action")
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.descriptor is None:
         args.descriptor = args.workspace / "project-descriptor.json"

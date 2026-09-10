@@ -1,0 +1,159 @@
+"""Tests for schemas/project-state.schema.json (chainlink #55/#56's
+`ligature status --json` contract). This schema is not implemented against
+yet -- #56 owns writing the code that produces a real document. These
+tests exercise the schema itself: the two hand-authored example documents
+validate, deliberate mutations are rejected, and -- the regression test
+#55's own text calls for -- the OLD flat capability-summary text
+(`cmd_status`'s current output) cannot be reshaped into anything this
+schema accepts, proving the new contract is not merely the old one
+renamed.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+from schema_utils import make_validator  # noqa: E402
+
+SCHEMA_PATH = ROOT / "schemas" / "project-state.schema.json"
+EXAMPLES_DIR = ROOT / "schemas" / "examples"
+
+
+class ProjectStateSchemaTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.schema = json.loads(SCHEMA_PATH.read_text())
+        cls.validator = make_validator(cls.schema)
+
+    def _load(self, name):
+        return json.loads((EXAMPLES_DIR / name).read_text())
+
+    def test_empty_example_is_valid(self):
+        errors = list(self.validator.iter_errors(self._load("project-state.empty.example.json")))
+        self.assertEqual(errors, [], [e.message for e in errors])
+
+    def test_mixed_example_is_valid(self):
+        errors = list(self.validator.iter_errors(self._load("project-state.mixed.example.json")))
+        self.assertEqual(errors, [], [e.message for e in errors])
+
+    def test_rejects_unknown_top_level_field(self):
+        doc = self._load("project-state.empty.example.json")
+        doc["extra_field"] = "nope"
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+    def test_rejects_missing_required_top_level_field(self):
+        doc = self._load("project-state.empty.example.json")
+        del doc["gate_integrity"]
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+    def test_rejects_wrong_schema_version(self):
+        doc = self._load("project-state.empty.example.json")
+        doc["schema_version"] = "2.0"
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+    def test_artifact_lifecycle_is_closed_enum(self):
+        doc = self._load("project-state.mixed.example.json")
+        doc["artifacts"][0]["lifecycle"] = "some-made-up-state"
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+    def test_artifact_lifecycle_accepts_unknown(self):
+        """Explicit unknown/not-checked states must never become a schema
+        rejection -- missing information is a valid, honest report."""
+        doc = self._load("project-state.mixed.example.json")
+        doc["artifacts"][0]["lifecycle"] = "unknown"
+        doc["artifacts"][0]["content_hash"] = None
+        errors = list(self.validator.iter_errors(doc))
+        self.assertEqual(errors, [], [e.message for e in errors])
+
+    def test_absent_artifact_may_have_null_content_hash(self):
+        doc = self._load("project-state.mixed.example.json")
+        errors = list(self.validator.iter_errors(doc))
+        self.assertEqual(errors, [])
+        absent = [a for a in doc["artifacts"] if a["lifecycle"] == "absent"]
+        self.assertTrue(absent)
+        self.assertIsNone(absent[0]["content_hash"])
+
+    def test_malformed_content_hash_is_rejected(self):
+        doc = self._load("project-state.mixed.example.json")
+        doc["artifacts"][0]["content_hash"] = "not-a-hash"
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+    def test_required_and_achieved_assurance_are_never_merged(self):
+        """A dimension required but not achieved must show up as TWO
+        separate records (one per array), never collapsed into a single
+        'partial' status -- this test asserts the shape allows exactly
+        that disagreement to be represented."""
+        doc = self._load("project-state.mixed.example.json")
+        obligation = doc["obligations"][0]
+        required_dims = {d["dimension"] for d in obligation["required_assurance"]}
+        achieved_dims = {
+            d["dimension"] for d in obligation["achieved_assurance"] if d["status"] == "achieved"
+        }
+        self.assertIn("differential", required_dims)
+        self.assertNotIn("differential", achieved_dims)
+        errors = list(self.validator.iter_errors(doc))
+        self.assertEqual(errors, [])
+
+    def test_cluster_state_and_closure_kind_have_explicit_unknown(self):
+        doc = self._load("project-state.mixed.example.json")
+        doc["clusters"][0]["state"] = "unknown"
+        doc["clusters"][0]["closure_kind"] = "unknown"
+        errors = list(self.validator.iter_errors(doc))
+        self.assertEqual(errors, [])
+
+    def test_witness_summary_never_carries_an_assurance_field(self):
+        """generated_observations must not smuggle in an assurance verdict
+        -- additionalProperties:false on witness_summary is what actually
+        enforces this."""
+        doc = self._load("project-state.mixed.example.json")
+        doc["generated_observations"]["witness_summaries"][0]["assurance_status"] = "achieved"
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+    def test_gate_integrity_state_is_closed_enum(self):
+        doc = self._load("project-state.empty.example.json")
+        doc["gate_integrity"]["state"] = "totally-fine-trust-me"
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
+
+class OldCapabilitySummaryCannotSatisfySchemaTest(unittest.TestCase):
+    """Regression test (#55's own requirement): the OLD cmd_status output
+    -- a flat list of implemented/not-yet-implemented command names as
+    strings -- cannot be reshaped into a document this schema accepts. If
+    this test ever starts passing, the new contract has silently regressed
+    into being the old one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.schema = json.loads(SCHEMA_PATH.read_text())
+        cls.validator = make_validator(cls.schema)
+
+    def test_old_style_capability_list_is_rejected(self):
+        old_style_document = {
+            "implemented": [
+                "draft", "approve", "approve-pair", "approve-exemption-pair",
+                "validate", "validate-interaction", "validate-exemption",
+            ],
+            "not_yet_implemented": {
+                "G4/G5 evidence tracing/grounding": "not yet implemented",
+                "emission": "Stage 5 itself is still not built",
+                "8B": "#26 (M4)",
+            },
+        }
+        errors = list(self.validator.iter_errors(old_style_document))
+        self.assertTrue(errors, "the old flat capability summary validated against the new project-state schema")
+
+    def test_a_document_with_only_the_old_fields_added_alongside_new_ones_is_still_rejected(self):
+        """Not enough to just add old fields NEXT TO a valid document --
+        additionalProperties:false must reject the leftover old shape too."""
+        doc = json.loads((EXAMPLES_DIR / "project-state.empty.example.json").read_text())
+        doc["implemented"] = ["draft", "approve"]
+        errors = list(self.validator.iter_errors(doc))
+        self.assertTrue(errors)
+
+
+if __name__ == "__main__":
+    unittest.main()

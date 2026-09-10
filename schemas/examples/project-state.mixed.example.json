@@ -1,0 +1,122 @@
+{
+  "schema_version": "1.0",
+  "product": {
+    "name": "ligature",
+    "version": "1.0.0"
+  },
+  "installation_manifest": {
+    "state": "current",
+    "installed_product_version": "1.0.0",
+    "installed_schema_versions": {
+      "project-state": "1.0",
+      "consolidated-check": "1.0",
+      "project-descriptor": "1.0"
+    }
+  },
+  "descriptor": {
+    "state": "present-valid",
+    "path": "project-descriptor.json",
+    "mode": "greenfield",
+    "schema_version": "1.0"
+  },
+  "binary_identity": {
+    "verified": "true",
+    "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "version": "1.0.0"
+  },
+  "artifacts": [
+    {
+      "artifact_id": "TaskQueue",
+      "kind": "boundary",
+      "path": "crate_a/specs/_boundaries/TaskQueue.json",
+      "content_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "lifecycle": "promoted",
+      "promoted_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "artifact_id": "mcmc-chain",
+      "kind": "interaction",
+      "path": "crate_a/specs/_interactions/mcmc-chain.json",
+      "content_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "lifecycle": "stale-by-hash-drift",
+      "promoted_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    {
+      "artifact_id": "sampler-step",
+      "kind": "evidence",
+      "path": "evidence/E-0143.json",
+      "content_hash": null,
+      "lifecycle": "absent"
+    }
+  ],
+  "obligations": [
+    {
+      "obligation_id": "TaskQueue.C003",
+      "required_assurance": [
+        {
+          "dimension": "formal",
+          "status": "achieved"
+        },
+        {
+          "dimension": "differential",
+          "status": "missing"
+        }
+      ],
+      "achieved_assurance": [
+        {
+          "dimension": "formal",
+          "status": "achieved"
+        }
+      ]
+    }
+  ],
+  "clusters": [
+    {
+      "cluster": "mcmc-chain",
+      "closure_kind": "bounded",
+      "state": "degraded",
+      "limitations": [
+        "unresolved_indirect_calls_at_or_above_medium: 1"
+      ]
+    }
+  ],
+  "open_findings": [
+    {
+      "dedup_key": "0123456789abcdef",
+      "gate_id": "g17",
+      "severity": "high",
+      "subject": "specs/_closure/mcmc-chain.yaml",
+      "summary": "closure_kind claims deductive over a closure containing a Kani result"
+    }
+  ],
+  "human_decisions": [
+    {
+      "decision_id": "HD-0001",
+      "subject": "mcmc-chain medium-risk unresolved call",
+      "status": "pending",
+      "gate_id": "r1-g16"
+    }
+  ],
+  "change_requests": [
+    {
+      "change_request_id": "CR-0001",
+      "status": "proposed",
+      "target": "specs/_closure/mcmc-chain.yaml",
+      "summary": "downgrade closure_kind to bounded"
+    }
+  ],
+  "gate_integrity": {
+    "state": "pinned",
+    "details": "binary content_hash matches installed manifest"
+  },
+  "generated_observations": {
+    "witness_summaries": [
+      {
+        "witness_id": "W-TQ-LOAD-FACTOR",
+        "determinism": "deterministic",
+        "degeneracy": "varies-as-expected"
+      }
+    ],
+    "feature_ledger_generated_at": "2026-09-10"
+  }
+}

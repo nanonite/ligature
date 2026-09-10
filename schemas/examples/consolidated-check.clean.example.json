@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "mutated_workspace": false,
+  "gates": [
+    { "gate_id": "g14", "outcome": "executed" },
+    { "gate_id": "g18", "outcome": "executed" },
+    { "gate_id": "g9", "outcome": "not-applicable", "reason": "no bridge specifications present in this workspace" }
+  ],
+  "findings": [],
+  "next_action": null,
+  "change_request_stubs": [],
+  "result": { "exit_code": 0, "conditions": [] }
+}

@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Authoritative implementation inventory (docs/implementation-inventory.json, schema v1.0) with a filesystem/argparse drift test, replacing the stale "53 tests / M0-M1" summary: 1333 passing tests (154 subtests), 32 registered CLI commands, 39 runtime modules, M0-M4 all complete (#55)
+- Stable public CLI grammar v1.0 (docs/cli-contract.md): `init doctor version status check validate gate draft approve migrate report`, with a complete 32/32 legacy-command disposition mapping and the `status`-stub-to-`doctor` retirement plan (#55)
+- Versioned `ligature status --json` and `ligature check --json` output contracts (schemas/project-state.schema.json, schemas/consolidated-check.schema.json, both v1.0), specified (not implemented) for #56, with a regression test proving the old capability summary cannot satisfy the new schema (#55)
+- Reconciled exit-code contract (docs/exit-code-contract.md) and a pure precedence resolver, scripts/exit_codes.py (#55)
+- Trust and compatibility boundaries document (docs/trust-and-compatibility-boundaries.md) (#55)
 - Workspace-wide assumption-identity collision check across boundary contracts (#6)
 
 ### Fixed
@@ -14,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- Reconcile implemented surface and define stable CLI/state contracts (#55)
 - Pilot-cluster selection rubric (verifier-agnostic) (#4)
 - witness as typed mitigation kind (risk tier low only) (#36)
 - Witness artifacts in promotion manifest + protected_write_set + gate_integrity (#35)

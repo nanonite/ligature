@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Workspace-wide assumption-identity collision check across boundary contracts (#6)
 
 ### Fixed
 - gate-g14 silently skips invalid closure artifacts instead of saying why (#49)

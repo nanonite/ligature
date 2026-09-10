@@ -387,6 +387,7 @@ from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import approve_pair as checkpoint_approve_pair  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
+from validate_boundary_contracts import check_assumption_identity_collisions  # noqa: E402
 from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
 from validate_boundary_contracts import load_draft_validator as load_boundary_draft_validator  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
@@ -591,6 +592,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     findings_total = []
     discovered = 0
+    valid_boundaries: list[dict] = []
     for crate in descriptor["crates"]:
         crate_root = args.workspace / crate["crate_dir"]
         specs_search_root = args.workspace / crate["specs_search_root"]
@@ -602,6 +604,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
             # not a silent "0 boundaries found, all clean" (external
             # review finding, high severity).
             raise PipelineError(f"crate {crate['crate_dir']!r} in the project descriptor: {e}")
+        valid_boundaries.extend(
+            load_boundaries_by_id(_boundary_dir_for(crate, args.workspace), specs_search_root).values()
+        )
+
+    # chainlink #6: composite assumption identity (boundary_id/tracking_issue/
+    # assumption_hash) is workspace-wide, but G1b's own tracking-issue-
+    # uniqueness check is scoped to one boundary file -- this is the
+    # cross-crate half, over every genuinely valid boundary discovered above.
+    findings_total.extend(check_assumption_identity_collisions(valid_boundaries))
 
     errors = [f for f in findings_total if f.severity == "error"]
     infos = [f for f in findings_total if f.severity == "info"]

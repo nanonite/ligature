@@ -7,7 +7,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from validate_boundary_contracts import validate, load_validator, valid_boundary_edges_from_crate  # noqa: E402
+from validate_boundary_contracts import (  # noqa: E402
+    check_assumption_identity_collisions,
+    validate,
+    load_validator,
+    valid_boundary_edges_from_crate,
+)
 
 FIXTURES = ROOT / "tests" / "fixtures" / "boundary_contracts"
 
@@ -160,6 +165,80 @@ class ValidBoundaryEdgesFromCrateTest(unittest.TestCase):
             canonical = crate_root / "specs" / "_boundaries"  # never created
             covered = valid_boundary_edges_from_crate(crate_root, canonical, None)
         self.assertEqual(covered, set())
+
+
+def boundary_with_assumption(boundary_id: str, tracking_issue: str, assumption_hash: str) -> dict:
+    return {
+        "boundary_id": boundary_id,
+        "assumptions": [
+            {
+                "boundary_id": boundary_id,
+                "tracking_issue": tracking_issue,
+                "assumption_hash": assumption_hash,
+            }
+        ],
+    }
+
+
+HASH_A = "sha256:" + "1" * 64
+HASH_B = "sha256:" + "2" * 64
+
+
+class AssumptionIdentityCollisionTest(unittest.TestCase):
+    """chainlink #6: composite assumption identity (boundary_id,
+    tracking_issue, assumption_hash) is workspace-wide; G1b's own
+    tracking-issue-uniqueness check is scoped to one boundary file."""
+
+    def test_the_same_issue_and_hash_across_boundaries_is_not_a_collision(self):
+        """plan.md §8.4's own first registry trigger, 'an assumption
+        spans boundaries' -- legitimate as long as the composite key
+        still resolves to one, identical assumption text everywhere."""
+        boundaries = [
+            boundary_with_assumption("a__to__b", "chainlink:713", HASH_A),
+            boundary_with_assumption("c__to__d", "chainlink:713", HASH_A),
+        ]
+        self.assertEqual(check_assumption_identity_collisions(boundaries), [])
+
+    def test_the_same_issue_with_different_hashes_is_a_collision(self):
+        boundaries = [
+            boundary_with_assumption("a__to__b", "chainlink:713", HASH_A),
+            boundary_with_assumption("c__to__d", "chainlink:713", HASH_B),
+        ]
+        findings = check_assumption_identity_collisions(boundaries)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("chainlink:713", findings[0].reason)
+        self.assertIn("2 distinct assumption_hash values", findings[0].reason)
+        self.assertIn("a__to__b", findings[0].reason)
+        self.assertIn("c__to__d", findings[0].reason)
+
+    def test_different_issues_never_collide_with_each_other(self):
+        boundaries = [
+            boundary_with_assumption("a__to__b", "chainlink:1", HASH_A),
+            boundary_with_assumption("c__to__d", "chainlink:2", HASH_B),
+        ]
+        self.assertEqual(check_assumption_identity_collisions(boundaries), [])
+
+    def test_a_single_boundary_alone_is_never_a_collision(self):
+        boundaries = [boundary_with_assumption("a__to__b", "chainlink:713", HASH_A)]
+        self.assertEqual(check_assumption_identity_collisions(boundaries), [])
+
+    def test_assumptions_with_no_tracking_issue_or_hash_are_ignored_not_crashed_on(self):
+        boundaries = [
+            {"boundary_id": "a__to__b", "assumptions": [{"boundary_id": "a__to__b"}]},
+            boundary_with_assumption("c__to__d", "chainlink:713", HASH_A),
+        ]
+        self.assertEqual(check_assumption_identity_collisions(boundaries), [])
+
+    def test_three_boundaries_two_of_which_collide_names_only_the_colliding_pair(self):
+        boundaries = [
+            boundary_with_assumption("a__to__b", "chainlink:713", HASH_A),
+            boundary_with_assumption("c__to__d", "chainlink:713", HASH_B),
+            boundary_with_assumption("e__to__f", "chainlink:999", HASH_A),
+        ]
+        findings = check_assumption_identity_collisions(boundaries)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("chainlink:713", findings[0].reason)
+        self.assertNotIn("chainlink:999", findings[0].reason)
 
 
 if __name__ == "__main__":

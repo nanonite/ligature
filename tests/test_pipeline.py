@@ -3246,5 +3246,101 @@ def _stage8a_interaction(interaction_id: str, caller: tuple, callee: tuple) -> d
     }
 
 
+class AssumptionIdentityCollisionIntegrationTest(unittest.TestCase):
+    """chainlink #6: composite assumption identity (boundary_id,
+    tracking_issue, assumption_hash) is workspace-wide -- through the
+    real `pipeline.py validate` CLI path, across two real crates."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _boundary(self, boundary_id: str, caller: str, callee: str, tracking_issue: str, assumption_hash: str) -> dict:
+        return {
+            "schema_version": "1.0",
+            "boundary_id": boundary_id,
+            "caller": {"concept": caller, "method": "call"},
+            "callee": {"concept": callee, "method": "serve"},
+            "callee_guarantees": [f"{callee}.C001"],
+            "assumptions": [
+                {"boundary_id": boundary_id, "tracking_issue": tracking_issue, "assumption_hash": assumption_hash},
+            ],
+            "review": {"reviewer": "alice", "reviewed_at": "2026-09-10"},
+        }
+
+    def _write(self, relative: str, data: dict) -> None:
+        path = self.workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+
+    def _descriptor(self, *crate_dirs: str) -> Path:
+        data = {
+            "schema_version": "1.0",
+            "project": {"name": "example-multi", "crate_naming_convention": "^example-multi-[a-z]+"},
+            "mode": "greenfield",
+            "crates": [
+                {"crate_dir": crate_dir, "contracts_crate": "contracts", "specs_search_root": "crates"}
+                for crate_dir in crate_dirs
+            ],
+            "verifier_policy": {"default": "creusot"},
+            "compatibility_policy": {"reliance_policy_path": "docs/reliance-policy.md"},
+            "write_set": {"allowed_roots": ["crates/*/src/"], "protected_roots": ["scripts/**"]},
+            "gate_integrity": [],
+            "llm_backend": {"kind": "manual"},
+            "review": {"reviewer": "alice", "reviewed_at": "2026-09-10"},
+        }
+        path = self.workspace / "project-descriptor.json"
+        path.write_text(json.dumps(data))
+        return path
+
+    def _run(self, descriptor: Path) -> tuple[int, str]:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = pipeline.main([
+                "--workspace", str(self.workspace), "--descriptor", str(descriptor), "validate",
+            ])
+        return code, buffer.getvalue()
+
+    def test_the_same_tracking_issue_with_different_hashes_across_crates_fails_the_real_cli(self):
+        hash_a = "sha256:" + "1" * 64
+        hash_b = "sha256:" + "2" * 64
+        self._write(
+            "crates/alpha/specs/_boundaries/scheduler_call__to__task_queue_serve.json",
+            self._boundary("scheduler_call__to__task_queue_serve", "Scheduler", "TaskQueue", "chainlink:713", hash_a),
+        )
+        self._write(
+            "crates/beta/specs/_boundaries/worker_call__to__logger_serve.json",
+            self._boundary("worker_call__to__logger_serve", "Worker", "Logger", "chainlink:713", hash_b),
+        )
+        descriptor = self._descriptor("crates/alpha", "crates/beta")
+
+        rc, printed = self._run(descriptor)
+
+        self.assertEqual(rc, 1, printed)
+        self.assertIn("chainlink:713", printed)
+        self.assertIn("2 distinct assumption_hash values", printed)
+
+    def test_the_same_tracking_issue_with_the_same_hash_across_crates_still_passes(self):
+        shared_hash = "sha256:" + "1" * 64
+        self._write(
+            "crates/alpha/specs/_boundaries/scheduler_call__to__task_queue_serve.json",
+            self._boundary(
+                "scheduler_call__to__task_queue_serve", "Scheduler", "TaskQueue", "chainlink:713", shared_hash
+            ),
+        )
+        self._write(
+            "crates/beta/specs/_boundaries/worker_call__to__logger_serve.json",
+            self._boundary("worker_call__to__logger_serve", "Worker", "Logger", "chainlink:713", shared_hash),
+        )
+        descriptor = self._descriptor("crates/alpha", "crates/beta")
+
+        rc, printed = self._run(descriptor)
+
+        self.assertEqual(rc, 0, printed)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -468,6 +468,68 @@ def load_boundaries_by_id(canonical_dir: Path, specs_search_root: Path | None = 
     return result
 
 
+def check_assumption_identity_collisions(boundaries: list[dict]) -> list[Finding]:
+    """chainlink #6: the smallest mechanism that fails closed on composite
+    assumption identity (`boundary_id`/`tracking_issue`/`assumption_hash`,
+    plan.md §8.4) without inventing a full registry.
+
+    G1b already enforces one `tracking_issue` per assumption WITHIN a
+    single boundary contract; nothing checks the same `tracking_issue`
+    ACROSS boundaries, workspace-wide. Two cases share that shape and
+    must be told apart:
+
+      * the SAME `tracking_issue` naming the IDENTICAL `assumption_hash`
+        in more than one boundary is §8.4's own first registry trigger,
+        "an assumption spans boundaries" -- legitimate today, since the
+        composite key still resolves to one unambiguous assumption text
+        wherever it is cited.
+      * the SAME `tracking_issue` naming DIFFERENT `assumption_hash`
+        values across boundaries is a genuine identity collision: the
+        issue number no longer names one assumption, and
+        `(boundary_id, tracking_issue, assumption_hash)` cannot
+        disambiguate which text a bare tracking_issue means without
+        already knowing the hash -- exactly the failure mode a registry
+        would exist to prevent, mechanically observed rather than
+        guessed at from a cluster-count heuristic.
+
+    Takes an already-discovered list of genuinely valid boundary bodies
+    (the caller supplies these via `load_boundaries_by_id`, one call per
+    crate, merged -- this function never re-discovers or re-validates
+    anything itself, the same reuse discipline every cross-file check in
+    this pipeline follows)."""
+    by_issue: dict[str, dict[str, set[str]]] = {}
+    for boundary in boundaries:
+        boundary_id = boundary.get("boundary_id")
+        for assumption in boundary.get("assumptions", []):
+            issue = assumption.get("tracking_issue")
+            ahash = assumption.get("assumption_hash")
+            if issue is None or ahash is None:
+                continue
+            by_issue.setdefault(issue, {}).setdefault(ahash, set()).add(boundary_id)
+
+    findings: list[Finding] = []
+    for issue in sorted(by_issue):
+        hashes = by_issue[issue]
+        if len(hashes) <= 1:
+            continue
+        detail = "; ".join(
+            f"{ahash!r} in {sorted(bid for bid in bids if bid is not None)}"
+            for ahash, bids in sorted(hashes.items())
+        )
+        findings.append(
+            Finding(
+                "G1b", Path(f"tracking_issue:{issue}"),
+                f"tracking_issue {issue!r} names {len(hashes)} distinct assumption_hash values "
+                f"across boundary contracts ({detail}) -- composite assumption identity "
+                "(boundary_id, tracking_issue, assumption_hash) cannot resolve this issue to one "
+                "assumption. Either these are genuinely different assumptions that must not share "
+                "a tracking issue (rename one), or the same assumption's text drifted apart across "
+                "boundaries (reconcile the wording so the hashes agree again)",
+            )
+        )
+    return findings
+
+
 def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]:
     validator = load_validator()
     findings: list[Finding] = []

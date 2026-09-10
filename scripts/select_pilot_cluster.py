@@ -444,11 +444,37 @@ def select_pilot(
                 )
             )
 
-    closure_artifacts, _ = load_cluster_artifacts_with_invalid(workspace)
+    closure_artifacts, invalid_closure_paths = load_cluster_artifacts_with_invalid(workspace)
+    for path in invalid_closure_paths:
+        findings.append(
+            Finding(
+                "PILOT", str(path),
+                "invalid closure artifact excluded from generic-status evidence -- run "
+                "`pipeline.py validate-closure` for the detailed reason",
+            )
+        )
+
     candidates = evaluate_clusters(concepts_by_name, edges, closure_artifacts)
     ranked = rank_eligible(candidates)
     findings.sort(key=lambda f: (f.gate, f.subject, f.reason))
     return candidates, ranked, findings
+
+
+def exit_code_for(ranked: list[ClusterCandidate], findings: list[Finding]) -> int:
+    """Error-severity input findings make the whole result
+    non-authoritative -- a schema-invalid concept spec, an ambiguous
+    concept identity, an invalid interaction, an unresolved edge
+    endpoint, or an invalid closure artifact could each be hiding a
+    concept or edge that would have changed which cluster is eligible,
+    or which one ranks first. A provisional ranking is still printed
+    (never withheld), but EXIT_INPUT_ERROR always wins over EXIT_OK,
+    even when an eligible cluster happens to remain -- the same
+    "genuinely valid, not just present" bar this codebase applies
+    everywhere else, applied here to the report as a whole rather than
+    to one artifact."""
+    if any(f.severity == "error" for f in findings):
+        return EXIT_INPUT_ERROR
+    return EXIT_OK if ranked else EXIT_NO_ELIGIBLE
 
 
 def render_report(candidates: list[ClusterCandidate], ranked: list[ClusterCandidate], findings: list[Finding]) -> str:
@@ -463,6 +489,7 @@ def render_report(candidates: list[ClusterCandidate], ranked: list[ClusterCandid
         for reason in c.reasons:
             lines.append(f"    excluded: {reason}")
 
+    errors = [f for f in findings if f.severity == "error"]
     if findings:
         lines.append(f"{len(findings)} input finding(s):")
         for f in findings:
@@ -475,7 +502,13 @@ def render_report(candidates: list[ClusterCandidate], ranked: list[ClusterCandid
                 f"  {i}. {c.cluster} (deductive_closure_value={c.deductive_closure_value}, "
                 f"concepts={c.concept_count})"
             )
-        lines.append(f"Selected pilot: {ranked[0].cluster}")
+        if errors:
+            lines.append(
+                f"PROVISIONAL pilot (NOT authoritative -- {len(errors)} error-severity input finding(s) above "
+                f"could hide a concept or edge that would change eligibility or rank): {ranked[0].cluster}"
+            )
+        else:
+            lines.append(f"Selected pilot: {ranked[0].cluster}")
     else:
         lines.append("No eligible candidate cluster -- every candidate was excluded (see reasons above).")
     return "\n".join(lines)
@@ -505,7 +538,7 @@ def main(argv: list[str]) -> int:
         return EXIT_INPUT_ERROR
 
     print(render_report(candidates, ranked, findings))
-    return EXIT_OK if ranked else EXIT_NO_ELIGIBLE
+    return exit_code_for(ranked, findings)
 
 
 if __name__ == "__main__":

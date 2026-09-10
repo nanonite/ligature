@@ -458,7 +458,7 @@ from validate_promotion_receipt import validate_file as validate_promotion_file 
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
-from select_pilot_cluster import EXIT_NO_ELIGIBLE as _PILOT_EXIT_NO_ELIGIBLE  # noqa: E402
+from select_pilot_cluster import exit_code_for as _pilot_exit_code_for  # noqa: E402
 from select_pilot_cluster import render_report as _render_pilot_report  # noqa: E402
 from select_pilot_cluster import select_pilot  # noqa: E402
 
@@ -1126,7 +1126,7 @@ def cmd_select_pilot_cluster(args: argparse.Namespace) -> int:
     workspace = _require_workspace_root_exists(args.workspace)
     candidates, ranked, findings = select_pilot(workspace, descriptor)
     print(_render_pilot_report(candidates, ranked, findings))
-    return 0 if ranked else _PILOT_EXIT_NO_ELIGIBLE
+    return _pilot_exit_code_for(ranked, findings)
 
 
 def cmd_gate_g18(args: argparse.Namespace) -> int:

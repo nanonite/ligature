@@ -21,10 +21,12 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import pipeline  # noqa: E402
 from select_pilot_cluster import (  # noqa: E402
+    EXIT_INPUT_ERROR,
     EXIT_NO_ELIGIBLE,
     EXIT_OK,
     ClusterCandidate,
     discover_concepts,
+    exit_code_for,
     select_pilot,
 )
 from test_validate_closure import valid_profile  # noqa: E402
@@ -448,6 +450,100 @@ class NoEligibleCandidatesTest(TmpWorkspaceTest):
             ])
         self.assertEqual(rc, EXIT_NO_ELIGIBLE)
         self.assertIn("No eligible candidate cluster", buffer.getvalue())
+
+
+class NonAuthoritativeOnInputErrorsTest(TmpWorkspaceTest):
+    """Error-severity input findings make the whole result
+    non-authoritative -- exit_code_for() must return EXIT_INPUT_ERROR
+    even when an eligible cluster happens to survive, because the
+    invalid/ambiguous/unresolved input could be hiding a concept or edge
+    that would have changed eligibility or rank."""
+
+    def test_exit_code_is_input_error_even_with_an_eligible_cluster_present(self):
+        self.ws.write_concept("TreeNode", "phylo-tree")
+        self.ws.write_concept("Clade", "phylo-tree")
+        self.ws.write_interaction("I-TREE-001", "TreeNode", "Clade")
+        self.ws.write_closure_profile("phylo-tree", generic=True)
+        # An unrelated, schema-invalid concept spec sitting elsewhere in
+        # the same crate -- does not touch phylo-tree's own eligibility,
+        # but must still veto the exit code.
+        broken = concept_spec("Unrelated", "other-cluster")
+        del broken["verifier"]
+        self.ws.write_raw("Unrelated.json", broken)
+
+        candidates, ranked, findings = self.ws.select()
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0].cluster, "phylo-tree")
+        self.assertTrue(any(f.severity == "error" for f in findings), findings)
+        self.assertEqual(exit_code_for(ranked, findings), EXIT_INPUT_ERROR)
+
+    def test_an_invalid_closure_artifact_also_forces_input_error(self):
+        self.ws.write_concept("TreeNode", "phylo-tree")
+        self.ws.write_concept("Clade", "phylo-tree")
+        self.ws.write_interaction("I-TREE-001", "TreeNode", "Clade")
+        self.ws.write_closure_profile("phylo-tree", generic=True)
+        # A second, unrelated closure profile that is itself schema-
+        # invalid (missing work_packages' minItems) -- excluded from
+        # load_cluster_artifacts_with_invalid's own valid index, but
+        # must still surface as a finding here.
+        broken_profile = valid_profile()
+        broken_profile["cluster"] = "other-cluster"
+        broken_profile["work_packages"] = []
+        self.ws.write("specs/_closure/other-cluster.json", broken_profile)
+
+        candidates, ranked, findings = self.ws.select()
+
+        self.assertEqual(len(ranked), 1)
+        self.assertTrue(
+            any("invalid closure artifact" in str(f) for f in findings), findings
+        )
+        self.assertEqual(exit_code_for(ranked, findings), EXIT_INPUT_ERROR)
+
+    def test_clean_input_still_exits_ok_or_no_eligible_as_before(self):
+        """The fix must not turn every run into EXIT_INPUT_ERROR -- only
+        one with a genuine error-severity finding."""
+        self.ws.write_concept("TreeNode", "phylo-tree")
+        self.ws.write_concept("Clade", "phylo-tree")
+        self.ws.write_interaction("I-TREE-001", "TreeNode", "Clade")
+        self.ws.write_closure_profile("phylo-tree", generic=True)
+
+        candidates, ranked, findings = self.ws.select()
+
+        self.assertEqual(findings, [])
+        self.assertEqual(exit_code_for(ranked, findings), EXIT_OK)
+
+    def test_cli_reports_a_provisional_pilot_and_exits_input_error(self):
+        self.ws.write_concept("TreeNode", "phylo-tree")
+        self.ws.write_concept("Clade", "phylo-tree")
+        self.ws.write_interaction("I-TREE-001", "TreeNode", "Clade")
+        self.ws.write_closure_profile("phylo-tree", generic=True)
+        broken = concept_spec("Unrelated", "other-cluster")
+        del broken["verifier"]
+        self.ws.write_raw("Unrelated.json", broken)
+        descriptor_path = self.ws.write("project-descriptor.json", {
+            "schema_version": "1.0",
+            "project": {"name": "example-greenfield", "crate_naming_convention": "^example-greenfield-[a-z]+"},
+            "mode": "greenfield",
+            "crates": [self.ws.crate],
+            "verifier_policy": {"default": "creusot"},
+            "compatibility_policy": {"reliance_policy_path": "docs/reliance-policy.md"},
+            "write_set": {"allowed_roots": ["crates/*/src/"], "protected_roots": ["scripts/**"]},
+            "gate_integrity": [],
+            "llm_backend": {"kind": "manual"},
+            "review": dict(REVIEW),
+        })
+
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            rc = pipeline.main([
+                "--workspace", str(self.ws.root), "--descriptor", str(descriptor_path), "select-pilot-cluster",
+            ])
+
+        self.assertEqual(rc, EXIT_INPUT_ERROR)
+        printed = buffer.getvalue()
+        self.assertIn("PROVISIONAL pilot (NOT authoritative", printed)
+        self.assertIn("phylo-tree", printed)
 
 
 class TwoIndependentProjectsTest(TmpWorkspaceTest):

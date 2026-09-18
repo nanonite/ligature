@@ -57,6 +57,16 @@ the four report-ids.
 `--workspace` and `--descriptor` remain global flags on every subcommand,
 unchanged from today's `build_parser()`.
 
+There is no `ligature start` or other supervisory verb that runs the phase
+loop autonomously. `approve`/`promote` are human-authority checkpoints
+(`approve()` already requires an explicit `_REQUIRED` `validate_fn`); a
+command that drove the loop itself would either stop at every such
+checkpoint, adding nothing over an agent calling `check`/`next`, act, and
+`check`/`next` again, or cross the human-approval boundary silently. The
+binary stays a passive oracle -- `status` for state, `check`/`next` for the
+single recommended next action -- and `.codex/skills/ligature/SKILL.md`
+(#58) is what instructs the agent to drive that loop.
+
 ## 2. `validate <artifact-kind>`
 
 All thirteen `G1a`/`G1b`(+) legacy `validate-*` commands become one verb,

@@ -240,13 +240,17 @@ project-state query.
 Today's literal `python3 scripts/pipeline.py status` invocation (source
 checkout only, pre-packaging) is not covered by this contract's
 compatibility-alias policy (§9) at all — it is this repository's own
-development-time behavior, not a released product's public API. It keeps
-printing the old capability text only until whichever of #56/#57/#58
-next rewires `cmd_status`'s body to the real project-state query; there
-is no promise it keeps doing so, and no deprecation notice is owed
-because nothing was ever a public commitment. The capability text itself
-does not disappear — it becomes `doctor`'s content from the same change
-that rewires `status`.
+development-time behavior, not a released product's public API.
+
+**Implemented by #56.** `status` now prints real project state
+(`cli-contract §1`'s grammar, `schemas/project-state.schema.json`) and
+`check` prints the read-only consolidated check
+(`schemas/consolidated-check.schema.json`); this is the change that
+rewired `cmd_status`. The old capability text did not disappear — it moved
+to `doctor`, which now owns it (alongside the install/version diagnostics
+#57/#58 will add), so there is no version window and no deprecation notice
+owed: `status` means project state unconditionally, and `doctor` means the
+capability manifest unconditionally.
 
 ## 9. Compatibility alias policy
 
@@ -267,7 +271,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 32/32)
+## 10. Legacy command → disposition (complete, 34/34)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -307,10 +311,12 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `extract-c-static` | internal operation `check` may recommend, never runs (§7) |
 | `check-bridges` | internal operation `check` may recommend, never runs (§7) |
 | `render-witness` | internal operation `check` may recommend, never runs (§7) |
-| `status` | dev-time-only alias → `doctor`'s capability text, unconditionally (§8) — not covered by §9's floor |
+| `status` | stable project-state query (#56, §8) — reserved unconditionally, not covered by §9's floor |
+| `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
+| `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print (§8) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 32 has a nested home, an internal-operation classification,
+every one of the 34 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

@@ -462,6 +462,12 @@ from scan_summary import pass_line  # noqa: E402
 from select_pilot_cluster import exit_code_for as _pilot_exit_code_for  # noqa: E402
 from select_pilot_cluster import render_report as _render_pilot_report  # noqa: E402
 from select_pilot_cluster import select_pilot  # noqa: E402
+from project_state import build_consolidated_check  # noqa: E402
+from project_state import build_project_state  # noqa: E402
+from project_state import canonical_json  # noqa: E402
+from project_state import render_check_text  # noqa: E402
+from project_state import render_next_action_text  # noqa: E402
+from project_state import render_status_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
@@ -1906,7 +1912,12 @@ def cmd_approve_exemption_pair(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_status(args: argparse.Namespace) -> int:
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """The capability manifest (docs/cli-contract.md §8). This used to be
+    `status`'s body; it moved here when #56 rewired `status` to the real
+    project-state query, per §8's own resolution that the capability text
+    becomes `doctor`'s content rather than disappearing or being reused
+    under the bare `status` name."""
     print(
         "Implemented: draft (Stage 0/3), approve (checkpoint), "
         "approve-pair (transactional interaction + protocol-debt checkpoint), "
@@ -1952,6 +1963,29 @@ def cmd_status(args: argparse.Namespace) -> int:
     for stage, ref in NOT_YET_IMPLEMENTED.items():
         print(f"  - {stage}: {ref}")
     return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Real project state (docs/cli-contract.md §8, schemas/project-state.schema.json)."""
+    document = build_project_state(args.workspace, args.descriptor)
+    if args.json:
+        sys.stdout.write(canonical_json(document))
+    else:
+        sys.stdout.write(render_status_text(document))
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Consolidated read-only gate run + one recommended next action
+    (docs/cli-contract.md §7, schemas/consolidated-check.schema.json)."""
+    document = build_consolidated_check(args.workspace, args.descriptor)
+    if args.json:
+        sys.stdout.write(canonical_json(document))
+    elif args.next:
+        sys.stdout.write(render_next_action_text(document))
+    else:
+        sys.stdout.write(render_check_text(document))
+    return document["result"]["exit_code"]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2193,8 +2227,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate_contact_sheet_p.set_defaults(func=cmd_generate_contact_sheet)
 
-    status_p = sub.add_parser("status", help="What this CLI can and can't do yet")
+    doctor_p = sub.add_parser("doctor", help="What this CLI can and can't do yet (capability manifest)")
+    doctor_p.set_defaults(func=cmd_doctor)
+
+    status_p = sub.add_parser("status", help="Project state: artifact lifecycles, obligations, clusters, integrity (chainlink #56)")
+    status_p.add_argument("--json", action="store_true", help="emit schemas/project-state.schema.json JSON")
     status_p.set_defaults(func=cmd_status)
+
+    check_p = sub.add_parser("check", help="Read-only consolidated gate run + one recommended next action (chainlink #56)")
+    check_p.add_argument("--json", action="store_true", help="emit schemas/consolidated-check.schema.json JSON")
+    check_p.add_argument("next", nargs="?", help="print only the recommended next action")
+    check_p.set_defaults(func=cmd_check)
 
     return parser
 

@@ -638,10 +638,10 @@ class CmdSelectPilotClusterCliTest(TmpWorkspaceTest):
         self.assertIn("No eligible candidate cluster", printed)
         self.assertIn("not exactly one verifier", printed)
 
-    def test_select_pilot_cluster_is_listed_by_status(self):
+    def test_select_pilot_cluster_is_listed_by_doctor(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            pipeline.main(["--workspace", str(self.ws.root), "status"])
+            pipeline.main(["--workspace", str(self.ws.root), "doctor"])
         self.assertIn("select-pilot-cluster", buffer.getvalue())
 
 

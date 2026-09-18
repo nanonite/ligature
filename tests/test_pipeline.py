@@ -2693,10 +2693,10 @@ class Stage8aCStaticIntegrationTest(unittest.TestCase):
         self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
         self.assertEqual(self._run("gate-r1-g16"), 3)
 
-    def test_status_lists_the_new_stage_8a_commands(self):
+    def test_doctor_lists_the_new_stage_8a_commands(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            pipeline.main(["--workspace", str(self.workspace), "status"])
+            pipeline.main(["--workspace", str(self.workspace), "doctor"])
         printed = buffer.getvalue()
         for command in ("extract-c-static", "validate-callsites", "gate-r1-g16"):
             self.assertIn(command, printed)
@@ -2760,10 +2760,10 @@ class WitnessIntegrationTest(unittest.TestCase):
         self.assertEqual(code, 1, printed)
         self.assertIn("is not the hash of this result", printed)
 
-    def test_status_lists_the_witness_command(self):
+    def test_doctor_lists_the_witness_command(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            pipeline.main(["--workspace", str(self.workspace), "status"])
+            pipeline.main(["--workspace", str(self.workspace), "doctor"])
         printed = buffer.getvalue()
         self.assertIn("validate-witness", printed)
         self.assertIn("render-witness", printed)
@@ -3006,10 +3006,10 @@ class GoldSetIntegrationTest(unittest.TestCase):
         self.assertEqual(code, 1, printed)
         self.assertIn("not a good score", printed)
 
-    def test_status_lists_the_gold_set_commands(self):
+    def test_doctor_lists_the_gold_set_commands(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            pipeline.main(["--workspace", str(self.workspace), "status"])
+            pipeline.main(["--workspace", str(self.workspace), "doctor"])
         printed = buffer.getvalue()
         self.assertIn("validate-gold-set", printed)
         self.assertIn("measure-gold-set", printed)
@@ -3071,10 +3071,10 @@ class Stage8aBridgeCheckIntegrationTest(unittest.TestCase):
         self.assertEqual(code, 0, printed)
         self.assertIn("(1 discovered)", printed)
 
-    def test_status_lists_the_new_bridge_commands(self):
+    def test_doctor_lists_the_new_bridge_commands(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            pipeline.main(["--workspace", str(self.workspace), "status"])
+            pipeline.main(["--workspace", str(self.workspace), "doctor"])
         printed = buffer.getvalue()
         self.assertIn("check-bridges", printed)
         self.assertIn("gate-g9", printed)
@@ -3137,10 +3137,10 @@ class Stage8cClosureIntegrationTest(unittest.TestCase):
         self.assertIn("ignored as invalid", printed)
         self.assertIn("pipeline.py validate-closure", printed)
 
-    def test_status_lists_the_new_stage_8c_commands(self):
+    def test_doctor_lists_the_new_stage_8c_commands(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            pipeline.main(["--workspace", str(self.workspace), "status"])
+            pipeline.main(["--workspace", str(self.workspace), "doctor"])
         printed = buffer.getvalue()
         self.assertIn("validate-closure", printed)
         self.assertIn("gate-g14", printed)
@@ -3211,8 +3211,8 @@ class ContactSheetIntegrationTest(unittest.TestCase):
         self.assertEqual(code, 1, printed)
         self.assertIn("ambiguous", printed)
 
-    def test_status_lists_the_new_command(self):
-        code, printed = self._run("status")
+    def test_doctor_lists_the_new_command(self):
+        code, printed = self._run("doctor")
         self.assertEqual(code, 0, printed)
         self.assertIn("generate-contact-sheet", printed)
 

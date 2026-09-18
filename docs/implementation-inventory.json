@@ -359,7 +359,17 @@
     {
       "name": "status",
       "func": "cmd_status",
-      "stable_mapping": "compatibility alias -> doctor (see docs/cli-contract.md's status-stub retirement note); removal target: product version 2.0.0 once #56 ships the real `ligature status`"
+      "stable_mapping": "stable project-state query (chainlink #56); reserved unconditionally per docs/cli-contract.md \u00a78, not an alias"
+    },
+    {
+      "name": "check",
+      "func": "cmd_check",
+      "stable_mapping": "stable read-only consolidated gate run + one recommended next action (chainlink #56, docs/cli-contract.md \u00a77)"
+    },
+    {
+      "name": "doctor",
+      "func": "cmd_doctor",
+      "stable_mapping": "stable capability manifest; owns the text `status` used to print (docs/cli-contract.md \u00a78)"
     }
   ],
   "python_modules": [
@@ -602,6 +612,12 @@
       "role": "helper",
       "disposition": "runtime-required",
       "summary": "Shared XML/SVG text escaping."
+    },
+    {
+      "path": "scripts/project_state.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`."
     }
   ],
   "schemas": [
@@ -993,6 +1009,11 @@
       "path": "tests/test_witness_result.py",
       "kind": "unit",
       "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_project_state.py",
+      "kind": "regression",
+      "disposition": "test-only"
     }
   ],
   "fixtures": [
@@ -1130,15 +1151,15 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 68,
+      "runtime-required": 69,
       "documentation": 12,
       "installed-template": 3,
-      "test-only": 58,
+      "test-only": 59,
       "vendored-runtime": 1
     },
-    "total_entries": 142,
-    "test_count": 45,
-    "registered_cli_command_count": 32
+    "total_entries": 144,
+    "test_count": 46,
+    "registered_cli_command_count": 34
   },
   "documentation_and_templates": [
     {

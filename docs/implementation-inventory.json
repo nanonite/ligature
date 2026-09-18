@@ -370,6 +370,16 @@
       "name": "doctor",
       "func": "cmd_doctor",
       "stable_mapping": "stable capability manifest; owns the text `status` used to print (docs/cli-contract.md \u00a78)"
+    },
+    {
+      "name": "init",
+      "func": "cmd_init",
+      "stable_mapping": "stable; installs mode-correct managed files + versioned skill (chainlink #58, docs/cli-contract.md \u00a78)"
+    },
+    {
+      "name": "migrate",
+      "func": "cmd_migrate",
+      "stable_mapping": "stable; explicit recovery/upgrade for installed managed files (chainlink #58, docs/cli-contract.md \u00a78)"
     }
   ],
   "python_modules": [
@@ -618,6 +628,12 @@
       "role": "helper",
       "disposition": "runtime-required",
       "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`."
+    },
+    {
+      "path": "scripts/ligature_install.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "chainlink #58: safe/idempotent init/upgrade + versioned ownership manifest + three-way managed-file classification behind init/doctor/migrate."
     }
   ],
   "schemas": [
@@ -1014,6 +1030,11 @@
       "path": "tests/test_project_state.py",
       "kind": "regression",
       "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_ligature_install.py",
+      "kind": "regression",
+      "disposition": "test-only"
     }
   ],
   "fixtures": [
@@ -1151,15 +1172,15 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 69,
+      "runtime-required": 70,
       "documentation": 12,
-      "installed-template": 3,
-      "test-only": 59,
+      "installed-template": 4,
+      "test-only": 60,
       "vendored-runtime": 1
     },
-    "total_entries": 144,
-    "test_count": 46,
-    "registered_cli_command_count": 34
+    "total_entries": 147,
+    "test_count": 47,
+    "registered_cli_command_count": 36
   },
   "documentation_and_templates": [
     {
@@ -1186,6 +1207,11 @@
       "path": "docs/trust-and-compatibility-boundaries.md",
       "disposition": "documentation",
       "summary": "Chainlink #55: stable-API/read-only/write-authority boundaries and what's deferred to #56-#59."
+    },
+    {
+      "path": "docs/ligature-skill.template.md",
+      "disposition": "installed-template",
+      "summary": "Versioned Ligature agent skill (chainlink #58); `ligature init` installs it to .codex/skills/ligature/SKILL.md. Its authority region is canonical, hash-pinned in the ownership manifest, and verified by `ligature doctor`."
     }
   ]
 }

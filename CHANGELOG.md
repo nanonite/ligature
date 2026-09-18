@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- Implement safe init, managed skills and repository migrations (#58)
 - Implement project-state query and feedback-loop driver (#56)
 - Pin the no-ligature-start invariant with a test (#62)
 - Reconcile implemented surface and define stable CLI/state contracts (#55)

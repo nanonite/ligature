@@ -265,6 +265,17 @@ def _installation_manifest(workspace: Path) -> dict:
     }
 
 
+def _installation_gate_hashes(workspace: Path) -> dict:
+    """The manifest's recorded gate hashes, read separately from the
+    normalized installation_manifest document -- the frozen v1.0
+    project-state schema has additionalProperties:false on that object, so
+    the extra bookkeeping must not leak into the emitted document."""
+    data = _read_json(workspace.joinpath(*MANIFEST_RELATIVE_PATH))
+    if isinstance(data, dict) and isinstance(data.get("gate_hashes"), dict):
+        return data["gate_hashes"]
+    return {}
+
+
 def _gate_integrity(workspace: Path, descriptor: dict | None, installation: dict) -> dict:
     if descriptor is None:
         return {"state": "unknown", "details": "no project descriptor present"}
@@ -272,8 +283,8 @@ def _gate_integrity(workspace: Path, descriptor: dict | None, installation: dict
     paths = [e.get("path") for e in entries if isinstance(e, dict) and e.get("path")]
     if not paths:
         return {"state": "unknown", "details": "descriptor declares no gate_integrity paths"}
-    recorded = installation.get("gate_hashes") if isinstance(installation, dict) else None
-    if installation.get("state") == "not-initialized" or not isinstance(recorded, dict):
+    recorded = _installation_gate_hashes(workspace)
+    if installation.get("state") == "not-initialized" or not recorded:
         return {
             "state": "unpinned",
             "details": f"{len(paths)} gate path(s) declared; no installation manifest records their hashes",
@@ -281,9 +292,11 @@ def _gate_integrity(workspace: Path, descriptor: dict | None, installation: dict
     drifted = []
     for rel in paths:
         target = workspace / rel
-        if not target.is_file():
+        if rel not in recorded:
+            drifted.append(f"{rel}: no recorded hash")
+        elif not target.is_file():
             drifted.append(f"{rel}: missing")
-        elif recorded.get(rel) not in (None, _sha256_file(target)):
+        elif recorded[rel] != _sha256_file(target):
             drifted.append(f"{rel}: hash drift")
     if drifted:
         return {"state": "drifted", "details": "; ".join(drifted)}

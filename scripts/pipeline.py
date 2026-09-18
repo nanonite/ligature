@@ -468,6 +468,13 @@ from project_state import canonical_json  # noqa: E402
 from project_state import render_check_text  # noqa: E402
 from project_state import render_next_action_text  # noqa: E402
 from project_state import render_status_text  # noqa: E402
+from ligature_install import MANIFEST_RELATIVE_PATH  # noqa: E402
+from ligature_install import InstallError  # noqa: E402
+from ligature_install import default_project_name  # noqa: E402
+from ligature_install import init_workspace  # noqa: E402
+from ligature_install import inspect as inspect_installation  # noqa: E402
+from ligature_install import migrate as migrate_installation  # noqa: E402
+from ligature_install import render_report_text as render_installation_report  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
@@ -1962,7 +1969,58 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
         print(f"  - {stage}: {ref}")
+    print("Installation:")
+    try:
+        report = inspect_installation(args.workspace)
+    except InstallError as e:
+        print(f"  error: {e}")
+        return 1
+    for line in render_installation_report(report).splitlines():
+        print(f"  {line}")
+    if report.status in ("conflict", "drifted", "incompatible"):
+        return 1
     return 0
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """`ligature init --mode greenfield|port`: install the mode-correct
+    descriptor, policy/schema/prompt templates, and the versioned
+    `.codex/skills/ligature/SKILL.md`, atomically and idempotently."""
+    name = args.name or default_project_name(args.workspace)
+    descriptor_rel = _descriptor_relative_to_workspace(args.workspace, args.descriptor)
+    try:
+        report = init_workspace(args.workspace, args.mode, name, descriptor_rel)
+    except InstallError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    sys.stdout.write(render_installation_report(report))
+    print(f"ownership manifest: {MANIFEST_RELATIVE_PATH}")
+    return 1 if report.conflicts else 0
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """Recover from managed-file conflicts and version skew. Read-only
+    unless `--upgrade`, `--prune`, or `--force <path>` is given."""
+    try:
+        report = migrate_installation(
+            args.workspace,
+            upgrade=args.upgrade,
+            prune=args.prune,
+            force=tuple(args.force or ()),
+        )
+    except InstallError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    sys.stdout.write(render_installation_report(report))
+    return 1 if report.status in ("conflict", "drifted", "incompatible") else 0
+
+
+def _descriptor_relative_to_workspace(workspace: Path, descriptor: Path) -> str:
+    resolved = descriptor if descriptor.is_absolute() else (workspace / descriptor)
+    try:
+        return resolved.resolve().relative_to(Path(workspace).resolve()).as_posix()
+    except ValueError as exc:
+        raise PipelineError("--descriptor must point inside --workspace") from exc
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -2227,7 +2285,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate_contact_sheet_p.set_defaults(func=cmd_generate_contact_sheet)
 
-    doctor_p = sub.add_parser("doctor", help="What this CLI can and can't do yet (capability manifest)")
+    init_p = sub.add_parser("init", help="Install Ligature-owned files into a target repo (chainlink #58)")
+    init_p.add_argument("--mode", choices=["greenfield", "port"], required=True)
+    init_p.add_argument("--name", help="project name (defaults to the workspace directory name)")
+    init_p.set_defaults(func=cmd_init)
+
+    migrate_p = sub.add_parser("migrate", help="Recover managed-file conflicts and version skew (chainlink #58)")
+    migrate_p.add_argument("--upgrade", action="store_true", help="apply safe managed-file upgrades")
+    migrate_p.add_argument("--prune", action="store_true", help="remove obsolete unmodified managed files")
+    migrate_p.add_argument("--force", action="append", default=[], metavar="PATH", help="explicitly overwrite one managed file")
+    migrate_p.set_defaults(func=cmd_migrate)
+
+    doctor_p = sub.add_parser("doctor", help="Capability manifest + installed-file/version diagnostics")
     doctor_p.set_defaults(func=cmd_doctor)
 
     status_p = sub.add_parser("status", help="Project state: artifact lifecycles, obligations, clusters, integrity (chainlink #56)")

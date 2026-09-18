@@ -2,14 +2,14 @@
 
 Chainlink #55. This is the stable public surface `ligature` (the future
 packaged binary, #57) and `python3 scripts/pipeline.py` (today's source
-checkout entrypoint) both commit to. It does **not** implement `init`,
-`doctor`, `version`, `migrate`, or the real `status`/`check` — those bodies
-are #58, #57, #57, #58, and #56 respectively. This document specifies the
-grammar and the mapping every one of today's 32 registered flat
-`pipeline.py` subcommands (`scripts/pipeline.py:build_parser()`,
+checkout entrypoint) both commit to. The real `status`/`check` bodies were
+implemented by #56; `init`, `doctor`'s install diagnostics, and `migrate`
+by #58. `version` (and `doctor`'s binary attestation) remain #57. This
+document specifies the grammar and the mapping every registered
+`pipeline.py` subcommand (`scripts/pipeline.py:build_parser()`,
 cross-checked by `tests/test_inventory_drift.py` and
-`tests/test_cli_contract.py`) resolves to, so #56/#57/#58 implement against
-a fixed target instead of inventing one mid-build.
+`tests/test_cli_contract.py`) resolves to, so the remaining bodies are
+implemented against a fixed target instead of inventing one mid-build.
 
 Module and function names (`scripts/*.py`, `cmd_*`) are explicitly **not**
 frozen by this contract — only the strings in the tables below are public
@@ -30,7 +30,7 @@ ligature validate <artifact-kind> <target>   # deterministic, per-artifact
 ligature gate <gate-id> [args...]            # deterministic, cross-artifact
 ligature draft <artifact-kind> <target>      # Stage 0/3, one-shot LLM
 ligature approve <operation> <target...>     # human checkpoint
-ligature migrate                             # #59 (schema/skill migration)
+ligature migrate [--upgrade|--prune|--force <path>]  # #58 (installed-file recovery); #59 owns assumption-registry migration
 ligature report <report-id>                  # extension verb, see §3
 ```
 
@@ -252,6 +252,16 @@ to `doctor`, which now owns it (alongside the install/version diagnostics
 owed: `status` means project state unconditionally, and `doctor` means the
 capability manifest unconditionally.
 
+**Implemented by #58.** `doctor` also owns the install/version
+diagnostics the resolution above anticipated. It reads the ownership
+manifest at `ci/manifest/installation.json`, classifies every installed
+file (`unchanged`/`upgrade`/`conflict`/`missing`/`obsolete`/`user-owned`),
+and — because the `ligature` skill's authority section is canonical,
+hash-pinned product content — recomputes that authority region's hash and
+verifies it. A modified managed file (including an edited authority
+region) makes `doctor` exit non-zero; it never auto-repairs. `init`
+installs, `migrate` is the explicit, human-invoked recovery path.
+
 ## 9. Compatibility alias policy
 
 Every legacy flat command not listed in §7 (internal) becomes a
@@ -271,7 +281,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 34/34)
+## 10. Legacy command → disposition (complete, 36/36)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -313,10 +323,12 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `render-witness` | internal operation `check` may recommend, never runs (§7) |
 | `status` | stable project-state query (#56, §8) — reserved unconditionally, not covered by §9's floor |
 | `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
-| `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print (§8) |
+| `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print and verifies the skill authority hash (§8, #58) |
+| `init` | stable; installs mode-correct managed files + versioned skill into a target repo (§8, #58) |
+| `migrate` | stable; explicit recovery/upgrade for installed managed files (§8, #58) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 34 has a nested home, an internal-operation classification,
+every one of the 36 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

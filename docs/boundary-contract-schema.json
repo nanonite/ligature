@@ -51,14 +51,27 @@
       }
     },
     "assumption_ref": {
-      "type": "object",
-      "required": ["boundary_id", "tracking_issue", "assumption_hash"],
-      "additionalProperties": false,
-      "properties": {
-        "boundary_id": { "type": "string" },
-        "tracking_issue": { "type": "string" },
-        "assumption_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
-      }
+      "description": "Chainlink #59 phase B dual-resolution. A reference is EITHER the legacy composite {boundary_id, tracking_issue, assumption_hash} (still fully valid and authoritative; using it now emits a non-blocking deprecation finding) OR a registry reference {assumption_id} that resolves against docs/assumption-registry-schema.json. This is an additive, backward-compatible alternative -- the legacy branch is unchanged -- so the artifact schema_version stays 1.0; removing the legacy branch is phase D's declared breaking version (scripts/assumption_registry.py:ASSUMPTION_REF_LEGACY_REMOVAL_VERSION).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["boundary_id", "tracking_issue", "assumption_hash"],
+          "additionalProperties": false,
+          "properties": {
+            "boundary_id": { "type": "string" },
+            "tracking_issue": { "type": "string" },
+            "assumption_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["assumption_id"],
+          "additionalProperties": false,
+          "properties": {
+            "assumption_id": { "type": "string", "pattern": "^ASM-[a-z0-9][a-z0-9-]*$" }
+          }
+        }
+      ]
     },
     "review": {
       "type": "object",

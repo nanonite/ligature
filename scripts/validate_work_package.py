@@ -519,6 +519,12 @@ def check_trusted_assumptions(
     findings: list[Finding] = []
     for entry in assumptions:
         ref = entry["assumption_ref"]
+        # Chainlink #59 phase B: a registry-form reference
+        # ({"assumption_id": "ASM-..."}) is resolved against
+        # docs/assumption-registry-schema.json by the dedicated G21 gate in
+        # scripts/assumption_registry.py, not against a boundary contract.
+        if "assumption_id" in ref:
+            continue
         boundary_id = ref["boundary_id"]
         matches = boundaries_by_id.get(boundary_id, [])
 
@@ -587,7 +593,8 @@ def check_witness_mitigation_risk_tier(path: Path, data: dict) -> list[Finding]:
         if "witness" not in kinds:
             continue
         risk = entry["risk"]
-        boundary_id = entry["assumption_ref"]["boundary_id"]
+        ref = entry["assumption_ref"]
+        boundary_id = ref.get("boundary_id") or ref.get("assumption_id") or "(unknown)"
         if risk != "low":
             findings.append(
                 Finding(

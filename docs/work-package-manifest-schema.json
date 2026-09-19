@@ -154,15 +154,27 @@
             "additionalProperties": false,
             "properties": {
               "assumption_ref": {
-                "type": "object",
-                "required": ["boundary_id", "tracking_issue", "assumption_hash"],
-                "additionalProperties": false,
-                "description": "Same shape as docs/boundary-contract-schema.json's assumption_ref -- resolved against a real boundary contract's own assumptions[] entry by scripts/validate_work_package.py, not just structurally validated here.",
-                "properties": {
-                  "boundary_id": { "type": "string" },
-                  "tracking_issue": { "type": "string" },
-                  "assumption_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
-                }
+                "description": "Same dual-resolution shape as docs/boundary-contract-schema.json's assumption_ref (chainlink #59 phase B). A legacy composite is resolved against a real boundary contract's assumptions[] entry by scripts/validate_work_package.py; a registry reference {assumption_id} is resolved against docs/assumption-registry-schema.json by scripts/assumption_registry.py's gate. Using the legacy composite emits a non-blocking deprecation finding.",
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": ["boundary_id", "tracking_issue", "assumption_hash"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "boundary_id": { "type": "string" },
+                      "tracking_issue": { "type": "string" },
+                      "assumption_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": ["assumption_id"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "assumption_id": { "type": "string", "pattern": "^ASM-[a-z0-9][a-z0-9-]*$" }
+                    }
+                  }
+                ]
               },
               "risk": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
               "mitigations": {

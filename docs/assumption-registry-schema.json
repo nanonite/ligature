@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/assumption-registry-schema.json",
+  "title": "Assumption registry — v1.0",
+  "description": "Chainlink #59, plan.md §8.4. A governed registry of assumptions, each with a STABLE assumption_id, the canonical assumption TEXT (not just a hash), a content hash RECOMPUTED from that stored text by scripts/assumption_registry.py:canonical_assumption_hash(), a tracking_issue, and provenance/history. This supersedes neither docs/boundary-contract-schema.json's composite assumption_ref nor the cross-boundary collision detector — those remain valid (phase A) and are dual-resolved with registry IDs (phase B); the composite form is only removed in a declared breaking version (phase D), which this schema's own schema_version participates in. Registry documents live under a workspace's specs/_assumptions/*.json.",
+  "type": "object",
+  "required": ["schema_version", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "The reference-resolution era this registry declares. Major 1.x = dual-resolution (registry ID or legacy composite both resolve). A future 2.0 declares legacy composite support removed (phase D); scripts/assumption_registry.py refuses an unknown major rather than reinterpreting it."
+    },
+    "entries": {
+      "type": "array",
+      "description": "One entry per canonical assumption. Two entries sharing an assumption_id anywhere in a workspace make every reference to that id ambiguous, which the registry gate reports as a hard error.",
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": ["assumption_id", "canonical_text", "content_hash", "tracking_issue", "provenance"],
+      "additionalProperties": false,
+      "properties": {
+        "assumption_id": {
+          "type": "string",
+          "pattern": "^ASM-[a-z0-9][a-z0-9-]*$",
+          "description": "The stable identity, chosen once and never recycled. Survives boundary/method renames and canonical-text edits, unlike the composite (boundary_id, tracking_issue, assumption_hash) which changes whenever any component does."
+        },
+        "canonical_text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The assumption's actual normative content. A reference resolving to an id resolves to THIS text; the hash is derived from it, never the reverse."
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "RECOMPUTED from canonical_text by scripts/assumption_registry.py:canonical_assumption_hash(). Unlike docs/boundary-contract-schema.json's bare declared assumption_hash, the gate recomputes this at load time and fails on disagreement, so it is a real content binding, not a typed string."
+        },
+        "tracking_issue": {
+          "type": "string",
+          "pattern": "^[a-z]+:[A-Za-z0-9_.-]+$",
+          "description": "Where the acceptance/risk decision for this assumption is tracked, e.g. chainlink:713."
+        },
+        "boundary_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional declared homes for this assumption. Informational: the gate's composite-ref resolution matches on (tracking_issue, assumption_hash), not on this list, so a boundary rename does not by itself break a reference once the id is used."
+        },
+        "provenance": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Append-only history, oldest first: who added or changed the canonical text and when. A canonical_text edit without a matching provenance append (and a re-signed content_hash) is reported as hash-disagreeing, not silently accepted.",
+          "items": {
+            "type": "object",
+            "required": ["action", "actor", "at"],
+            "additionalProperties": false,
+            "properties": {
+              "action": { "type": "string", "enum": ["added", "changed"] },
+              "actor": { "type": "string", "minLength": 1 },
+              "at": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+              "note": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

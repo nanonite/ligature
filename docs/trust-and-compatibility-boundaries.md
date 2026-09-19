@@ -155,6 +155,15 @@ that is #59's own scope. Where `project-state.schema.json` or
 assumption identity), #59 extends these schemas with its own minor version
 bump rather than this task guessing its shape now.
 
+**Implemented by #59.** `docs/assumption-registry-schema.json` (v1.0) and
+`scripts/assumption_registry.py` add the registry, phase-B dual-resolution
+with a non-blocking deprecation finding for the legacy composite, phase-C
+`ligature migrate --assumptions` reference rewriting (generated work-package
+manifests only; reviewed boundary content is never auto-rewritten), and the
+phase-D version mechanism (`ASSUMPTION_REF_LEGACY_REMOVAL_VERSION`).
+`status`/`check` themselves still need no assumption field: the new G21
+gate runs in `validate` and does not change either output schema.
+
 ## 12. Ambiguities explicitly deferred
 
 - Exact `required_assurance`/`achieved_assurance` dimension vocabulary

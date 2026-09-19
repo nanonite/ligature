@@ -30,7 +30,8 @@ ligature validate <artifact-kind> <target>   # deterministic, per-artifact
 ligature gate <gate-id> [args...]            # deterministic, cross-artifact
 ligature draft <artifact-kind> <target>      # Stage 0/3, one-shot LLM
 ligature approve <operation> <target...>     # human checkpoint
-ligature migrate [--upgrade|--prune|--force <path>]  # #58 (installed-file recovery); #59 owns assumption-registry migration
+ligature migrate [--upgrade|--prune|--force <path>]  # #58 installed-file recovery
+ligature migrate --assumptions [--apply --reviewer <name>]  # #59 phase-C reference migration
 ligature report <report-id>                  # extension verb, see §3
 ```
 
@@ -325,7 +326,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
 | `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print and verifies the skill authority hash (§8, #58) |
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo (§8, #58) |
-| `migrate` | stable; explicit recovery/upgrade for installed managed files (§8, #58) |
+| `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C) |
 
 No command from today's registered set is deliberately unsupported —
 every one of the 36 has a nested home, an internal-operation classification,

@@ -475,6 +475,10 @@ from ligature_install import init_workspace  # noqa: E402
 from ligature_install import inspect as inspect_installation  # noqa: E402
 from ligature_install import migrate as migrate_installation  # noqa: E402
 from ligature_install import render_report_text as render_installation_report  # noqa: E402
+from assumption_registry import RegistryError  # noqa: E402
+from assumption_registry import check_assumption_registry  # noqa: E402
+from assumption_registry import migrate_assumption_refs  # noqa: E402
+from assumption_registry import render_migration_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPTS = ROOT / "prompts"
@@ -626,6 +630,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
     # uniqueness check is scoped to one boundary file -- this is the
     # cross-crate half, over every genuinely valid boundary discovered above.
     findings_total.extend(check_assumption_identity_collisions(valid_boundaries))
+
+    # chainlink #59: the canonical assumption registry gate (G21) -- missing,
+    # ambiguous, hash-disagreeing, dangling references; legacy composites get
+    # a non-blocking deprecation once a registry exists. No registry present
+    # is phase A's old-workspace-only state and adds nothing.
+    findings_total.extend(check_assumption_registry(args.workspace, boundaries=valid_boundaries))
 
     errors = [f for f in findings_total if f.severity == "error"]
     infos = [f for f in findings_total if f.severity == "info"]
@@ -1999,8 +2009,22 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
-    """Recover from managed-file conflicts and version skew. Read-only
-    unless `--upgrade`, `--prune`, or `--force <path>` is given."""
+    """Recover from managed-file conflicts and version skew (chainlink
+    #58). Read-only unless `--upgrade`, `--prune`, or `--force <path>` is
+    given. With `--assumptions`, instead migrates legacy composite
+    assumption_refs to registry IDs (chainlink #59 phase C): dry-run by
+    default, `--apply --reviewer <name>` to rewrite generated work-package
+    manifests only -- never a reviewed boundary contract's own content."""
+    if getattr(args, "assumptions", False):
+        try:
+            migration = migrate_assumption_refs(
+                args.workspace, apply=args.apply, reviewer=args.reviewer
+            )
+        except RegistryError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        sys.stdout.write(render_migration_text(migration))
+        return 1 if migration.unresolved else 0
     try:
         report = migrate_installation(
             args.workspace,
@@ -2294,6 +2318,9 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_p.add_argument("--upgrade", action="store_true", help="apply safe managed-file upgrades")
     migrate_p.add_argument("--prune", action="store_true", help="remove obsolete unmodified managed files")
     migrate_p.add_argument("--force", action="append", default=[], metavar="PATH", help="explicitly overwrite one managed file")
+    migrate_p.add_argument("--assumptions", action="store_true", help="migrate legacy composite assumption_refs to registry IDs (chainlink #59 phase C)")
+    migrate_p.add_argument("--apply", action="store_true", help="with --assumptions, write the rewrites (requires --reviewer)")
+    migrate_p.add_argument("--reviewer", help="human identity triggering an --apply rewrite")
     migrate_p.set_defaults(func=cmd_migrate)
 
     doctor_p = sub.add_parser("doctor", help="Capability manifest + installed-file/version diagnostics")

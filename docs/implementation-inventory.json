@@ -198,6 +198,14 @@
       "implemented": true,
       "module": "scripts/gate_g14.py",
       "cli_command": "gate-g14"
+    },
+    {
+      "gate_id": "G21",
+      "title": "Assumption-registry reference integrity (missing/ambiguous/hash-disagreeing/dangling)",
+      "stage": "Stage 4 (workspace-level)",
+      "implemented": true,
+      "module": "scripts/assumption_registry.py",
+      "cli_command": "validate"
     }
   ],
   "cli_commands": [
@@ -634,6 +642,12 @@
       "role": "helper",
       "disposition": "runtime-required",
       "summary": "chainlink #58: safe/idempotent init/upgrade + versioned ownership manifest + three-way managed-file classification behind init/doctor/migrate."
+    },
+    {
+      "path": "scripts/assumption_registry.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "Chainlink #59: canonical assumption registry loader, G21 reference gate (missing/ambiguous/hash-disagreeing/dangling), phase-B deprecation, phase-C reference migration, and the phase-D version mechanism."
     }
   ],
   "schemas": [
@@ -744,6 +758,11 @@
       "path": "schemas/consolidated-check.schema.json",
       "disposition": "runtime-required",
       "summary": "Chainlink #55/#56: `ligature check --json` output contract, not yet implemented (that's #56)."
+    },
+    {
+      "path": "docs/assumption-registry-schema.json",
+      "disposition": "runtime-required",
+      "summary": "Chainlink #59 phase A: governed assumption registry (stable id, canonical text, recomputed content hash, tracking_issue, provenance), read by scripts/assumption_registry.py."
     }
   ],
   "schema_examples": [
@@ -1035,6 +1054,11 @@
       "path": "tests/test_ligature_install.py",
       "kind": "regression",
       "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_assumption_registry.py",
+      "kind": "regression",
+      "disposition": "test-only"
     }
   ],
   "fixtures": [
@@ -1172,14 +1196,14 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 70,
+      "runtime-required": 72,
       "documentation": 12,
       "installed-template": 4,
-      "test-only": 60,
+      "test-only": 61,
       "vendored-runtime": 1
     },
-    "total_entries": 147,
-    "test_count": 47,
+    "total_entries": 150,
+    "test_count": 48,
     "registered_cli_command_count": 36
   },
   "documentation_and_templates": [

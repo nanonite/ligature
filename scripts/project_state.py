@@ -768,6 +768,21 @@ def _run_standalone_validators(workspace: Path) -> list[NormalizedFinding]:
             findings.append(
                 _normalize_finding(finding, gate_id, f"scripts/{module_name}.py:validate")
             )
+    # chainlink #59's G21 gate is workspace-level, not per-artifact, so it is
+    # not one of the module `validate()` entry points above; surface it here
+    # too so `check` (the loop driver) reports missing/ambiguous/
+    # hash-disagreeing/dangling assumption-registry references.
+    try:
+        import assumption_registry
+
+        for finding in assumption_registry.check_assumption_registry(workspace):
+            findings.append(
+                _normalize_finding(
+                    finding, finding.gate, "scripts/assumption_registry.py:check_assumption_registry"
+                )
+            )
+    except Exception:
+        pass
     return findings
 
 

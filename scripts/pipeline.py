@@ -351,6 +351,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import adjudicator  # noqa: E402
+import resources  # noqa: E402
 from extract_c_static import ExtractionError  # noqa: E402
 from extract_c_static import extract_crate as extract_c_static_crate  # noqa: E402
 from gate_g14 import gate_workspace as gate_g14_workspace  # noqa: E402
@@ -471,6 +473,7 @@ from project_state import render_status_text  # noqa: E402
 from ligature_install import MANIFEST_RELATIVE_PATH  # noqa: E402
 from ligature_install import InstallError  # noqa: E402
 from ligature_install import default_project_name  # noqa: E402
+from ligature_install import inspect_adjudicator_pin  # noqa: E402
 from ligature_install import init_workspace  # noqa: E402
 from ligature_install import inspect as inspect_installation  # noqa: E402
 from ligature_install import migrate as migrate_installation  # noqa: E402
@@ -480,7 +483,7 @@ from assumption_registry import check_assumption_registry  # noqa: E402
 from assumption_registry import migrate_assumption_refs  # noqa: E402
 from assumption_registry import render_migration_text  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = resources.resource_root()
 PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
@@ -1929,6 +1932,27 @@ def cmd_approve_exemption_pair(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_version(args: argparse.Namespace) -> int:
+    """`ligature version [--verify]` (docs/cli-contract.md §1, §10):
+    report the product version and the executable's own build identity.
+    With `--verify`, recompute the packaged content hash, check it against
+    the embedded attestation, and check the interpreter/platform contract --
+    failing closed (non-zero) on an unattested or mismatched adjudicator."""
+    info = adjudicator.current_identity()
+    sys.stdout.write(adjudicator.render_identity_text(info, show_schemas=args.verify))
+    if not args.verify:
+        return 0
+    if not adjudicator.identity_ok(info):
+        print(
+            "FAIL: the executable could not verify its own attested identity "
+            "(see the errors above)",
+            file=sys.stderr,
+        )
+        return 1
+    print("OK: executable identity verified against its embedded build attestation")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """The capability manifest (docs/cli-contract.md §8). This used to be
     `status`'s body; it moved here when #56 rewired `status` to the real
@@ -1987,6 +2011,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return 1
     for line in render_installation_report(report).splitlines():
         print(f"  {line}")
+    print("Executable attestation:")
+    info = adjudicator.current_identity()
+    for line in adjudicator.render_identity_text(info, show_schemas=True).splitlines():
+        print(f"  {line}")
+    pin = inspect_adjudicator_pin(args.workspace)
+    detail = f" -- {pin['details']}" if pin.get("details") else ""
+    print(f"  adjudicator pin: {pin['state']}{detail}")
+    if info["kind"] == "zipapp" and not adjudicator.identity_ok(info):
+        return 1
+    if pin["state"] in ("mismatch", "unattested"):
+        return 1
     if report.status in ("conflict", "drifted", "incompatible"):
         return 1
     return 0
@@ -2325,6 +2360,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_p = sub.add_parser("doctor", help="Capability manifest + installed-file/version diagnostics")
     doctor_p.set_defaults(func=cmd_doctor)
+
+    version_p = sub.add_parser(
+        "version",
+        help="Report the product version and executable build identity (chainlink #57)",
+    )
+    version_p.add_argument(
+        "--verify",
+        action="store_true",
+        help="recompute and verify the packaged build's own content hash, schemas and interpreter contract",
+    )
+    version_p.set_defaults(func=cmd_version)
 
     status_p = sub.add_parser("status", help="Project state: artifact lifecycles, obligations, clusters, integrity (chainlink #56)")
     status_p.add_argument("--json", action="store_true", help="emit schemas/project-state.schema.json JSON")

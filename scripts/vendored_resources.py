@@ -25,7 +25,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+import resources
+
+ROOT = resources.resource_root()
 
 # name -> workspace-relative path. THE authoritative declaration of which
 # vendor/ files are required at runtime. Add an entry here -- and only

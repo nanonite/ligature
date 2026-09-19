@@ -47,12 +47,13 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "bridge-schema.json"
+SCHEMA_PATH = resources.resource_path("docs", "bridge-schema.json")
 
 
 @dataclass

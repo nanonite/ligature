@@ -103,6 +103,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from project_descriptor import interaction_dir_for  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -111,7 +112,7 @@ from validate_gold_set import edge_label  # noqa: E402
 from validate_gold_set import load_gold_sets  # noqa: E402
 from validate_interaction import load_interactions_by_id  # noqa: E402
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+DOCS = resources.resource_path("docs")
 MEASUREMENT_SCHEMA_PATH = DOCS / "gold-set-measurement-schema.json"
 
 MEASUREMENT_DIR = ("ci", "results", "gold_set")

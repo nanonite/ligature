@@ -55,10 +55,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from atomic_write import write_atomically  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = resources.resource_root()
 SCHEMA_PATH = ROOT / "docs" / "assumption-registry-schema.json"
 
 REGISTRY_DIR_PARTS = ("specs", "_assumptions")

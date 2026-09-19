@@ -1,8 +1,8 @@
 {
   "inventory_version": "1.0",
   "generated_from": {
-    "commit": "98e0f9d",
-    "recorded_at": "2026-09-10"
+    "commit": "0904234",
+    "recorded_at": "2026-09-18"
   },
   "milestones": [
     {
@@ -388,6 +388,11 @@
       "name": "migrate",
       "func": "cmd_migrate",
       "stable_mapping": "stable; explicit recovery/upgrade for installed managed files (chainlink #58, docs/cli-contract.md \u00a78)"
+    },
+    {
+      "name": "version",
+      "func": "cmd_version",
+      "stable_mapping": "stable; reports product version + executable build attestation, `--verify` self-verifies (chainlink #57, docs/cli-contract.md \u00a71/\u00a78)"
     }
   ],
   "python_modules": [
@@ -648,6 +653,24 @@
       "role": "helper",
       "disposition": "runtime-required",
       "summary": "Chainlink #59: canonical assumption registry loader, G21 reference gate (missing/ambiguous/hash-disagreeing/dangling), phase-B deprecation, phase-C reference migration, and the phase-D version mechanism."
+    },
+    {
+      "path": "scripts/resources.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "Cwd-independent packaged-resource discovery (#57): returns the source root in a checkout, or extracts the bundled ligature_data package via importlib.resources inside a zipapp."
+    },
+    {
+      "path": "scripts/adjudicator.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "The executable's own identity (#57): content/build hash over the zipapp bundle, product version, bundled schema set, required Python/platform, and self-verification used by `version --verify`, `doctor`, and gate_integrity."
+    },
+    {
+      "path": "scripts/build_zipapp.py",
+      "role": "generator",
+      "disposition": "excluded",
+      "summary": "Release build tool (#57): derives the bundle from this inventory, writes a deterministic attested zipapp plus SHA256SUMS/PROVENANCE/NOTICE/THIRD_PARTY_NOTICES. Source-only; never itself bundled into the artifact."
     }
   ],
   "schemas": [
@@ -1059,6 +1082,16 @@
       "path": "tests/test_assumption_registry.py",
       "kind": "regression",
       "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_packaging_attestation.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_zipapp_out_of_checkout.py",
+      "kind": "regression",
+      "disposition": "test-only"
     }
   ],
   "fixtures": [
@@ -1133,7 +1166,7 @@
       "path": "vendor/concept-to-code/schemas/spec.schema.json",
       "disposition": "vendored-runtime",
       "required_at_runtime": true,
-      "reason": "Registered in scripts/vendored_resources.py:VENDORED_RESOURCES (the sole authoritative declaration, chainlink #55 round 3) and read via vendored_resource_path() by scripts/select_pilot_cluster.py to validate concept specs during pilot-cluster ranking. The only vendor/ file any scripts/*.py actually needs at runtime -- everything else under vendor/ is copied-not-imported logic or prose reference. #57 must replace vendored_resource_path()'s own Path(__file__)-relative body with a packaged-resource abstraction before a distributed binary can run outside a ligature-workspace checkout; #57's own issue text names this exact gap. Call sites do not change when #57 lands, only this one function's body does."
+      "reason": "Registered in scripts/vendored_resources.py:VENDORED_RESOURCES (the sole authoritative declaration, chainlink #55 round 3) and read via vendored_resource_path() by scripts/select_pilot_cluster.py to validate concept specs during pilot-cluster ranking. The only vendor/ file any scripts/*.py actually needs at runtime -- everything else under vendor/ is copied-not-imported logic or prose reference. #57 replaced vendored_resource_path()'s own Path(__file__)-relative body with scripts/resources.py, which uses importlib.resources from a zipapp, so a distributed binary resolves this asset outside a ligature-workspace checkout. Call sites did not change, only that one function's body."
     },
     {
       "path": "vendor/concept-to-code/emit_stubs.py",
@@ -1192,19 +1225,28 @@
     {
       "pattern": "any project-descriptor.json / policy doc / .env / credential file a target repository authors after `ligature init`",
       "reason": "User-owned content belonging to a CONSUMER of this pipeline, never to ligature-workspace's own release artifact -- the #58 ownership-manifest split (owned vs. user-owned) applies here even though #58 itself is out of scope for #55."
+    },
+    {
+      "pattern": "dist/",
+      "reason": "Built release artifacts (zipapp, checksums, PROVENANCE, notices) are build outputs, never committed source."
+    },
+    {
+      "pattern": "*.pyz",
+      "reason": "Built zipapp binaries are outputs, regenerated per build, never committed source."
     }
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 72,
-      "documentation": 12,
+      "documentation": 13,
+      "excluded": 1,
       "installed-template": 4,
-      "test-only": 61,
+      "runtime-required": 74,
+      "test-only": 63,
       "vendored-runtime": 1
     },
-    "total_entries": 150,
-    "test_count": 48,
-    "registered_cli_command_count": 36
+    "total_entries": 156,
+    "test_count": 50,
+    "registered_cli_command_count": 37
   },
   "documentation_and_templates": [
     {
@@ -1236,6 +1278,11 @@
       "path": "docs/ligature-skill.template.md",
       "disposition": "installed-template",
       "summary": "Versioned Ligature agent skill (chainlink #58); `ligature init` installs it to .codex/skills/ligature/SKILL.md. Its authority region is canonical, hash-pinned in the ownership manifest, and verified by `ligature doctor`."
+    },
+    {
+      "path": "docs/packaging.md",
+      "disposition": "documentation",
+      "summary": "Runtime contract (zipapp + system Python), bundle-manifest derivation, the executable-attestation/gate_integrity trust model, and the release/provenance outputs (#57)."
     }
   ]
 }

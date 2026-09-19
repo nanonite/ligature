@@ -72,6 +72,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from gate_r1_g16 import unresolved_at_or_above_medium  # noqa: E402
 from project_descriptor import boundary_dir_for, bridge_dir_for  # noqa: E402
 from satisfies import satisfies  # noqa: E402
@@ -86,7 +87,7 @@ from validate_closure import closure_dir_for  # noqa: E402
 from validate_closure import load_cluster_artifacts_with_invalid  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+DOCS = resources.resource_path("docs")
 ASSURANCE_REPORT_SCHEMA_PATH = DOCS / "assurance-report-schema.json"
 
 MANIFEST_DIR = ("ci", "manifest")

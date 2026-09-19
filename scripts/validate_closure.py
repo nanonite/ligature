@@ -49,11 +49,12 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+DOCS = resources.resource_path("docs")
 PROFILE_SCHEMA_PATH = DOCS / "closure-profile-schema.json"
 DEGRADATION_SCHEMA_PATH = DOCS / "degradation-record-schema.json"
 CANONICAL_DIR_NAME = "_closure"

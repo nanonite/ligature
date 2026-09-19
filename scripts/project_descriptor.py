@@ -14,9 +14,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
-DESCRIPTOR_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "project-descriptor.schema.json"
+DESCRIPTOR_SCHEMA_PATH = resources.resource_path("schemas", "project-descriptor.schema.json")
 
 
 class ProjectDescriptorError(Exception):

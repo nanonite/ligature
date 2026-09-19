@@ -69,9 +69,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
-ACHIEVED_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "achieved-assurance-schema.json"
+ACHIEVED_SCHEMA_PATH = resources.resource_path("docs", "achieved-assurance-schema.json")
 
 
 def load_achieved_schema() -> dict:

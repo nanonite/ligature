@@ -108,6 +108,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
@@ -116,7 +117,7 @@ from validate_boundary_naming import check_file as check_boundary_naming  # noqa
 from validate_boundary_naming import find_boundary_files  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "work-package-manifest-schema.json"
+SCHEMA_PATH = resources.resource_path("docs", "work-package-manifest-schema.json")
 
 
 @dataclass

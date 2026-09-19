@@ -113,6 +113,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from atomic_write import write_atomically  # noqa: E402
 from gate_g14 import load_assurance_report_validator  # noqa: E402
 from gate_g14 import load_manifests  # noqa: E402
@@ -127,7 +128,7 @@ from gate_g20 import check_must_vary  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from validate_closure import load_cluster_artifacts  # noqa: E402
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+DOCS = resources.resource_path("docs")
 SCHEMA_PATH = DOCS / "feature-ledger-schema.json"
 LEDGER_RELATIVE_PATH = ("ci", "results", "feature_ledger.json")
 

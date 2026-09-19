@@ -4,7 +4,7 @@ Chainlink #55. This is the stable public surface `ligature` (the future
 packaged binary, #57) and `python3 scripts/pipeline.py` (today's source
 checkout entrypoint) both commit to. The real `status`/`check` bodies were
 implemented by #56; `init`, `doctor`'s install diagnostics, and `migrate`
-by #58. `version` (and `doctor`'s binary attestation) remain #57. This
+by #58; `version` and `doctor`'s binary attestation by #57. This
 document specifies the grammar and the mapping every registered
 `pipeline.py` subcommand (`scripts/pipeline.py:build_parser()`,
 cross-checked by `tests/test_inventory_drift.py` and
@@ -282,7 +282,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 36/36)
+## 10. Legacy command → disposition (complete, 37/37)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -324,12 +324,13 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `render-witness` | internal operation `check` may recommend, never runs (§7) |
 | `status` | stable project-state query (#56, §8) — reserved unconditionally, not covered by §9's floor |
 | `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
-| `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print and verifies the skill authority hash (§8, #58) |
+| `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print, verifies the skill authority hash (§8, #58), and reports/verifies the executable's own build attestation (#57) |
+| `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation (§1, §8, #57) |
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo (§8, #58) |
 | `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 36 has a nested home, an internal-operation classification,
+every one of the 37 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

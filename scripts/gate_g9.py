@@ -72,6 +72,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from bridge_harness import CompileError  # noqa: E402
 from bridge_harness import EVIDENCE_KIND_BY_VERIFIER  # noqa: E402
 from bridge_harness import Harness  # noqa: E402
@@ -83,7 +84,7 @@ from scan_summary import pass_line  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from validate_closure import load_cluster_artifacts  # noqa: E402
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+DOCS = resources.resource_path("docs")
 BRIDGE_CHECK_SCHEMA_PATH = DOCS / "bridge-check-schema.json"
 
 HARNESS_DIR = ("ci", "harness")

@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import adjudicator  # noqa: E402
+import resources  # noqa: E402
 
 import exit_codes  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
@@ -49,13 +51,13 @@ from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 
-PRODUCT_NAME = "ligature"
-# The running product's own version. #57 owns real release versioning;
-# until a packaged build exists the honest value is the same
-# "0.0.0-unreleased" the empty project-state example uses.
-PRODUCT_VERSION = "0.0.0-unreleased"
+# Re-exported from the adjudicator, which is the single source of the
+# running product's identity (#57). Callers that imported these names from
+# project_state keep working.
+PRODUCT_NAME = adjudicator.PRODUCT_NAME
+PRODUCT_VERSION = adjudicator.PRODUCT_VERSION
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = resources.resource_root()
 SCHEMAS = ROOT / "schemas"
 
 # The schema versions this build knows how to emit/consume, used to
@@ -291,6 +293,26 @@ def _gate_integrity(workspace: Path, descriptor: dict | None, installation: dict
         }
     drifted = []
     for rel in paths:
+        if rel == adjudicator.ADJUDICATOR_PIN_TOKEN:
+            recorded_adj = recorded.get(rel)
+            running_hash = adjudicator.current_identity().get("content_hash")
+            if recorded_adj is None:
+                drifted.append(f"{rel}: no recorded identity")
+            elif recorded_adj == adjudicator.UNATTESTED:
+                if running_hash is not None:
+                    drifted.append(
+                        f"{rel}: workspace was initialized by an unattested source checkout, "
+                        "but the running executable is a packaged build"
+                    )
+            elif running_hash is None:
+                drifted.append(
+                    f"{rel}: workspace pins a packaged executable, but this is an unattested source checkout"
+                )
+            elif running_hash != recorded_adj:
+                drifted.append(
+                    f"{rel}: content hash drift (pinned {recorded_adj}, running {running_hash})"
+                )
+            continue
         target = workspace / rel
         if rel not in recorded:
             drifted.append(f"{rel}: no recorded hash")
@@ -1090,13 +1112,18 @@ def build_project_state(workspace: Path, descriptor_path: Path) -> dict:
                 },
             )
     change_requests = _change_request_stubs(analysis)
+    identity = adjudicator.current_identity()
 
     return {
         "schema_version": "1.0",
         "product": {"name": PRODUCT_NAME, "version": PRODUCT_VERSION},
         "installation_manifest": analysis.installation,
         "descriptor": descriptor_doc,
-        "binary_identity": {"verified": "unknown", "content_hash": None, "version": PRODUCT_VERSION},
+        "binary_identity": {
+            "verified": identity["verified"],
+            "content_hash": identity["content_hash"],
+            "version": PRODUCT_VERSION,
+        },
         "artifacts": analysis.artifacts,
         "obligations": analysis.obligations,
         "clusters": analysis.clusters,

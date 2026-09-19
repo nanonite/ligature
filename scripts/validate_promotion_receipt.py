@@ -75,6 +75,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from gate_g18 import collect_declared_features  # noqa: E402
 from gate_g18 import collect_valid_witnesses  # noqa: E402
 from gate_g19 import collect_valid_witness_entries  # noqa: E402
@@ -88,7 +89,7 @@ from validate_witness import validate_data as validate_witness_data  # noqa: E40
 from validate_witness import witness_dir_for  # noqa: E402
 from validate_witness import witness_promotion_digest  # noqa: E402
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "promotion-receipt-schema.json"
+SCHEMA_PATH = resources.resource_path("docs", "promotion-receipt-schema.json")
 
 CLUSTER_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
 """The exact grammar docs/promotion-receipt-schema.json's own `cluster`

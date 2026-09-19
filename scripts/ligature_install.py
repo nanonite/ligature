@@ -48,11 +48,13 @@ from pathlib import PurePosixPath
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import adjudicator  # noqa: E402
+import resources  # noqa: E402
 from atomic_write import write_atomically  # noqa: E402
 from project_state import KNOWN_SCHEMA_VERSIONS  # noqa: E402
 from project_state import PRODUCT_VERSION  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = resources.resource_root()
 
 MANIFEST_SCHEMA_VERSION = "1.0"
 MANIFEST_RELATIVE_PATH = "ci/manifest/installation.json"
@@ -70,11 +72,24 @@ USER = "user"
 # The managed product paths pinned by the installed descriptor's
 # gate_integrity list and recorded in the manifest's gate_hashes, so #56's
 # `status` can report gate integrity as `pinned` rather than `unpinned`.
+#
+# `@adjudicator` is the #57 extension: the executable is itself the trusted
+# adjudicator, so the descriptor pins the identity of the process that
+# installed the workspace, not only the repository files it copied. Its
+# recorded value is the running build's content hash, or the sentinel
+# `unattested` when the workspace was initialized from a source checkout
+# (which has no build to pin). scripts/project_state.py compares that pin
+# against the adjudicator actually running and fails closed on a mismatch or
+# an unattested adjudicator.
 _GATE_PINNED_PATHS = (
     SKILL_RELATIVE_PATH,
     ".ligature/schemas/project-state.schema.json",
     ".ligature/schemas/consolidated-check.schema.json",
+    adjudicator.ADJUDICATOR_PIN_TOKEN,
 )
+
+ADJUDICATOR_PIN_TOKEN = adjudicator.ADJUDICATOR_PIN_TOKEN
+UNATTESTED = adjudicator.UNATTESTED
 
 _PROMPTS = (
     "stage-0-evidence-intake.md",
@@ -416,6 +431,9 @@ def apply_plan(workspace: Path, report: InstallReport, manifest: dict | None) ->
         )
     gate_hashes = {}
     for rel in _GATE_PINNED_PATHS:
+        if rel == ADJUDICATOR_PIN_TOKEN:
+            gate_hashes[rel] = adjudicator.identity_hash() or UNATTESTED
+            continue
         target = workspace / rel
         if target.is_file():
             gate_hashes[rel] = _sha256_file(target)
@@ -430,6 +448,7 @@ def apply_plan(workspace: Path, report: InstallReport, manifest: dict | None) ->
         "descriptor_path": report.descriptor_path,
         "files": files,
         "gate_hashes": gate_hashes,
+        "adjudicator": running_adjudicator_record(),
     }
     _write_manifest(workspace, new_manifest)
     return new_manifest
@@ -582,6 +601,69 @@ def _manifest_descriptor_rel(manifest: dict) -> str:
         if path.endswith("project-descriptor.json"):
             return path
     return "project-descriptor.json"
+
+
+# ---------------------------------------------------------------------------
+# Executable (adjudicator) trust pin
+# ---------------------------------------------------------------------------
+def running_adjudicator_record() -> dict:
+    """The identity `init`/`migrate` record in the ownership manifest, so a
+    later run can verify the executable that installed this workspace."""
+    info = adjudicator.current_identity()
+    return {
+        "kind": info["kind"],
+        "version": info["version"],
+        "content_hash": info["content_hash"],
+        "required_python": info["required_python"],
+        "python": info["python"],
+        "platform": info["platform"],
+    }
+
+
+def inspect_adjudicator_pin(workspace: Path) -> dict:
+    """Compare the running executable's identity against the one recorded
+    when the workspace was initialized. Read-only; never repairs.
+
+    States: `not-installed` (no manifest), `unpinned` (manifest predates
+    #57 and records no adjudicator), `pinned` (running identity matches the
+    recorded one), `unattested` (a packaged pin is present but the runner is
+    an unattested source checkout, or vice versa), `mismatch` (both are
+    packaged builds but the content hashes differ -- the executable was
+    replaced). `doctor` fails closed on `unattested`/`mismatch`.
+    """
+    manifest = load_manifest(workspace)
+    if manifest is None:
+        return {"state": "not-installed", "details": "no installation manifest"}
+    recorded = manifest.get("adjudicator")
+    if not isinstance(recorded, dict):
+        return {
+            "state": "unpinned",
+            "details": "manifest records no adjudicator identity (pre-#57 install)",
+        }
+    running = adjudicator.current_identity()
+    recorded_hash = recorded.get("content_hash")
+    running_hash = running.get("content_hash")
+    if recorded_hash is None:
+        if running["kind"] == "source-checkout" and recorded.get("version") == adjudicator.PRODUCT_VERSION:
+            return {
+                "state": "pinned",
+                "details": "workspace initialized by an unattested source checkout (no build hash to pin)",
+            }
+        return {
+            "state": "unattested",
+            "details": "workspace pinned to an unattested source checkout; running adjudicator differs",
+        }
+    if running["kind"] != "zipapp" or running_hash is None:
+        return {
+            "state": "unattested",
+            "details": "workspace pins a packaged adjudicator; running executable is an unattested source checkout",
+        }
+    if running_hash != recorded_hash:
+        return {
+            "state": "mismatch",
+            "details": f"recorded {recorded_hash}, running {running_hash}",
+        }
+    return {"state": "pinned", "details": "running executable matches the recorded adjudicator"}
 
 
 # ---------------------------------------------------------------------------

@@ -76,6 +76,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
@@ -86,7 +87,7 @@ from witness_result import is_canonically_encoded  # noqa: E402
 from witness_result import values_of  # noqa: E402
 from witness_result import witness_result_dir_for  # noqa: E402
 
-DOCS = Path(__file__).resolve().parent.parent / "docs"
+DOCS = resources.resource_path("docs")
 SPEC_SCHEMA_PATH = DOCS / "witness-spec-schema.json"
 RESULT_SCHEMA_PATH = DOCS / "witness-result-schema.json"
 CANONICAL_DIR_NAME = "_witnesses"

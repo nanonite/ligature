@@ -50,10 +50,11 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "callsite-schema.json"
+SCHEMA_PATH = resources.resource_path("docs", "callsite-schema.json")
 CANONICAL_DIR_NAME = "c_static"
 
 

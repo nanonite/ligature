@@ -136,13 +136,18 @@ dimension.
 
 `project-state.schema.json`'s `binary_identity` object (`verified`,
 `content_hash`, `version`) is the shape #57's `ligature version --verify`
-and `doctor` are expected to populate. This task does not implement that
-verification — `verified: "unknown"` is the only honest value any current
-invocation (`python3 scripts/pipeline.py`, no build hash to check) can
-report, and every example in `schemas/examples/` reflects that: the
-`empty` example uses `"unknown"`; the `mixed` example uses `"true"` only
-as an illustration of what a real #57 verification result would look
-like, not a claim that verification exists today.
+and `doctor` populate. **Implemented by #57.** A packaged zipapp reports
+`verified: "true"` only after recomputing its own content hash and matching
+the embedded build attestation, and the interpreter/platform contract;
+`verified: "unknown"` remains the only honest value from a source checkout
+(`python3 scripts/pipeline.py`, no build hash to check). The same build
+identity is pinned by the installed descriptor's `gate_integrity` under the
+`@adjudicator` entry; an unattested or mismatched adjudicator fails closed.
+See `docs/packaging.md`, whose §4 states the boundary explicitly:
+`verified: "true"` is a self-consistency and pin-persistence check, not a
+signature against a root of trust outside the archive -- it catches a
+binary swapped in after `ligature init`, not a compromised binary at the
+first `init` itself.
 
 ## 11. Assumption-registry migration is specified under #59
 
@@ -174,9 +179,12 @@ gate runs in `validate` and does not change either output schema.
   consults installed-manifest state — #56.
 - The real shape of `--json`'s relationship to the human-readable form
   (same command, `--json` flag, vs. separate rendering path) — #56.
-- Packaged-resource discovery replacing `Path(__file__)` (named directly
+- ~~Packaged-resource discovery replacing `Path(__file__)` (named directly
   in `docs/implementation-inventory.json`'s `vendored_runtime_assets`
-  entry for `vendor/concept-to-code/schemas/spec.schema.json`) — #57.
+  entry for `vendor/concept-to-code/schemas/spec.schema.json`)~~ —
+  resolved by #57: every such lookup now goes through
+  `scripts/resources.py`, which uses `importlib.resources` from a zipapp and
+  the repository root from a source checkout. See `docs/packaging.md`.
 - The ownership-manifest three-way-comparison mechanics
   (`installation_manifest` here only models the STATE such a manifest
   produces, not how it's computed or stored) — #58.

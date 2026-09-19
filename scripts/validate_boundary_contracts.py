@@ -38,13 +38,14 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resources  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
 from validate_boundary_naming import check_file as check_naming  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "boundary-contract-schema.json"
+SCHEMA_PATH = resources.resource_path("docs", "boundary-contract-schema.json")
 
 # Symmetric digit-width grammar for both prefixes -- an earlier version
 # hardcoded exactly 3 digits for C but let A be any length, which would

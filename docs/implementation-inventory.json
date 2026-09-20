@@ -674,13 +674,13 @@
       "path": "scripts/adjudicator.py",
       "role": "shared-loader",
       "disposition": "runtime-required",
-      "summary": "The executable's own identity (#57): content/build hash over the zipapp bundle, product version, bundled schema set, required Python/platform, and self-verification used by `version --verify`, `doctor`, and gate_integrity."
+      "summary": "The executable's own identity (#57): content/build hash over the zipapp bundle, product version, bundled schema set, required Python/platform, and self-verification used by `version --verify`, `doctor`, and gate_integrity. Also surfaces the embedded build's source provenance (`source_commit`/`source_dirty`/`working_tree_diff_hash`), #64."
     },
     {
       "path": "scripts/build_zipapp.py",
       "role": "generator",
       "disposition": "excluded",
-      "summary": "Release build tool (#57): derives the bundle from this inventory, writes a deterministic attested zipapp plus SHA256SUMS/PROVENANCE/NOTICE/THIRD_PARTY_NOTICES. Source-only; never itself bundled into the artifact."
+      "summary": "Release build tool (#57): derives the bundle from this inventory, writes a deterministic attested zipapp plus SHA256SUMS/PROVENANCE/NOTICE/THIRD_PARTY_NOTICES. Records the working tree's source provenance (`source_commit`, `source_dirty`, `working_tree_diff_hash`) honestly rather than assuming a clean tree (#64). Source-only; never itself bundled into the artifact."
     }
   ],
   "schemas": [

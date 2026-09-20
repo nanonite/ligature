@@ -25,6 +25,15 @@ Outputs (into --out, default `dist/`):
   PROVENANCE.json         build/adjudicator metadata + bundle manifest
   NOTICE                  project notice
   THIRD_PARTY_NOTICES.txt vendored component licenses
+
+Source provenance (chainlink #64): both the embedded attestation and
+PROVENANCE.json record `source_commit`, `source_dirty`, and
+`working_tree_diff_hash`. The build does **not** refuse a dirty tree -- this
+repository is routinely dirty during active development and the test suite
+calls `build()` directly -- but it never mislabels one as clean: a dirty build
+is marked `source_dirty: true` with a content hash of the uncommitted state,
+and `version --verify` / `doctor` surface that. Artifact integrity
+(`content_hash`) and source provenance are deliberately separate questions.
 """
 from __future__ import annotations
 
@@ -94,6 +103,78 @@ def _git_commit(root: Path) -> str | None:
         return out.stdout.strip() or None
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def _working_tree_diff_hash(root: Path) -> str | None:
+    """A sha256 over the uncommitted state: the `git diff HEAD` bytes
+    (tracked staged + unstaged changes) plus every untracked, non-ignored
+    file's path and content hash. Two different dirty trees therefore get
+    different hashes; `None` means git could not produce the diff."""
+    try:
+        diff = subprocess.run(
+            ["git", "diff", "HEAD", "--no-color", "--binary"],
+            cwd=root,
+            capture_output=True,
+            check=True,
+        )
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            capture_output=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    digest = hashlib.sha256()
+    digest.update(b"diff\0")
+    digest.update(diff.stdout)
+    digest.update(b"untracked\0")
+    for rel in sorted(p for p in untracked.stdout.split(b"\0") if p):
+        digest.update(rel)
+        digest.update(b"\0")
+        try:
+            digest.update(hashlib.sha256((root / os.fsdecode(rel)).read_bytes()).digest())
+        except OSError:
+            digest.update(b"<unreadable>")
+    return "sha256:" + digest.hexdigest()
+
+
+def _git_state(root: Path) -> dict:
+    """The working tree's provenance, recorded honestly rather than assumed
+    clean (chainlink #64).
+
+    * `commit`   -- HEAD, or None outside a git repository / before the first
+      commit.
+    * `dirty`    -- whether `git status --porcelain` reports any change
+      (tracked or untracked), or None when git cannot answer.
+    * `diff_hash`-- a content hash of the uncommitted state (see
+      `_working_tree_diff_hash`), or None when the tree is clean or the hash
+      could not be computed.
+
+    A build never refuses a dirty tree: this repository is routinely dirty
+    during active development, and `build_zipapp.build()` is invoked directly
+    by the test suite. Recording the true state lets `version --verify` and
+    `doctor` surface it instead of silently mislabeling a dirty build as a
+    clean one at a commit it does not match.
+    """
+    commit = _git_commit(root)
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": commit, "dirty": None, "diff_hash": None}
+    dirty = bool(status.stdout.strip())
+    return {
+        "commit": commit,
+        "dirty": dirty,
+        "diff_hash": _working_tree_diff_hash(root) if dirty else None,
+    }
 
 
 def load_inventory(source_root: Path) -> dict:
@@ -189,6 +270,10 @@ def build(out_dir: Path, *, source_root: Path = ROOT) -> dict:
             + ", ".join(sorted(missing))
         )
 
+    # Read the working tree's provenance once, so the embedded attestation and
+    # PROVENANCE.json can never disagree about it (chainlink #64).
+    git_state = _git_state(source_root)
+
     staging = Path(tempfile.mkdtemp(prefix="ligature-build-"))
     try:
         for source_rel, arcname in entries:
@@ -221,7 +306,9 @@ def build(out_dir: Path, *, source_root: Path = ROOT) -> dict:
             "platform": adjudicator.REQUIRED_PLATFORM,
             "inventory_version": inventory["inventory_version"],
             "inventory_source": INVENTORY_RELPATH,
-            "source_commit": _git_commit(source_root),
+            "source_commit": git_state["commit"],
+            "source_dirty": git_state["dirty"],
+            "working_tree_diff_hash": git_state["diff_hash"],
             "bundle_file_count": len(manifest),
             "bundled_schemas": _bundled_schemas(staging, manifest),
             "content_hash": content_hash,
@@ -250,7 +337,9 @@ def build(out_dir: Path, *, source_root: Path = ROOT) -> dict:
         "build_command": "python3 scripts/build_zipapp.py --out <dir>",
         "runtime_contract": "zipapp targeting a system Python interpreter",
         "required_python": adjudicator.required_python_string(),
-        "source_commit": _git_commit(source_root),
+        "source_commit": git_state["commit"],
+        "source_dirty": git_state["dirty"],
+        "working_tree_diff_hash": git_state["diff_hash"],
         "bundle_manifest_derivation": (
             "docs/implementation-inventory.json dispositions runtime-required, "
             "installed-template, and required_at_runtime vendored assets"

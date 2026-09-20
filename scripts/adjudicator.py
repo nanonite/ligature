@@ -167,6 +167,9 @@ def current_identity() -> dict:
         "archive_path": None,
         "bundled_schemas": {},
         "file_count": None,
+        "source_commit": None,
+        "source_dirty": None,
+        "working_tree_diff_hash": None,
         "errors": [],
     }
     if not packaged:
@@ -193,6 +196,12 @@ def current_identity() -> dict:
         info["errors"].append("the archive embeds no build attestation")
     else:
         info["bundled_schemas"] = embedded.get("bundled_schemas", {})
+        # Source provenance is reported even when artifact integrity fails:
+        # "which commit, and was the tree clean" is a different question from
+        # "do the running bytes match the embedded manifest" (chainlink #64).
+        info["source_commit"] = embedded.get("source_commit")
+        info["source_dirty"] = embedded.get("source_dirty")
+        info["working_tree_diff_hash"] = embedded.get("working_tree_diff_hash")
         if embedded.get("content_hash") != content_hash:
             info["verified"] = "false"
             info["errors"].append(
@@ -225,6 +234,29 @@ def identity_hash() -> str | None:
     return info.get("content_hash")
 
 
+def render_source_provenance(info: dict) -> str | None:
+    """The build's source provenance line, or None when there is nothing
+    honest to say (a source checkout carries no build attestation).
+
+    A dirty tree is surfaced explicitly -- never rendered as a clean build at
+    a commit it does not match (chainlink #64)."""
+    commit = info.get("source_commit")
+    if commit:
+        dirty = info.get("source_dirty")
+        if dirty is True:
+            detail = "DIRTY working tree"
+            diff_hash = info.get("working_tree_diff_hash")
+            if diff_hash:
+                detail += f", uncommitted-state {diff_hash}"
+            return f"  source: {commit} ({detail})"
+        if dirty is False:
+            return f"  source: {commit} (clean working tree)"
+        return f"  source: {commit} (working-tree state unknown)"
+    if info.get("kind") == "zipapp":
+        return "  source: (no commit recorded in the build attestation)"
+    return None
+
+
 def render_identity_text(info: dict, *, show_schemas: bool = False) -> str:
     lines = [
         f"{info['product_name']} {info['version']}",
@@ -238,6 +270,9 @@ def render_identity_text(info: dict, *, show_schemas: bool = False) -> str:
     ]
     if info.get("archive_path"):
         lines.append(f"  artifact: {info['archive_path']}")
+    source_line = render_source_provenance(info)
+    if source_line is not None:
+        lines.append(source_line)
     if show_schemas and info["bundled_schemas"]:
         lines.append("  bundled schemas:")
         for name in sorted(info["bundled_schemas"]):

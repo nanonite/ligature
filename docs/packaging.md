@@ -122,12 +122,26 @@ does. The genuine security property here is pin *persistence*, not pin
 caught (`tests/test_zipapp_out_of_checkout.py`'s
 `test_source_checkout_is_refused_after_a_packaged_init`), but the very
 first `ligature init` against a workspace trusts whatever adjudicator
-happens to be running it. `PROVENANCE.json`'s `source commit` field exists
-for exactly this gap: a human can cross-check it against reviewed git
-history before that first `init`, the same manual trust-on-first-use step
-every unsigned software distribution ultimately relies on somewhere. A
-cryptographic signature tied to a key outside the archive would close this
-gap; none is implemented here, and this document does not claim one.
+happens to be running it. `PROVENANCE.json`'s `source_commit`,
+`source_dirty`, and `working_tree_diff_hash` fields exist for exactly this
+gap: a human can cross-check the commit against reviewed git history, and
+see at a glance whether the build came from a clean tree or from a working
+tree with uncommitted changes (whose content is summarized by
+`working_tree_diff_hash`). A cryptographic signature tied to a key outside
+the archive would close this gap; none is implemented here, and this
+document does not claim one.
+
+**Dirty-tree policy (chainlink #64).** `build_zipapp.py` does **not** refuse
+to build from a dirty tree: this repository is routinely dirty during active
+development, and the test suite invokes `build()` directly, so a
+refuse-on-dirty default would fail routine local runs for reasons unrelated
+to what they test. Instead the build records the truth -- `source_dirty:
+true` plus a content hash of the uncommitted state -- and `version --verify`
+and `doctor` surface it as a `source:` line (`DIRTY working tree`). Artifact
+integrity (`content_hash`, `attested: true`) and source provenance are
+separate questions: a dirty build is still a self-consistent, correctly
+attested artifact, so `--verify` does not fail on dirtiness; a release
+process that wants a clean-tree guarantee can read `source_dirty` and refuse.
 
 ## 5. Building a release
 
@@ -141,7 +155,7 @@ writes into `dist/`:
 |---|---|
 | `ligature.pyz` | the executable zipapp |
 | `SHA256SUMS` | sha256 of the archive bytes (distribution integrity) |
-| `PROVENANCE.json` | product version, artifact hash, content hash, source commit, bundle derivation and bundled schema set |
+| `PROVENANCE.json` | product version, artifact hash, content hash, source commit + dirty state (`source_dirty`, `working_tree_diff_hash`), bundle derivation and bundled schema set |
 | `NOTICE` | project notice |
 | `THIRD_PARTY_NOTICES.txt` | licenses of bundled vendored components |
 

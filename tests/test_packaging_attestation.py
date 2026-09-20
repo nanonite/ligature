@@ -146,5 +146,134 @@ class BuildAttestationTest(unittest.TestCase):
         self.assertNotIn("ligature_data/docs/packaging.md", arcnames)
 
 
+class SourceProvenanceRenderTest(unittest.TestCase):
+    """The rendered source-provenance line (chainlink #64). Deterministic and
+    git-free, so the dirty/clean/unknown distinction is checked directly."""
+
+    def test_dirty_tree_is_surfaced_never_hidden(self):
+        line = adjudicator.render_source_provenance(
+            {
+                "kind": "zipapp",
+                "source_commit": "abc1234",
+                "source_dirty": True,
+                "working_tree_diff_hash": "sha256:" + "a" * 64,
+            }
+        )
+        self.assertIsNotNone(line)
+        self.assertIn("abc1234", line)
+        self.assertIn("DIRTY working tree", line)
+        self.assertIn("sha256:" + "a" * 64, line)
+
+    def test_clean_tree_is_reported_clean(self):
+        line = adjudicator.render_source_provenance(
+            {"kind": "zipapp", "source_commit": "abc1234", "source_dirty": False}
+        )
+        self.assertIn("clean working tree", line)
+
+    def test_unknown_tree_state_is_not_reported_clean(self):
+        line = adjudicator.render_source_provenance(
+            {"kind": "zipapp", "source_commit": "abc1234", "source_dirty": None}
+        )
+        self.assertIn("unknown", line)
+        self.assertNotIn("clean", line)
+
+    def test_source_checkout_has_no_build_provenance_line(self):
+        self.assertIsNone(
+            adjudicator.render_source_provenance(
+                {"kind": "source-checkout", "source_commit": None, "source_dirty": None}
+            )
+        )
+
+
+class GitStateTest(unittest.TestCase):
+    """`build_zipapp._git_state` against a controlled temporary repository,
+    so clean/dirty detection is proven rather than assumed from this repo's
+    own (frequently dirty) working tree."""
+
+    def _init_repo(self, root: Path) -> None:
+        def git(*args: str) -> None:
+            subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
+
+        git("init")
+        git("config", "user.email", "probe@example.invalid")
+        git("config", "user.name", "probe")
+        (root / "tracked.txt").write_text("one\n")
+        git("add", "tracked.txt")
+        git("commit", "-m", "initial")
+
+    def test_outside_a_repository_is_unknown_not_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = build_zipapp._git_state(Path(tmp))
+        self.assertIsNone(state["commit"])
+        self.assertIsNone(state["dirty"])
+        self.assertIsNone(state["diff_hash"])
+
+    def test_clean_then_dirty_tracked_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_repo(root)
+
+            clean = build_zipapp._git_state(root)
+            self.assertIsNotNone(clean["commit"])
+            self.assertFalse(clean["dirty"])
+            self.assertIsNone(clean["diff_hash"])
+
+            (root / "tracked.txt").write_text("two\n")
+            dirty = build_zipapp._git_state(root)
+            self.assertTrue(dirty["dirty"])
+            self.assertRegex(dirty["diff_hash"], r"^sha256:[0-9a-f]{64}$")
+            self.assertEqual(dirty["diff_hash"], build_zipapp._working_tree_diff_hash(root))
+
+            (root / "tracked.txt").write_text("three\n")
+            self.assertNotEqual(build_zipapp._git_state(root)["diff_hash"], dirty["diff_hash"])
+
+    def test_untracked_file_is_dirty_and_changes_the_diff_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._init_repo(root)
+
+            (root / "untracked.txt").write_text("first\n")
+            first = build_zipapp._git_state(root)
+            self.assertTrue(first["dirty"])
+            self.assertRegex(first["diff_hash"], r"^sha256:[0-9a-f]{64}$")
+
+            (root / "untracked.txt").write_text("second\n")
+            self.assertNotEqual(build_zipapp._git_state(root)["diff_hash"], first["diff_hash"])
+
+
+@unittest.skipIf(build_zipapp._git_state(ROOT)["commit"] is None, "not a git checkout")
+class DirtyTreeBuildTest(unittest.TestCase):
+    """A deliberately dirtied working tree must be recorded honestly, end to
+    end, in both PROVENANCE.json and the bundled attestation, and surfaced by
+    `version --verify` -- not silently labeled clean (chainlink #64)."""
+
+    def test_dirty_build_is_recorded_and_surfaced(self):
+        probe = ROOT / "tests" / f"_dirty_probe_{os.getpid()}.tmp"
+        probe.write_text("deliberate uncommitted change\n")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp)
+                result = build_zipapp.build(out)
+                artifact = Path(result["artifact"])
+
+                provenance = json.loads((out / "PROVENANCE.json").read_text())
+                self.assertIs(provenance["source_dirty"], True)
+                self.assertEqual(provenance["source_commit"], build_zipapp._git_state(ROOT)["commit"])
+                self.assertRegex(provenance["working_tree_diff_hash"], r"^sha256:[0-9a-f]{64}$")
+
+                with zipfile.ZipFile(artifact) as zf:
+                    attestation = json.loads(zf.read(adjudicator.ATTESTATION_ARCNAME))
+                for field in ("source_commit", "source_dirty", "working_tree_diff_hash"):
+                    self.assertEqual(attestation[field], provenance[field], field)
+
+                proc = _run_artifact(artifact, out, "version", "--verify")
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertIn("attested: true", proc.stdout)
+                self.assertIn("DIRTY working tree", proc.stdout)
+                self.assertIn(provenance["working_tree_diff_hash"], proc.stdout)
+        finally:
+            probe.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()

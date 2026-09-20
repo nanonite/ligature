@@ -263,6 +263,14 @@ verifies it. A modified managed file (including an edited authority
 region) makes `doctor` exit non-zero; it never auto-repairs. `init`
 installs, `migrate` is the explicit, human-invoked recovery path.
 
+**Implemented by #64.** `doctor` and `version --verify` also report the
+running build's source provenance from its embedded attestation: the
+`source_commit`, and for a build made from a dirty working tree a `source:`
+line naming it `DIRTY working tree` with a `working_tree_diff_hash` over the
+uncommitted state. A dirty build is still a self-consistent, correctly
+attested artifact, so this is reported, not treated as an integrity
+failure; `PROVENANCE.json` carries the same three fields.
+
 ## 9. Compatibility alias policy
 
 Every legacy flat command not listed in §7 (internal) becomes a
@@ -325,7 +333,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `status` | stable project-state query (#56, §8) — reserved unconditionally, not covered by §9's floor |
 | `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
 | `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print, verifies the skill authority hash (§8, #58), and reports/verifies the executable's own build attestation (#57) |
-| `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation (§1, §8, #57) |
+| `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation, and both report the build's source provenance (`source_commit`, and `source_dirty`/`working_tree_diff_hash` for a dirty tree) (§1, §8, #57, #64) |
 | `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3 (#57 grammar v1.0) |
 | `report` | stable; nested reporting verb, `report <report-id>` dispatches the four report generators in §6 (#57 grammar v1.0) |
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo (§8, #58) |

@@ -282,7 +282,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 37/37)
+## 10. Legacy command → disposition (complete, 39/39)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -326,11 +326,13 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
 | `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print, verifies the skill authority hash (§8, #58), and reports/verifies the executable's own build attestation (#57) |
 | `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation (§1, §8, #57) |
+| `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3 (#57 grammar v1.0) |
+| `report` | stable; nested reporting verb, `report <report-id>` dispatches the four report generators in §6 (#57 grammar v1.0) |
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo (§8, #58) |
 | `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 37 has a nested home, an internal-operation classification,
+every one of the 39 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

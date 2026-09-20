@@ -409,8 +409,6 @@ from validate_callsites import validate_workspace as validate_callsites_workspac
 from validate_callsites import count_discovered as _count_callsite_reports  # noqa: E402
 from validate_closure import closure_dir_for as _closure_dir_for  # noqa: E402
 from validate_closure import count_discovered as _count_closure_artifacts  # noqa: E402
-from validate_closure import load_validators as load_closure_validators  # noqa: E402
-from validate_closure import validate_draft_data as validate_closure_draft_data  # noqa: E402
 from validate_closure import validate_workspace as validate_closure_workspace  # noqa: E402
 from validate_gold_set import count_discovered as _count_gold_sets  # noqa: E402
 from validate_gold_set import gold_set_dir_for as _gold_set_dir_for  # noqa: E402
@@ -2105,6 +2103,38 @@ def cmd_check(args: argparse.Namespace) -> int:
     return document["result"]["exit_code"]
 
 
+_GATE_VERBS = {
+    "r1-g16": cmd_gate_r1_g16,
+    "g9": cmd_gate_g9,
+    "g14": cmd_gate_g14,
+    "g18": cmd_gate_g18,
+    "g19": cmd_gate_g19,
+    "g20": cmd_gate_g20,
+}
+
+_REPORT_VERBS = {
+    "pilot-cluster": cmd_select_pilot_cluster,
+    "gold-set-measurement": cmd_measure_gold_set,
+    "feature-ledger": cmd_generate_feature_ledger,
+    "contact-sheet": cmd_generate_contact_sheet,
+}
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    """`ligature gate <gate-id>` (docs/cli-contract.md §3): the nested
+    stable spelling of the six standalone cross-artifact gates. Dispatches
+    to the same handler the flat legacy alias uses -- one implementation,
+    never a second that can drift from the first (docs/cli-contract.md §9)."""
+    return _GATE_VERBS[args.gate_id](args)
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """`ligature report <report-id>` (docs/cli-contract.md §6): the nested
+    stable spelling of the four reporting commands, dispatching to the same
+    handlers as their flat legacy aliases."""
+    return _REPORT_VERBS[args.report_id](args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the pipeline's argparse parser without running anything.
 
@@ -2380,6 +2410,19 @@ def build_parser() -> argparse.ArgumentParser:
     check_p.add_argument("--json", action="store_true", help="emit schemas/consolidated-check.schema.json JSON")
     check_p.add_argument("next", nargs="?", help="print only the recommended next action")
     check_p.set_defaults(func=cmd_check)
+
+    gate_p = sub.add_parser("gate", help="Cross-artifact gate runner: `gate <gate-id>` (docs/cli-contract.md §3)")
+    gate_p.add_argument("gate_id", choices=sorted(_GATE_VERBS), metavar="GATE-ID")
+    gate_p.set_defaults(func=cmd_gate)
+
+    report_p = sub.add_parser("report", help="Reporting commands: `report <report-id>` (docs/cli-contract.md §6)")
+    report_p.add_argument("report_id", choices=sorted(_REPORT_VERBS), metavar="REPORT-ID")
+    report_p.add_argument(
+        "--no-write",
+        action="store_true",
+        help="(gold-set-measurement only) suppress writing the generated projection",
+    )
+    report_p.set_defaults(func=cmd_report)
 
     return parser
 

@@ -393,6 +393,16 @@
       "name": "version",
       "func": "cmd_version",
       "stable_mapping": "stable; reports product version + executable build attestation, `--verify` self-verifies (chainlink #57, docs/cli-contract.md \u00a71/\u00a78)"
+    },
+    {
+      "name": "gate",
+      "func": "cmd_gate",
+      "stable_mapping": "stable; nested `gate <gate-id>` dispatches the six standalone gates (docs/cli-contract.md \u00a73, grammar v1.0)"
+    },
+    {
+      "name": "report",
+      "func": "cmd_report",
+      "stable_mapping": "stable; nested `report <report-id>` dispatches the four report generators (docs/cli-contract.md \u00a76, grammar v1.0)"
     }
   ],
   "python_modules": [
@@ -1092,6 +1102,11 @@
       "path": "tests/test_zipapp_out_of_checkout.py",
       "kind": "regression",
       "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_neargye_port_acceptance.py",
+      "kind": "regression",
+      "disposition": "test-only"
     }
   ],
   "fixtures": [
@@ -1241,12 +1256,12 @@
       "excluded": 1,
       "installed-template": 4,
       "runtime-required": 74,
-      "test-only": 63,
+      "test-only": 64,
       "vendored-runtime": 1
     },
-    "total_entries": 156,
-    "test_count": 50,
-    "registered_cli_command_count": 37
+    "total_entries": 157,
+    "test_count": 51,
+    "registered_cli_command_count": 39
   },
   "documentation_and_templates": [
     {

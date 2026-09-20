@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- Ship trusted Ligature metaharness: distribution, project state, and feedback-loop driver (#53)
 - Prove release candidate out of checkout in Neargye workspace (#60)
 - Build self-contained attested Ligature distribution (#57)
 - Introduce canonical assumption registry through staged migration (#59)

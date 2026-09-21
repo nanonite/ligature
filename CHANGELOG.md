@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- ligature init writes a schema-valid but placeholder-content project descriptor with no signal to fill it in (#67)
 - ligature init silently re-pins gate_integrity[@adjudicator] on rerun with a different binary (#65)
 - gate g14 misreads the installed ownership manifest as a work-package manifest, making check exit 1 on any initialized workspace (#66)
 - build_zipapp.py's PROVENANCE.json source_commit is wrong on a dirty git tree (#64)

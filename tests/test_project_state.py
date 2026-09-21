@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+import ligature_install  # noqa: E402
 import pipeline  # noqa: E402
 import project_state  # noqa: E402
 from project_state import Analysis, NormalizedFinding, _next_action  # noqa: E402
@@ -65,6 +66,12 @@ class WorkspaceFixture(unittest.TestCase):
             {"crate_dir": crate, "contracts_crate": "contracts", "specs_search_root": "crates"}
             for crate in crates
         ]
+        # A real project has replaced the init template's placeholder
+        # reviewer. `verifier_policy.default` is deliberately left at the
+        # example's "creusot" so these fixtures double as the coincidence
+        # case: a real project that happens to pick the same verifier must
+        # not be flagged on that field alone (chainlink #67).
+        descriptor["review"]["reviewer"] = "real-reviewer"
         self.descriptor_path.write_text(json.dumps(descriptor))
         return descriptor
 
@@ -498,6 +505,90 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         self.assertIn("refresh-c-static", out)
         self.assertNotIn("gate g14:", out)
         self.assertNotIn("consolidated check", out)
+
+
+class DescriptorPlaceholderTest(WorkspaceFixture):
+    """Chainlink #67: a descriptor still holding the shipped init-template
+    values is flagged by `check` (with a human-decision next action), while
+    a genuinely edited one is not -- including a legitimate coincidental
+    match on a value a real project could choose (`verifier_policy.default`)."""
+
+    def write_init_descriptor(self, mode: str, name: str = "myproj") -> dict:
+        """Exactly what `ligature init` writes for `mode`: the real
+        `_render_descriptor` output, not a hand-rolled near-copy."""
+        rendered = json.loads(ligature_install._render_descriptor(mode, name))
+        self.descriptor_path.write_text(json.dumps(rendered))
+        return rendered
+
+    def p0_findings(self, doc: dict) -> list[dict]:
+        return [f for f in doc["findings"] if f["gate_id"] == "P0"]
+
+    def test_untouched_port_descriptor_is_flagged(self):
+        self.write_init_descriptor("port")
+        code, doc = self.check()
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertEqual(code, 1)
+        p0 = self.p0_findings(doc)
+        self.assertEqual(len(p0), 1)
+        self.assertIn("review.reviewer", p0[0]["reason"])
+        self.assertIn("port_source.repository", p0[0]["reason"])
+        self.assertEqual(p0[0]["authority"], "human-decision-pending")
+        # The next action is the descriptor edit, not a downstream refresh.
+        self.assertEqual(doc["next_action"]["kind"], "human-decision")
+        self.assertIsNone(doc["next_action"]["command"])
+        self.assertIn("project descriptor", doc["next_action"]["description"])
+
+    def test_untouched_greenfield_descriptor_is_flagged(self):
+        self.write_init_descriptor("greenfield")
+        code, doc = self.check()
+        self.assertEqual(code, 1)
+        p0 = self.p0_findings(doc)
+        self.assertEqual(len(p0), 1)
+        self.assertIn("review.reviewer", p0[0]["reason"])
+
+    def test_edited_descriptor_is_not_flagged(self):
+        descriptor = self.write_init_descriptor("port")
+        descriptor["review"]["reviewer"] = "real-reviewer"
+        descriptor["port_source"]["repository"] = "/srv/real-project"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        code, doc = self.check()
+        self.assertEqual(self.p0_findings(doc), [])
+        self.assertEqual(code, 0)
+
+    def test_coincidental_verifier_choice_is_not_flagged(self):
+        # reviewer + repository are real, but the project happens to keep
+        # the example's verifier default ("creusot"). That coincidence
+        # alone must not be treated as an unedited template.
+        descriptor = self.write_init_descriptor("port")
+        descriptor["review"]["reviewer"] = "real-reviewer"
+        descriptor["port_source"]["repository"] = "/srv/real-project"
+        self.assertEqual(descriptor["verifier_policy"]["default"], "creusot")
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        code, doc = self.check()
+        self.assertEqual(self.p0_findings(doc), [])
+
+    def test_a_strong_placeholder_left_behind_is_flagged_after_partial_edits(self):
+        # The operator changed the reviewer but left the example repo path.
+        descriptor = self.write_init_descriptor("port")
+        descriptor["review"]["reviewer"] = "real-reviewer"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        self.assertEqual(
+            ligature_install.descriptor_placeholder_fields(descriptor),
+            ["port_source.repository"],
+        )
+        _, doc = self.check()
+        self.assertEqual(len(self.p0_findings(doc)), 1)
+        self.assertIn("port_source.repository", self.p0_findings(doc)[0]["reason"])
+
+    def test_status_surfaces_the_placeholder_as_an_open_finding(self):
+        self.write_init_descriptor("port")
+        code, doc = self.status()
+        self.assertEqual(code, 0)  # status is a read-only query; always 0
+        self.assertTrue(any(f["gate_id"] == "P0" for f in doc["open_findings"]))
+
+    def test_descriptor_placeholder_fields_ignores_missing_or_unknown_mode(self):
+        self.assertEqual(ligature_install.descriptor_placeholder_fields({"mode": "other"}), [])
+        self.assertEqual(ligature_install.descriptor_placeholder_fields({}), [])
 
 
 if __name__ == "__main__":

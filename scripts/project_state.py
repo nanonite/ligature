@@ -808,6 +808,43 @@ def _run_standalone_validators(workspace: Path) -> list[NormalizedFinding]:
     return findings
 
 
+def _descriptor_placeholder_findings(
+    descriptor: dict | None, descriptor_state: str, descriptor_path: Path
+) -> list[NormalizedFinding]:
+    """A descriptor that is still the Stage P0 template `init` wrote is a
+    real, mechanized fact with a human-only resolution, so it is reported
+    as a finding rather than folded into the installation report's
+    managed-file vocabulary (which classifies product-owned files, not a
+    user-owned file nobody has edited yet). `ligature_install` owns the
+    example fixtures and `_render_descriptor`, so the comparison lives
+    there and is imported lazily to avoid the import cycle (`ligature_install`
+    imports this module at load time) -- chainlink #67."""
+    if descriptor is None or descriptor_state != "present-valid":
+        return []
+    try:
+        from ligature_install import descriptor_placeholder_fields
+    except ImportError:
+        return []
+    fields = descriptor_placeholder_fields(descriptor)
+    if not fields:
+        return []
+    return [
+        NormalizedFinding(
+            gate_id="P0",
+            severity="high",
+            subject=str(descriptor_path),
+            reason=(
+                "project descriptor is still the init template: "
+                + ", ".join(fields)
+                + " still hold the shipped example-fixture value(s); replace them with real "
+                "project values before running any stage (chainlink #67)"
+            ),
+            authority="human-decision-pending",
+            provenance="scripts/ligature_install.py:descriptor_placeholder_fields",
+        )
+    ]
+
+
 def _has_c_static(workspace: Path) -> bool:
     directory = workspace / "ci" / "results" / "c_static"
     return directory.is_dir() and any(directory.glob("*.json"))
@@ -1038,6 +1075,7 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
     gate_integrity = _gate_integrity(workspace, descriptor, installation)
 
     findings = _run_standalone_validators(workspace)
+    findings.extend(_descriptor_placeholder_findings(descriptor, descriptor_state, descriptor_path))
     gate_runs, gate_findings, witness_backend = _run_gates(workspace, descriptor)
     findings.extend(gate_findings)
     findings.extend(_lifecycle_findings(artifacts))
@@ -1172,6 +1210,19 @@ def _next_action(analysis: Analysis) -> dict | None:
         # No valid project descriptor: nothing mechanized can be
         # recommended, and the action_id enum has no "init". Honest null.
         return None
+
+    # 0. A descriptor that is still the Stage P0 template makes every
+    #    downstream recommendation premature: the project hasn't been
+    #    described yet. This outranks the refresh recommendations below,
+    #    which would otherwise point at an artifact of an undescribed
+    #    project (chainlink #67).
+    for f in analysis.findings:
+        if f.gate_id == "P0":
+            return {
+                "kind": "human-decision",
+                "description": f"{f.reason} (subject: {f.subject})",
+                "command": None,
+            }
 
     # 1. A blocked gate whose missing prerequisite is one of the three
     #    internal refresh operations check may recommend but never runs.

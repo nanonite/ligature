@@ -1302,7 +1302,7 @@
     {
       "path": "docs/mode-p-cli-flow.md",
       "disposition": "documentation",
-      "summary": "Intended Mode P (port) CLI state machine mapped directly onto plan.md stages P0-8C, with the three authority regimes, command-by-command prerequisites, and the known gaps (#67 and the G2+/schema-conflict/rubric findings; #65, #66 closed) surfaced by the #52 pilot and its review."
+      "summary": "Intended Mode P (port) CLI state machine mapped directly onto plan.md stages P0-8C, with the three authority regimes, command-by-command prerequisites, and the known gaps (the G2+/schema-conflict/rubric findings; #65, #66, #67 closed) surfaced by the #52 pilot and its review."
     }
   ]
 }

@@ -70,7 +70,7 @@ spec exists, but reports little until interactions declaring
 | plan.md stage | what happens | CLI command(s) | regime |
 |---|---|---|---|
 | Stage P0 (bootstrap) | `ligature init --mode port` writes managed files + a **schema-valid but placeholder-content** descriptor (see §4) | `init` | operator |
-| — (operator, off-CLI) | operator replaces the placeholder `port_source`, `verifier_policy`, `crates[]`, `review` fields with real project values | *(no command enforces this — see §4)* | — |
+| — (operator, off-CLI) | operator replaces the placeholder `port_source`, `verifier_policy`, `crates[]`, `review` fields with real project values; `check`/`status` report a `P0` finding while the descriptor still holds the shipped example values (`check next` recommends editing it), though `draft`/`validate` themselves still do not gate on it — see §4 | `check`, `status` | read-only |
 | Stage 0 | evidence intake: claim + origin + semantic_disposition + lifecycle | `draft evidence-intake` → `approve draft` | LLM-side → human |
 | Stage 1/2 | concepts (L1), intra-contracts (L2) | `draft` (concept templates, if configured) | LLM-side |
 | Stage 3 | interactions (I) + reliance (O) + boundary contracts + bridge specs + witness specs + exemptions + protocol-debt records — independent candidate sources | `draft boundary-drafting`/`interaction-drafting` → `approve draft`/`pair`/`exemption-pair` | LLM-side → human |
@@ -154,20 +154,38 @@ review.reviewer:               "example-reviewer"
 ```
 
 This is schema-valid — `mode: port` + a `port_source` object satisfies the
-descriptor schema's own `if`/`then` — so nothing downstream currently
-distinguishes "the operator filled this in for real" from "the operator
-left the generated example in place." `draft`/`approve`/`validate` do not
-check that `port_source.repository` resolves to a real, reachable
-repository, or that `verifier_policy.default` names a verifier the project
-actually intends to use, before running.
+descriptor schema's own `if`/`then` — so before #67 nothing downstream
+distinguished "the operator filled this in for real" from "the operator
+left the generated example in place." A sequence run against a freshly
+init'd, never-edited workspace proceeded silently until something much
+later (the oracle build step, off-CLI) failed for an unrelated-looking
+reason.
 
-This is a real, previously-undocumented gap in *this* document's own
-premise (§2's second row — "operator replaces the placeholder fields" — is
-aspirational, not enforced by anything today), filed as **#67**: either a
-schema-level marker distinguishing "template" from "reviewed" descriptor
-content, or an explicit `check`/`doctor` finding when
-`port_source.repository`/`review.reviewer` still match the known
-example-fixture values verbatim.
+**Fixed (#67), as an explicit finding rather than a schema rule.** A
+descriptor still holding the shipped example values is now reported by
+`check`/`status` as a `P0` finding (severity `high`, authority
+`human-decision-pending`): `check` exits `1`, and `check next` recommends
+editing the descriptor instead of a downstream refresh. The comparison
+lives in `scripts/ligature_install.py` (`descriptor_placeholder_fields`),
+which owns the example fixtures, and is surfaced through
+`scripts/project_state.py`'s project-state report — deliberately **not**
+through the installation report's managed-file vocabulary, which
+classifies product-owned files, not a user-owned file nobody has edited
+yet.
+
+The schema-level alternative was rejected: a "reject the literal example
+value" rule is more brittle (a legitimate project could coincidentally
+want a similar-looking path), and descriptor schemas are a stable public
+contract (`docs/trust-and-compatibility-boundaries.md` §1) that such a
+change would have to justify more carefully than a read-only finding does.
+The finding is deliberately conservative about coincidence:
+`review.reviewer` and (for `mode: port`) `port_source.repository` are
+flagged on their own — the example's `"example-reviewer"` and example path
+are unambiguous placeholders — but `verifier_policy.default: "creusot"` is
+a value a real project can legitimately choose, so it is named only when
+the descriptor is byte-identical to the example everywhere `init` does not
+overwrite it. A real project that happens to pick `creusot` alongside a
+real reviewer and repository is not flagged.
 
 ## 5. The adjudicator trust-pin sub-state-machine
 
@@ -260,7 +278,14 @@ kept here so error-case work starts from what's already known:
   depends on `source_commit` being trustworthy provenance, which #64 made
   true — and #65 (closed) made the pin *mechanism* enforce that on the
   `init` path too, not only on read.
-- **#67** — the Stage P0 descriptor-placeholder gap. See §4.
+- **#67** (closed) — the Stage P0 descriptor-placeholder gap. `check`/
+  `status` now report a `P0` finding (severity `high`, authority
+  `human-decision-pending`) while the descriptor still holds the shipped
+  example values — `review.reviewer`, and `port_source.repository` for
+  `mode: port`; `verifier_policy.default` only as part of a fully untouched
+  descriptor, so a coincidental `creusot` choice is never flagged alone.
+  `check next` recommends editing the descriptor rather than a downstream
+  refresh. A genuinely edited descriptor is not flagged. See §4.
 - **Boundary G2+ doesn't skip `_`-prefixed directories** — unlike the
   witness validator (`validate_witness.py:283`'s `part.startswith("_")`
   skip), `validate_boundary_contracts.py`'s G2+ resolver has no
@@ -288,7 +313,7 @@ kept here so error-case work starts from what's already known:
   exclude bounded closures, or was that an oversight), not a code defect.
   Documented in `docs/limitations.md` (F4).
 
-Seven items above (three closed); none of the open ones blocks a Mode P
+Seven items above (four closed); none of the open ones blocks a Mode P
 project from *genuinely* reaching Stage 8C closure — the G2+/
 schema-conflict gaps are read-path noise a human currently has to route
 around, not incorrect promotions, and the remainder are authority or

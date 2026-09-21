@@ -186,6 +186,74 @@ def _render_descriptor(mode: str, name: str) -> str:
     return json.dumps(data, indent=2) + "\n"
 
 
+# The top-level keys `_render_descriptor` overwrites. A descriptor that is
+# byte-identical to the shipped example outside exactly these keys was never
+# hand-edited after `init` (chainlink #67).
+_DESCRIPTOR_INIT_KEYS = ("project", "crates", "gate_integrity")
+
+
+def _example_descriptor_for(mode: object) -> dict | None:
+    if mode not in ("greenfield", "port"):
+        return None
+    path = ROOT / "schemas" / "examples" / f"project-descriptor.{mode}.example.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _dig(data: object, *keys: str) -> object:
+    node = data
+    for key in keys:
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
+
+
+def _matches_example_outside_init_keys(descriptor: dict, example: dict) -> bool:
+    ignored = set(_DESCRIPTOR_INIT_KEYS)
+    return (
+        {k: v for k, v in descriptor.items() if k not in ignored}
+        == {k: v for k, v in example.items() if k not in ignored}
+    )
+
+
+def descriptor_placeholder_fields(descriptor: dict) -> list[str]:
+    """The descriptor fields still holding the shipped example-fixture
+    value(s) -- i.e. the Stage P0 template `init` copied in and nobody
+    replaced (chainlink #67).
+
+    Only unambiguous placeholders are reported on their own:
+    `review.reviewer` (the literal `"example-reviewer"`) and, for
+    `mode: port`, `port_source.repository` (the literal example path). A
+    value a real project can legitimately choose by coincidence --
+    `verifier_policy.default: "creusot"` is the shipped default -- is
+    reported only when the descriptor is byte-identical to the example
+    everywhere `_render_descriptor` does not overwrite it, so a project
+    that happens to pick the same verifier never false-positives on that
+    field alone."""
+    example = _example_descriptor_for(descriptor.get("mode"))
+    if example is None:
+        return []
+    fields: list[str] = []
+    reviewer = _dig(example, "review", "reviewer")
+    if isinstance(reviewer, str) and _dig(descriptor, "review", "reviewer") == reviewer:
+        fields.append("review.reviewer")
+    if descriptor.get("mode") == "port":
+        repository = _dig(example, "port_source", "repository")
+        if isinstance(repository, str) and _dig(descriptor, "port_source", "repository") == repository:
+            fields.append("port_source.repository")
+    if _matches_example_outside_init_keys(descriptor, example):
+        verifier = _dig(example, "verifier_policy", "default")
+        if isinstance(verifier, str) and _dig(descriptor, "verifier_policy", "default") == verifier:
+            fields.append("verifier_policy.default")
+    return fields
+
+
 def _render_policy(name: str) -> str:
     text = (ROOT / "docs" / "reliance-policy.template.md").read_text()
     return text.replace("# Reliance policy — `<project name>`", f"# Reliance policy — `{name}`", 1)

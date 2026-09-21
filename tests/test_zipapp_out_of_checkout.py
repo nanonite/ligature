@@ -27,6 +27,13 @@ from schema_utils import make_validator  # noqa: E402
 DESCRIPTOR_SCHEMA = json.loads((ROOT / "schemas" / "project-descriptor.schema.json").read_text())
 
 
+# The commit that filed chainlink #65, before init grew the re-pin guard:
+# building a worktree at this revision yields a genuinely different-hash
+# artifact from the current working tree, without depending on a dirty-tree
+# difference (an untracked file would not change content_hash at all).
+OLD_COMMIT = "940e412"
+
+
 class ZipappOutOfCheckoutTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -113,6 +120,114 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn("unattested", proc.stdout)
+
+
+class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
+    """Chainlink #65, tested with two genuinely different builds of the
+    artifact rather than a mocked identity or a dirty-tree hash difference:
+    a worktree at OLD_COMMIT (pre-fix) and the current working tree. First
+    init pins; a same-binary rerun is a no-op; a different-binary rerun is
+    refused and leaves the pin alone; the explicit `migrate --upgrade`
+    re-pins."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._worktree_tmp = tempfile.TemporaryDirectory()
+        cls.worktree = Path(cls._worktree_tmp.name) / "worktree"
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", "--detach", str(cls.worktree), OLD_COMMIT],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            cls._worktree_tmp.cleanup()
+            raise unittest.SkipTest(f"cannot create worktree at {OLD_COMMIT}: {exc}") from exc
+        # Git submodules are not materialized in a fresh worktree; the build
+        # derives its bundle from the inventory, which requires the vendored
+        # runtime asset. Copy the main checkout's submodule content in.
+        vendor = cls.worktree / "vendor"
+        vendor_asset = vendor / "concept-to-code" / "schemas" / "spec.schema.json"
+        if not vendor_asset.is_file():
+            shutil.rmtree(vendor, ignore_errors=True)
+            shutil.copytree(ROOT / "vendor", vendor)
+        cls._artifacts_tmp = tempfile.TemporaryDirectory()
+        artifacts = Path(cls._artifacts_tmp.name)
+        cls.old_build = build_zipapp.build(artifacts / "old", source_root=cls.worktree)
+        cls.new_build = build_zipapp.build(artifacts / "new")
+        assert cls.old_build["content_hash"] != cls.new_build["content_hash"], (
+            "the two builds must be genuinely different for this test to mean anything"
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(cls.worktree)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        cls._artifacts_tmp.cleanup()
+        cls._worktree_tmp.cleanup()
+
+    def setUp(self):
+        self._workspace_tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._workspace_tmp.name).resolve()
+
+    def tearDown(self):
+        self._workspace_tmp.cleanup()
+
+    def run_artifact(self, artifact: str, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-I", artifact, "--workspace", str(self.workspace), *args],
+            cwd=str(Path(artifact).parent),
+            capture_output=True,
+            text=True,
+        )
+
+    def init(self, build: dict) -> subprocess.CompletedProcess:
+        return self.run_artifact(build["artifact"], "init", "--mode", "greenfield", "--name", "repin")
+
+    def pinned_hash(self) -> str | None:
+        manifest = json.loads((self.workspace / "ci" / "manifest" / "installation.json").read_text())
+        return manifest["adjudicator"]["content_hash"]
+
+    def test_first_init_still_pins_normally(self):
+        proc = self.init(self.new_build)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.pinned_hash(), self.new_build["content_hash"])
+
+    def test_rerun_with_the_same_binary_is_a_noop_on_the_pin(self):
+        self.assertEqual(self.init(self.new_build).returncode, 0)
+        proc = self.init(self.new_build)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.pinned_hash(), self.new_build["content_hash"])
+
+    def test_rerun_with_a_different_binary_refuses_to_repin(self):
+        self.assertEqual(self.init(self.old_build).returncode, 0)
+        proc = self.init(self.new_build)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("adjudicator pin mismatch", proc.stdout)
+        self.assertIn("migrate --upgrade", proc.stdout)
+        self.assertEqual(self.pinned_hash(), self.old_build["content_hash"])
+
+        doctor = self.run_artifact(self.new_build["artifact"], "doctor")
+        self.assertEqual(doctor.returncode, 1, doctor.stdout + doctor.stderr)
+        self.assertIn("adjudicator pin: mismatch", doctor.stdout)
+
+    def test_migrate_upgrade_repins_deliberately(self):
+        self.assertEqual(self.init(self.old_build).returncode, 0)
+        self.assertEqual(self.init(self.new_build).returncode, 1)  # refused
+        proc = self.run_artifact(self.new_build["artifact"], "migrate", "--upgrade")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.pinned_hash(), self.new_build["content_hash"])
+
+        doctor = self.run_artifact(self.new_build["artifact"], "doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertIn("adjudicator pin: pinned", doctor.stdout)
 
 
 if __name__ == "__main__":

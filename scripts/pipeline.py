@@ -2038,7 +2038,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 2
     sys.stdout.write(render_installation_report(report))
     print(f"ownership manifest: {MANIFEST_RELATIVE_PATH}")
-    return 1 if report.conflicts else 0
+    return 1 if report.conflicts or report.status == "conflict" else 0
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:

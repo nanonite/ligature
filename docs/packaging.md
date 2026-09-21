@@ -106,6 +106,16 @@ the running executable's identity against it:
 * a pre-#57 manifest records no adjudicator → reported `unpinned`, never
   silently treated as pinned.
 
+A rerun of `init` under a **different** executable does not re-pin it
+(chainlink #65). `init` reports an `adjudicator pin mismatch` conflict,
+exits non-zero, and leaves the recorded identity byte-for-byte untouched;
+the read paths above then keep reporting `mismatch` until the swap is
+either reverted or accepted deliberately. First-time init (no manifest) and
+a rerun under the same executable behave exactly as before. Re-pinning after
+a deliberate binary swap is an explicit, flag-gated action — `ligature
+migrate --upgrade` (or `migrate --force <path>`) — the same path that
+already recovers managed-file drift.
+
 **Authority boundary, stated honestly rather than left implied.**
 `content_hash` is computed and verified by the same public function
 (`adjudicator.hash_manifest`) in both directions -- there is no signature,
@@ -118,11 +128,15 @@ produced a given `ligature.pyz` was itself trustworthy: anyone who can
 write a zip archive can compute a self-consistent `content_hash` and
 `BUILD_ATTESTATION.json` for arbitrary content, the same way `build_zipapp.py`
 does. The genuine security property here is pin *persistence*, not pin
-*origin* -- a binary swapped in under an already-initialized workspace is
-caught (`tests/test_zipapp_out_of_checkout.py`'s
-`test_source_checkout_is_refused_after_a_packaged_init`), but the very
-first `ligature init` against a workspace trusts whatever adjudicator
-happens to be running it. `PROVENANCE.json`'s `source_commit`,
+*origin* -- and persistence is enforced on every **read** path: a binary
+swapped in under an already-initialized workspace is caught by
+`doctor`/`status`/`check` (e.g.
+`tests/test_zipapp_out_of_checkout.py`'s
+`test_source_checkout_is_refused_after_a_packaged_init`), and since #65 it
+can no longer be laundered into a legitimate pin by an `init` rerun, which
+refuses to re-pin an executable it did not install. What remains true is
+that the very first `ligature init` against a workspace trusts whatever
+adjudicator happens to be running it. `PROVENANCE.json`'s `source_commit`,
 `source_dirty`, and `working_tree_diff_hash` fields exist for exactly this
 gap: a human can cross-check the commit against reviewed git history, and
 see at a glance whether the build came from a clean tree or from a working

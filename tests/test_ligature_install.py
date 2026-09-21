@@ -22,6 +22,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+import adjudicator  # noqa: E402
 import ligature_install  # noqa: E402
 import pipeline  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -369,6 +370,116 @@ class StatusIntegrationTest(InstallFixture):
         self.assertEqual(document["installation_manifest"]["state"], "current")
         self.assertEqual(document["installation_manifest"]["installed_product_version"], ligature_install.PRODUCT_VERSION)
         self.assertEqual(document["gate_integrity"]["state"], "pinned")
+
+
+def _identity(content_hash, *, kind="zipapp", version=ligature_install.PRODUCT_VERSION) -> dict:
+    """A full `adjudicator.current_identity()` shape, so both `init` (which
+    records it) and `doctor` (which renders and verifies it) can run under
+    a mocked binary identity."""
+    return {
+        "kind": kind,
+        "product_name": "ligature",
+        "version": version,
+        "content_hash": content_hash,
+        "required_python": "3.10",
+        "python": "3.12.3",
+        "platform": {"system": "Linux", "machine": "x86_64", "required": "any"},
+        "interpreter_ok": True,
+        "verified": "true" if kind == "zipapp" else "unknown",
+        "archive_path": "/tmp/ligature.pyz" if kind == "zipapp" else None,
+        "bundled_schemas": {},
+        "file_count": 1 if kind == "zipapp" else None,
+        "source_commit": None,
+        "source_dirty": None,
+        "working_tree_diff_hash": None,
+        "errors": [],
+    }
+
+
+class AdjudicatorRepinTest(InstallFixture):
+    """Chainlink #65: `init` reruns must not silently re-pin a workspace to
+    a different executable. Managed files are still reconciled as before;
+    only the trusted adjudicator identity is held, and re-pinning requires
+    the explicit `migrate --upgrade`/`--force` path."""
+
+    H_A = "sha256:" + "a" * 64
+    H_B = "sha256:" + "b" * 64
+
+    def run_as(self, content_hash, *args, kind="zipapp"):
+        with mock.patch.object(
+            adjudicator, "current_identity", return_value=_identity(content_hash, kind=kind)
+        ):
+            return self.run_cli(*args)
+
+    def init_as(self, content_hash, *, mode="greenfield", name="myproj", kind="zipapp"):
+        return self.run_as(content_hash, "init", "--mode", mode, "--name", name, kind=kind)
+
+    def pinned_hash(self) -> str | None:
+        return self.manifest()["adjudicator"]["content_hash"]
+
+    def test_first_init_pins_the_running_binary(self):
+        code, out, _ = self.init_as(self.H_A)
+        self.assertEqual(code, 0)
+        self.assertIn("installation: current", out)
+        self.assertEqual(self.pinned_hash(), self.H_A)
+        self.assertEqual(self.manifest()["gate_hashes"]["@adjudicator"], self.H_A)
+
+    def test_rerun_with_the_same_binary_is_a_noop_on_the_pin(self):
+        self.init_as(self.H_A)
+        before = self.manifest()["adjudicator"]
+        code, out, _ = self.init_as(self.H_A)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manifest()["adjudicator"], before)
+        self.assertNotIn("mismatch", out)
+
+    def test_rerun_with_a_different_binary_refuses_to_silently_repin(self):
+        self.init_as(self.H_A)
+        code, out, _ = self.init_as(self.H_B)
+        self.assertEqual(code, 1)
+        self.assertIn("adjudicator pin mismatch", out)
+        self.assertIn("migrate --upgrade", out)
+        self.assertEqual(self.pinned_hash(), self.H_A)
+        self.assertEqual(self.manifest()["gate_hashes"]["@adjudicator"], self.H_A)
+
+    def test_doctor_still_reports_the_refused_pin_as_a_mismatch(self):
+        self.init_as(self.H_A)
+        self.init_as(self.H_B)
+        code, out, _ = self.run_as(self.H_B, "doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("adjudicator pin: mismatch", out)
+
+    def test_migrate_upgrade_is_the_explicit_repin_path(self):
+        self.init_as(self.H_A)
+        self.init_as(self.H_B)  # refused, pin stays A
+        code, out, _ = self.run_as(self.H_B, "migrate", "--upgrade")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.pinned_hash(), self.H_B)
+        code, out, _ = self.run_as(self.H_B, "doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("adjudicator pin: pinned", out)
+
+    def test_source_checkout_rerun_is_a_noop(self):
+        self.init_as(None, kind="source-checkout")
+        before = self.manifest()["adjudicator"]
+        code, out, _ = self.init_as(None, kind="source-checkout")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.manifest()["adjudicator"], before)
+
+    def test_source_checkout_cannot_silently_replace_a_packaged_pin(self):
+        self.init_as(self.H_A)
+        code, out, _ = self.init_as(None, kind="source-checkout")
+        self.assertEqual(code, 1)
+        self.assertIn("adjudicator pin mismatch", out)
+        self.assertEqual(self.pinned_hash(), self.H_A)
+
+    def test_a_pre_57_manifest_without_a_pin_is_pinned_on_rerun(self):
+        self.init_as(self.H_A)
+        manifest = self.manifest()
+        del manifest["adjudicator"]
+        self.write_manifest(manifest)
+        code, out, _ = self.init_as(self.H_B)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.pinned_hash(), self.H_B)
 
 
 if __name__ == "__main__":

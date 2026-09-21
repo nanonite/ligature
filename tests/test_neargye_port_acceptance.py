@@ -180,6 +180,12 @@ class NeargyePortAcceptanceTest(unittest.TestCase):
         if proc.returncode != 0 or "CONFLICT" in proc.stdout:
             for path in re.findall(r"CONFLICT\s+(\S+)", proc.stdout):
                 _run(cls.artifact, cls.outside, "--workspace", str(cls.workspace), "migrate", "--force", path)
+            # This test's freshly built artifact can differ from whichever
+            # binary last initialized the workspace. Since chainlink #65
+            # that rerun is an explicit `adjudicator pin mismatch` conflict
+            # rather than a silent re-pin, so re-pinning this real
+            # workspace to the artifact under test is done deliberately.
+            _run(cls.artifact, cls.outside, "--workspace", str(cls.workspace), "migrate", "--upgrade")
             proc = cls._init_port()
         doctor = _run(cls.artifact, cls.outside, "--workspace", str(cls.workspace), "doctor")
         if doctor.returncode != 0:

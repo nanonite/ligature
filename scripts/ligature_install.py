@@ -394,9 +394,21 @@ def _overall_status(report: InstallReport) -> str:
 # ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
-def apply_plan(workspace: Path, report: InstallReport, manifest: dict | None) -> dict:
+def apply_plan(
+    workspace: Path,
+    report: InstallReport,
+    manifest: dict | None,
+    *,
+    adjudicator_record: dict | None = None,
+) -> dict:
     """Write every pending create/upgrade, then rebuild and atomically
-    write the ownership manifest. Never writes a conflict."""
+    write the ownership manifest. Never writes a conflict.
+
+    `adjudicator_record` is the identity to pin; the default (`None`) is
+    the running executable. `init` passes the previously recorded record
+    when a rerun's binary has changed, so the conflict is reported without
+    rewriting the trusted pin (chainlink #65); the explicit recovery paths
+    (`migrate --upgrade`/`--force`) leave it as the running identity."""
     records = dict(_manifest_files(manifest))
     for plan in report.files:
         if plan.content is not None:
@@ -429,10 +441,13 @@ def apply_plan(workspace: Path, report: InstallReport, manifest: dict | None) ->
                 "obsolete": True,
             }
         )
+    if adjudicator_record is None:
+        adjudicator_record = running_adjudicator_record()
+    adjudicator_pin = adjudicator_record.get("content_hash") or UNATTESTED
     gate_hashes = {}
     for rel in _GATE_PINNED_PATHS:
         if rel == ADJUDICATOR_PIN_TOKEN:
-            gate_hashes[rel] = adjudicator.identity_hash() or UNATTESTED
+            gate_hashes[rel] = adjudicator_pin
             continue
         target = workspace / rel
         if target.is_file():
@@ -448,10 +463,47 @@ def apply_plan(workspace: Path, report: InstallReport, manifest: dict | None) ->
         "descriptor_path": report.descriptor_path,
         "files": files,
         "gate_hashes": gate_hashes,
-        "adjudicator": running_adjudicator_record(),
+        "adjudicator": adjudicator_record,
     }
     _write_manifest(workspace, new_manifest)
     return new_manifest
+
+
+def _describe_adjudicator_hash(content_hash: str | None) -> str:
+    return content_hash if content_hash else f"{UNATTESTED} (source checkout)"
+
+
+def adjudicator_pin_conflict(manifest: dict | None) -> str | None:
+    """The conflict message for a rerun whose running executable identity
+    differs from the one recorded at init, or `None` when there is nothing
+    to refuse.
+
+    A pre-#57 manifest records no adjudicator at all: there is no trusted
+    value to preserve, so recording one now strengthens the pin rather than
+    silently replacing it. A recorded identity equal to the running one --
+    including both being an unattested source checkout, where both hashes
+    are `None` -- is the ordinary idempotent rerun. Every other case
+    (packaged A -> packaged B, packaged -> source checkout, or source
+    checkout -> packaged) changes a value that `doctor`/`status`/`check`
+    hold the workspace to, so `init` must report a conflict and leave the
+    pin alone rather than rewrite it; `migrate --upgrade`/`--force` is the
+    deliberate, explicit re-pin path (chainlink #65)."""
+    if manifest is None:
+        return None
+    recorded = manifest.get("adjudicator")
+    if not isinstance(recorded, dict):
+        return None
+    recorded_hash = recorded.get("content_hash")
+    running_hash = adjudicator.identity_hash()
+    if recorded_hash == running_hash:
+        return None
+    return (
+        "adjudicator pin mismatch: the ownership manifest records "
+        f"{_describe_adjudicator_hash(recorded_hash)} but this executable is "
+        f"{_describe_adjudicator_hash(running_hash)} -- refusing to silently re-pin it. "
+        "If the binary swap is deliberate, re-pin explicitly with "
+        "`ligature migrate --upgrade` (or `migrate --force <path>`)"
+    )
 
 
 def init_workspace(workspace: Path, mode: str, name: str, descriptor_rel: str) -> InstallReport:
@@ -468,7 +520,17 @@ def init_workspace(workspace: Path, mode: str, name: str, descriptor_rel: str) -
     if manifest is not None:
         _require_compatible(manifest)
     report = plan_install(workspace, mode, name, descriptor_rel, manifest)
-    apply_plan(workspace, report, manifest)
+    conflict = adjudicator_pin_conflict(manifest)
+    if conflict is None:
+        apply_plan(workspace, report, manifest)
+        return report
+    # A rerun under a different executable: reconcile the managed files as
+    # usual, but preserve the recorded adjudicator pin instead of replacing
+    # it. This mirrors a managed-file conflict -- the conflict is reported,
+    # never silently resolved; `migrate` is the explicit recovery path.
+    report.status = "conflict"
+    report.messages.append(conflict)
+    apply_plan(workspace, report, manifest, adjudicator_record=manifest.get("adjudicator"))
     return report
 
 

@@ -108,7 +108,7 @@ Two corrections to a natural first reading of this table:
 
 | command | earliest invocable state | prerequisite data | regime | mutates |
 |---|---|---|---|---|
-| `init --mode port` | Stage P0 (first run); **currently unguarded on rerun with a different binary — #65** | none | operator | managed files, `.codex/skills/`, `.ligature/`, **and** `project-descriptor.json` + `docs/reliance-policy.md` (written once, then marked user-owned) |
+| `init --mode port` | Stage P0 (first run); rerun with a **different** binary now reports an `adjudicator pin mismatch` conflict instead of silently re-pinning — use `migrate --upgrade`/`--force` to re-pin deliberately (#65, fixed) | none | operator | managed files, `.codex/skills/`, `.ligature/`, **and** `project-descriptor.json` + `docs/reliance-policy.md` (written once, then marked user-owned) |
 | `doctor` | any state, including before `init` | none — reports `installation: not-initialized` | read-only | — |
 | `version [--verify]` | any state, including before `init` (inspects the running binary, not the workspace) | none | read-only | — |
 | `status [--json]` | any state, including before `init` — reports `descriptor.state: absent` | none | read-only | — |
@@ -180,12 +180,18 @@ UNPINNED  (pre-#57 manifest, or before init)
     │  init (first run)
     ▼
 PINNED  ── doctor/status/check with the SAME binary ──▶ PINNED (stays)
+    │  init rerun with the SAME binary ──▶ PINNED (stays; pin field no-op)
     │
     │  doctor/status/check with a DIFFERENT binary
     ▼
 DRIFTED/MISMATCH  (reported, never silently repaired for a READ command —
     │              confirmed: doctor correctly reports "adjudicator pin:
     │              mismatch" without touching the manifest)
+    │  init rerun with a DIFFERENT binary
+    ▼
+CONFLICT  (init reports "adjudicator pin mismatch", exits non-zero, and
+    │      leaves the recorded pin byte-for-byte untouched; it does NOT
+    │      re-pin — chainlink #65)
     │  migrate --upgrade | --force <path>   (explicit, operator-gated —
     │                                        both call apply_plan(), which
     │                                        also re-pins gate_integrity
@@ -195,33 +201,31 @@ DRIFTED/MISMATCH  (reported, never silently repaired for a READ command —
 PINNED  (re-pinned, deliberately, under an explicit flag)
 ```
 
-The tested, documented edge is the read-path column on the right — a
-swapped-in binary is caught by `doctor` without touching the manifest.
-**The test usually cited for this
-(`tests/test_zipapp_out_of_checkout.py:104`,
-`test_source_checkout_is_refused_after_a_packaged_init`) proves a
-narrower claim than "a swapped binary is caught": it reruns `doctor` from
-an *unattested source checkout* against a workspace pinned to a *packaged*
-build, and asserts `"unattested"` in the output. It does not construct two
-different packaged builds and assert a mismatch between them** — that
-specific case (binary A pins, binary B reads, correctly reported
-`mismatch`) was verified manually during #65's investigation, not by an
-existing automated test. Worth a dedicated test alongside whatever fixes
-#65.
+Both columns of that state machine are now tested. On the read path, a
+swapped-in binary is caught by `doctor` without touching the manifest:
+`tests/test_zipapp_out_of_checkout.py`'s
+`test_source_checkout_is_refused_after_a_packaged_init` reruns `doctor`
+from an *unattested source checkout* against a workspace pinned to a
+*packaged* build and asserts `"unattested"`. On the `init` path, the same
+file's `AdjudicatorRepinAcceptanceTest` builds two genuinely different
+packaged artifacts — a `git worktree` at a pre-#65 commit plus the current
+tree — and asserts that first init pins normally, a same-binary rerun is a
+no-op on the pin, a different-binary rerun exits non-zero with
+`adjudicator pin mismatch` and leaves the pin unchanged, and
+`migrate --upgrade` re-pins deliberately.
 
-The **known open gap** is that `init` reruns bypass this state machine
-entirely: `init_workspace()` always calls `apply_plan()`, which
-unconditionally rewrites `gate_hashes["@adjudicator"]` to whatever binary
-is currently running it — no comparison against the existing pin, no flag
-required. This is *not* a claim that every `init` rerun is unsafe — a
-rerun with the **same** binary that's already pinned is a genuine no-op on
-this field, and requiring confirmation for that case would be needless
-friction. The gap is specifically: a rerun with a **different**
-content_hash than what's currently pinned silently re-pins, with zero
-signal, where `migrate --force`'s identical underlying re-pin at least
-required the operator to type `--force` first. Any future error/misuse
-review of `init` should check it against this sub-state-machine
-specifically (chainlink #65).
+The gap #65 closed: `init` reruns used to bypass this state machine
+entirely — `init_workspace()` always called `apply_plan()`, which
+unconditionally rewrote `gate_hashes["@adjudicator"]` to whatever binary was
+running it, with no comparison and no flag. A rerun under the **same**
+binary that was already pinned was a genuine no-op on this field, and still
+is; a rerun under a **different** content hash silently re-pinned, exiting
+`0` with `installation: current` and no signal. Now `init_workspace()`
+compares the running executable's identity against the recorded pin before
+applying, reports the `CONFLICT` state above when they differ, and preserves
+the existing pin; deliberate re-pinning goes through `migrate
+--upgrade`/`--force`, the same explicit path managed-file drift already
+uses (chainlink #65).
 
 ## 6. Known gaps, seeded for future misuse-case review
 
@@ -229,9 +233,16 @@ Findings already surfaced by real use of this flow (the #52 pilot, its
 independent review, and review of an earlier draft of this document),
 kept here so error-case work starts from what's already known:
 
-- **#65** — `init` rerun silently re-pins `gate_integrity[@adjudicator]`
-  to whatever binary invokes it when the content hash differs from what's
-  pinned; no confirmation, no `--force` gate, unlike `migrate`. See §5.
+- **#65** (closed) — `init` rerun no longer silently re-pins
+  `gate_integrity[@adjudicator]` to whatever binary invokes it. When the
+  running executable's content hash differs from the recorded one,
+  `init_workspace()` reports an `adjudicator pin mismatch` conflict, exits
+  non-zero, and leaves the pin byte-for-byte untouched; first init and a
+  same-binary rerun are unchanged. Deliberate re-pinning goes through the
+  explicit `migrate --upgrade`/`--force` path, as with managed-file drift.
+  Covered by `tests/test_ligature_install.py` (mocked identities) and
+  `tests/test_zipapp_out_of_checkout.py`'s `AdjudicatorRepinAcceptanceTest`
+  (two genuinely different packaged builds). See §5.
 - **#66** (closed) — `gate g14`'s `load_manifests` no longer globs every
   `ci/manifest/*.json` as a work-package manifest: it now discriminates on
   shape (`work_package`/`definition_of_done` top-level keys) before
@@ -247,7 +258,8 @@ kept here so error-case work starts from what's already known:
   `source_dirty`/`working_tree_diff_hash` rather than mislabeling a dirty
   build clean; relevant here because §5's PINNED state's *meaning*
   depends on `source_commit` being trustworthy provenance, which #64 made
-  true — #65 shows the pin *mechanism* still doesn't fully respect that.
+  true — and #65 (closed) made the pin *mechanism* enforce that on the
+  `init` path too, not only on read.
 - **#67** — the Stage P0 descriptor-placeholder gap. See §4.
 - **Boundary G2+ doesn't skip `_`-prefixed directories** — unlike the
   witness validator (`validate_witness.py:283`'s `part.startswith("_")`
@@ -276,7 +288,7 @@ kept here so error-case work starts from what's already known:
   exclude bounded closures, or was that an oversight), not a code defect.
   Documented in `docs/limitations.md` (F4).
 
-Seven items above (two closed); none of the open ones blocks a Mode P
+Seven items above (three closed); none of the open ones blocks a Mode P
 project from *genuinely* reaching Stage 8C closure — the G2+/
 schema-conflict gaps are read-path noise a human currently has to route
 around, not incorrect promotions, and the remainder are authority or

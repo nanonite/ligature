@@ -77,6 +77,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from project_descriptor import is_underscore_artifact_path  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
@@ -280,15 +281,7 @@ def resolve_query(concept: str, query: str, specs_search_root: Path | None) -> t
 
     matches = []
     for spec_path in sorted(specs_search_root.glob("**/*.json")):
-        if any(part.startswith("_") for part in spec_path.relative_to(specs_search_root).parts):
-            # Every artifact directory in this codebase is underscore-
-            # prefixed (_boundaries, _interactions, _bridges, _witnesses,
-            # ...), and a witness spec carries its own top-level
-            # `concept` field -- so an unfiltered scan finds the witness
-            # itself and reports its own concept as ambiguous.
-            # validate_boundary_contracts.py's version of this scan never
-            # hit that only because a boundary contract has no top-level
-            # `concept`.
+        if is_underscore_artifact_path(spec_path, specs_search_root):
             continue
         try:
             spec = json.loads(spec_path.read_text())

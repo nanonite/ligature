@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
+from project_descriptor import is_underscore_artifact_path  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
 from validate_boundary_naming import check_file as check_naming  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
@@ -169,6 +170,13 @@ def _resolve_constraint(
     all_specs = sorted(specs_search_root.glob("**/*.json"))
     matches = []
     for spec_path in all_specs:
+        if is_underscore_artifact_path(spec_path, specs_search_root):
+            # A witness spec carries its own top-level `concept`; an
+            # unfiltered scan would mistake it for the concept spec that
+            # defines the callee's concept and report a spurious ambiguity
+            # whenever a witness shares a concept name with a boundary's
+            # callee (chainlink #69).
+            continue
         try:
             spec = json.loads(spec_path.read_text())
         except json.JSONDecodeError:

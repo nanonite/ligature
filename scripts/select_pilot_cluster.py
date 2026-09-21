@@ -108,6 +108,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import interaction_dir_for  # noqa: E402
+from project_descriptor import is_underscore_artifact_path  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from validate_closure import load_cluster_artifacts_with_invalid  # noqa: E402
@@ -201,7 +202,7 @@ def discover_concepts(descriptor: dict, workspace: Path) -> tuple[dict[str, Conc
         if not root.is_dir():
             continue
         for path in sorted(root.glob("**/*.json")):
-            if any(part.startswith("_") for part in path.relative_to(root).parts):
+            if is_underscore_artifact_path(path, root):
                 continue
             try:
                 data = json.loads(path.read_text())

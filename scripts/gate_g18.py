@@ -83,6 +83,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from project_descriptor import is_underscore_artifact_path  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from validate_witness import find_witness_files  # noqa: E402
 from validate_witness import load_validator as load_witness_validator  # noqa: E402
@@ -116,7 +117,7 @@ def discover_declared_features(specs_search_root: Path) -> list[tuple[str, str, 
     if not specs_search_root.is_dir():
         return features
     for spec_path in sorted(specs_search_root.glob("**/*.json")):
-        if any(part.startswith("_") for part in spec_path.relative_to(specs_search_root).parts):
+        if is_underscore_artifact_path(spec_path, specs_search_root):
             continue
         try:
             spec = json.loads(spec_path.read_text())

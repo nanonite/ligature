@@ -316,16 +316,20 @@ kept here so error-case work starts from what's already known:
   descriptor, so a coincidental `creusot` choice is never flagged alone.
   `check next` recommends editing the descriptor rather than a downstream
   refresh. A genuinely edited descriptor is not flagged. See §4.
-- **Boundary G2+ doesn't skip `_`-prefixed directories** — unlike the
-  witness validator (`validate_witness.py:283`'s `part.startswith("_")`
-  skip), `validate_boundary_contracts.py`'s G2+ resolver has no
-  equivalent, so a witness spec and a boundary contract naming the same
-  concept collide ambiguously at Stage 4 — **only when such a witness
-  actually exists**; the #52 pilot avoided the collision by witnessing a
-  different concept (`VersionOrder.compare` rather than `SemVer`), so this
-  is a real but conditional gap, not one every Mode P project hits.
-  Documented in `docs/limitations.md` (F2); not yet its own chainlink
-  issue.
+- **#69** (closed) — Boundary G2+'s concept resolver did not skip
+  `_`-prefixed directories, unlike the witness validator
+  (`validate_witness.py`'s `part.startswith("_")` skip), so a witness spec
+  and a boundary contract naming the same concept collided ambiguously at
+  Stage 4 — **only when such a witness actually exists**; the #52 pilot
+  avoided the collision by witnessing a different concept
+  (`VersionOrder.compare` rather than `SemVer`), so this was a real but
+  conditional gap, not one every Mode P project hits. G2+ now skips those
+  directories via `project_descriptor.is_underscore_artifact_path` — the
+  same predicate the witness/G18/pilot-cluster resolvers now share, so the
+  convention cannot drift apart across validators again. A genuinely
+  ambiguous pair of concept specs outside those directories still reports
+  the ambiguity: the candidate set was narrowed, not the check disabled.
+  Documented in `docs/limitations.md` (F2).
 - **Concept-spec schema conflict across tools** — G2+'s
   `constraints[].id` and `gate g18`'s `queries[].witness_required` are
   proposed concept-to-code extensions not applied upstream, while
@@ -343,9 +347,9 @@ kept here so error-case work starts from what's already known:
   exclude bounded closures, or was that an oversight), not a code defect.
   Documented in `docs/limitations.md` (F4).
 
-Eight items above (five closed); none of the open ones blocks a Mode P
-project from *genuinely* reaching Stage 8C closure — the G2+/
-schema-conflict gaps are read-path noise a human currently has to route
+Eight items above (six closed); none of the open ones blocks a Mode P
+project from *genuinely* reaching Stage 8C closure — the remaining
+schema-conflict gap is read-path noise a human currently has to route
 around, not incorrect promotions, and the remainder are authority or
 scope questions rather than wrong gate results. They're listed here
 because each is a concrete instance of the question this document exists

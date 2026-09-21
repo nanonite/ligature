@@ -118,6 +118,77 @@ class ValidateBoundaryContractsTest(unittest.TestCase):
         self.assertIn("no --specs-search-root given", infos[0].reason)
 
 
+class G2PlusConceptResolutionTest(unittest.TestCase):
+    """Chainlink #69: G2+'s concept resolver must skip underscore-prefixed
+    artifact directories, exactly as the witness/G18/pilot-cluster resolvers
+    already do. A witness spec carries its own top-level `concept`, so an
+    unfiltered scan reports a spurious ambiguity the moment a witness shares
+    a concept name with a boundary's callee -- the collision #52's pilot
+    avoided only by witnessing a different concept. Narrowing the candidate
+    set must not disable the ambiguity check itself."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        specs = self.root / "specs"
+        (specs / "_boundaries").mkdir(parents=True)
+        (specs / "task_queue.json").write_text(
+            json.dumps(
+                {
+                    "concept": "TaskQueue",
+                    "constraints": [
+                        {
+                            "id": "C003",
+                            "english": "pop_ready returns None only when no task has deadline <= now",
+                            "logic": "true",
+                            "kind": "postcondition",
+                            "applies_to": ["pop_ready"],
+                        }
+                    ],
+                }
+            )
+        )
+        (specs / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                    "caller": {"concept": "Scheduler", "method": "dispatch"},
+                    "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+                    "callee_guarantees": ["TaskQueue.C003"],
+                    "review": {"reviewer": "alice", "reviewed_at": "2026-08-25"},
+                }
+            )
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _add_witness_naming_task_queue(self):
+        witness_dir = self.root / "specs" / "_witnesses"
+        witness_dir.mkdir()
+        (witness_dir / "task_queue.load_factor.json").write_text(
+            json.dumps({"concept": "TaskQueue", "witness_id": "W-TQ-LOAD-FACTOR"})
+        )
+
+    def test_a_witness_sharing_the_callee_concept_is_skipped_not_ambiguous(self):
+        self._add_witness_naming_task_queue()
+        findings = validate(self.root, specs_search_root=self.root / "specs")
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_two_concept_specs_outside_artifact_dirs_still_report_ambiguity(self):
+        self._add_witness_naming_task_queue()
+        (self.root / "specs" / "task_queue_copy.json").write_text(
+            json.dumps({"concept": "TaskQueue", "constraints": []})
+        )
+        findings = validate(self.root, specs_search_root=self.root / "specs")
+        errors = [f for f in findings if f.severity == "error"]
+        self.assertTrue(
+            any("ambiguous" in f.reason.lower() or "more than one" in f.reason for f in errors),
+            [str(f) for f in findings],
+        )
+
+
 class ValidBoundaryEdgesFromCrateTest(unittest.TestCase):
     """valid_boundary_edges_from_crate(): the coverage set
     scripts/validate_interaction.py's check_r2_coverage trusts as

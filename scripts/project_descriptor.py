@@ -38,6 +38,24 @@ def load_project_descriptor(path: Path) -> dict:
     return data
 
 
+def is_underscore_artifact_path(path: Path, specs_search_root: Path) -> bool:
+    """True when `path` has an underscore-prefixed path component relative
+    to `specs_search_root` -- i.e. it lives inside one of the canonical
+    artifact directories this module names (`_boundaries`,
+    `_interactions`, `_bridges`, `_exemptions`, `_protocol_debt`,
+    `_conflicts`; also `_witnesses`), not in the concept-spec tree itself.
+
+    Cross-file concept resolution must exclude these: several artifacts
+    (witness specs, bridge specs) carry their own top-level `concept`
+    field, so an unfiltered scan mistakes an artifact that merely names a
+    concept for the concept spec that defines it, and reports a spurious
+    ambiguity when both exist. One shared predicate so
+    validate_witness.py, gate_g18.py, select_pilot_cluster.py, and
+    validate_boundary_contracts.py cannot drift apart on the convention
+    (chainlink #69)."""
+    return any(part.startswith("_") for part in path.relative_to(specs_search_root).parts)
+
+
 def boundary_dir_for(crate: dict, workspace: Path) -> Path:
     """plan.md's canonical layout, §2: crates/*/specs/_boundaries/*.json --
     always this exact path relative to the crate root, not a separate

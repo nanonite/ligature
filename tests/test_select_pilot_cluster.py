@@ -645,5 +645,68 @@ class CmdSelectPilotClusterCliTest(TmpWorkspaceTest):
         self.assertIn("select-pilot-cluster", buffer.getvalue())
 
 
+class ExtendedSchemaAcceptsDecidedExtensionsTest(TmpWorkspaceTest):
+    """Chainlink #69's investigation into docs/limitations.md finding F3:
+    G2+ and gate g18 already read `constraints[].id` and
+    `queries[].witness_required` when present, but this rubric validated
+    concept specs against the bare vendored schema, which rejects both
+    (`additionalProperties: false`) -- so no single concept spec could
+    satisfy G2+, gate g18, and this rubric at once. Both extensions are
+    already decided (docs/concept-to-code-modifications.md gaps #5/#6,
+    chainlink #33/#40); this rubric now validates against a locally
+    extended copy of the real vendored schema instead of the bare one."""
+
+    def test_a_spec_using_both_decided_extension_fields_is_accepted(self):
+        spec = concept_spec("TaskQueue", "sched-core")
+        spec["queries"][0]["witness_required"] = True
+        spec["constraints"][0]["id"] = "C001"
+        self.ws.write_raw("task_queue.json", spec)
+        self.ws.write_interaction("I-SCHED-001", "TaskQueue", "TaskQueue")
+        self.ws.write_closure_profile("sched-core", generic=True)
+
+        candidates, ranked, findings = self.ws.select()
+
+        self.assertEqual(findings, [])
+        self.assertEqual(self.candidate(candidates, "sched-core").eligible, True)
+
+    def test_a_spec_without_either_extension_field_still_validates(self):
+        # Backward compatibility: this rubric must not start requiring
+        # either field just because it now accepts them.
+        self.ws.write_concept("TaskQueue", "sched-core")
+        self.ws.write_interaction("I-SCHED-001", "TaskQueue", "TaskQueue")
+        self.ws.write_closure_profile("sched-core", generic=True)
+
+        candidates, ranked, findings = self.ws.select()
+
+        self.assertEqual(findings, [])
+        self.assertEqual(self.candidate(candidates, "sched-core").eligible, True)
+
+    def test_a_malformed_id_is_still_rejected(self):
+        # Accepting the field is not the same as accepting anything in it
+        # -- the extension's own shape (pattern ^C\d{3}$) still applies.
+        spec = concept_spec("TaskQueue", "sched-core")
+        spec["constraints"][0]["id"] = "not-a-valid-id"
+        self.ws.write_raw("task_queue.json", spec)
+        self.ws.write_interaction("I-SCHED-001", "TaskQueue", "TaskQueue")
+        self.ws.write_closure_profile("sched-core", generic=True)
+
+        candidates, ranked, findings = self.ws.select()
+
+        self.assertTrue(findings, "a malformed id should be reported as schema-invalid")
+
+    def test_an_unrelated_additional_property_is_still_rejected(self):
+        # additionalProperties: false on the base spec object itself
+        # (not query/constraint) must survive the extension unrelated.
+        spec = concept_spec("TaskQueue", "sched-core")
+        spec["totally_unrelated_bogus_field"] = "x"
+        self.ws.write_raw("task_queue.json", spec)
+        self.ws.write_interaction("I-SCHED-001", "TaskQueue", "TaskQueue")
+        self.ws.write_closure_profile("sched-core", generic=True)
+
+        candidates, ranked, findings = self.ws.select()
+
+        self.assertTrue(findings, "an unrelated additional property should still be rejected")
+
+
 if __name__ == "__main__":
     unittest.main()

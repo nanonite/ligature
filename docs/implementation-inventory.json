@@ -718,6 +718,10 @@
       "disposition": "runtime-required"
     },
     {
+      "path": "docs/concept-to-code-constraint-id-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
       "path": "docs/concept-to-code-witness-required-schema.json",
       "disposition": "runtime-required"
     },
@@ -861,6 +865,11 @@
     {
       "path": "tests/test_cli_contract.py",
       "kind": "drift",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_concept_to_code_constraint_id_schema.py",
+      "kind": "schema",
       "disposition": "test-only"
     },
     {
@@ -1255,12 +1264,12 @@
       "documentation": 14,
       "excluded": 1,
       "installed-template": 4,
-      "runtime-required": 74,
-      "test-only": 64,
+      "runtime-required": 75,
+      "test-only": 65,
       "vendored-runtime": 1
     },
-    "total_entries": 158,
-    "test_count": 51,
+    "total_entries": 160,
+    "test_count": 52,
     "registered_cli_command_count": 39
   },
   "documentation_and_templates": [

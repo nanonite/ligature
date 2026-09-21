@@ -175,3 +175,38 @@ backfill of `id` onto every existing constraint in any project already using
 concept-to-code — worth stating plainly to whoever applies it, not
 minimizing. `command`/`query` need no change. Tracked as chainlink issue #40
 in `ligature-workspace`.
+
+**Implementation status (chainlink #40):** not yet applied upstream, same
+posture as gap #5 — the vendored submodule remains an unmodified read-only
+pin, and the literal proposed patch (vendor's real `constraint` `$def`,
+field for field, plus this one new *required* property) is recorded at
+`docs/concept-to-code-constraint-id-schema.json`, drift-tested against the
+live vendored `$def` the same way gap #5's proposal is
+(`tests/test_concept_to_code_constraint_id_schema.py`). Unlike gap #5,
+`id` is required, not optional, so this proposal is honestly
+backward-*in*compatible: `ExistingDocumentBackwardIncompatibilityTest`
+proves every real constraint in this codebase's own vendored fixtures is
+correctly *rejected* by the proposed schema today, precisely because none
+of them has been backfilled yet — that's the point of stating the backfill
+cost plainly above, made mechanically observable rather than left as a
+sentence in this file.
+
+**F3 (docs/limitations.md in a Mode P pilot workspace, chainlink #52):
+both gaps #5 and #6 being decided-but-not-yet-upstreamed created a real
+three-way conflict.** G2+ (`validate_boundary_contracts.py`) and `gate g18`
+already read `constraints[].id`/`queries[].witness_required` when present,
+but `scripts/select_pilot_cluster.py` validated concept specs against the
+bare vendored schema, whose `additionalProperties: false` rejects both —
+so no single concept spec could satisfy all three tools. Resolved
+(chainlink #69's investigation) by having `select_pilot_cluster.py`
+validate against a copy of the live vendored schema extended in memory
+with both fields (`load_extended_concept_spec_schema()`), pulling each
+field's shape from its own proposed-patch artifact above so the local
+copy can't drift from what's actually proposed. `constraint.id` is
+deliberately accepted as **optional** there, diverging from this file's
+own "required" decision — requiring it today would make the rubric reject
+every concept spec that hasn't done the backfill gap #6 describes, which
+is a regression, not the fix F3 asked for. A project may start assigning
+`id`s now to get G2+'s concrete guarantee resolution instead of its
+`no_ids_in_spec` fallback; nothing requires it yet. `vendor/concept-to-code`
+itself remains untouched either way.

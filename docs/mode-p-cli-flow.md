@@ -330,28 +330,45 @@ kept here so error-case work starts from what's already known:
   ambiguous pair of concept specs outside those directories still reports
   the ambiguity: the candidate set was narrowed, not the check disabled.
   Documented in `docs/limitations.md` (F2).
-- **Concept-spec schema conflict across tools** — G2+'s
+- **#70** (closed) — concept-spec schema conflict across tools. G2+'s
   `constraints[].id` and `gate g18`'s `queries[].witness_required` are
-  proposed concept-to-code extensions not applied upstream, while
-  `report pilot-cluster` validates against the unmodified vendored
-  schema, which rejects both fields. No single concept spec can satisfy
-  all three tools at Stage 3/4. This is a genuine cross-tool schema
-  disagreement, not read-path noise and not a rubric-scope question —
-  it means one of the three tools is always slightly wrong about a
-  conforming spec. Documented in `docs/limitations.md` (F3).
-- **`select-pilot-cluster`'s rubric excludes any bounded-only (Kani)
-  cluster** — `deductive_closure_value > 0` requires a Creusot/Verus
-  edge, so a real, honestly-closed Stage 8C cluster can still be
-  `eligible: False` for `report pilot-cluster`. This is a scope question
-  about what #50's rubric is meant to select for (does it intend to
-  exclude bounded closures, or was that an oversight), not a code defect.
-  Documented in `docs/limitations.md` (F4).
+  proposed concept-to-code extensions, already decided
+  (`docs/concept-to-code-modifications.md` gaps #5/#6, chainlink #33/#40)
+  but not yet applied upstream, while `report pilot-cluster` validated
+  against the unmodified vendored schema, which rejected both fields —
+  no single concept spec could satisfy all three tools at Stage 3/4.
+  `select_pilot_cluster.py` now validates against a copy of the live
+  vendored schema extended in memory with both already-decided fields
+  (`load_extended_concept_spec_schema()`), each pulled from its own
+  regression-tested proposed-patch artifact so the local copy can't
+  drift from what's actually proposed. `constraint.id` is accepted as
+  optional there, deliberately diverging from #40's own "required"
+  decision, since requiring it today would reject every spec that
+  hasn't done the backfill #40 describes — a regression, not the fix
+  this asked for. `vendor/concept-to-code` remains untouched either
+  way. Originally documented as finding F3 in `docs/limitations.md`.
+- **Not a gap: `select-pilot-cluster`'s rubric correctly excludes any
+  bounded-only (Kani) cluster.** `plan.md` §14 states this explicitly —
+  "deductive-closure value... Must be **> 0** to be eligible at all...
+  It is 0 whenever... its sole verifier is `kani`" — this is the
+  original, deliberate spec for the pilot-selection rubric (chainlink
+  #4/#50), not an implementation artifact. A real, honestly-closed
+  Stage 8C cluster with only bounded (Kani) closure — like the #52
+  pilot's own `semver-core` — is genuinely, correctly `eligible: False`
+  for `report pilot-cluster`: the pilot-selection role was always
+  designed to pick the pipeline's *strongest* demonstrable claim
+  (deductive closure) first, not any honest closure. `#50` stays
+  correctly blocked on this specifically — it needs a real project with
+  a genuinely deductive-closure (Creusot/Verus) cluster, separate,
+  unstarted work, not a rubric fix. Originally documented as finding F4
+  in `docs/limitations.md`; no chainlink issue filed, since nothing
+  here is a defect to track.
 
-Eight items above (six closed); none of the open ones blocks a Mode P
-project from *genuinely* reaching Stage 8C closure — the remaining
-schema-conflict gap is read-path noise a human currently has to route
-around, not incorrect promotions, and the remainder are authority or
-scope questions rather than wrong gate results. They're listed here
+Eight items above (seven closed, one resolved as "working as designed");
+none of the open ones blocks a Mode P project from *genuinely* reaching
+Stage 8C closure — they're either fixed, or (F4) correctly-behaving code
+against a real, separate scope gap (`#50` needing a deductive-closure
+project) that isn't this rubric's own fault. They're listed here
 because each is a concrete instance of the question this document exists
 to make routine:
 *does this command's behavior match where the state machine says it

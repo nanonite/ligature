@@ -173,12 +173,65 @@ class ClusterCandidate:
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
 
+WITNESS_REQUIRED_PROPOSAL_PATH = (
+    Path(__file__).resolve().parent.parent / "docs" / "concept-to-code-witness-required-schema.json"
+)
+CONSTRAINT_ID_PROPOSAL_PATH = (
+    Path(__file__).resolve().parent.parent / "docs" / "concept-to-code-constraint-id-schema.json"
+)
+
+
 def load_concept_spec_schema() -> dict:
+    """The real, live vendored schema, read fresh every call
+    (`vendor/concept-to-code` is a read-only submodule pin -- this reads
+    it, never edits it, and never caches a copy that could go stale
+    against it). Unextended: see `load_extended_concept_spec_schema()`
+    for the version this rubric actually validates against."""
     return json.loads(CONCEPT_SPEC_SCHEMA_PATH.read_text())
 
 
+def load_extended_concept_spec_schema() -> dict:
+    """`load_concept_spec_schema()`'s result, patched so a concept spec
+    MAY declare `queries[].witness_required` and `constraints[].id`
+    without being rejected (chainlink #69's investigation into
+    docs/limitations.md finding F3: G2+ and gate g18 already read these
+    two fields when present, but this rubric validated against the bare
+    vendored schema, whose `additionalProperties: false` rejects both --
+    so no single concept spec could satisfy all three tools at once).
+
+    `witness_required` is added exactly as chainlink #33 decided it
+    upstream: optional, default `false`. `constraint.id` is added as
+    OPTIONAL here, even though chainlink #40 decided it should be
+    REQUIRED once actually applied upstream (docs/concept-to-code-
+    constraint-id-schema.json is the faithful record of that decision).
+    That's a deliberate divergence, not an oversight: #40's own text
+    warns a required `id` needs "a backfill... onto every existing
+    constraint in any project already using concept-to-code" before it
+    can be required without breaking every spec written before the
+    backfill. Requiring it here, today, would make this rubric reject
+    every concept spec that hasn't done that backfill -- a compatibility
+    regression, not the fix F3 asks for. A project MAY start assigning
+    `id`s now (and should, to get G2+'s concrete guarantee resolution
+    instead of its `no_ids_in_spec` non-blocking fallback); nothing here
+    requires it yet."""
+    schema = load_concept_spec_schema()
+    schema = json.loads(json.dumps(schema))  # deep copy; never mutate the cached vendored read
+
+    witness_required_proposal = json.loads(WITNESS_REQUIRED_PROPOSAL_PATH.read_text())
+    schema["$defs"]["query"]["properties"]["witness_required"] = witness_required_proposal[
+        "properties"
+    ]["witness_required"]
+
+    constraint_id_proposal = json.loads(CONSTRAINT_ID_PROPOSAL_PATH.read_text())
+    schema["$defs"]["constraint"]["properties"]["id"] = constraint_id_proposal["properties"]["id"]
+    # Deliberately NOT added to $defs["constraint"]["required"] -- see the
+    # docstring above.
+
+    return schema
+
+
 def load_concept_spec_validator():
-    return make_validator(load_concept_spec_schema())
+    return make_validator(load_extended_concept_spec_schema())
 
 
 def discover_concepts(descriptor: dict, workspace: Path) -> tuple[dict[str, ConceptInfo], list[Finding]]:

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/concept-to-code-constraint-id-schema.json",
+  "title": "concept-to-code constraint $def, proposed (chainlink #40)",
+  "description": "The literal patch requested upstream: docs/concept-to-code-modifications.md gap #6, tracked as chainlink #40. vendor/concept-to-code/schemas/spec.schema.json's own `constraint` $def, field for field, plus exactly one new property, `id` (string, pattern ^C\\d{3}$, REQUIRED -- author-assigned at Step A time, like every other id in this ecosystem, and stable under reordering by construction unlike a positional scheme). Unlike gap #5's witness_required (docs/concept-to-code-witness-required-schema.json), this field is required, not optional: the reliance-graph plan references obligations by a stable id everywhere (callee_guarantees, work-package obligations, interaction reliances), and there is nothing else stable to reference a constraint by. This is a real backward-incompatible change for any project already using concept-to-code -- every existing constraint needs an `id` backfilled onto it, worth stating plainly to whoever applies it, not minimizing (docs/concept-to-code-modifications.md gap #6's own words). This file is NOT consumed by any of this pipeline's runtime code and is never substituted for the real vendored schema -- vendor/concept-to-code is a read-only submodule pin and this is a proposal, not an applied change; nothing here alters vendor/concept-to-code/schemas/spec.schema.json. It exists so the extension's own shape -- valid with a correctly-patterned id, rejected without one, rejected on a malformed one, and otherwise additive over every constraint document today -- can be regression-tested before the upstream maintainer ever applies it. tests/test_concept_to_code_constraint_id_schema.py asserts every field here other than `id` is pulled verbatim from the live vendored `constraint` $def at test time, so this proposal can never silently drift from what it is actually proposing a patch against. See scripts/select_pilot_cluster.py's own locally-extended schema for how this pipeline's tooling accepts `id` as OPTIONAL today, pending the upstream backfill this proposal would require -- that local schema deliberately diverges from this literal proposal for exactly that reason, documented at its own definition.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["english", "logic", "id"],
+  "properties": {
+    "english": {
+      "type": "string",
+      "minLength": 10,
+      "description": "Restricted-English invariant, precondition, or postcondition."
+    },
+    "logic": {
+      "type": "string",
+      "minLength": 3,
+      "description": "Rust-boolean-subset expression consumed by contract and property-test generators."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["invariant", "precondition", "postcondition"],
+      "default": "invariant"
+    },
+    "source": {
+      "type": "string",
+      "enum": ["hand", "daikon", "llmlift", "oracle-doc"],
+      "default": "hand",
+      "description": "Provenance tag. 'daikon' means trace-inferred from a reference implementation by an external invariant-mining tool (e.g. Daikon); constraints with this tag must be reviewed before promotion into the main spec."
+    },
+    "applies_to": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Optional query or command names this constraint applies to."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^C\\d{3}$",
+      "description": "Stable obligation identifier, author-assigned at Step A time, unique within the owning concept spec. Referenced elsewhere in the reliance-graph pipeline as <Concept>.<id> (e.g. boundary contracts' callee_guarantees, work-package manifests' obligations, interaction specs' reliances[].obligation_id). Required, not optional: reordering constraints must never silently renumber a downstream reference, and there is no other stable field to extract one from (docs/concept-to-code-modifications.md gap #6). Reported upstream as chainlink #40; not applied to the vendored submodule."
+    }
+  }
+}

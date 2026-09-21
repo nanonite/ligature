@@ -16,8 +16,8 @@ Every stage tag below is taken verbatim from the pipeline's own source
 (`cmd_gate_g18`/`cmd_gate_g20`/`cmd_gate_g19`'s docstrings,
 `scripts/gate_g14.py`, `cmd_doctor`'s capability text, `docs/cli-contract.md`
 §2/§3/§6/§7), not inferred. Where a command's actual stage differs from
-where it's invocable in practice (gate g14 is the sharpest case — see §6),
-both are stated separately rather than picking one.
+where it's invocable in practice, both are stated separately rather than
+picking one.
 
 Everything here is Mode P (`mode: port` — a foreign-language source port
 validated by differential testing, plan.md §1.1, §11). Mode R
@@ -131,7 +131,7 @@ Two corrections to a natural first reading of this table:
 | `render-witness` | Stage 3 (first rendering) through Stage 8A (re-rendering for G19) | a witness spec + configured `witness_backend` | internal op, writes | a witness's declared `output.path`, `determinism.value_hash` |
 | `gate g19` | Stage 8A | a witness spec with a stored `determinism.value_hash` | read-only | — |
 | `validate closure` | Stage 8C | a closure profile | read-only | — |
-| `gate g14` | Stage 8C | closure profile **+** work-package manifests **+** callsite reports **+** bridge data — **and, as released, is blocked on every initialized workspace by #66** | read-only | — |
+| `gate g14` | Stage 8C | closure profile **+** work-package manifests **+** callsite reports **+** bridge data | read-only | — |
 | `report pilot-cluster` | any state with authored clusters (Stage 3+) | concept/verifier/edge structure | read-only | stdout only |
 | `validate gold-set` | any state with a gold set authored | a gold-set fixture | read-only | — |
 | `report gold-set-measurement` | any state with a gold set + candidate predictions | same | projection, no authority | `ci/results/gold_set/` (unless `--no-write`) |
@@ -232,16 +232,17 @@ kept here so error-case work starts from what's already known:
 - **#65** — `init` rerun silently re-pins `gate_integrity[@adjudicator]`
   to whatever binary invokes it when the content hash differs from what's
   pinned; no confirmation, no `--force` gate, unlike `migrate`. See §5.
-- **#66** — `gate g14` globs every `ci/manifest/*.json` as a work-package
-  manifest with no discriminator, so it also reads `ligature init`'s own
-  `ci/manifest/installation.json` and reports it schema-invalid
-  (severity `high`). As released, **no initialized Mode P workspace can
-  get a clean `gate g14` (or therefore `check`) pass through automated
-  tooling alone**, even when the cluster itself genuinely closes — the
-  §2 table's Stage 8C row states both facts rather than picking one: the
-  cluster can close *and* the gate can still exit 1 in the same run.
-  Originally documented as finding F1 in the #52 pilot's
-  `docs/limitations.md`.
+- **#66** (closed) — `gate g14`'s `load_manifests` no longer globs every
+  `ci/manifest/*.json` as a work-package manifest: it now discriminates on
+  shape (`work_package`/`definition_of_done` top-level keys) before
+  work-package schema validation, so `ligature init`'s own
+  `ci/manifest/installation.json` is skipped rather than reported
+  schema-invalid (severity `high`). A genuinely malformed work-package
+  manifest still fails closed, including one that has lost `schema` — the
+  key `installation.json` also lacks. Confirmed on the #52 pilot: `gate
+  g14` now exits 0 on the closing `semver-core` cluster with
+  `installation.json` in place. Originally documented as finding F1 in the
+  pilot's `docs/limitations.md`.
 - **#64** (closed) — release artifacts now honestly record
   `source_dirty`/`working_tree_diff_hash` rather than mislabeling a dirty
   build clean; relevant here because §5's PINNED state's *meaning*
@@ -275,12 +276,13 @@ kept here so error-case work starts from what's already known:
   exclude bounded closures, or was that an oversight), not a code defect.
   Documented in `docs/limitations.md` (F4).
 
-Seven gaps above; none blocks a Mode P project from *genuinely* reaching
-Stage 8C closure — the underlying cluster can close correctly even where
-#66 makes the gate that's supposed to confirm it exit non-zero, and G2+/
+Seven items above (two closed); none of the open ones blocks a Mode P
+project from *genuinely* reaching Stage 8C closure — the G2+/
 schema-conflict gaps are read-path noise a human currently has to route
-around, not incorrect promotions. They're listed here because each is a
-concrete instance of the question this document exists to make routine:
+around, not incorrect promotions, and the remainder are authority or
+scope questions rather than wrong gate results. They're listed here
+because each is a concrete instance of the question this document exists
+to make routine:
 *does this command's behavior match where the state machine says it
 should sit* — and each one is a case where it didn't, quietly, until
 someone actually ran the sequence for real.

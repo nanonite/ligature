@@ -1252,14 +1252,14 @@
   ],
   "counts": {
     "by_disposition": {
-      "documentation": 13,
+      "documentation": 14,
       "excluded": 1,
       "installed-template": 4,
       "runtime-required": 74,
       "test-only": 64,
       "vendored-runtime": 1
     },
-    "total_entries": 157,
+    "total_entries": 158,
     "test_count": 51,
     "registered_cli_command_count": 39
   },
@@ -1298,6 +1298,11 @@
       "path": "docs/packaging.md",
       "disposition": "documentation",
       "summary": "Runtime contract (zipapp + system Python), bundle-manifest derivation, the executable-attestation/gate_integrity trust model, and the release/provenance outputs (#57)."
+    },
+    {
+      "path": "docs/mode-p-cli-flow.md",
+      "disposition": "documentation",
+      "summary": "Intended Mode P (port) CLI state machine mapped directly onto plan.md stages P0-8C, with the three authority regimes, command-by-command prerequisites, and the known gaps (#65, #67 and the G2+/schema-conflict/rubric findings; #66 closed) surfaced by the #52 pilot and its review."
     }
   ]
 }

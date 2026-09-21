@@ -30,6 +30,7 @@ from gate_g14 import (  # noqa: E402
     cycles,
     gate_workspace,
     load_manifests,
+    looks_like_work_package_manifest,
     main,
     report_outcomes,
     strongly_connected_components,
@@ -1025,6 +1026,68 @@ class ManifestLoadingTest(GateTestCase):
             (self.ws.root / "ci" / "manifest" / f"{name}.json").unlink()
         outcome, _ = self.ws.cluster()
         self.assertTrue(any("no valid manifest for it was found" in e for e in self.errors(outcome)))
+
+    def write_installation_manifest(self) -> None:
+        """`ligature init`'s ownership manifest, at its fixed path
+        ci/manifest/installation.json -- an unrelated schema that shares
+        the directory and filename suffix with work-package manifests
+        (chainlink #66)."""
+        self.ws.write("ci/manifest/installation.json", {
+            "manifest_schema_version": "1.0",
+            "adjudicator": {
+                "kind": "zipapp",
+                "version": "0.0.0-unreleased",
+                "content_hash": "sha256:" + "0" * 64,
+            },
+            "descriptor_path": "project-descriptor.json",
+            "files": [
+                {
+                    "path": "project-descriptor.json",
+                    "ownership": "user",
+                    "base_hash": "sha256:" + "1" * 64,
+                    "expected_hash": "sha256:" + "1" * 64,
+                    "authority_hash": None,
+                }
+            ],
+            "gate_hashes": {"gate-g14": "sha256:" + "3" * 64},
+            "installed_product_version": "0.0.0-unreleased",
+        })
+
+    def test_the_discriminator_recognizes_an_ownership_manifest_not_a_work_package_one(self):
+        self.assertFalse(looks_like_work_package_manifest({
+            "manifest_schema_version": "1.0",
+            "adjudicator": {},
+            "files": [],
+            "gate_hashes": {},
+            "installed_product_version": "0.0.0-unreleased",
+        }))
+        self.assertTrue(looks_like_work_package_manifest({"work_package": "WP-A"}))
+
+    def test_the_installed_ownership_manifest_is_not_read_as_a_work_package_manifest(self):
+        self.write_installation_manifest()
+        manifests, findings = load_manifests(self.ws.root)
+        self.assertEqual(sorted(manifests), ["WP-A", "WP-B", "WP-C"])
+        self.assertEqual(findings, [])
+
+    def test_the_ownership_manifest_does_not_make_an_otherwise_closing_cluster_fail(self):
+        self.write_installation_manifest()
+        code, output = self.ws.run()
+        self.assertEqual(code, EXIT_OK, output)
+        outcome, workspace_findings = self.ws.cluster()
+        self.assertEqual([str(f) for f in workspace_findings], [])
+        self.assertEqual(outcome.status, "closes")
+
+    def test_a_work_package_manifest_missing_the_schema_key_still_fails_closed(self):
+        # `schema` is the required top-level key installation.json also
+        # lacks; discriminating on it would silently swallow this
+        # genuinely broken work-package manifest, so the discriminator
+        # must not key on it alone.
+        self.write_installation_manifest()
+        self.ws.patch("ci/manifest/WP-C.json", lambda d: d.pop("schema"))
+        _, workspace_findings = self.ws.cluster()
+        self.assertTrue(
+            any("WP-C.json" in str(f) and "not schema-valid" in str(f) for f in workspace_findings)
+        )
 
 
 if __name__ == "__main__":

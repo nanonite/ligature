@@ -148,6 +148,24 @@ def load_assurance_report_validator():
     return make_validator(json.loads(ASSURANCE_REPORT_SCHEMA_PATH.read_text()))
 
 
+def looks_like_work_package_manifest(data: object) -> bool:
+    """Discriminator between a work-package manifest and the other,
+    unrelated files that share ci/manifest/ -- in particular the ownership
+    manifest `ligature init` installs at ci/manifest/installation.json
+    (chainlink #66), whose top-level keys are manifest_schema_version,
+    adjudicator, files, gate_hashes and installed_product_version.
+
+    A work-package manifest always carries at least one of these
+    top-level keys; the ownership manifest carries none. Discriminating
+    on shape rather than on the reserved filename means a future second
+    reserved file in the same directory cannot be misread either -- and
+    because `definition_of_done` is checked as well as `work_package`, a
+    genuinely malformed manifest that has lost the `schema` key (the one
+    installation.json also lacks) is still validated, not silently
+    skipped."""
+    return isinstance(data, dict) and ("work_package" in data or "definition_of_done" in data)
+
+
 def load_manifests(workspace: Path) -> tuple[dict[str, dict], list[Finding]]:
     """Every schema-valid work-package manifest in ci/manifest.
 
@@ -169,6 +187,8 @@ def load_manifests(workspace: Path) -> tuple[dict[str, dict], list[Finding]]:
             data = json.loads(path.read_text())
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             findings.append(Finding("G14", str(path), f"manifest is not readable JSON: {e}"))
+            continue
+        if not looks_like_work_package_manifest(data):
             continue
         errors = list(validator.iter_errors(data))
         if errors:

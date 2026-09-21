@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- gate g14 misreads the installed ownership manifest as a work-package manifest, making check exit 1 on any initialized workspace (#66)
 - build_zipapp.py's PROVENANCE.json source_commit is wrong on a dirty git tree (#64)
 - Ship trusted Ligature metaharness: distribution, project state, and feedback-loop driver (#53)
 - Prove release candidate out of checkout in Neargye workspace (#60)

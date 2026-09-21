@@ -16,7 +16,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -394,6 +394,136 @@ def _identity(content_hash, *, kind="zipapp", version=ligature_install.PRODUCT_V
         "working_tree_diff_hash": None,
         "errors": [],
     }
+
+
+def _render_with_stamp(path: str, marker: str):
+    """The real renderer with one managed file's content changed -- stands in
+    for a different build's registry/templates producing different bytes."""
+    real = ligature_install.render_entry
+
+    def render(entry, mode, name):
+        text = real(entry, mode, name)
+        if entry.path == path:
+            return text + f"\n{marker}\n"
+        return text
+
+    return render
+
+
+class AdjudicatorConflictFreezesInstallTest(InstallFixture):
+    """Chainlink #68: an adjudicator conflict freezes the whole install, not
+    just the pin. A refused rerun must not rewrite managed-file content from
+    its own (untrusted) registry, nor bump the recorded product/schema
+    versions to its own; only an explicit `migrate --upgrade` applies them.
+    A genuinely new file ("create") still installs."""
+
+    H_A = "sha256:" + "a" * 64
+    H_B = "sha256:" + "b" * 64
+    PROMPT_REL = ".ligature/prompts/stage-0-evidence-intake.md"
+    REFUSED_VERSION = "9.9.9-refused"
+    STAMP = "refused-binary content"
+
+    def run_as(self, content_hash, *args, kind="zipapp", product_version=None, render=None):
+        identity = _identity(
+            content_hash,
+            kind=kind,
+            version=product_version or ligature_install.PRODUCT_VERSION,
+        )
+        patches = [mock.patch.object(adjudicator, "current_identity", return_value=identity)]
+        if product_version is not None:
+            patches.append(mock.patch.object(ligature_install, "PRODUCT_VERSION", product_version))
+        if render is not None:
+            patches.append(mock.patch.object(ligature_install, "render_entry", render))
+        with ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            return self.run_cli(*args)
+
+    def init_as(self, content_hash, *, product_version=None, render=None):
+        return self.run_as(
+            content_hash,
+            "init",
+            "--mode",
+            "greenfield",
+            "--name",
+            "myproj",
+            product_version=product_version,
+            render=render,
+        )
+
+    def test_conflict_refuses_upgrade_content_and_version_bump(self):
+        self.init_as(self.H_A)
+        old_prompt = self.read(self.PROMPT_REL)
+        old_product = self.manifest()["installed_product_version"]
+        old_schemas = self.manifest()["installed_schema_versions"]
+
+        code, out, _ = self.init_as(
+            self.H_B,
+            product_version=self.REFUSED_VERSION,
+            render=_render_with_stamp(self.PROMPT_REL, self.STAMP),
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("adjudicator pin mismatch", out)
+        self.assertIn("installation: conflict", out)
+        self.assertIn("upgrade", out)  # the refused upgrade is still reported
+        self.assertNotIn(self.STAMP, self.read(self.PROMPT_REL))
+        self.assertEqual(self.read(self.PROMPT_REL), old_prompt)
+        self.assertEqual(self.manifest()["installed_product_version"], old_product)
+        self.assertNotEqual(self.manifest()["installed_product_version"], self.REFUSED_VERSION)
+        self.assertEqual(self.manifest()["installed_schema_versions"], old_schemas)
+        self.assertEqual(self.pinned_hash(), self.H_A)
+        self.assertEqual(self.manifest()["gate_hashes"]["@adjudicator"], self.H_A)
+
+    def test_conflict_refuses_a_version_bump_without_any_content_change(self):
+        self.init_as(self.H_A)
+        old_product = self.manifest()["installed_product_version"]
+        old_schemas = self.manifest()["installed_schema_versions"]
+
+        code, out, _ = self.init_as(self.H_B, product_version=self.REFUSED_VERSION)
+
+        self.assertEqual(code, 1)
+        self.assertIn("installation: conflict", out)
+        self.assertNotEqual(old_product, self.REFUSED_VERSION)
+        self.assertEqual(self.manifest()["installed_product_version"], old_product)
+        self.assertEqual(self.manifest()["installed_schema_versions"], old_schemas)
+        self.assertEqual(self.pinned_hash(), self.H_A)
+
+    def test_migrate_upgrade_applies_the_refused_content_and_version(self):
+        self.init_as(self.H_A)
+        old_prompt = self.read(self.PROMPT_REL)
+        render = _render_with_stamp(self.PROMPT_REL, self.STAMP)
+        self.assertEqual(
+            self.init_as(self.H_B, product_version=self.REFUSED_VERSION, render=render)[0],
+            1,
+        )
+        self.assertEqual(self.read(self.PROMPT_REL), old_prompt)  # refused, still frozen
+
+        code, out, _ = self.run_as(
+            self.H_B,
+            "migrate",
+            "--upgrade",
+            product_version=self.REFUSED_VERSION,
+            render=render,
+        )
+
+        self.assertEqual(code, 0, out)
+        self.assertIn(self.STAMP, self.read(self.PROMPT_REL))
+        self.assertEqual(self.manifest()["installed_product_version"], self.REFUSED_VERSION)
+        self.assertEqual(self.pinned_hash(), self.H_B)
+
+    def test_conflict_still_installs_a_genuinely_new_file(self):
+        self.init_as(self.H_A)
+        (self.workspace / self.PROMPT_REL).unlink()
+
+        code, out, _ = self.init_as(self.H_B)
+
+        self.assertEqual(code, 1)
+        self.assertIn("installation: conflict", out)
+        self.assertTrue((self.workspace / self.PROMPT_REL).is_file())
+
+    def pinned_hash(self) -> str | None:
+        return self.manifest()["adjudicator"]["content_hash"]
 
 
 class AdjudicatorRepinTest(InstallFixture):

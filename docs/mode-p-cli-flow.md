@@ -208,8 +208,12 @@ DRIFTED/MISMATCH  (reported, never silently repaired for a READ command —
     │  init rerun with a DIFFERENT binary
     ▼
 CONFLICT  (init reports "adjudicator pin mismatch", exits non-zero, and
-    │      leaves the recorded pin byte-for-byte untouched; it does NOT
-    │      re-pin — chainlink #65)
+    │      freezes the ENTIRE install, not just the pin: the recorded pin,
+    │      installed_product_version/installed_schema_versions, and every
+    │      managed-file "upgrade" the refused binary would have written all
+    │      stay exactly as the trusted binary left them. A genuinely new
+    │      ("create") file still installs; "unchanged"/"user-owned" are
+    │      untouched as always — chainlink #65 + #68)
     │  migrate --upgrade | --force <path>   (explicit, operator-gated —
     │                                        both call apply_plan(), which
     │                                        also re-pins gate_integrity
@@ -245,6 +249,19 @@ the existing pin; deliberate re-pinning goes through `migrate
 --upgrade`/`--force`, the same explicit path managed-file drift already
 uses (chainlink #65).
 
+The gap #68 closed: #65 froze only the trust pin. On that same conflict path
+`apply_plan()` still wrote `installed_product_version`/
+`installed_schema_versions` from the currently running (refused) binary and
+applied every `"upgrade"`-outcome managed file rendered from that binary's
+registry — so the pin was preserved while the workspace's content and
+version claims could silently move ahead of it, a mixed-provenance install
+the manifest did not surface. Now the conflict path passes the *recorded*
+versions through (mirroring how `adjudicator_record` is already passed) and
+refuses to write any `"upgrade"`-outcome content, while still installing a
+genuinely new `"create"` file. `migrate --upgrade` — not a bare `init`
+rerun — is the one explicit action that applies the refused binary's content
+and version and re-pins the adjudicator (chainlink #68).
+
 ## 6. Known gaps, seeded for future misuse-case review
 
 Findings already surfaced by real use of this flow (the #52 pilot, its
@@ -261,6 +278,19 @@ kept here so error-case work starts from what's already known:
   Covered by `tests/test_ligature_install.py` (mocked identities) and
   `tests/test_zipapp_out_of_checkout.py`'s `AdjudicatorRepinAcceptanceTest`
   (two genuinely different packaged builds). See §5.
+- **#68** (closed) — an adjudicator conflict freezes the whole install, not
+  just the pin. `init_workspace()`'s conflict path passes the previously
+  recorded `installed_product_version`/`installed_schema_versions` through
+  instead of the refused binary's, and refuses to write any managed-file
+  `"upgrade"`-outcome content rendered from that binary; a genuinely new
+  `"create"` file still installs. `migrate --upgrade` remains the one
+  explicit action that applies the new content/version and re-pins.
+  Covered by `tests/test_ligature_install.py`'s
+  `AdjudicatorConflictFreezesInstallTest` (mocked renderer and version,
+  plus the `create`-still-installs boundary). The pre-#65 vs current
+  builds constructed in `AdjudicatorRepinAcceptanceTest` do not differ in
+  managed-file content (both render from unchanged templates), so no
+  end-to-end case was added there. See §5.
 - **#66** (closed) — `gate g14`'s `load_manifests` no longer globs every
   `ci/manifest/*.json` as a work-package manifest: it now discriminates on
   shape (`work_package`/`definition_of_done` top-level keys) before
@@ -313,7 +343,7 @@ kept here so error-case work starts from what's already known:
   exclude bounded closures, or was that an oversight), not a code defect.
   Documented in `docs/limitations.md` (F4).
 
-Seven items above (four closed); none of the open ones blocks a Mode P
+Eight items above (five closed); none of the open ones blocks a Mode P
 project from *genuinely* reaching Stage 8C closure — the G2+/
 schema-conflict gaps are read-path noise a human currently has to route
 around, not incorrect promotions, and the remainder are authority or

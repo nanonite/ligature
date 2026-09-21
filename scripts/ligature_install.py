@@ -468,6 +468,8 @@ def apply_plan(
     manifest: dict | None,
     *,
     adjudicator_record: dict | None = None,
+    installed_product_version: str | None = None,
+    installed_schema_versions: dict | None = None,
 ) -> dict:
     """Write every pending create/upgrade, then rebuild and atomically
     write the ownership manifest. Never writes a conflict.
@@ -476,7 +478,13 @@ def apply_plan(
     the running executable. `init` passes the previously recorded record
     when a rerun's binary has changed, so the conflict is reported without
     rewriting the trusted pin (chainlink #65); the explicit recovery paths
-    (`migrate --upgrade`/`--force`) leave it as the running identity."""
+    (`migrate --upgrade`/`--force`) leave it as the running identity.
+
+    `installed_product_version`/`installed_schema_versions` are the version
+    values to record; the default (`None`) is the running binary's. On the
+    same conflict path `init` passes the previously recorded values, so a
+    refused rerun cannot report a version its preserved pin does not
+    correspond to (chainlink #68)."""
     records = dict(_manifest_files(manifest))
     for plan in report.files:
         if plan.content is not None:
@@ -520,12 +528,16 @@ def apply_plan(
         target = workspace / rel
         if target.is_file():
             gate_hashes[rel] = _sha256_file(target)
+    if installed_product_version is None:
+        installed_product_version = PRODUCT_VERSION
+    if installed_schema_versions is None:
+        installed_schema_versions = {**KNOWN_SCHEMA_VERSIONS, "skill": SKILL_VERSION}
     new_manifest = {
         "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
-        "product_version": PRODUCT_VERSION,
-        "installed_product_version": PRODUCT_VERSION,
+        "product_version": installed_product_version,
+        "installed_product_version": installed_product_version,
         "installed_skill_version": SKILL_VERSION,
-        "installed_schema_versions": {**KNOWN_SCHEMA_VERSIONS, "skill": SKILL_VERSION},
+        "installed_schema_versions": installed_schema_versions,
         "mode": report.mode,
         "project_name": report.product_name,
         "descriptor_path": report.descriptor_path,
@@ -592,14 +604,44 @@ def init_workspace(workspace: Path, mode: str, name: str, descriptor_rel: str) -
     if conflict is None:
         apply_plan(workspace, report, manifest)
         return report
-    # A rerun under a different executable: reconcile the managed files as
-    # usual, but preserve the recorded adjudicator pin instead of replacing
-    # it. This mirrors a managed-file conflict -- the conflict is reported,
-    # never silently resolved; `migrate` is the explicit recovery path.
+    # A rerun under a different executable: the whole install is frozen, not
+    # just the adjudicator pin (#68). Managed-file "upgrade" content and the
+    # recorded product/schema versions all describe what the *refused* binary
+    # would have installed; writing any of them would leave the workspace's
+    # content and version claims ahead of the pin it still trusts. Refuse them
+    # together, exactly as #65 refuses the pin, until `migrate --upgrade`
+    # (or `--force`) is the operator's explicit choice. "create" outcomes
+    # still proceed (a genuinely new file has nothing to refuse), and
+    # "unchanged"/"user-owned" are untouched as always.
     report.status = "conflict"
     report.messages.append(conflict)
-    apply_plan(workspace, report, manifest, adjudicator_record=manifest.get("adjudicator"))
+    for plan in report.files:
+        if plan.outcome == "upgrade":
+            plan.content = None
+    recorded_product, recorded_schemas = _recorded_install_versions(manifest)
+    apply_plan(
+        workspace,
+        report,
+        manifest,
+        adjudicator_record=manifest.get("adjudicator"),
+        installed_product_version=recorded_product,
+        installed_schema_versions=recorded_schemas,
+    )
     return report
+
+
+def _recorded_install_versions(manifest: dict) -> tuple[str, dict]:
+    """The product/schema versions an already-initialized workspace records,
+    so a refused (`init` conflict-path) rerun preserves them rather than
+    adopting the running, untrusted binary's (chainlink #68). Falls back to
+    the running values only if the manifest genuinely predates the fields."""
+    product = manifest.get("installed_product_version") or manifest.get("product_version")
+    if not isinstance(product, str) or not product:
+        product = PRODUCT_VERSION
+    schemas = manifest.get("installed_schema_versions")
+    if not isinstance(schemas, dict) or not schemas:
+        schemas = {**KNOWN_SCHEMA_VERSIONS, "skill": SKILL_VERSION}
+    return product, schemas
 
 
 # ---------------------------------------------------------------------------

@@ -110,6 +110,7 @@ from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import interaction_dir_for  # noqa: E402
 from project_descriptor import is_underscore_artifact_path  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
+import resources  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from validate_closure import load_cluster_artifacts_with_invalid  # noqa: E402
 from validate_interaction import find_interaction_files  # noqa: E402
@@ -173,12 +174,8 @@ class ClusterCandidate:
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
 
-WITNESS_REQUIRED_PROPOSAL_PATH = (
-    Path(__file__).resolve().parent.parent / "docs" / "concept-to-code-witness-required-schema.json"
-)
-CONSTRAINT_ID_PROPOSAL_PATH = (
-    Path(__file__).resolve().parent.parent / "docs" / "concept-to-code-constraint-id-schema.json"
-)
+WITNESS_REQUIRED_PROPOSAL_PATH = resources.resource_path("docs", "concept-to-code-witness-required-schema.json")
+CONSTRAINT_ID_PROPOSAL_PATH = resources.resource_path("docs", "concept-to-code-constraint-id-schema.json")
 
 
 def load_concept_spec_schema() -> dict:

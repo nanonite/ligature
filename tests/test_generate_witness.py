@@ -20,6 +20,8 @@ directly (both fixed in generate_witness.py):
     the I/O layer.
 """
 import json
+import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -30,7 +32,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import atomic_write  # noqa: E402
-import generate_witness  # noqa: E402
 from generate_witness import (  # noqa: E402
     EXIT_GENERATION_FAILED,
     EXIT_INPUT_ERROR,
@@ -277,6 +278,59 @@ class WriteAtomicallyUnitTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 atomic_write.write_atomically(self.destination, "replacement")
         self.assertEqual(self.destination.read_text(), "original")
+
+    def test_a_fresh_write_gets_the_umask_derived_mode(self):
+        """Chainlink #63: mkstemp creates 0600, so without an explicit
+        post-rename chmod every destination would be owner-only. Run under
+        two different umasks set in the test itself, so this can't pass
+        just because of whatever umask the CI process happens to have."""
+        for umask in (0o022, 0o077):
+            with self.subTest(umask=oct(umask)):
+                destination = Path(self._tmp.name) / f"fresh-{umask:o}.txt"
+                saved = os.umask(umask)
+                try:
+                    atomic_write.write_atomically(destination, "x")
+                finally:
+                    os.umask(saved)
+                self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o666 & ~umask)
+
+    def test_overwriting_an_existing_file_preserves_its_mode(self):
+        """A deliberately chmod'd managed file (e.g. 0640) must not have
+        its mode silently reverted by a later atomic rewrite."""
+        self.destination.write_text("original")
+        os.chmod(self.destination, 0o640)
+        atomic_write.write_atomically(self.destination, "replacement")
+        self.assertEqual(self.destination.read_text(), "replacement")
+        self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o640)
+
+    def test_the_mode_is_normalized_after_the_atomic_replace(self):
+        """The chmod must run after os.replace, never on the temp file
+        before it -- otherwise it would reopen a mkstemp-then-crash window
+        the rename itself exists to close."""
+        calls = []
+        real_replace, real_chmod = atomic_write.os.replace, atomic_write.os.chmod
+
+        def replace(*args, **kwargs):
+            calls.append("replace")
+            return real_replace(*args, **kwargs)
+
+        def chmod(*args, **kwargs):
+            calls.append("chmod")
+            return real_chmod(*args, **kwargs)
+
+        with patch("atomic_write.os.replace", side_effect=replace), patch(
+            "atomic_write.os.chmod", side_effect=chmod
+        ):
+            atomic_write.write_atomically(self.destination, "x")
+        self.assertEqual(calls, ["replace", "chmod"])
+
+    def test_a_failed_write_leaves_a_pre_existing_file_mode_untouched(self):
+        self.destination.write_text("original")
+        os.chmod(self.destination, 0o640)
+        with patch("atomic_write.os.fsync", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                atomic_write.write_atomically(self.destination, "replacement")
+        self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o640)
 
 
 class FailureWritesNothingTest(GenerationTestCase):

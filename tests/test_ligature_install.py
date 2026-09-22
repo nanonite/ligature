@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -99,6 +101,27 @@ class FreshInitTest(InstallFixture):
         self.assertEqual(paths[SKILL_REL]["ownership"], "managed")
         self.assertEqual(paths["project-descriptor.json"]["ownership"], "user")
         self.assertIsNotNone(paths[SKILL_REL]["authority_hash"])
+
+    def test_initialized_files_get_the_umask_derived_mode(self):
+        """Chainlink #63, end to end through the CLI: every file init writes
+        must get what a umask-respecting open() would have produced, not
+        mkstemp's 0600. A non-default umask (0o027 -> 0640) makes a
+        hardcoded 0644/0664 fail too."""
+        saved = os.umask(0o027)
+        try:
+            code, _, _ = self.init("greenfield", name="myproj")
+        finally:
+            os.umask(saved)
+        self.assertEqual(code, 0)
+        expected = 0o666 & ~0o027
+        for rel in (
+            "project-descriptor.json",
+            "docs/reliance-policy.md",
+            SKILL_REL,
+            ".ligature/schemas/project-state.schema.json",
+            "ci/manifest/installation.json",
+        ):
+            self.assertEqual(stat.S_IMODE((self.workspace / rel).stat().st_mode), expected, rel)
 
     def test_port_init_installs_the_port_descriptor_shape(self):
         code, _, _ = self.init("port", name="myport")

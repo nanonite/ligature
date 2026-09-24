@@ -4,3 +4,4 @@ ci/results/
 dist/
 *.pyz
 .chainlink/
+!releases/**/*.pyz

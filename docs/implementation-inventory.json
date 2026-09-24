@@ -1252,11 +1252,15 @@
     },
     {
       "pattern": "dist/",
-      "reason": "Built release artifacts (zipapp, checksums, PROVENANCE, notices) are build outputs, never committed source."
+      "reason": "Scratch build output (zipapp, checksums, PROVENANCE, notices); gitignored. Published builds are copied to releases/ instead."
+    },
+    {
+      "pattern": "releases/",
+      "reason": "Published release assets (ligature.pyz + SHA256SUMS, PROVENANCE.json, notices) committed per tagged version for download; distribution outputs, never bundled into a build."
     },
     {
       "pattern": "*.pyz",
-      "reason": "Built zipapp binaries are outputs, regenerated per build, never committed source."
+      "reason": "Built zipapp binaries are outputs and never bundled into another build. The only committed copies are the published ones under releases/."
     }
   ],
   "counts": {

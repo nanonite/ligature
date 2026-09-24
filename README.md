@@ -63,9 +63,10 @@ ligature ships as a single Python zipapp, `ligature.pyz`. You copy it into
 your own port workspace and run it there. Requires Python ≥ 3.10 with
 `jsonschema` and `PyYAML` installed.
 
-1. Get `ligature.pyz`. Either download it (with `SHA256SUMS` and
-   `PROVENANCE.json`) from the [latest release](https://github.com/nanonite/ligature/releases/latest),
-   or build it from this checkout:
+1. Get `ligature.pyz`. Either copy the published build from
+   [`releases/v1.0/`](releases/v1.0/) (check it with
+   `sha256sum -c SHA256SUMS`; `PROVENANCE.json` records the exact source
+   commit), or build it yourself from this checkout:
 
    ```sh
    pip install -r requirements.txt

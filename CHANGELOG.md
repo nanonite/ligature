@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [1.0.0] - 2026-09-24
 
-First tagged release. `ligature.pyz` is published as a GitHub release asset.
+First tagged release. The built `ligature.pyz` (with checksums and provenance) is committed under `releases/v1.0/`.
 
 ### Added
 - README with the workflow/feedback-loop diagram and a C++ → Rust scope note; MIT license

@@ -59,17 +59,32 @@ implemented. They're left out of the diagram above.
 
 ## Quick start
 
-Requires Python ≥ 3.10.
+ligature ships as a single Python zipapp, `ligature.pyz`. You copy it into
+your own port workspace and run it there. Requires Python ≥ 3.10 with
+`jsonschema` and `PyYAML` installed.
 
-```sh
-pip install -r requirements.txt           # jsonschema, PyYAML
-python3 scripts/build_zipapp.py --out dist
-python3 dist/ligature.pyz init --mode port   # bootstrap a workspace
-python3 dist/ligature.pyz check              # read-only status + next action
-```
+1. Get `ligature.pyz`. Either download it (with `SHA256SUMS` and
+   `PROVENANCE.json`) from the [latest release](https://github.com/nanonite/ligature/releases/latest),
+   or build it from this checkout:
 
-The LLM backend is pluggable (`claude -p`, `codex exec`, `opencode run`, or a
-manual mode) and is configured in the project descriptor that `init` writes.
+   ```sh
+   pip install -r requirements.txt
+   python3 scripts/build_zipapp.py --out dist   # writes dist/ligature.pyz
+   ```
+
+2. Bootstrap your workspace and follow `check`'s next action:
+
+   ```sh
+   cd <your-port-workspace>
+   python3 ligature.pyz init --mode port
+   python3 ligature.pyz check        # read-only status + next action
+   ```
+
+`init` writes a `project-descriptor.json` with placeholder values such as
+`<path-to-cpp-source-repository>`. Replace them with your own paths and
+settings. ligature never assumes any machine-specific location. The LLM
+backend is also set there and is pluggable (`claude -p`, `codex exec`,
+`opencode run`, or a manual mode).
 
 ## Further reading
 

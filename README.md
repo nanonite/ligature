@@ -78,3 +78,7 @@ manual mode) and is configured in the project descriptor that `init` writes.
 - [`docs/trust-and-compatibility-boundaries.md`](docs/trust-and-compatibility-boundaries.md): read/write authority
 - [`plan.md`](plan.md): full design rationale
 - `vendor/concept-to-code`: the concept/contract skill that covers layers 1–2 (git submodule)
+
+## License
+
+MIT, see [`LICENSE`](LICENSE). The `vendor/concept-to-code` submodule is a separate repository with its own terms.

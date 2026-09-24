@@ -2,8 +2,8 @@
 
 The acceptance boundary between #53 (the metaharness epic) and #52 (the real
 Mode-P port): the released artifact, run with the ligature-workspace source
-checkout unavailable to it, must initialize the real
-`<path-to-neargye-workspace>` target and prove the loop driver
+checkout unavailable to it, must initialize a real Neargye workspace
+target and prove the loop driver
 surfaces a real problem there -- not just in a synthetic temp fixture.
 
 Like tests/test_zipapp_out_of_checkout.py, this builds the real
@@ -17,9 +17,9 @@ failure surfaced through `check`, a conflict/recovery cycle, and independent
 inspection of the release payload against the inventory's `never_release`
 list.
 
-Set `LIGATURE_NEARGYE_WORKSPACE` to point at a different (empty or already
-Ligature-initialized) target; the class skips if the directory is absent or
-contains unrecognized content. The real port itself (SemVer source pinning,
+Set `LIGATURE_NEARGYE_WORKSPACE` to the (empty or already
+Ligature-initialized) target; the class skips if it is unset, if the
+directory is absent, or if it contains unrecognized content. The real port itself (SemVer source pinning,
 oracles, differential tests) is #52, explicitly out of scope here.
 """
 from __future__ import annotations
@@ -42,9 +42,8 @@ import adjudicator  # noqa: E402
 import assumption_registry as ar  # noqa: E402
 import ligature_install  # noqa: E402
 
-NEARGYE_WORKSPACE = Path(
-    os.environ.get("LIGATURE_NEARGYE_WORKSPACE", "<path-to-neargye-workspace>")
-).expanduser()
+_NEARGYE_ENV = os.environ.get("LIGATURE_NEARGYE_WORKSPACE")
+NEARGYE_WORKSPACE = Path(_NEARGYE_ENV).expanduser() if _NEARGYE_ENV else None
 CONTRACT_PATH = ROOT / "docs" / "cli-contract.md"
 INVENTORY_PATH = ROOT / "docs" / "implementation-inventory.json"
 DIST = ROOT / "dist"
@@ -128,7 +127,10 @@ def _forbidden_release_tokens(inventory: dict) -> set[str]:
     return tokens
 
 
-@unittest.skipUnless(NEARGYE_WORKSPACE.is_dir(), f"Neargye acceptance workspace absent: {NEARGYE_WORKSPACE}")
+@unittest.skipUnless(
+    NEARGYE_WORKSPACE is not None and NEARGYE_WORKSPACE.is_dir(),
+    f"Neargye acceptance workspace unset or absent: {NEARGYE_WORKSPACE} (set LIGATURE_NEARGYE_WORKSPACE)",
+)
 class NeargyePortAcceptanceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

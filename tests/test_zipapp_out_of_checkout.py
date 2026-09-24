@@ -27,11 +27,11 @@ from schema_utils import make_validator  # noqa: E402
 DESCRIPTOR_SCHEMA = json.loads((ROOT / "schemas" / "project-descriptor.schema.json").read_text())
 
 
-# The commit that filed chainlink #65, before init grew the re-pin guard:
-# building a worktree at this revision yields a genuinely different-hash
-# artifact from the current working tree, without depending on a dirty-tree
-# difference (an untracked file would not change content_hash at all).
-OLD_COMMIT = "940e412"
+# A revision from before init grew the re-pin guard (#65): building a
+# worktree at this revision yields a genuinely different-hash artifact from
+# the current working tree, without depending on a dirty-tree difference (an
+# untracked file would not change content_hash at all).
+OLD_COMMIT = "3c44ef7"
 
 
 class ZipappOutOfCheckoutTest(unittest.TestCase):

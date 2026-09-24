@@ -6,7 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-24
+
+First tagged release. `ligature.pyz` is published as a GitHub release asset.
+
 ### Added
+- README with the workflow/feedback-loop diagram and a C++ → Rust scope note; MIT license
 - Authoritative implementation inventory (docs/implementation-inventory.json, schema v1.0) with a filesystem/argparse drift test, replacing the stale "53 tests / M0-M1" summary: 1389 passing tests (173 subtests), 32 registered CLI commands, 40 runtime modules, M0-M4 all complete (#55)
 - Central vendored-runtime-resource registry, scripts/vendored_resources.py (#55)
 - Stable public CLI grammar v1.0 (docs/cli-contract.md): `init doctor version status check validate gate draft approve migrate report`, with a complete 32/32 legacy-command disposition mapping and the `status`-stub-to-`doctor` retirement plan (#55)
@@ -34,6 +39,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- Example descriptors and docs use user-supplied placeholders (e.g. `<path-to-cpp-source-repository>`) instead of machine-specific paths; the Neargye acceptance test runs only when `LIGATURE_NEARGYE_WORKSPACE` is set
+- `.chainlink/` issue-tracker data is no longer tracked in the repository
 - atomic_write.py leaves files at mode 0600 (owner-only), never normalized (#63)
 - concept-spec schema conflict: no single spec satisfies G2+, gate g18, and report pilot-cluster at once (#70)
 - boundary G2+ concept resolver doesn't skip _-prefixed directories, unlike the witness validator (#69)

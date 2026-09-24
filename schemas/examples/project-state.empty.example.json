@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "product": { "name": "ligature", "version": "0.0.0-unreleased" },
+  "product": { "name": "ligature", "version": "1.0.0" },
   "installation_manifest": {
     "state": "not-initialized",
     "installed_product_version": null,
@@ -15,7 +15,7 @@
   "binary_identity": {
     "verified": "unknown",
     "content_hash": null,
-    "version": "0.0.0-unreleased"
+    "version": "1.0.0"
   },
   "artifacts": [],
   "obligations": [],

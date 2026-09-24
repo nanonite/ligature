@@ -37,10 +37,8 @@ from pathlib import Path
 import resources
 
 PRODUCT_NAME = "ligature"
-# #57 produces the first packaged build; the version string itself is
-# deliberately unchanged here so the existing project-state examples remain
-# honest about a pre-release artifact.
-PRODUCT_VERSION = "0.0.0-unreleased"
+# Bump together with the git tag (vX.Y) and CHANGELOG.md's release heading.
+PRODUCT_VERSION = "1.0.0"
 
 # The interpreter floor this packaging contract supports and needs `doctor`
 # to report rather than silently assume. `importlib.resources.files` (the

@@ -1036,7 +1036,7 @@ class ManifestLoadingTest(GateTestCase):
             "manifest_schema_version": "1.0",
             "adjudicator": {
                 "kind": "zipapp",
-                "version": "0.0.0-unreleased",
+                "version": "1.0.0",
                 "content_hash": "sha256:" + "0" * 64,
             },
             "descriptor_path": "project-descriptor.json",
@@ -1050,7 +1050,7 @@ class ManifestLoadingTest(GateTestCase):
                 }
             ],
             "gate_hashes": {"gate-g14": "sha256:" + "3" * 64},
-            "installed_product_version": "0.0.0-unreleased",
+            "installed_product_version": "1.0.0",
         })
 
     def test_the_discriminator_recognizes_an_ownership_manifest_not_a_work_package_one(self):
@@ -1059,7 +1059,7 @@ class ManifestLoadingTest(GateTestCase):
             "adjudicator": {},
             "files": [],
             "gate_hashes": {},
-            "installed_product_version": "0.0.0-unreleased",
+            "installed_product_version": "1.0.0",
         }))
         self.assertTrue(looks_like_work_package_manifest({"work_package": "WP-A"}))
 

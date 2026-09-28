@@ -100,6 +100,56 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
         self.assertEqual(document["gate_integrity"]["state"], "pinned")
         self.assertEqual(document["binary_identity"]["verified"], "true")
         self.assertEqual(document["binary_identity"]["content_hash"], self.build_result["content_hash"])
+        # chainlink #72: the ownership manifest init just wrote is
+        # ownership metadata, not a work-package artifact -- status must
+        # not classify it as an invalid work-package.
+        self.assertEqual(document["installation_manifest"]["state"], "current")
+        self.assertFalse(
+            [a for a in document["artifacts"] if a["path"] == "ci/manifest/installation.json"]
+        )
+
+    def test_invalid_descriptor_diagnostic_from_the_artifact_alone(self):
+        """chainlink #73 end-to-end through the packaged binary: an invalid
+        project descriptor must produce a finding naming the offending
+        property (JSON path + permitted alternatives) and a non-null
+        next_action, and status gate integrity must report the descriptor
+        as present-but-invalid rather than absent."""
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor = json.loads((self.workspace / "project-descriptor.json").read_text())
+        descriptor["port_source"]["commit"] = "abc123"
+        (self.workspace / "project-descriptor.json").write_text(json.dumps(descriptor))
+
+        status = self.run_artifact("--workspace", str(self.workspace), "status", "--json")
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        document = json.loads(status.stdout)
+        self.assertEqual(document["descriptor"]["state"], "present-invalid")
+        self.assertIn("present but invalid", document["gate_integrity"]["details"])
+        self.assertIn("commit", document["gate_integrity"]["details"])
+
+        check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertEqual(check.returncode, 2, check.stdout + check.stderr)
+        document = json.loads(check.stdout)
+        self.assertEqual(document["result"]["exit_code"], 2)
+        self.assertTrue(document["findings"])
+        self.assertIn("$.port_source", document["findings"][0]["reason"])
+        self.assertIn("permitted: language, oracle_build_command, repository", document["findings"][0]["reason"])
+        self.assertIsNotNone(document["next_action"])
+        self.assertEqual(document["next_action"]["kind"], "human-decision")
+
+    def test_declared_closure_kind_validates_from_the_artifact_alone(self):
+        """chainlink #73 gap 1 end-to-end: the descriptor schema the
+        packaged binary enforces accepts a declared closure_kind, and
+        status reads it back."""
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor = json.loads((self.workspace / "project-descriptor.json").read_text())
+        descriptor["closure_kind"] = "bounded"
+        (self.workspace / "project-descriptor.json").write_text(json.dumps(descriptor))
+
+        status = self.run_artifact("--workspace", str(self.workspace), "status", "--json")
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        document = json.loads(status.stdout)
+        self.assertEqual(document["descriptor"]["state"], "present-valid")
+        self.assertEqual(document["descriptor"]["closure_kind"], "bounded")
 
     def test_init_records_the_artifact_as_the_pinned_adjudicator(self):
         self.assertEqual(self.init_port().returncode, 0)

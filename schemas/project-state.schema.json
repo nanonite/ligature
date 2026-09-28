@@ -48,7 +48,12 @@
         "state": { "type": "string", "enum": ["absent", "present-invalid", "present-valid", "unknown"] },
         "path": { "type": "string" },
         "mode": { "type": ["string", "null"], "enum": ["greenfield", "port", null] },
-        "schema_version": { "type": ["string", "null"] }
+        "schema_version": { "type": ["string", "null"] },
+        "closure_kind": {
+          "type": ["string", "null"],
+          "enum": ["deductive", "bounded", null],
+          "description": "The closure_kind the project declared in project-descriptor.json (chainlink #73), read back here so the recorded intent is visible in status output rather than only living in the descriptor file. null when the descriptor is absent, invalid, or declares no intent. Additive optional field: a descriptor without it still validates against schema_version 1.0."
+        }
       }
     },
 

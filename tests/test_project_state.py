@@ -307,6 +307,68 @@ class ProjectStateDocumentTest(WorkspaceFixture):
         self.assertEqual(doc["installation_manifest"]["state"], "current")
         self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
 
+    def test_init_then_status_reports_no_invalid_work_package(self):
+        """The exact reproduction of chainlink #72: after a successful
+        `init --mode port`, status must agree with its own
+        installation_manifest.state -- no artifact may classify
+        ci/manifest/installation.json as an invalid work-package."""
+        code, _ = self.run_cli("init", "--mode", "port", "--name", "myport")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.workspace / "ci" / "manifest" / "installation.json").is_file())
+        _, doc = self.status()
+        self.assertEqual(doc["installation_manifest"]["state"], "current")
+        by_path = {a["path"]: a for a in doc["artifacts"]}
+        self.assertNotIn("ci/manifest/installation.json", by_path)
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+
+    def test_installation_manifest_is_not_reported_as_a_work_package_artifact(self):
+        """The ownership manifest shares ci/manifest/ with work-package
+        manifests but is ownership metadata, not a work-package artifact
+        (chainlink #66/#72)."""
+        self.write_descriptor()
+        self.write(
+            "ci/manifest/installation.json",
+            {
+                "installed_product_version": project_state.PRODUCT_VERSION,
+                "installed_schema_versions": {"project-state": "1.0"},
+            },
+        )
+        self.write(
+            "ci/manifest/WP-1.json",
+            {"work_package": "WP-1", "report": {"emit": "ci/results/WP-1.json"}},
+        )
+        _, doc = self.status()
+        self.assertEqual(doc["installation_manifest"]["state"], "current")
+        by_path = {a["path"]: a for a in doc["artifacts"]}
+        self.assertNotIn("ci/manifest/installation.json", by_path)
+        self.assertEqual(by_path["ci/manifest/WP-1.json"]["kind"], "work-package")
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+
+    def test_a_broken_work_package_manifest_is_still_reported_invalid(self):
+        """The skip is shape-based, not directory-based: a file in
+        ci/manifest/ that carries a work_package key but fails the
+        work-package schema is still an honestly-invalid work-package
+        artifact, not something to hide."""
+        self.write_descriptor()
+        self.write("ci/manifest/WP-1.json", {"work_package": "WP-1"})
+        _, doc = self.status()
+        by_path = {a["path"]: a for a in doc["artifacts"]}
+        self.assertEqual(by_path["ci/manifest/WP-1.json"]["kind"], "work-package")
+        self.assertEqual(by_path["ci/manifest/WP-1.json"]["lifecycle"], "invalid")
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+
+    def test_an_unreadable_manifest_file_is_still_reported_invalid(self):
+        """Unparseable content stays an honest invalid artifact rather
+        than disappearing: only files that parse and are recognizably
+        not work-package manifests are skipped."""
+        self.write_descriptor()
+        self.write("ci/manifest/broken.json", "{not json")
+        _, doc = self.status()
+        by_path = {a["path"]: a for a in doc["artifacts"]}
+        self.assertEqual(by_path["ci/manifest/broken.json"]["kind"], "work-package")
+        self.assertEqual(by_path["ci/manifest/broken.json"]["lifecycle"], "invalid")
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+
     def test_json_output_is_deterministic(self):
         self.write_descriptor()
         self.write("crates/a/specs/_boundaries/x.json", {**BOUNDARY, "boundary_id": "x"})
@@ -321,11 +383,13 @@ class NextActionSelectionTest(unittest.TestCase):
     action. Exercised directly against `_next_action` with synthetic
     analyses so each branch is isolated from gate discovery."""
 
-    def _analysis(self, gate_runs=(), findings=(), descriptor=True) -> Analysis:
+    def _analysis(
+        self, gate_runs=(), findings=(), descriptor=True, descriptor_state=None, descriptor_diagnostics=()
+    ) -> Analysis:
         return Analysis(
             workspace=Path("/tmp"),
             descriptor={"crates": []} if descriptor else None,
-            descriptor_state="present-valid" if descriptor else "absent",
+            descriptor_state=descriptor_state or ("present-valid" if descriptor else "absent"),
             descriptor_error=None,
             artifacts=[],
             obligations=[],
@@ -335,6 +399,7 @@ class NextActionSelectionTest(unittest.TestCase):
             installation={},
             gate_integrity={},
             observations={},
+            descriptor_diagnostics=list(descriptor_diagnostics),
         )
 
     def _finding(self, gate_id="r1-g16", reason="definition of done", authority="mechanized-gate"):
@@ -349,6 +414,26 @@ class NextActionSelectionTest(unittest.TestCase):
 
     def test_no_descriptor_has_no_next_action(self):
         self.assertIsNone(_next_action(self._analysis(descriptor=False)))
+
+    def test_invalid_descriptor_recommends_fixing_it(self):
+        """chainlink #73: a user-fixable input error gets a next_action
+        naming the offending property -- the old behavior was an honest
+        null that left a descriptor typo with no recovery path."""
+        action = _next_action(
+            self._analysis(
+                descriptor=False,
+                descriptor_state="present-invalid",
+                descriptor_diagnostics=[
+                    "$.port_source: unexpected property 'commit'; "
+                    "permitted: language, oracle_build_command, repository"
+                ],
+            )
+        )
+        self.assertEqual(action["kind"], "human-decision")
+        self.assertIsNone(action["command"])
+        self.assertNotIn("action_id", action)
+        self.assertIn("commit", action["description"])
+        self.assertIn("project-descriptor.json", action["description"])
 
     def test_missing_c_static_recommends_refresh_c_static(self):
         action = _next_action(
@@ -589,6 +674,181 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
     def test_descriptor_placeholder_fields_ignores_missing_or_unknown_mode(self):
         self.assertEqual(ligature_install.descriptor_placeholder_fields({"mode": "other"}), [])
         self.assertEqual(ligature_install.descriptor_placeholder_fields({}), [])
+
+
+class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
+    """chainlink #73: an invalid project descriptor was rejected with no
+    actionable diagnostic -- `check` reported `conditions:
+    [invalid_input]` next to an empty findings list and a null
+    next_action, and `status`'s gate integrity claimed "no project
+    descriptor present" while the descriptor file sat right there. A
+    descriptor typo was indistinguishable from a missing descriptor."""
+
+    def write_example_descriptor(self, example: str, mutate) -> dict:
+        descriptor = json.loads((EXAMPLES / example).read_text())
+        mutate(descriptor)
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        return descriptor
+
+    def test_unknown_property_finding_names_json_path_and_permitted_alternatives(self):
+        """The exact reproduction of chainlink #73: `port_source.commit` --
+        a natural way to pin the upstream revision. The finding must name
+        the offending property, its JSON path, and the permitted
+        alternatives."""
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d["port_source"].__setitem__("commit", "abc123"),
+        )
+        code, doc = self.check()
+        self.assertEqual(code, 2)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertEqual(doc["result"]["conditions"], ["blocking_findings", "invalid_input"])
+        self.assertEqual(len(doc["findings"]), 1)
+        finding = doc["findings"][0]
+        self.assertEqual(finding["gate_id"], "P0")
+        self.assertEqual(finding["severity"], "high")
+        self.assertEqual(finding["subject"], "project-descriptor.json")
+        self.assertIn("$.port_source", finding["reason"])
+        self.assertIn("commit", finding["reason"])
+        self.assertIn("permitted: language, oracle_build_command, repository", finding["reason"])
+
+    def test_next_action_recommends_fixing_the_descriptor(self):
+        """A user-fixable input error gets a next_action naming the fix --
+        the old behavior was `next_action: null` next to exit code 2."""
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d["port_source"].__setitem__("commit", "abc123"),
+        )
+        code, doc = self.check()
+        self.assertEqual(code, 2)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertIsNotNone(doc["next_action"])
+        self.assertEqual(doc["next_action"]["kind"], "human-decision")
+        self.assertIsNone(doc["next_action"]["command"])
+        self.assertNotIn("action_id", doc["next_action"])
+        self.assertIn("commit", doc["next_action"]["description"])
+        self.assertIn("project-descriptor.json", doc["next_action"]["description"])
+
+    def test_status_gate_integrity_reports_present_but_invalid(self):
+        """gate integrity claimed "no project descriptor present" while
+        `descriptor.path` named the file that existed (chainlink #73)."""
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d["port_source"].__setitem__("commit", "abc123"),
+        )
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "present-invalid")
+        self.assertEqual(doc["descriptor"]["path"], "project-descriptor.json")
+        self.assertEqual(doc["gate_integrity"]["state"], "unknown")
+        self.assertIn("present but invalid", doc["gate_integrity"]["details"])
+        self.assertIn("commit", doc["gate_integrity"]["details"])
+        self.assertNotEqual(doc["gate_integrity"]["details"], "no project descriptor present")
+        # The same fact is an open finding in status, not only in check.
+        self.assertTrue(any(f["gate_id"] == "P0" for f in doc["open_findings"]))
+
+    def test_absent_descriptor_still_reports_no_descriptor_present(self):
+        """The present-but-invalid wording must not fire for a genuinely
+        absent descriptor -- the two states stay distinguishable."""
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "absent")
+        self.assertEqual(doc["gate_integrity"]["details"], "no project descriptor present")
+        code, doc = self.check()
+        self.assertEqual(code, 2)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertIsNone(doc["next_action"])
+        self.assertEqual(doc["findings"], [])
+
+    def test_unparseable_descriptor_is_reported_as_a_finding(self):
+        self.descriptor_path.write_text("{not json")
+        code, doc = self.check()
+        self.assertEqual(code, 2)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertTrue(doc["findings"])
+        self.assertIn("not valid JSON", doc["findings"][0]["reason"])
+        self.assertIsNotNone(doc["next_action"])
+        self.assertIn("not valid JSON", doc["next_action"]["description"])
+
+    def test_unknown_top_level_property_lists_the_permitted_top_level_keys(self):
+        """The pilot's probe shape `closure_kinds` (a near-miss of the new
+        `closure_kind` field) must be rejected with the permitted
+        alternatives named, so the typo is fixable in one look."""
+        self.write_example_descriptor(
+            "project-descriptor.greenfield.example.json",
+            lambda d: d.__setitem__("closure_kinds", ["deductive"]),
+        )
+        code, doc = self.check()
+        self.assertEqual(code, 2)
+        reason = doc["findings"][0]["reason"]
+        self.assertIn("closure_kinds", reason)
+        self.assertIn("closure_kind", reason)  # the permitted alternative the pilot wanted
+        self.assertIn("permitted:", reason)
+
+    def test_verifier_policy_closure_kind_is_rejected_with_the_verifier_enum(self):
+        """The pilot's second probe shape: `verifier_policy.closure_kind`
+        is not the field -- the diagnostic must say what verifier_policy
+        does permit, not just "invalid"."""
+        self.write_example_descriptor(
+            "project-descriptor.greenfield.example.json",
+            lambda d: d["verifier_policy"].__setitem__("closure_kind", "deductive"),
+        )
+        code, doc = self.check()
+        self.assertEqual(code, 2)
+        reason = doc["findings"][0]["reason"]
+        self.assertIn("$.verifier_policy.closure_kind", reason)
+        self.assertIn("kani", reason)
+
+    def test_declared_closure_kind_is_read_back_by_status(self):
+        """The declared intent is recorded in the tool's own input and
+        read back by status -- no out-of-band closure-intent file the
+        tool cannot see at G14 time (chainlink #73)."""
+        descriptor = self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d.__setitem__("closure_kind", "bounded"),
+        )
+        self.assertEqual(descriptor["closure_kind"], "bounded")
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "present-valid")
+        self.assertEqual(doc["descriptor"]["closure_kind"], "bounded")
+
+    def test_undeclared_closure_kind_reads_back_as_null(self):
+        self.write_example_descriptor("project-descriptor.port.example.json", lambda d: None)
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "present-valid")
+        self.assertIsNone(doc["descriptor"]["closure_kind"])
+
+    def test_invalid_descriptor_check_is_deterministic(self):
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d["port_source"].__setitem__("commit", "abc123"),
+        )
+        _, first = self.run_cli("check", "--json")
+        _, second = self.run_cli("check", "--json")
+        self.assertEqual(first, second)
+        self.assertTrue(first.endswith("\n"))
+
+
+class DeclaredClosureKindTest(WorkspaceFixture):
+    """chainlink #73 gap 1: the descriptor schema has no closure_kind
+    field, so the intended closure_kind could only be recorded outside
+    the tool. A declared value must validate, read back through status,
+    and leave every downstream gate able to run."""
+
+    def test_closure_kind_does_not_disturb_the_placeholder_finding(self):
+        """A descriptor that declares closure_kind but is otherwise the
+        untouched init template is still the #67 placeholder case --
+        closure_kind is not a placeholder field, it is a declaration."""
+        descriptor = json.loads(ligature_install._render_descriptor("port", "myproj"))
+        descriptor["closure_kind"] = "deductive"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        code, doc = self.check()
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        p0 = [f for f in doc["findings"] if f["gate_id"] == "P0"]
+        self.assertEqual(len(p0), 1)
+        self.assertIn("review.reviewer", p0[0]["reason"])
 
 
 if __name__ == "__main__":

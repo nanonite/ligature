@@ -187,6 +187,52 @@ the descriptor is byte-identical to the example everywhere `init` does not
 overwrite it. A real project that happens to pick `creusot` alongside a
 real reviewer and repository is not flagged.
 
+### Declaring the intended closure_kind (chainlink #73)
+
+The per-pilot bootstrap step is: `init --mode port`, then fill in
+`project-descriptor.json` — set `verifier_policy.default` **and the
+intended `closure_kind`** — before any code exists. `verifier_policy.default`
+was expressible; the intended `closure_kind` was not, in any shape: the
+date-creusot pilot's probe matrix (top-level `closure_kind`,
+`verifier_policy.closure_kind`, a top-level `closure` object,
+`verifier_policy.closure_kinds`) was rejected by the schema 1.0 on every
+row, and `init` exposed no switch for it either. The pilot could only
+record the intent outside the tool (its `analysis/ligature/closure-intent.json`),
+which the tool cannot read back at G14 time.
+
+The descriptor schema now has the field the pilot was looking for: a
+top-level, optional `closure_kind` (`deductive` | `bounded`, plan.md §4's
+vocabulary). It records **intent only** — each cluster's closure profile
+(`specs/_closure/<cluster>.json`) remains the authoritative per-cluster
+declaration at Stage 8C, and gate g14 recomputes `closure_kind` from the
+evidence actually present, so a declared intent can never launder a
+bounded cluster into a deductive one. The field is deliberately absent
+from the init template: a project that has not chosen an intent yet must
+not be silently defaulted to `deductive`. `status --json` reads the
+declaration back as `descriptor.closure_kind` (null when absent, invalid,
+or undeclared).
+
+### An invalid descriptor names its offender (chainlink #73)
+
+A descriptor the schema rejects used to be reported as `conditions:
+[invalid_input]` next to an **empty findings list**, a `null`
+`next_action`, and — in `status` — a gate-integrity detail of "no project
+descriptor present" while `descriptor.path` named the file that existed.
+A descriptor typo was indistinguishable from a missing descriptor, and the
+only recovery path was trial and error against an undocumented schema.
+
+`check` now emits a `P0` finding (severity `high`, authority
+`mechanized-gate`) that names the offending property with its JSON path
+and the permitted alternatives — `$.port_source: unexpected property
+'commit'; permitted: language, oracle_build_command, repository` for the
+pilot's `port_source.commit` probe — and `check next` recommends fixing
+`project-descriptor.json` as a `human-decision` action (no CLI command
+can repair a descriptor). `status` carries the same diagnostic as an open
+finding, and its gate-integrity detail reads "project descriptor is
+present but invalid: …" so the two states stay distinguishable. The same
+diagnostic is in the `ProjectDescriptorError` message every
+`load_project_descriptor` caller already prints.
+
 ## 5. The adjudicator trust-pin sub-state-machine
 
 Orthogonal to §2 — this tracks *which binary is trusted*, not *how far the
@@ -302,6 +348,39 @@ kept here so error-case work starts from what's already known:
   g14` now exits 0 on the closing `semver-core` cluster with
   `installation.json` in place. Originally documented as finding F1 in the
   pilot's `docs/limitations.md`.
+- **#72** (closed) — `status --json` applied the same misreading #66 fixed
+  in `gate g14`: `project_state._discover_artifact_files` globbed every
+  `ci/manifest/*.json` as a work-package manifest, so `ligature init`'s own
+  `ci/manifest/installation.json` surfaced as a `work-package` artifact with
+  lifecycle `invalid`, contradicting the same document's
+  `installation_manifest.state: current` (and `doctor`'s
+  `installation: current`) after every successful `init --mode port`.
+  `status` now reuses `gate_g14.looks_like_work_package_manifest` so the two
+  walks cannot drift apart on what a work-package manifest is. Unparseable
+  files stay in the discovery set and are still reported honestly as invalid
+  work-packages; a schema-invalid work-package manifest is still reported as
+  `work-package`/`invalid`. Covered by regression tests in
+  `tests/test_project_state.py` and an end-to-end assertion in
+  `tests/test_zipapp_out_of_checkout.py`.
+- **#73** (closed) — the project-descriptor schema 1.0 had no
+  `closure_kind` field, so the intended closure_kind could not be declared
+  in the tool's own input before any code exists (the date-creusot pilot's
+  four probe shapes were all rejected, and `init` had no switch), and an
+  invalid descriptor was rejected with no actionable diagnostic: `check`
+  reported `conditions: [invalid_input]` next to an empty findings list
+  and a null `next_action`, and `status`'s gate integrity claimed "no
+  project descriptor present" while the descriptor file sat right there.
+  The descriptor schema gains an optional top-level `closure_kind`
+  (`deductive` | `bounded`) recording intent only — per-cluster closure
+  profiles remain authoritative at Stage 8C — which `status --json` reads
+  back as `descriptor.closure_kind`. An invalid descriptor now produces a
+  `P0` finding naming the offending property with its JSON path and the
+  permitted alternatives, a `human-decision` `next_action` recommending
+  the fix, and a gate-integrity detail of "project descriptor is present
+  but invalid: …". Covered by regression tests in
+  `tests/test_project_state.py`, `tests/test_project_descriptor_schema.py`,
+  and `tests/test_pipeline.py`, plus end-to-end assertions in
+  `tests/test_zipapp_out_of_checkout.py`. See §4.
 - **#64** (closed) — release artifacts now honestly record
   `source_dirty`/`working_tree_diff_hash` rather than mislabeling a dirty
   build clean; relevant here because §5's PINNED state's *meaning*

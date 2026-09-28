@@ -21,19 +21,95 @@ DESCRIPTOR_SCHEMA_PATH = resources.resource_path("schemas", "project-descriptor.
 
 
 class ProjectDescriptorError(Exception):
-    pass
+    """The project descriptor failed to load: either it is not valid JSON
+    or it does not satisfy schemas/project-descriptor.schema.json.
+
+    `diagnostics` carries one actionable line per problem (see
+    schema_diagnostics), so a caller can name the offending property
+    instead of only saying the descriptor is invalid (chainlink #73)."""
+
+    def __init__(self, message: str, diagnostics: list[str] | None = None):
+        super().__init__(message)
+        self.diagnostics = list(diagnostics or [])
+
+
+def _diagnostic_line(error) -> str:
+    """One actionable line for a schema violation: the offending value's
+    JSON path, what was wrong, and -- where the schema itself states
+    them -- the permitted alternatives (chainlink #73).
+
+    The generic fallback is jsonschema's own message, already prefixed
+    with the JSON path; the special cases below exist because the raw
+    messages name neither the rejected property nor what was allowed:
+    additionalProperties reports the whole object as "$" with the
+    unexpected key buried in prose, and the if/then/else guard prints the
+    entire descriptor as the "instance"."""
+    path = error.json_path
+    validator_name = error.validator
+    schema = error.schema if isinstance(error.schema, dict) else {}
+    if validator_name == "additionalProperties" and isinstance(error.instance, dict):
+        properties = schema.get("properties", {})
+        unexpected = [key for key in error.instance if key not in properties]
+        if unexpected:
+            names = ", ".join(repr(key) for key in unexpected)
+            permitted = sorted(properties)
+            allowed = ", ".join(permitted) if permitted else "(none)"
+            return (
+                f"{path}: unexpected propert{'y' if len(unexpected) == 1 else 'ies'} "
+                f"{names}; permitted: {allowed}"
+            )
+    if validator_name == "enum" and "enum" in schema:
+        return f"{path}: {error.instance!r} is not one of {schema['enum']}"
+    if validator_name == "const" and "const" in schema:
+        return f"{path}: must be {schema['const']!r} (got {error.instance!r})"
+    if validator_name == "required" and isinstance(error.instance, dict):
+        missing = [name for name in (error.validator_value or []) if name not in error.instance]
+        if missing:
+            names = ", ".join(repr(name) for name in missing)
+            return f"{path}: missing required propert{'y' if len(missing) == 1 else 'ies'} {names}"
+    if validator_name == "not":
+        forbidden = schema.get("not", schema)
+        return f"{path}: should not be valid under {forbidden}"
+    return f"{path}: {error.message}"
+
+
+def schema_diagnostics(data: dict) -> list[str]:
+    """One actionable line per schema violation in `data`, in validator
+    order, deduplicated (chainlink #73).
+
+    `check`/`status` surface these so an invalid project descriptor
+    names the offending property -- with its JSON path and the permitted
+    alternatives -- instead of reporting `conditions: [invalid_input]`
+    next to an empty findings list, which left a descriptor typo
+    indistinguishable from a missing descriptor."""
+    schema = json.loads(DESCRIPTOR_SCHEMA_PATH.read_text())
+    validator = make_validator(schema)
+    lines: list[str] = []
+    for error in validator.iter_errors(data):
+        line = _diagnostic_line(error)
+        if line not in lines:
+            lines.append(line)
+    return lines
 
 
 def load_project_descriptor(path: Path) -> dict:
     schema = json.loads(DESCRIPTOR_SCHEMA_PATH.read_text())
     validator = make_validator(schema)
 
-    data = json.loads(path.read_text())
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ProjectDescriptorError(
+            f"project descriptor {path} is not valid JSON: {exc}",
+            diagnostics=[f"not valid JSON: {exc}"],
+        ) from exc
     errors = list(validator.iter_errors(data))
     if errors:
+        diagnostics = schema_diagnostics(data)
         raise ProjectDescriptorError(
             f"project descriptor {path} is invalid:\n"
-            + "\n".join(f"  - {e.message}" for e in errors)
+            + "\n".join(f"  - {line}" for line in diagnostics),
+            diagnostics=diagnostics,
         )
     return data
 

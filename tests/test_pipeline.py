@@ -1736,6 +1736,26 @@ class LoadProjectDescriptorTest(unittest.TestCase):
         finally:
             path.unlink()
 
+    def test_invalid_descriptor_error_names_the_offending_property(self):
+        """chainlink #73: the load error names the offending property with
+        its JSON path and the permitted alternatives, so recovering from a
+        descriptor typo is not trial and error against an undocumented
+        schema."""
+        data = json.loads(json.dumps(VALID_DESCRIPTOR))
+        data["closure"] = {"kind": "deductive"}  # a near-miss of closure_kind
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+        path = Path(f.name)
+        try:
+            with self.assertRaises(pipeline.PipelineError) as ctx:
+                pipeline.load_project_descriptor(path)
+            message = str(ctx.exception)
+            self.assertIn("unexpected property 'closure'", message)
+            self.assertIn("permitted:", message)
+            self.assertIn("closure_kind", message)
+        finally:
+            path.unlink()
+
 
 VALID_DESCRIPTOR = {
     "schema_version": "1.0",

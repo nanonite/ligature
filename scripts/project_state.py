@@ -278,8 +278,24 @@ def _installation_gate_hashes(workspace: Path) -> dict:
     return {}
 
 
-def _gate_integrity(workspace: Path, descriptor: dict | None, installation: dict) -> dict:
+def _gate_integrity(
+    workspace: Path,
+    descriptor: dict | None,
+    installation: dict,
+    descriptor_state: str = "absent",
+    descriptor_diagnostics: list[str] | None = None,
+) -> dict:
     if descriptor is None:
+        if descriptor_state == "present-invalid":
+            # The descriptor file exists but failed schema validation; say
+            # so, naming the offending property, instead of the old "no
+            # project descriptor present" that made a descriptor typo
+            # indistinguishable from a missing descriptor (chainlink #73).
+            detail = "; ".join(descriptor_diagnostics or []) or "schema-invalid"
+            return {
+                "state": "unknown",
+                "details": f"project descriptor is present but invalid: {detail}",
+            }
         return {"state": "unknown", "details": "no project descriptor present"}
     entries = descriptor.get("gate_integrity") or []
     paths = [e.get("path") for e in entries if isinstance(e, dict) and e.get("path")]
@@ -328,6 +344,22 @@ def _gate_integrity(workspace: Path, descriptor: dict | None, installation: dict
 # ---------------------------------------------------------------------------
 # Artifact discovery + lifecycle
 # ---------------------------------------------------------------------------
+def _looks_like_work_package_manifest(data) -> bool:
+    """Whether parsed ci/manifest/ content is a work-package manifest
+    rather than one of the other, unrelated files that share the
+    directory -- in particular the ownership manifest `ligature init`
+    installs at ci/manifest/installation.json (chainlink #66, #72).
+
+    Reuses gate_g14's discriminator so `status` and the closure gate
+    cannot drift apart on what a work-package manifest is: a work-package
+    manifest always carries at least one of the `work_package` or
+    `definition_of_done` top-level keys, and the ownership manifest
+    carries neither."""
+    import gate_g14
+
+    return gate_g14.looks_like_work_package_manifest(data)
+
+
 def _discover_artifact_files(workspace: Path, descriptor: dict | None) -> list[tuple[str, Path]]:
     found: list[tuple[str, Path]] = []
 
@@ -363,7 +395,21 @@ def _discover_artifact_files(workspace: Path, descriptor: dict | None) -> list[t
     _walk(workspace / "specs" / "_gold_sets", "gold-set")
     _walk(workspace / "specs" / "_promotions", "promotion")
     _walk(workspace / "ci" / "results" / "c_static", "callsites")
-    _walk(workspace / "ci" / "manifest", "work-package")
+    # ci/manifest/ holds work-package manifests AND the ownership manifest
+    # `ligature init` installs at ci/manifest/installation.json; only the
+    # former are work-package artifacts. A file that parses but is
+    # recognizably not a work-package manifest is skipped, while one that
+    # cannot be parsed at all stays in the discovery set so status can
+    # report it honestly as an invalid work-package (chainlink #66/#72).
+    manifest_dir = workspace / "ci" / "manifest"
+    if manifest_dir.is_dir():
+        for path in sorted(manifest_dir.iterdir()):
+            if not path.is_file() or path.suffix not in (".json", ".yaml", ".yml"):
+                continue
+            data = _load_data(path)
+            if data is not None and not _looks_like_work_package_manifest(data):
+                continue
+            found.append(("work-package", path))
     return found
 
 
@@ -524,6 +570,8 @@ def _obligations(workspace: Path, descriptor: dict | None) -> list[dict]:
                 continue
             manifest = _load_data(manifest_path)
             if not isinstance(manifest, dict):
+                continue
+            if not _looks_like_work_package_manifest(manifest):
                 continue
             emit = (manifest.get("report") or {}).get("emit")
             if isinstance(emit, str):
@@ -748,6 +796,7 @@ class Analysis:
     gate_integrity: dict
     observations: dict
     conditions: set[str] = field(default_factory=set)
+    descriptor_diagnostics: list[str] = field(default_factory=list)
 
     @property
     def descriptor_rel(self) -> str:
@@ -841,6 +890,40 @@ def _descriptor_placeholder_findings(
             ),
             authority="human-decision-pending",
             provenance="scripts/ligature_install.py:descriptor_placeholder_fields",
+        )
+    ]
+
+
+def _descriptor_invalid_findings(
+    descriptor_state: str, descriptor_diagnostics: list[str], descriptor_path: Path
+) -> list[NormalizedFinding]:
+    """A descriptor that fails schema validation is a user-fixable input
+    error, so `check` names the offending property -- JSON path, what was
+    wrong, and the permitted alternatives -- instead of reporting an
+    empty findings list next to `conditions: [invalid_input]`, and
+    `status` carries it as an open finding (chainlink #73).
+
+    The finding is mechanized (the schema validator is a deterministic,
+    recomputed fact) even though only a human can fix it; the matching
+    next_action is the human-decision kind, since no CLI command can
+    repair a descriptor."""
+    if descriptor_state != "present-invalid":
+        return []
+    diagnostics = [line for line in descriptor_diagnostics if line]
+    if not diagnostics:
+        return []
+    return [
+        NormalizedFinding(
+            gate_id="P0",
+            severity="high",
+            subject=str(descriptor_path),
+            reason=(
+                "project descriptor is invalid: "
+                + "; ".join(diagnostics)
+                + " (chainlink #73)"
+            ),
+            authority="mechanized-gate",
+            provenance="scripts/project_descriptor.py:schema_diagnostics",
         )
     ]
 
@@ -1055,6 +1138,7 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
     descriptor: dict | None = None
     descriptor_state = "absent"
     descriptor_error: str | None = None
+    descriptor_diagnostics: list[str] = []
     if descriptor_path.is_file():
         try:
             descriptor = load_project_descriptor(descriptor_path)
@@ -1062,6 +1146,7 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
         except (ProjectDescriptorError, ValueError) as exc:
             descriptor_state = "present-invalid"
             descriptor_error = str(exc)
+            descriptor_diagnostics = list(getattr(exc, "diagnostics", []) or [])
         except OSError as exc:
             descriptor_state = "unknown"
             descriptor_error = str(exc)
@@ -1072,10 +1157,13 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
     obligations = _obligations(workspace, descriptor)
     clusters = _clusters(workspace, descriptor)
     observations = _observations(workspace, descriptor)
-    gate_integrity = _gate_integrity(workspace, descriptor, installation)
+    gate_integrity = _gate_integrity(
+        workspace, descriptor, installation, descriptor_state, descriptor_diagnostics
+    )
 
     findings = _run_standalone_validators(workspace)
     findings.extend(_descriptor_placeholder_findings(descriptor, descriptor_state, descriptor_path))
+    findings.extend(_descriptor_invalid_findings(descriptor_state, descriptor_diagnostics, descriptor_path))
     gate_runs, gate_findings, witness_backend = _run_gates(workspace, descriptor)
     findings.extend(gate_findings)
     findings.extend(_lifecycle_findings(artifacts))
@@ -1097,6 +1185,7 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
         descriptor=descriptor,
         descriptor_state=descriptor_state,
         descriptor_error=descriptor_error,
+        descriptor_diagnostics=descriptor_diagnostics,
         artifacts=artifacts,
         obligations=obligations,
         clusters=clusters,
@@ -1124,6 +1213,10 @@ def build_project_state(workspace: Path, descriptor_path: Path) -> dict:
     if analysis.descriptor_state in ("present-valid", "present-invalid"):
         descriptor_doc["mode"] = descriptor.get("mode") if descriptor else None
         descriptor_doc["schema_version"] = descriptor.get("schema_version") if descriptor else None
+        # The declared closure_kind intent, read back here so it is visible
+        # in status output rather than living only in the descriptor file
+        # (chainlink #73). null when absent, invalid, or undeclared.
+        descriptor_doc["closure_kind"] = descriptor.get("closure_kind") if descriptor else None
 
     open_findings: dict[str, dict] = {}
     human_decisions: dict[str, dict] = {}
@@ -1207,7 +1300,26 @@ _REFRESH_BY_GATE = {
 
 def _next_action(analysis: Analysis) -> dict | None:
     if analysis.descriptor is None:
-        # No valid project descriptor: nothing mechanized can be
+        if analysis.descriptor_state == "present-invalid":
+            # A user-fixable input error: name the offending property and
+            # the fix, rather than the old honest-null that left a
+            # descriptor typo with no recovery path at all (chainlink #73).
+            # kind is human-decision (not automated-command): no CLI
+            # command can repair a descriptor -- a person must edit it.
+            detail = (
+                "; ".join(analysis.descriptor_diagnostics)
+                or analysis.descriptor_error
+                or "schema-invalid"
+            )
+            return {
+                "kind": "human-decision",
+                "description": (
+                    f"project descriptor is invalid: {detail}. "
+                    "Fix project-descriptor.json, then re-run check."
+                ),
+                "command": None,
+            }
+        # No project descriptor at all: nothing mechanized can be
         # recommended, and the action_id enum has no "init". Honest null.
         return None
 

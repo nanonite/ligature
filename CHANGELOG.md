@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- #72: `ligature status --json` classified `ligature init`'s ownership manifest at `ci/manifest/installation.json` as a `work-package` artifact with lifecycle `invalid`, contradicting its own `installation_manifest.state: current` (and `doctor`'s `installation: current`) on every initialized workspace. `status` now applies the same shape discriminator gate g14 already uses (chainlink #66): a file in `ci/manifest/` is a work-package manifest only if it carries a `work_package` or `definition_of_done` top-level key. A file that cannot be parsed at all is still reported honestly as an invalid work-package, and a schema-invalid work-package manifest is still reported as `work-package`/`invalid` -- only files that parse and are recognizably not work-package manifests are skipped. Covered by four new regression tests in `tests/test_project_state.py` plus an end-to-end assertion in `tests/test_zipapp_out_of_checkout.py`.
+- #73: an invalid `project-descriptor.json` was rejected with no actionable diagnostic -- `check` reported `conditions: [invalid_input]` next to an empty findings list and a null `next_action`, and `status`'s gate integrity claimed "no project descriptor present" while `descriptor.path` named the file that existed, so a descriptor typo was indistinguishable from a missing descriptor. `check` now emits a `P0` finding (severity `high`, authority `mechanized-gate`) naming the offending property with its JSON path and the permitted alternatives (e.g. `$.port_source: unexpected property 'commit'; permitted: language, oracle_build_command, repository`), `check next` recommends fixing the descriptor as a `human-decision` action, `status` carries the same diagnostic as an open finding, and its gate-integrity detail reads "project descriptor is present but invalid: ...". The same diagnostic is in the `ProjectDescriptorError` message every `load_project_descriptor` caller already prints. Covered by regression tests in `tests/test_project_state.py`, `tests/test_project_descriptor_schema.py`, and `tests/test_pipeline.py`, plus an end-to-end assertion in `tests/test_zipapp_out_of_checkout.py`.
+
+### Added
+- #73: `schemas/project-descriptor.schema.json` gains an optional top-level `closure_kind` field (`deductive` | `bounded`, plan.md §4's vocabulary), so the intended closure_kind can be declared in the tool's own input before any code exists -- the date-creusot pilot's four probe shapes were all rejected by schema 1.0 and `init` exposed no switch, forcing the intent into an out-of-band file the tool cannot read back at G14 time. The field records intent only: each cluster's closure profile remains the authoritative per-cluster declaration at Stage 8C, and gate g14 recomputes `closure_kind` from the evidence actually present. Deliberately absent from the init template, so a project that has not chosen is not silently defaulted to `deductive`. `status --json` reads the declaration back as `descriptor.closure_kind` (additive optional field in `schemas/project-state.schema.json`; a descriptor without it still validates against schema_version 1.0). Documented in `docs/mode-p-cli-flow.md` §4 and `plan.md` §1.1.
+
 ## [1.0.0] - 2026-09-24
 
 First tagged release. The built `ligature.pyz` (with checksums and provenance) is committed under `releases/v1.0/`.
@@ -39,6 +46,7 @@ First tagged release. The built `ligature.pyz` (with checksums and provenance) i
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- [p1-date-creusot] status misclassifies installation manifest as invalid work-package (C.1) (#72)
 - Example descriptors and docs use user-supplied placeholders (e.g. `<path-to-cpp-source-repository>`) instead of machine-specific paths; the Neargye acceptance test runs only when `LIGATURE_NEARGYE_WORKSPACE` is set
 - `.chainlink/` issue-tracker data is no longer tracked in the repository
 - atomic_write.py leaves files at mode 0600 (owner-only), never normalized (#63)

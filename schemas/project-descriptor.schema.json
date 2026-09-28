@@ -135,6 +135,14 @@
         "$ref": "#/$defs/verifier"
       }
     },
+    "closure_kind": {
+      "type": "string",
+      "enum": [
+        "deductive",
+        "bounded"
+      ],
+      "description": "The project's intended closure_kind for its clusters, declared before any code exists (chainlink #73). plan.md §4's vocabulary: deductive = Creusot/Verus-owned (universal over inputs, modulo SMT completeness and trusted specs); bounded = Kani-owned (holds only within unwind/harness bounds and enumerated monomorphizations). This records intent only -- each cluster's closure profile (specs/_closure/<cluster>.json) remains the authoritative per-cluster declaration at Stage 8C, and gate g14 recomputes closure_kind from the evidence actually present, rejecting a profile whose declared kind disagrees with it. Optional and deliberately absent from the init template: a project that has not chosen an intent yet must not be silently defaulted to 'deductive'."
+    },
     "verifier_backends": {
       "type": "object",
       "description": "plan.md \u00a78.3 / chainlink #47 -- pluggable verifier dispatch, one command per verifier system, exactly as llm_backend is a pluggable one-shot command for Stage 0/3. `pipeline.py check-bridges` compiles a promoted bridge's bridge_logic to a harness and invokes the command for the verifier that owns the bridge's cluster, appending the generated harness path. The command must print one JSON verdict object on stdout: {result: pass|fail, scope, assumptions, config}. Optional and deliberately absent by default: with no backend configured, no bridge check is recorded and the gate blocks -- a verifier that never ran must never produce a pass, so the ceiling stays harness-tested (never bridge-checked).",

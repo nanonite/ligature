@@ -1,8 +1,8 @@
 """Tests for scripts/exit_codes.py (docs/exit-code-contract.md, chainlink
-#55). Precedence-order tests over the pure resolver -- not integration
-tests against pipeline.py's own dispatch, which today still collapses most
-of this into exit 1 (see the contract doc's own "Known drift" section;
-that reconciliation is left to #56/#57/#58, not this task).
+#55, extended by #75). Precedence-order tests over the pure resolver -- not
+integration tests against pipeline.py's own dispatch, which today still
+collapses most of this into exit 1 (see the contract doc's own "Known
+drift" section; that reconciliation is left to #56/#57/#58, not this task).
 """
 from __future__ import annotations
 
@@ -17,12 +17,13 @@ import exit_codes  # noqa: E402
 
 
 class ExitCodeValuesTest(unittest.TestCase):
-    def test_five_contract_codes_are_0_through_4(self):
+    def test_six_contract_codes_are_0_through_5(self):
         self.assertEqual(exit_codes.CLEAN, 0)
         self.assertEqual(exit_codes.BLOCKING_FINDINGS, 1)
         self.assertEqual(exit_codes.INVALID_INPUT, 2)
         self.assertEqual(exit_codes.HUMAN_DECISION_REQUIRED, 3)
         self.assertEqual(exit_codes.BACKEND_UNAVAILABLE, 4)
+        self.assertEqual(exit_codes.GATE_INTEGRITY_FAILED, 5)
 
 
 class ResolvePrecedenceTest(unittest.TestCase):
@@ -31,6 +32,7 @@ class ResolvePrecedenceTest(unittest.TestCase):
 
     def test_each_single_condition_maps_to_its_own_code(self):
         cases = {
+            "gate_integrity_failed": exit_codes.GATE_INTEGRITY_FAILED,
             "invalid_input": exit_codes.INVALID_INPUT,
             "blocking_findings": exit_codes.BLOCKING_FINDINGS,
             "backend_unavailable": exit_codes.BACKEND_UNAVAILABLE,
@@ -40,7 +42,25 @@ class ResolvePrecedenceTest(unittest.TestCase):
             with self.subTest(condition=condition):
                 self.assertEqual(exit_codes.resolve([condition]), expected)
 
-    def test_invalid_input_outranks_everything(self):
+    def test_gate_integrity_failed_outranks_everything(self):
+        """chainlink #75: a compromised gate definition voids every other
+        signal the run could produce -- even invalid input, since the
+        descriptor cannot even be trusted to declare what is pinned."""
+        others = [
+            "invalid_input",
+            "blocking_findings",
+            "backend_unavailable",
+            "human_decision_required",
+        ]
+        for r in range(len(others) + 1):
+            for combo in itertools.combinations(others, r):
+                with self.subTest(combo=combo):
+                    self.assertEqual(
+                        exit_codes.resolve({"gate_integrity_failed", *combo}),
+                        exit_codes.GATE_INTEGRITY_FAILED,
+                    )
+
+    def test_invalid_input_outranks_the_remaining_three(self):
         others = ["blocking_findings", "backend_unavailable", "human_decision_required"]
         for r in range(len(others) + 1):
             for combo in itertools.combinations(others, r):
@@ -64,16 +84,24 @@ class ResolvePrecedenceTest(unittest.TestCase):
             exit_codes.BACKEND_UNAVAILABLE,
         )
 
-    def test_full_precedence_chain_all_four_present(self):
+    def test_full_precedence_chain_all_five_present(self):
         self.assertEqual(
             exit_codes.resolve(
-                {"invalid_input", "blocking_findings", "backend_unavailable", "human_decision_required"}
+                {
+                    "gate_integrity_failed",
+                    "invalid_input",
+                    "blocking_findings",
+                    "backend_unavailable",
+                    "human_decision_required",
+                }
             ),
-            exit_codes.INVALID_INPUT,
+            exit_codes.GATE_INTEGRITY_FAILED,
         )
 
     def test_order_and_duplicates_in_input_do_not_matter(self):
-        a = exit_codes.resolve(["human_decision_required", "blocking_findings", "blocking_findings"])
+        a = exit_codes.resolve(
+            ["human_decision_required", "blocking_findings", "blocking_findings"]
+        )
         b = exit_codes.resolve(["blocking_findings", "human_decision_required"])
         self.assertEqual(a, b)
         self.assertEqual(a, exit_codes.BLOCKING_FINDINGS)
@@ -85,8 +113,12 @@ class ResolvePrecedenceTest(unittest.TestCase):
     def test_exhaustive_powerset_always_returns_a_valid_code(self):
         conditions = sorted(exit_codes.CONDITION_NAMES)
         valid_codes = {
-            exit_codes.CLEAN, exit_codes.BLOCKING_FINDINGS, exit_codes.INVALID_INPUT,
-            exit_codes.HUMAN_DECISION_REQUIRED, exit_codes.BACKEND_UNAVAILABLE,
+            exit_codes.CLEAN,
+            exit_codes.BLOCKING_FINDINGS,
+            exit_codes.INVALID_INPUT,
+            exit_codes.HUMAN_DECISION_REQUIRED,
+            exit_codes.BACKEND_UNAVAILABLE,
+            exit_codes.GATE_INTEGRITY_FAILED,
         }
         for r in range(len(conditions) + 1):
             for combo in itertools.combinations(conditions, r):

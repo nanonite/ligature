@@ -121,6 +121,7 @@ def file_registry(mode: str, name: str, descriptor_rel: str) -> list[RegistryEnt
         RegistryEntry(descriptor_rel, descriptor_example, USER, "descriptor"),
         RegistryEntry("docs/reliance-policy.md", ROOT / "docs" / "reliance-policy.template.md", USER, "policy"),
         RegistryEntry(SKILL_RELATIVE_PATH, ROOT / "docs" / "ligature-skill.template.md", MANAGED, "skill", skill=True),
+        RegistryEntry(".ligature/schemas/project-descriptor.schema.json", ROOT / "schemas" / "project-descriptor.schema.json", MANAGED, "copy"),
         RegistryEntry(".ligature/schemas/project-state.schema.json", ROOT / "schemas" / "project-state.schema.json", MANAGED, "copy"),
         RegistryEntry(".ligature/schemas/consolidated-check.schema.json", ROOT / "schemas" / "consolidated-check.schema.json", MANAGED, "copy"),
     ]
@@ -368,7 +369,7 @@ class InstallReport:
     status: str
     files: list[FilePlan] = field(default_factory=list)
     obsolete: list[str] = field(default_factory=list)
-    authority_ok: bool | None = None
+    authority_state: str | None = None
     messages: list[str] = field(default_factory=list)
     descriptor_path: str = "project-descriptor.json"
     descriptor_schema: DescriptorSchemaReport | None = None
@@ -432,27 +433,67 @@ def plan_install(
     for path, record in records.items():
         if record.get("ownership") == MANAGED and path not in known:
             report.obsolete.append(path)
-    report.authority_ok = _authority_ok(workspace)
+    report.authority_state = _authority_verdict(workspace, manifest, _skill_plan(report))
     report.status = _overall_status(report)
     return report
 
 
-def _authority_ok(workspace: Path) -> bool | None:
+def _skill_plan(report: InstallReport) -> FilePlan | None:
+    """The skill file's inventory plan, or None when the report does not
+    carry one (a not-initialized or incompatible workspace)."""
+    return next((f for f in report.files if f.path == SKILL_RELATIVE_PATH), None)
+
+
+def _authority_verdict(workspace: Path, manifest: dict | None, plan: FilePlan | None) -> str | None:
+    """The `skill authority hash` attestation doctor prints (chainlink #75):
+    `verified`, `drifted`, or `missing` -- derived from the manifest's
+    recorded `authority_hash` for the skill file, never from the file's own
+    self-consistency alone.
+
+    * `verified` -- the on-disk skill file is byte-identical to the installed
+      one, and its authority region's hash matches the record.
+    * `drifted` -- the file was modified after install (the inventory's
+      `conflict` outcome -- the edit may have landed OUTSIDE the authority
+      region, where the old declared-vs-computed self-consistency check
+      could not see it and attested a tampered file as verified on the line
+      directly above that file's CONFLICT line), or the region's hash no
+      longer matches the record.
+    * `missing` -- the skill file is absent from the workspace.
+    * None -- no manifest to attest against; no line is printed.
+
+    The attestation attests the file listed directly below it, so `verified`
+    and that file's CONFLICT can never both be true."""
     target = workspace / SKILL_RELATIVE_PATH
     if not target.is_file():
-        return None
+        return "missing"
+    if plan is not None and plan.outcome == "conflict":
+        return "drifted"
     try:
         text = target.read_text()
-        return declared_authority_hash(text) == computed_authority_hash(text)
+        current = computed_authority_hash(text)
     except (InstallError, OSError, UnicodeDecodeError):
-        return False
+        return "drifted"
+    recorded = None
+    if manifest is not None:
+        record = _manifest_files(manifest).get(SKILL_RELATIVE_PATH)
+        if isinstance(record, dict):
+            recorded = record.get("authority_hash")
+    if recorded is not None:
+        return "verified" if recorded == current else "drifted"
+    # A manifest that records no authority hash for the skill (hand-written
+    # or predating the field): fall back to the file's own self-consistency,
+    # the only attestation the older record supports.
+    try:
+        return "verified" if declared_authority_hash(text) == current else "drifted"
+    except InstallError:
+        return "drifted"
 
 
 def _overall_status(report: InstallReport) -> str:
     managed = [f for f in report.files if f.ownership == MANAGED]
     if any(f.outcome == "conflict" for f in managed):
         return "conflict"
-    if report.authority_ok is False:
+    if report.authority_state == "drifted":
         return "conflict"
     if any(f.outcome == "missing" for f in managed):
         return "drifted"
@@ -605,6 +646,14 @@ def init_workspace(workspace: Path, mode: str, name: str, descriptor_rel: str) -
     conflict = adjudicator_pin_conflict(manifest)
     if conflict is None:
         apply_plan(workspace, report, manifest)
+        # The attestation describes the install just applied, not the
+        # pre-write disk: a fresh init's skill file does not exist until
+        # apply_plan writes it, and a refused upgrade must not be attested
+        # against bytes the product no longer ships (chainlink #75).
+        report.authority_state = _authority_verdict(
+            workspace, load_manifest(workspace), _skill_plan(report)
+        )
+        report.status = _overall_status(report)
         return report
     # A rerun under a different executable: the whole install is frozen, not
     # just the adjudicator pin (#68). Managed-file "upgrade" content and the
@@ -628,6 +677,12 @@ def init_workspace(workspace: Path, mode: str, name: str, descriptor_rel: str) -
         adjudicator_record=manifest.get("adjudicator"),
         installed_product_version=recorded_product,
         installed_schema_versions=recorded_schemas,
+    )
+    # Same post-write attestation as the normal path above; the forced
+    # `conflict` status is left as set -- the pin refusal is the headline
+    # there, not the skill file's own state.
+    report.authority_state = _authority_verdict(
+        workspace, load_manifest(workspace), _skill_plan(report)
     )
     return report
 
@@ -742,7 +797,7 @@ def inspect(workspace: Path) -> InstallReport:
     for path, record in records.items():
         if record.get("ownership") == MANAGED and path not in known:
             report.obsolete.append(path)
-    report.authority_ok = _authority_ok(workspace)
+    report.authority_state = _authority_verdict(workspace, manifest, _skill_plan(report))
     report.descriptor_schema = descriptor_schema_report(workspace, descriptor_rel)
     report.status = _overall_status(report)
     return report
@@ -921,8 +976,8 @@ def render_report_text(report: InstallReport) -> str:
     lines = [f"installation: {report.status}"]
     if report.mode:
         lines.append(f"mode: {report.mode}  project: {report.product_name}")
-    if report.authority_ok is not None:
-        lines.append(f"skill authority hash: {'verified' if report.authority_ok else 'MISMATCH'}")
+    if report.authority_state is not None:
+        lines.append(f"skill authority hash: {report.authority_state}")
     for plan in sorted(report.files, key=lambda p: p.path):
         line = f"  {_OUTCOME_GLYPH.get(plan.outcome, plan.outcome):>9}  {plan.path}"
         if plan.path == report.descriptor_path and report.descriptor_schema is not None:

@@ -395,9 +395,14 @@ class CliValidateIntegrationTest(WorkspaceFixture):
         self.write_registry(entry())
         self.write_manifest(manifest_with({"assumption_id": "ASM-missing"}))
         code, out, _ = self.run_cli("check", "--json")
-        self.assertEqual(code, 1)
+        # chainlink #75: this hand-written workspace records no gate
+        # hashes, so check also fails closed on gate integrity -- exit 5
+        # (gate_integrity_failed outranks blocking_findings). The G21
+        # finding the test exists for is unchanged.
+        self.assertEqual(code, 5)
         document = json.loads(out)
         self.assertTrue(any(f["gate_id"] == "G21" for f in document["findings"]))
+        self.assertIn("gate_integrity_failed", document["result"]["conditions"])
 
 
 if __name__ == "__main__":

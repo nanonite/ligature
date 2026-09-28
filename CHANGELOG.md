@@ -47,6 +47,8 @@ First tagged release. The built `ligature.pyz` (with checksums and provenance) i
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- [p1-date-creusot] check exits 0 while a gate-pinned file is tampered or missing: no installation/gate-integrity gate, doctor attests a tampered skill authority as verified, and status installation_manifest.state stays current through integrity failures (#75)
+- [p1-date-creusot] doctor reports installation current while a schema-invalid project-descriptor makes check fail-closed (#74)
 - [p1-date-creusot] project-descriptor schema 1.0 has no closure_kind field and rejects unknown keys with no diagnostic (#73)
 - [p1-date-creusot] status misclassifies installation manifest as invalid work-package (C.1) (#72)
 - Example descriptors and docs use user-supplied placeholders (e.g. `<path-to-cpp-source-repository>`) instead of machine-specific paths; the Neargye acceptance test runs only when `LIGATURE_NEARGYE_WORKSPACE` is set

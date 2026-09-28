@@ -13,12 +13,15 @@ BLOCKING_FINDINGS = 1
 INVALID_INPUT = 2
 HUMAN_DECISION_REQUIRED = 3
 BACKEND_UNAVAILABLE = 4
+GATE_INTEGRITY_FAILED = 5
 
 # Highest precedence first -- see docs/exit-code-contract.md's own
-# rationale for why 4 outranks 3 (a complete diagnosis beats an
-# incomplete one) and 1 outranks 4 (an unambiguous finding needs no
-# further information to act on).
+# rationale for why 5 outranks 2 (a compromised gate definition voids every
+# other signal the run could produce), why 4 outranks 3 (a complete
+# diagnosis beats an incomplete one) and 1 outranks 4 (an unambiguous
+# finding needs no further information to act on).
 _PRECEDENCE: tuple[tuple[str, int], ...] = (
+    ("gate_integrity_failed", GATE_INTEGRITY_FAILED),
     ("invalid_input", INVALID_INPUT),
     ("blocking_findings", BLOCKING_FINDINGS),
     ("backend_unavailable", BACKEND_UNAVAILABLE),

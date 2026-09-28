@@ -127,9 +127,13 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
         self.assertIn("commit", document["gate_integrity"]["details"])
 
         check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
-        self.assertEqual(check.returncode, 2, check.stdout + check.stderr)
+        # chainlink #75: the invalid descriptor makes gate integrity
+        # `unknown`, so check also fails the installation/gate-integrity
+        # gate -- exit 5 with gate_integrity_failed alongside invalid_input.
+        self.assertEqual(check.returncode, 5, check.stdout + check.stderr)
         document = json.loads(check.stdout)
-        self.assertEqual(document["result"]["exit_code"], 2)
+        self.assertEqual(document["result"]["exit_code"], 5)
+        self.assertIn("gate_integrity_failed", document["result"]["conditions"])
         self.assertTrue(document["findings"])
         self.assertIn("$.port_source", document["findings"][0]["reason"])
         self.assertIn("permitted: language, oracle_build_command, repository", document["findings"][0]["reason"])

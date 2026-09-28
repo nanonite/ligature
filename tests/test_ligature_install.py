@@ -128,6 +128,27 @@ class FreshInitTest(InstallFixture):
         self.assertEqual(code, 0)
         self.assert_descriptor_valid("port")
 
+    def test_init_installs_all_three_bundled_schemas(self):
+        """chainlink #75 Part 4: `init` writes the descriptor schema into
+        `.ligature/schemas/` alongside the other two, so the schema that
+        governs the user-owned `project-descriptor.json` is attested as
+        installed (`installed_schema_versions`) AND present on disk --
+        previously it was attested at 1.0 while absent, leaving the
+        descriptor's permitted properties discoverable only by trial and
+        error."""
+        code, _, _ = self.init("port", name="myport")
+        self.assertEqual(code, 0)
+        installed = self.workspace / ".ligature" / "schemas" / "project-descriptor.schema.json"
+        self.assertTrue(installed.is_file())
+        self.assertEqual(installed.read_text(), (ROOT / "schemas" / "project-descriptor.schema.json").read_text())
+        paths = {f["path"]: f for f in self.manifest()["files"]}
+        self.assertEqual(paths[".ligature/schemas/project-descriptor.schema.json"]["ownership"], "managed")
+        self.assertEqual(paths[".ligature/schemas/project-descriptor.schema.json"]["expected_hash"], "sha256:" + hashlib.sha256(installed.read_bytes()).hexdigest())
+        # doctor inventories it as an unchanged managed file.
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("unchanged  .ligature/schemas/project-descriptor.schema.json", out)
+
     def test_project_name_defaults_to_the_workspace_directory(self):
         self.init("greenfield")
         self.assertEqual(self.manifest()["project_name"], ligature_install.default_project_name(self.workspace))
@@ -207,7 +228,11 @@ class ConflictAndAuthorityTest(InstallFixture):
         skill.write_text(tampered)
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 1)
-        self.assertIn("MISMATCH", out)
+        # chainlink #75: the verdict is derived from the manifest's recorded
+        # authority_hash, so a tampered region reads "drifted" (the old
+        # self-consistency check printed "MISMATCH" for the same fact).
+        self.assertIn("skill authority hash: drifted", out)
+        self.assertNotIn("MISMATCH", out)
 
     def test_manifest_records_a_verifiable_authority_hash(self):
         self.init("greenfield", name="myproj")
@@ -218,6 +243,45 @@ class ConflictAndAuthorityTest(InstallFixture):
         )
         record = next(f for f in self.manifest()["files"] if f["path"] == SKILL_REL)
         self.assertEqual(record["authority_hash"], ligature_install.computed_authority_hash(text))
+
+    def test_doctor_detects_tampering_outside_the_authority_region(self):
+        """chainlink #75 Part 2, exact reproduction: appending a comment
+        AFTER the authority-region END marker leaves the region (and its
+        self-consistency) untouched, so the old declared-vs-computed check
+        attested the tampered file as verified on the line directly above
+        that file's CONFLICT line. The verdict is now derived from the
+        manifest's recorded authority_hash plus the file's conflict state,
+        so `verified` and `CONFLICT` can never both be true."""
+        self.init("greenfield", name="myproj")
+        skill = self.workspace / SKILL_REL
+        skill.write_text(skill.read_text() + "\n<!-- TAMPERED -->\n")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("skill authority hash: drifted", out)
+        self.assertIn("CONFLICT  .codex/skills/ligature/SKILL.md", out)
+        # The attestation line no longer contradicts the inventory line.
+        self.assertNotIn("skill authority hash: verified", out)
+
+    def test_doctor_reports_missing_authority_when_the_skill_file_is_absent(self):
+        """chainlink #75 Part 2: a deleted skill file must read `missing`,
+        never `verified` -- the attestation attests the file listed
+        directly below it."""
+        self.init("greenfield", name="myproj")
+        (self.workspace / SKILL_REL).unlink()
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("skill authority hash: missing", out)
+        self.assertIn("MISSING  .codex/skills/ligature/SKILL.md", out)
+
+    def test_doctor_verifies_a_clean_install(self):
+        """The flip side of the #75 verdict derivation: an untouched skill
+        file's region hash matches the record, so the attestation reads
+        `verified` -- the word the pre-#75 code also printed for a clean
+        install, now derived from the recorded authority_hash."""
+        self.init("greenfield", name="myproj")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("skill authority hash: verified", out)
 
 
 class UpgradePruneIncompatibilityTest(InstallFixture):
@@ -451,8 +515,19 @@ class DoctorDescriptorSchemaTest(InstallFixture):
         self.invalidate_descriptor(lambda d: d.__setitem__("bogus_key", "x"))
         doctor_code, _, _ = self.run_cli("doctor")
         check_code, check_out, _ = self.run_cli("check", "--json")
-        self.assertEqual(check_code, 2)
-        self.assertEqual(doctor_code, check_code)
+        # Both commands fail closed on the same workspace (chainlink #74's
+        # agreement invariant), but not with the same code since chainlink
+        # #75: `check` additionally fails the installation/gate-integrity
+        # gate -- an invalid descriptor makes the gate pins unreadable, so
+        # gate_integrity reports "unknown" and check exits 5 (the new
+        # top-precedence condition) while doctor's own descriptor-schema
+        # check still exits 2, the invalid-input code.
+        self.assertEqual(doctor_code, 2)
+        self.assertEqual(check_code, 5)
+        document = json.loads(check_out)
+        self.assertEqual(document["result"]["exit_code"], 5)
+        self.assertIn("gate_integrity_failed", document["result"]["conditions"])
+        self.assertIn("invalid_input", document["result"]["conditions"])
 
     def test_doctor_on_an_uninitialized_workspace_is_unchanged(self):
         code, out, _ = self.run_cli("doctor")

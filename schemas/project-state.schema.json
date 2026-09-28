@@ -30,7 +30,7 @@
       "additionalProperties": false,
       "description": "#58's ownership manifest, read (not recomputed) by status. A workspace with no manifest at all is `not-initialized`, never silently reported as if every field below were clean.",
       "properties": {
-        "state": { "type": "string", "enum": ["not-initialized", "current", "upgradable", "incompatible", "unknown"] },
+        "state": { "type": "string", "enum": ["not-initialized", "current", "upgradable", "incompatible", "drifted", "unknown"] },
         "installed_product_version": { "type": ["string", "null"] },
         "installed_schema_versions": {
           "type": "object",

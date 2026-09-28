@@ -285,6 +285,25 @@ as a healthy, current installation. `check` remains the detail surface
 for the offending property; `doctor` never repairs the descriptor (it is
 user-owned, and `migrate --force` refuses it).
 
+**Implemented by #75.** `check` also fails closed on installation
+integrity: when the descriptor's `gate_integrity` pins are drifted,
+missing, or unverifiable against the ownership manifest's recorded hashes
+(`status --json`'s `gate_integrity.state` is anything but `pinned`),
+`check` reports the `gate_integrity_failed` condition and exits **5** --
+the exit-code contract's new top-precedence code, so a compromised gate
+definition voids every other signal the run could produce -- with one
+high-severity finding per drifted or missing path naming it (or a single
+workspace-level finding when no individual path can be named). The same
+run drops `status --json`'s `installation_manifest.state` from `current`
+to `drifted`/`unknown`, so the machine-readable status no longer reports a
+clean installation whose gate definitions have been altered. `doctor`'s
+`skill authority hash` line is derived from the manifest's recorded
+`authority_hash` (plus the file's conflict state), so a tampered
+skill-authority file is never attested as `verified` on the line directly
+above that file's `CONFLICT` line, and `init` installs
+`schemas/project-descriptor.schema.json` into `.ligature/schemas/`
+alongside the other two bundled schemas.
+
 ## 9. Compatibility alias policy
 
 Every legacy flat command not listed in §7 (internal) becomes a

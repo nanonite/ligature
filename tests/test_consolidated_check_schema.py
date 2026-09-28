@@ -189,9 +189,22 @@ class ConsolidatedCheckSchemaTest(unittest.TestCase):
         doc["findings"][0]["authority"] = "vibes"
         self.assertTrue(list(self.validator.iter_errors(doc)))
 
-    def test_result_exit_code_is_one_of_the_five_contract_codes(self):
+    def test_result_exit_code_is_one_of_the_six_contract_codes(self):
+        """chainlink #75 added exit 5 (gate_integrity_failed) to the
+        contract; 6 remains outside it."""
         doc = self._load("consolidated-check.blocked.example.json")
-        doc["result"]["exit_code"] = 7
+        doc["result"]["exit_code"] = 6
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+        doc["result"]["exit_code"] = 5
+        self.assertEqual(list(self.validator.iter_errors(doc)), [])
+
+    def test_result_conditions_is_a_closed_enum_including_gate_integrity_failed(self):
+        """chainlink #75: gate_integrity_failed is part of the v1.0
+        condition vocabulary, and an invented condition is rejected."""
+        doc = self._load("consolidated-check.blocked.example.json")
+        doc["result"]["conditions"] = ["gate_integrity_failed"]
+        self.assertEqual(list(self.validator.iter_errors(doc)), [])
+        doc["result"]["conditions"] = ["gate_integrity_failed", "made_up_condition"]
         self.assertTrue(list(self.validator.iter_errors(doc)))
 
     def test_rejects_unknown_top_level_field(self):

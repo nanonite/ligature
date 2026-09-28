@@ -278,13 +278,18 @@ def _installation_gate_hashes(workspace: Path) -> dict:
     return {}
 
 
-def _gate_integrity(
+def _gate_integrity_evaluate(
     workspace: Path,
     descriptor: dict | None,
     installation: dict,
     descriptor_state: str = "absent",
     descriptor_diagnostics: list[str] | None = None,
-) -> dict:
+) -> tuple[str, str, list[str]]:
+    """(state, details, problems) for the descriptor's `gate_integrity`
+    pins. `problems` is the per-path list (`"<path>: <reason>"` per drifted
+    or missing path) that `check`'s installation/gate-integrity finding
+    names; it is empty for the verdicts that have no individual path to
+    name (`unknown`, `unpinned`)."""
     if descriptor is None:
         if descriptor_state == "present-invalid":
             # The descriptor file exists but failed schema validation; say
@@ -292,21 +297,23 @@ def _gate_integrity(
             # project descriptor present" that made a descriptor typo
             # indistinguishable from a missing descriptor (chainlink #73).
             detail = "; ".join(descriptor_diagnostics or []) or "schema-invalid"
-            return {
-                "state": "unknown",
-                "details": f"project descriptor is present but invalid: {detail}",
-            }
-        return {"state": "unknown", "details": "no project descriptor present"}
+            return (
+                "unknown",
+                f"project descriptor is present but invalid: {detail}",
+                [],
+            )
+        return "unknown", "no project descriptor present", []
     entries = descriptor.get("gate_integrity") or []
     paths = [e.get("path") for e in entries if isinstance(e, dict) and e.get("path")]
     if not paths:
-        return {"state": "unknown", "details": "descriptor declares no gate_integrity paths"}
+        return "unknown", "descriptor declares no gate_integrity paths", []
     recorded = _installation_gate_hashes(workspace)
     if installation.get("state") == "not-initialized" or not recorded:
-        return {
-            "state": "unpinned",
-            "details": f"{len(paths)} gate path(s) declared; no installation manifest records their hashes",
-        }
+        return (
+            "unpinned",
+            f"{len(paths)} gate path(s) declared; no installation manifest records their hashes",
+            [],
+        )
     drifted = []
     for rel in paths:
         if rel == adjudicator.ADJUDICATOR_PIN_TOKEN:
@@ -337,8 +344,52 @@ def _gate_integrity(
         elif recorded[rel] != _sha256_file(target):
             drifted.append(f"{rel}: hash drift")
     if drifted:
-        return {"state": "drifted", "details": "; ".join(drifted)}
-    return {"state": "pinned", "details": f"{len(paths)} gate path(s) match the installed manifest"}
+        return "drifted", "; ".join(drifted), drifted
+    return "pinned", f"{len(paths)} gate path(s) match the installed manifest", []
+
+
+def _gate_integrity(
+    workspace: Path,
+    descriptor: dict | None,
+    installation: dict,
+    descriptor_state: str = "absent",
+    descriptor_diagnostics: list[str] | None = None,
+) -> dict:
+    state, details, _problems = _gate_integrity_evaluate(
+        workspace, descriptor, installation, descriptor_state, descriptor_diagnostics
+    )
+    return {"state": state, "details": details}
+
+
+def _gate_integrity_findings(gate_integrity: dict, problems: list[str]) -> list[NormalizedFinding]:
+    """check's installation/gate-integrity gate (chainlink #75): one finding
+    per drifted or missing gate path, naming that path, or a single
+    workspace-level finding when the verdict is `unknown`/`unpinned` and no
+    individual path can be named. High severity: a workspace whose gate
+    definitions are tampered with, missing, or unverifiable must never
+    read as a clean bill of health."""
+    if problems:
+        return [
+            NormalizedFinding(
+                gate_id="gate-integrity",
+                severity="high",
+                subject=problem.split(": ", 1)[0],
+                reason=problem,
+                authority="mechanized-gate",
+                provenance="scripts/project_state.py:_gate_integrity_findings",
+            )
+            for problem in problems
+        ]
+    return [
+        NormalizedFinding(
+            gate_id="gate-integrity",
+            severity="high",
+            subject="(workspace)",
+            reason=gate_integrity["details"],
+            authority="mechanized-gate",
+            provenance="scripts/project_state.py:_gate_integrity_findings",
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1157,11 +1208,20 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
     obligations = _obligations(workspace, descriptor)
     clusters = _clusters(workspace, descriptor)
     observations = _observations(workspace, descriptor)
-    gate_integrity = _gate_integrity(
+    gate_state, gate_details, gate_problems = _gate_integrity_evaluate(
         workspace, descriptor, installation, descriptor_state, descriptor_diagnostics
     )
+    gate_integrity = {"state": gate_state, "details": gate_details}
+    # chainlink #75: installation_manifest.state must not read "current"
+    # while the gate definitions it pins are drifted or unverifiable --
+    # a consumer reading only `status --json` was told the installation is
+    # current in a workspace whose gate definitions had been altered.
+    if installation["state"] == "current" and gate_state != "pinned":
+        installation["state"] = "drifted" if gate_state == "drifted" else "unknown"
 
     findings = _run_standalone_validators(workspace)
+    if gate_integrity["state"] != "pinned":
+        findings.extend(_gate_integrity_findings(gate_integrity, gate_problems))
     findings.extend(_descriptor_placeholder_findings(descriptor, descriptor_state, descriptor_path))
     findings.extend(_descriptor_invalid_findings(descriptor_state, descriptor_diagnostics, descriptor_path))
     gate_runs, gate_findings, witness_backend = _run_gates(workspace, descriptor)
@@ -1173,6 +1233,12 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
     conditions: set[str] = set()
     if descriptor_state in ("absent", "present-invalid", "unknown"):
         conditions.add("invalid_input")
+    if gate_integrity["state"] != "pinned":
+        # chainlink #75: check fails closed on installation integrity -- a
+        # gate definition that is drifted, missing, or unverifiable means
+        # the check's own basis cannot be trusted, so the run reports the
+        # gate-integrity condition regardless of what else it found.
+        conditions.add("gate_integrity_failed")
     if any(f.severity in ("critical", "high") for f in findings):
         conditions.add("blocking_findings")
     if any(r.get("outcome") == "blocked" and "backend" in str(r.get("reason", "")) for r in gate_runs):

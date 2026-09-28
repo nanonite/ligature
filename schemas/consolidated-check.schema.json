@@ -58,10 +58,10 @@
       "additionalProperties": false,
       "description": "The exit-code contract (docs/exit-code-contract.md) applied to this run's own findings/gates/next_action -- makes the connection between the JSON body and the process exit code explicit and independently checkable rather than something only the process's own return value asserts.",
       "properties": {
-        "exit_code": { "type": "integer", "enum": [0, 1, 2, 3, 4] },
+        "exit_code": { "type": "integer", "enum": [0, 1, 2, 3, 4, 5] },
         "conditions": {
           "type": "array",
-          "items": { "type": "string", "enum": ["invalid_input", "blocking_findings", "backend_unavailable", "human_decision_required"] },
+          "items": { "type": "string", "enum": ["gate_integrity_failed", "invalid_input", "blocking_findings", "backend_unavailable", "human_decision_required"] },
           "uniqueItems": true,
           "description": "The condition set scripts/exit_codes.py:resolve() was called with to produce exit_code -- present even when empty (exit_code 0)."
         }

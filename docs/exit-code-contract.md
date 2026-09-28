@@ -34,8 +34,9 @@ current behavior, which is called out below as a known, open drift.
 | **2** | Invalid input or product/install state. The requested operation could not even be attempted: missing workspace/descriptor, malformed CLI arguments, a missing prerequisite artifact directory ("no C_static reports, run extract-c-static first"), an incompatible installed product/schema version (#57/#58). | every standalone script's own `main()` |
 | **3** | Human decision required. The check ran to completion and found nothing that can be resolved mechanically — only a disposition only a human can make (`gate-r1-g16`'s medium risk tier: neither clearly safe nor definitely blocking). | `cmd_gate_r1_g16` today |
 | **4** | Missing/unavailable external backend. An operation needed an external system that isn't there or didn't respond usably — no `llm_backend` configured for `draft`, a configured backend that errored, a verifier dispatch target unreachable for `check-bridges`/`gate-g9`. Distinct from 2: the *request* was well-formed, the *environment it needs* wasn't available. | not distinguished today — currently folds into 1 via `PipelineError` (see "Known drift" below) |
+| **5** | Gate-integrity failure. The workspace's gate definitions are drifted, missing, or unverifiable against the installation manifest's recorded hashes — `check`'s own basis cannot be trusted, so nothing else the run could report (not even invalid input) means anything until the installation is restored. | `check` since chainlink #75 (previously exited 0 with empty findings) |
 
-Values 5+ are reserved; this contract does not assign them.
+Values 6+ are reserved; this contract does not assign them.
 
 ## Precedence
 
@@ -44,31 +45,36 @@ simultaneously, the **highest-precedence condition present wins** and is
 the code returned (never a bitmask, never "the last one computed"):
 
 ```
-2  (invalid input/state)         highest — nothing else can be trusted
+5  (gate-integrity failure)      highest — the check's basis is compromised
+2  (invalid input/state)
 1  (blocking findings)
 4  (missing/unavailable backend)
 3  (human decision required)
 0  (clean/success)               lowest
 ```
 
-Rationale for the middle two: a genuine blocking finding is unambiguous
-and actionable without any further information, so it outranks "an
-external backend was unavailable" — you don't need the backend to know the
-workspace has a real problem. "Backend unavailable" in turn outranks
-"human decision required": exit 3 is a *complete, precise* diagnosis (the
-mechanized checks ran fully and the only remaining gap is a human call);
-exit 4 means the mechanized checks could not even finish running, which is
-a less complete state than 3 and must not be silently reported as if it
-were the more precise one.
+Rationale for the top condition: a drifted or missing gate definition
+voids every other signal the run could produce — if the gates themselves
+cannot be trusted, even "your input was invalid" cannot be acted on,
+because the descriptor cannot be trusted to declare what is pinned in the
+first place (chainlink #75). Rationale for the middle two: a genuine
+blocking finding is unambiguous and actionable without any further
+information, so it outranks "an external backend was unavailable" — you
+don't need the backend to know the workspace has a real problem. "Backend
+unavailable" in turn outranks "human decision required": exit 3 is a
+*complete, precise* diagnosis (the mechanized checks ran fully and the
+only remaining gap is a human call); exit 4 means the mechanized checks
+could not even finish running, which is a less complete state than 3 and
+must not be silently reported as if it were the more precise one.
 
 `scripts/exit_codes.py` implements this precedence as a pure function,
-`resolve(conditions: frozenset[str]) -> int`, over the same five names
-(`invalid_input`, `blocking_findings`, `backend_unavailable`,
-`human_decision_required`, plus the empty set meaning clean) so #56's
-`check`/`status` implementation calls one shared resolver instead of
-re-deriving this table. It has no side effects and does not read the
-filesystem or invoke any gate — it is pure precedence arithmetic over a
-set the caller already computed, tested directly by
+`resolve(conditions: frozenset[str]) -> int`, over the same six names
+(`gate_integrity_failed`, `invalid_input`, `blocking_findings`,
+`backend_unavailable`, `human_decision_required`, plus the empty set
+meaning clean) so #56's `check`/`status` implementation calls one shared
+resolver instead of re-deriving this table. It has no side effects and
+does not read the filesystem or invoke any gate — it is pure precedence
+arithmetic over a set the caller already computed, tested directly by
 `tests/test_exit_code_contract.py`.
 
 ## Compatibility aliases

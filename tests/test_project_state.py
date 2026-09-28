@@ -75,6 +75,24 @@ class WorkspaceFixture(unittest.TestCase):
         self.descriptor_path.write_text(json.dumps(descriptor))
         return descriptor
 
+    def init_workspace(self, mode="greenfield", name="myproj", crates=("crates/a",)):
+        """A real `ligature init` -- which records the four gate_integrity
+        hashes in a manifest, pinning them -- then the descriptor edits
+        `write_descriptor` applies on top, so `check` runs against a
+        pinned installation rather than an unpinned hand-written one
+        (chainlink #75). Tests whose scenario is orthogonal to gate
+        integrity use this to keep testing their own behavior."""
+        code, _ = self.run_cli("init", "--mode", mode, "--name", name)
+        self.assertEqual(code, 0)
+        descriptor = json.loads(self.descriptor_path.read_text())
+        descriptor["crates"] = [
+            {"crate_dir": crate, "contracts_crate": "contracts", "specs_search_root": "crates"}
+            for crate in crates
+        ]
+        descriptor["review"]["reviewer"] = "real-reviewer"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        return descriptor
+
     def write(self, relative: str, data) -> Path:
         path = self.workspace / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,7 +322,12 @@ class ProjectStateDocumentTest(WorkspaceFixture):
             },
         )
         doc = self.status()[1]
-        self.assertEqual(doc["installation_manifest"]["state"], "current")
+        # chainlink #75 Part 3: the manifest records no gate hashes, so
+        # gate integrity is `unpinned` and installation_manifest.state
+        # drops from "current" to "unknown" -- a consumer reading only
+        # `status --json` is no longer told the installation is current
+        # while its gate pins are unverifiable.
+        self.assertEqual(doc["installation_manifest"]["state"], "unknown")
         self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
 
     def test_init_then_status_reports_no_invalid_work_package(self):
@@ -338,7 +361,9 @@ class ProjectStateDocumentTest(WorkspaceFixture):
             {"work_package": "WP-1", "report": {"emit": "ci/results/WP-1.json"}},
         )
         _, doc = self.status()
-        self.assertEqual(doc["installation_manifest"]["state"], "current")
+        # chainlink #75 Part 3: no gate hashes are recorded, so the state
+        # drops to "unknown" even though the recorded versions match.
+        self.assertEqual(doc["installation_manifest"]["state"], "unknown")
         by_path = {a["path"]: a for a in doc["artifacts"]}
         self.assertNotIn("ci/manifest/installation.json", by_path)
         self.assertEqual(by_path["ci/manifest/WP-1.json"]["kind"], "work-package")
@@ -490,14 +515,25 @@ class NextActionSelectionTest(unittest.TestCase):
 class ConsolidatedCheckDocumentTest(WorkspaceFixture):
     def test_empty_workspace_is_invalid_input_with_no_action(self):
         code, doc = self.check()
-        self.assertEqual(code, 2)
+        # chainlink #75: an empty workspace has no descriptor, so gate
+        # integrity is `unknown` and check fails closed on BOTH conditions
+        # -- invalid_input (no descriptor to check) and
+        # gate_integrity_failed (nothing is pinned) -- exiting 5, the new
+        # top-precedence code.
+        self.assertEqual(code, 5)
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
         self.assertFalse(doc["mutated_workspace"])
-        self.assertEqual(doc["result"], {"exit_code": 2, "conditions": ["invalid_input"]})
+        self.assertEqual(
+            doc["result"],
+            {
+                "exit_code": 5,
+                "conditions": ["blocking_findings", "gate_integrity_failed", "invalid_input"],
+            },
+        )
         self.assertIsNone(doc["next_action"])
 
     def test_valid_descriptor_no_findings_is_clean(self):
-        self.write_descriptor()
+        self.init_workspace()
         code, doc = self.check()
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
         self.assertFalse(doc["mutated_workspace"])
@@ -516,7 +552,7 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         self.assertFalse((self.workspace / "ci" / "results" / "c_static").exists())
 
     def test_invalid_artifact_is_a_blocking_finding(self):
-        self.write_descriptor()
+        self.init_workspace()
         self.write("crates/a/specs/_boundaries/broken.json", "{not json")
         code, doc = self.check()
         self.assertEqual(code, 1)
@@ -525,7 +561,7 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         self.assertTrue(any(f["severity"] == "high" for f in doc["findings"]))
 
     def test_draft_is_a_human_decision_not_a_mechanized_failure(self):
-        self.write_descriptor()
+        self.init_workspace()
         draft = {k: v for k, v in BOUNDARY.items() if k != "review"}
         self.write("crates/a/specs/_boundaries/draft.json", draft)
         code, doc = self.check()
@@ -538,7 +574,7 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         )
 
     def test_stale_promoted_artifact_is_a_blocking_finding(self):
-        self.write_descriptor()
+        self.init_workspace()
         self.write("crates/a/specs/_boundaries/x.json", {**BOUNDARY, "boundary_id": "x"})
         promoted_hash = _sha256(self.boundary_path("x"))
         self.write(
@@ -592,6 +628,112 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         self.assertNotIn("consolidated check", out)
 
 
+class GateIntegrityCheckTest(WorkspaceFixture):
+    """chainlink #75: `check` fails closed on installation integrity.
+
+    Before #75, `check --json` exited 0 with empty findings while a
+    gate-pinned file was tampered or deleted -- the plan's
+    "check exits 0" criterion could not report a modified gate
+    definition. These tests pin the new behavior: a non-pinned
+    gate_integrity state produces exit 5, the gate_integrity_failed
+    condition, and a finding naming the drifted or missing path; and
+    `status --json`'s installation_manifest.state drops its "current"
+    verdict whenever gate integrity is not pinned."""
+
+    def test_tampered_gate_pinned_file_fails_check_closed(self):
+        """Part 1, exact reproduction: appending a comment after the
+        authority-region END marker trips gate_integrity's hash drift,
+        and check must now fail closed naming the path."""
+        self.init_workspace()
+        skill = self.workspace / ".codex" / "skills" / "ligature" / "SKILL.md"
+        skill.write_text(skill.read_text() + "\n<!-- TAMPERED -->\n")
+        code, doc = self.check()
+        self.assertEqual(code, 5)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertEqual(doc["result"]["exit_code"], 5)
+        self.assertIn("gate_integrity_failed", doc["result"]["conditions"])
+        integrity = [f for f in doc["findings"] if f["gate_id"] == "gate-integrity"]
+        self.assertEqual(len(integrity), 1)
+        self.assertEqual(integrity[0]["subject"], ".codex/skills/ligature/SKILL.md")
+        self.assertIn("hash drift", integrity[0]["reason"])
+        self.assertEqual(integrity[0]["severity"], "high")
+        self.assertEqual(integrity[0]["authority"], "mechanized-gate")
+
+    def test_missing_gate_pinned_file_fails_check_closed(self):
+        """Part 1, deletion variant: a deleted gate schema is named by
+        the finding, not just by status/doctor."""
+        self.init_workspace()
+        (self.workspace / ".ligature" / "schemas" / "consolidated-check.schema.json").unlink()
+        code, doc = self.check()
+        self.assertEqual(code, 5)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertIn("gate_integrity_failed", doc["result"]["conditions"])
+        integrity = [f for f in doc["findings"] if f["gate_id"] == "gate-integrity"]
+        self.assertEqual(len(integrity), 1)
+        self.assertEqual(
+            integrity[0]["subject"], ".ligature/schemas/consolidated-check.schema.json"
+        )
+        self.assertIn("missing", integrity[0]["reason"])
+
+    def test_unpinned_workspace_fails_check_closed(self):
+        """A descriptor that declares gate paths with no manifest
+        recording their hashes is `unpinned` -- check fails closed with
+        a workspace-level finding (no individual path to name)."""
+        self.write_descriptor()
+        code, doc = self.check()
+        self.assertEqual(code, 5)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertIn("gate_integrity_failed", doc["result"]["conditions"])
+        integrity = [f for f in doc["findings"] if f["gate_id"] == "gate-integrity"]
+        self.assertEqual(len(integrity), 1)
+        self.assertIn("no installation manifest records their hashes", integrity[0]["reason"])
+
+    def test_pinned_workspace_has_no_gate_integrity_finding(self):
+        """The flip side: a clean init pins every path, so check reports
+        no gate-integrity finding and exits 0 (nothing else outstanding)."""
+        self.init_workspace()
+        code, doc = self.check()
+        self.assertEqual(code, 0)
+        self.assertEqual(doc["result"]["conditions"], [])
+        self.assertFalse([f for f in doc["findings"] if f["gate_id"] == "gate-integrity"])
+
+    def test_status_installation_state_drops_current_when_gate_integrity_drifts(self):
+        """Part 3: status --json must not report the installation as
+        current while a gate-pinned file has been tampered."""
+        self.init_workspace()
+        skill = self.workspace / ".codex" / "skills" / "ligature" / "SKILL.md"
+        skill.write_text(skill.read_text() + "\n<!-- TAMPERED -->\n")
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["gate_integrity"]["state"], "drifted")
+        self.assertEqual(doc["installation_manifest"]["state"], "drifted")
+
+    def test_status_installation_state_drops_current_when_unpinned(self):
+        """Part 3: a manifest that records no gate hashes leaves the
+        installation state at "unknown", not "current"."""
+        self.write_descriptor()
+        self.write(
+            "ci/manifest/installation.json",
+            {
+                "installed_product_version": project_state.PRODUCT_VERSION,
+                "installed_schema_versions": {"project-state": "1.0"},
+            },
+        )
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["gate_integrity"]["state"], "unpinned")
+        self.assertEqual(doc["installation_manifest"]["state"], "unknown")
+
+    def test_status_installation_state_current_when_pinned(self):
+        """The flip side of Part 3: a clean init reports current -- the
+        state only drops when gate integrity is not pinned."""
+        self.init_workspace()
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["gate_integrity"]["state"], "pinned")
+        self.assertEqual(doc["installation_manifest"]["state"], "current")
+
+
 class DescriptorPlaceholderTest(WorkspaceFixture):
     """Chainlink #67: a descriptor still holding the shipped init-template
     values is flagged by `check` (with a human-decision next action), while
@@ -599,11 +741,13 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
     match on a value a real project could choose (`verifier_policy.default`)."""
 
     def write_init_descriptor(self, mode: str, name: str = "myproj") -> dict:
-        """Exactly what `ligature init` writes for `mode`: the real
-        `_render_descriptor` output, not a hand-rolled near-copy."""
-        rendered = json.loads(ligature_install._render_descriptor(mode, name))
-        self.descriptor_path.write_text(json.dumps(rendered))
-        return rendered
+        """Exactly what `ligature init` writes for `mode`: a real init, so
+        the four gate_integrity paths are pinned in a manifest and `check`
+        isolates the placeholder behavior under test rather than also
+        failing closed on an unpinned workspace (chainlink #75)."""
+        code, _ = self.run_cli("init", "--mode", mode, "--name", name)
+        self.assertEqual(code, 0)
+        return json.loads(self.descriptor_path.read_text())
 
     def p0_findings(self, doc: dict) -> list[dict]:
         return [f for f in doc["findings"] if f["gate_id"] == "P0"]
@@ -700,10 +844,19 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
             lambda d: d["port_source"].__setitem__("commit", "abc123"),
         )
         code, doc = self.check()
-        self.assertEqual(code, 2)
+        # chainlink #75: the invalid descriptor makes gate integrity
+        # `unknown`, so check also fails the installation/gate-integrity
+        # gate -- exit 5 with gate_integrity_failed alongside the
+        # invalid_input and blocking_findings conditions.
+        self.assertEqual(code, 5)
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
-        self.assertEqual(doc["result"]["conditions"], ["blocking_findings", "invalid_input"])
-        self.assertEqual(len(doc["findings"]), 1)
+        self.assertEqual(
+            doc["result"]["conditions"],
+            ["blocking_findings", "gate_integrity_failed", "invalid_input"],
+        )
+        # The P0 diagnostic plus the workspace-level gate-integrity
+        # finding (the invalid descriptor makes the pins unreadable).
+        self.assertEqual(len(doc["findings"]), 2)
         finding = doc["findings"][0]
         self.assertEqual(finding["gate_id"], "P0")
         self.assertEqual(finding["severity"], "high")
@@ -720,7 +873,10 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
             lambda d: d["port_source"].__setitem__("commit", "abc123"),
         )
         code, doc = self.check()
-        self.assertEqual(code, 2)
+        # chainlink #75: exit 5 (gate_integrity_failed outranks
+        # invalid_input); the next_action is unchanged -- the descriptor
+        # edit is still the recommended fix.
+        self.assertEqual(code, 5)
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
         self.assertIsNotNone(doc["next_action"])
         self.assertEqual(doc["next_action"]["kind"], "human-decision")
@@ -755,15 +911,25 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
         self.assertEqual(doc["descriptor"]["state"], "absent")
         self.assertEqual(doc["gate_integrity"]["details"], "no project descriptor present")
         code, doc = self.check()
-        self.assertEqual(code, 2)
+        # chainlink #75: no descriptor means nothing is pinned, so check
+        # fails closed on gate integrity too -- exit 5. The absent-vs-
+        # invalid distinction the test exists for is untouched: the only
+        # finding is the workspace-level gate-integrity one, and no
+        # descriptor-level finding is produced.
+        self.assertEqual(code, 5)
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
         self.assertIsNone(doc["next_action"])
-        self.assertEqual(doc["findings"], [])
+        self.assertEqual(len(doc["findings"]), 1)
+        self.assertEqual(doc["findings"][0]["gate_id"], "gate-integrity")
+        self.assertEqual(doc["findings"][0]["subject"], "(workspace)")
+        self.assertEqual(doc["findings"][0]["reason"], "no project descriptor present")
 
     def test_unparseable_descriptor_is_reported_as_a_finding(self):
         self.descriptor_path.write_text("{not json")
         code, doc = self.check()
-        self.assertEqual(code, 2)
+        # chainlink #75: exit 5 -- the unparseable descriptor is both an
+        # invalid input and an unverifiable gate-integrity pin list.
+        self.assertEqual(code, 5)
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
         self.assertTrue(doc["findings"])
         self.assertIn("not valid JSON", doc["findings"][0]["reason"])
@@ -779,7 +945,9 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
             lambda d: d.__setitem__("closure_kinds", ["deductive"]),
         )
         code, doc = self.check()
-        self.assertEqual(code, 2)
+        # chainlink #75: exit 5 (gate_integrity_failed outranks
+        # invalid_input); the diagnostic content is unchanged.
+        self.assertEqual(code, 5)
         reason = doc["findings"][0]["reason"]
         self.assertIn("closure_kinds", reason)
         self.assertIn("closure_kind", reason)  # the permitted alternative the pilot wanted
@@ -794,7 +962,9 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
             lambda d: d["verifier_policy"].__setitem__("closure_kind", "deductive"),
         )
         code, doc = self.check()
-        self.assertEqual(code, 2)
+        # chainlink #75: exit 5 (gate_integrity_failed outranks
+        # invalid_input); the diagnostic content is unchanged.
+        self.assertEqual(code, 5)
         reason = doc["findings"][0]["reason"]
         self.assertIn("$.verifier_policy.closure_kind", reason)
         self.assertIn("kani", reason)

@@ -19,6 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+import exit_codes  # noqa: E402
 
 CLI_CONTRACT = (ROOT / "docs" / "cli-contract.md").read_text()
 TRUST_BOUNDARIES = (ROOT / "docs" / "trust-and-compatibility-boundaries.md").read_text()
@@ -178,6 +179,32 @@ class ActionIdVocabularyConsistencyTest(unittest.TestCase):
     def test_cli_contract_states_command_always_present_for_automated_command(self):
         normalized = " ".join(CLI_CONTRACT.split())
         self.assertIn("never omitted or null for this kind", normalized)
+
+
+class ExitCodeConditionVocabularyConsistencyTest(unittest.TestCase):
+    """chainlink #75: the consolidated-check schema's `conditions` enum
+    and scripts/exit_codes.py's CONDITION_NAMES must name the exact same
+    set -- a condition the resolver knows but the schema rejects (or vice
+    versa) is exactly the two-sources-of-truth gap this file exists to
+    prevent."""
+
+    def test_schema_conditions_enum_matches_exit_codes_condition_names(self):
+        schema_enum = set(CONSOLIDATED_CHECK_SCHEMA["properties"]["result"]["properties"]["conditions"]["items"]["enum"])
+        self.assertEqual(schema_enum, set(exit_codes.CONDITION_NAMES))
+
+    def test_schema_exit_code_enum_matches_exit_codes_contract_codes(self):
+        schema_codes = set(CONSOLIDATED_CHECK_SCHEMA["properties"]["result"]["properties"]["exit_code"]["enum"])
+        self.assertEqual(
+            schema_codes,
+            {
+                exit_codes.CLEAN,
+                exit_codes.BLOCKING_FINDINGS,
+                exit_codes.INVALID_INPUT,
+                exit_codes.HUMAN_DECISION_REQUIRED,
+                exit_codes.BACKEND_UNAVAILABLE,
+                exit_codes.GATE_INTEGRITY_FAILED,
+            },
+        )
 
 
 if __name__ == "__main__":

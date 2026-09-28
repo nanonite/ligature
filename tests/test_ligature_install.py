@@ -395,6 +395,85 @@ class StatusIntegrationTest(InstallFixture):
         self.assertEqual(document["gate_integrity"]["state"], "pinned")
 
 
+class DoctorDescriptorSchemaTest(InstallFixture):
+    """Chainlink #74: `doctor` validates the user-owned project descriptor
+    against the product's own `schemas/project-descriptor.schema.json` --
+    the same schema and validator `check` fails closed on -- and fails closed
+    itself (exit 2, the exit-code contract's invalid-input code) on the
+    states `check` reports `invalid_input` for, so a workspace the pipeline
+    cannot check is never reported as a healthy, current installation."""
+
+    def invalidate_descriptor(self, mutate):
+        path = self.workspace / "project-descriptor.json"
+        data = json.loads(path.read_text())
+        mutate(data)
+        path.write_text(json.dumps(data, indent=2) + "\n")
+
+    def test_doctor_annotates_a_valid_descriptor(self):
+        self.init("greenfield", name="myproj")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("  user-owned  project-descriptor.json  schema: valid", out)
+
+    def test_doctor_reports_a_schema_invalid_descriptor_and_exits_non_zero(self):
+        self.init("greenfield", name="myproj")
+        self.invalidate_descriptor(lambda d: d.__setitem__("bogus_key", "x"))
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("  user-owned  project-descriptor.json  schema: invalid (see check for detail)", out)
+        # The installation itself is still current; the descriptor is the
+        # fail-closed condition, exactly as `check` reports it.
+        self.assertIn("installation: current", out)
+
+    def test_doctor_reports_an_invalid_enum_value_and_exits_non_zero(self):
+        self.init("greenfield", name="myproj")
+        self.invalidate_descriptor(lambda d: d.__setitem__("closure_kind", "bogus"))
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("schema: invalid (see check for detail)", out)
+
+    def test_doctor_reports_a_missing_descriptor_and_exits_non_zero(self):
+        self.init("greenfield", name="myproj")
+        (self.workspace / "project-descriptor.json").unlink()
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("  MISSING  project-descriptor.json  schema: absent", out)
+
+    def test_doctor_reports_a_non_json_descriptor_and_exits_non_zero(self):
+        self.init("greenfield", name="myproj")
+        (self.workspace / "project-descriptor.json").write_text("{not json")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("schema: invalid (see check for detail)", out)
+
+    def test_doctor_and_check_agree_on_the_fail_closed_workspace(self):
+        self.init("greenfield", name="myproj")
+        self.invalidate_descriptor(lambda d: d.__setitem__("bogus_key", "x"))
+        doctor_code, _, _ = self.run_cli("doctor")
+        check_code, check_out, _ = self.run_cli("check", "--json")
+        self.assertEqual(check_code, 2)
+        self.assertEqual(doctor_code, check_code)
+
+    def test_doctor_on_an_uninitialized_workspace_is_unchanged(self):
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("installation: not-initialized", out)
+        self.assertNotIn("schema:", out)
+
+    def test_migrate_also_annotates_the_descriptor(self):
+        self.init("greenfield", name="myproj")
+        self.invalidate_descriptor(lambda d: d.__setitem__("bogus_key", "x"))
+        code, out, _ = self.run_cli("migrate")
+        self.assertEqual(code, 0)
+        self.assertIn("  user-owned  project-descriptor.json  schema: invalid (see check for detail)", out)
+
+    def test_descriptor_schema_report_marks_an_unreadable_file(self):
+        self.init("greenfield", name="myproj")
+        with mock.patch.object(Path, "read_text", side_effect=OSError("permission denied")):
+            report = ligature_install.descriptor_schema_report(self.workspace, "project-descriptor.json")
+        self.assertEqual(report.state, "unreadable")
+
+
 def _identity(content_hash, *, kind="zipapp", version=ligature_install.PRODUCT_VERSION) -> dict:
     """A full `adjudicator.current_identity()` shape, so both `init` (which
     records it) and `doctor` (which renders and verifies it) can run under

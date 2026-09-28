@@ -271,6 +271,20 @@ uncommitted state. A dirty build is still a self-consistent, correctly
 attested artifact, so this is reported, not treated as an integrity
 failure; `PROVENANCE.json` carries the same three fields.
 
+**Implemented by #74.** `doctor` also validates the user-owned
+`project-descriptor.json` against the product's own
+`schemas/project-descriptor.schema.json` -- the same schema and validator
+`check` fails closed on -- and annotates the descriptor's `user-owned`
+inventory line with its schema state (`schema: valid`, `schema: invalid
+(see check for detail)`, `schema: absent`, or `schema: unreadable`). A
+descriptor state `check` reports `invalid_input` for (invalid, absent, or
+unreadable) makes `doctor` exit **2** -- the exit-code contract's
+invalid-input code, checked before every other condition per its
+precedence -- so a workspace the pipeline cannot check is never reported
+as a healthy, current installation. `check` remains the detail surface
+for the offending property; `doctor` never repairs the descriptor (it is
+user-owned, and `migrate --force` refuses it).
+
 ## 9. Compatibility alias policy
 
 Every legacy flat command not listed in §7 (internal) becomes a

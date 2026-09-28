@@ -2016,6 +2016,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     pin = inspect_adjudicator_pin(args.workspace)
     detail = f" -- {pin['details']}" if pin.get("details") else ""
     print(f"  adjudicator pin: {pin['state']}{detail}")
+    # Fail closed on the user-owned project descriptor (chainlink #74): the
+    # states `check` reports `invalid_input` for -- schema-invalid, absent,
+    # or unreadable -- make `doctor` exit 2, the exit-code contract's
+    # invalid-input code, so a workspace the pipeline cannot check is never
+    # reported as a healthy, current installation. Checked first per
+    # docs/exit-code-contract.md's precedence: invalid input outranks every
+    # other condition.
+    if report.descriptor_schema is not None and report.descriptor_schema.state in (
+        "invalid",
+        "absent",
+        "unreadable",
+    ):
+        return 2
     if info["kind"] == "zipapp" and not adjudicator.identity_ok(info):
         return 1
     if pin["state"] in ("mismatch", "unattested"):

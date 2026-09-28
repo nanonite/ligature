@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adjudicator  # noqa: E402
 import resources  # noqa: E402
 from atomic_write import write_atomically  # noqa: E402
+from project_descriptor import schema_diagnostics  # noqa: E402
 from project_state import KNOWN_SCHEMA_VERSIONS  # noqa: E402
 from project_state import PRODUCT_VERSION  # noqa: E402
 
@@ -370,6 +371,7 @@ class InstallReport:
     authority_ok: bool | None = None
     messages: list[str] = field(default_factory=list)
     descriptor_path: str = "project-descriptor.json"
+    descriptor_schema: DescriptorSchemaReport | None = None
 
     @property
     def conflicts(self) -> list[FilePlan]:
@@ -647,6 +649,51 @@ def _recorded_install_versions(manifest: dict) -> tuple[str, dict]:
 # ---------------------------------------------------------------------------
 # Inspection (doctor / migrate --status)
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class DescriptorSchemaReport:
+    """The workspace's user-owned project descriptor validated against the
+    product's own `schemas/project-descriptor.schema.json` -- the same schema
+    and validator `check`/`status` read (chainlink #74).
+
+    States: `valid` (parses as a JSON object and satisfies the schema),
+    `invalid` (parses but violates it -- `diagnostics` carries one
+    actionable line per violation, or the file is not valid JSON / not a
+    JSON object), `absent` (no file at the manifest's descriptor path),
+    `unreadable` (the file exists but cannot be read). `check` reports
+    `invalid_input` for every state except `valid`, so those are exactly
+    the states `doctor` fails closed on."""
+
+    state: str
+    diagnostics: list[str] = field(default_factory=list)
+
+
+def descriptor_schema_report(workspace: Path, descriptor_rel: str) -> DescriptorSchemaReport:
+    """Read-only schema check of the user-owned descriptor. Never repairs
+    and never writes: the descriptor is user-owned, `migrate --force`
+    refuses it, and `check` remains the detail surface for the offending
+    property -- this only decides whether the workspace is fail-closed."""
+    try:
+        target = safe_target(workspace, descriptor_rel)
+    except InstallError as exc:
+        return DescriptorSchemaReport("unreadable", [str(exc)])
+    if not target.is_file():
+        return DescriptorSchemaReport("absent")
+    try:
+        text = target.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        return DescriptorSchemaReport("unreadable", [str(exc)])
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return DescriptorSchemaReport("invalid", [f"not valid JSON: {exc}"])
+    if not isinstance(data, dict):
+        return DescriptorSchemaReport("invalid", ["descriptor is not a JSON object"])
+    diagnostics = schema_diagnostics(data)
+    if diagnostics:
+        return DescriptorSchemaReport("invalid", diagnostics)
+    return DescriptorSchemaReport("valid")
+
+
 def _require_compatible(manifest: dict) -> None:
     version = manifest.get("manifest_schema_version")
     if version != MANIFEST_SCHEMA_VERSION:
@@ -696,6 +743,7 @@ def inspect(workspace: Path) -> InstallReport:
         if record.get("ownership") == MANAGED and path not in known:
             report.obsolete.append(path)
     report.authority_ok = _authority_ok(workspace)
+    report.descriptor_schema = descriptor_schema_report(workspace, descriptor_rel)
     report.status = _overall_status(report)
     return report
 
@@ -852,6 +900,23 @@ _OUTCOME_GLYPH = {
 }
 
 
+def _descriptor_schema_note(schema: DescriptorSchemaReport) -> str:
+    """The schema-state annotation on the descriptor's inventory line
+    (chainlink #74). `doctor` inventories `project-descriptor.json` as
+    user-owned, so its schema state belongs on that line: a workspace
+    `check` treats as fail-closed `invalid_input` must never be reported as
+    a healthy, current installation. `check` stays the detail surface -- the
+    note points there rather than duplicating its per-property diagnostics,
+    and the descriptor is user-owned, so nothing here repairs it."""
+    if schema.state == "valid":
+        return "  schema: valid"
+    if schema.state == "invalid":
+        return "  schema: invalid (see check for detail)"
+    if schema.state == "absent":
+        return "  schema: absent"
+    return "  schema: unreadable"
+
+
 def render_report_text(report: InstallReport) -> str:
     lines = [f"installation: {report.status}"]
     if report.mode:
@@ -859,7 +924,10 @@ def render_report_text(report: InstallReport) -> str:
     if report.authority_ok is not None:
         lines.append(f"skill authority hash: {'verified' if report.authority_ok else 'MISMATCH'}")
     for plan in sorted(report.files, key=lambda p: p.path):
-        lines.append(f"  {_OUTCOME_GLYPH.get(plan.outcome, plan.outcome):>9}  {plan.path}")
+        line = f"  {_OUTCOME_GLYPH.get(plan.outcome, plan.outcome):>9}  {plan.path}"
+        if plan.path == report.descriptor_path and report.descriptor_schema is not None:
+            line += _descriptor_schema_note(report.descriptor_schema)
+        lines.append(line)
     for path in sorted(report.obsolete):
         lines.append(f"  {'obsolete':>9}  {path}")
     for message in report.messages:

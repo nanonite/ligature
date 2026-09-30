@@ -55,8 +55,13 @@ almost every gap found so far (§6) actually took:
   whether that operator authority is actually gated. The three writing
   `report` sub-verbs (`feature-ledger`, `contact-sheet`,
   `gold-set-measurement`) require **no authority at all** — they write
-  generated projections, "always safe to regenerate/overwrite"
-  (`trust-and-compatibility-boundaries.md` §5), never a reviewed artifact.
+  generated projections, never a reviewed artifact
+  (`trust-and-compatibility-boundaries.md` §5). Regenerating over a
+  previous projection is always safe, but `report feature-ledger` is not
+  unconditionally safe: it refuses (exit 1, file untouched) when its
+  destination already holds a schema-valid assurance report, so run
+  `record-assurance` after `report feature-ledger`, or point the manifest's
+  `report.emit` at a free `ci/results/*.json` path (#88).
 
 ## 2. Stage-by-stage: what each CLI command does at each plan.md stage
 

@@ -1335,7 +1335,10 @@ def cmd_generate_feature_ledger(args: argparse.Namespace) -> int:
     (witness_required: true) feature, reusing G18/G19/G20 for real
     rather than re-deriving their dispositions. Never consulted by
     satisfies()/assurance/closure computation; refuses to write a
-    schema-invalid result rather than ever producing one."""
+    schema-invalid result rather than ever producing one. Refuses (chainlink
+    #88) to overwrite an assurance report already at the destination:
+    run `record-assurance` after `report feature-ledger`, or point the
+    manifest's report.emit at a free ci/results/*.json path."""
     descriptor = load_project_descriptor(args.descriptor)
     workspace = _require_workspace_root_exists(args.workspace)
     try:

@@ -573,6 +573,78 @@ class WriteLedgerTest(GateTestCase):
                 gfl.write_ledger(self.root, self.descriptor)
         self.assertFalse((self.root / "ci" / "results" / "feature_ledger.json").exists())
 
+    def test_write_ledger_refuses_to_overwrite_an_assurance_report(self):
+        # chainlink #88: `report feature-ledger` silently overwrote the
+        # assurance report at ci/results/feature_ledger.json (incompatible
+        # schemas), flipping gate-g14 to BLOCKED with exit 0. It must
+        # refuse instead, leaving the report byte-identical.
+        self.ws.write_concept_spec()
+        destination = self.root / "ci" / "results" / "feature_ledger.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        report = {
+            "schema_version": "1.0",
+            "work_package": "WP-X",
+            "obligation_records": [],
+            "bridge_records": [],
+        }
+        destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        before = destination.read_bytes()
+        with self.assertRaises(gfl.GenerationError) as caught:
+            gfl.write_ledger(self.root, self.descriptor)
+        self.assertIn("assurance report", str(caught.exception))
+        self.assertEqual(destination.read_bytes(), before)
+
+    def test_write_ledger_still_overwrites_a_stale_feature_ledger(self):
+        # The #88 refusal is narrow: ledger-over-ledger remains allowed.
+        self.ws.write_concept_spec()
+        happy_path_witness_and_rendering(self.ws)
+        first = gfl.write_ledger(self.root, self.descriptor)
+        original = first.read_bytes()
+        second = gfl.write_ledger(self.root, self.descriptor)
+        self.assertEqual(second, first)
+        self.assertEqual(second.read_bytes(), original)
+
+    def test_pipeline_report_feature_ledger_refuses_over_an_assurance_report(self):
+        # chainlink #88 at the reported surface: `ligature report
+        # feature-ledger` exited 0 with no warning while destroying the
+        # assurance report. Through pipeline.main() it must exit non-zero
+        # with the report left byte-identical, so a refactor that folds
+        # GenerationError back into a success path fails the suite.
+        import pipeline  # noqa: E402, local import: tests/test_pipeline.py already imports this module
+        from contextlib import redirect_stderr  # noqa: E402
+
+        self.ws.write_concept_spec()
+        destination = self.root / "ci" / "results" / "feature_ledger.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "work_package": "WP-X",
+                    "obligation_records": [],
+                    "bridge_records": [],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        before = destination.read_bytes()
+        descriptor = json.loads(
+            (ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text()
+        )
+        descriptor["crates"] = [
+            {"crate_dir": "crates/scheduler", "contracts_crate": "contracts", "specs_search_root": "crates"}
+        ]
+        descriptor["witness_backend"] = {"command": PRODUCER_BACKEND}
+        (self.root / "project-descriptor.json").write_text(json.dumps(descriptor))
+        buffer = io.StringIO()
+        with redirect_stdout(buffer), redirect_stderr(buffer):
+            code = pipeline.main(["--workspace", str(self.root), "report", "feature-ledger"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("assurance report", buffer.getvalue())
+        self.assertEqual(destination.read_bytes(), before)
+
 
 class CliTest(GateTestCase):
     def _run(self, *args) -> tuple[int, str]:

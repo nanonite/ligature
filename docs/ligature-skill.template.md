@@ -120,7 +120,7 @@ progress.
 | `ligature promote-evidence <target>` | mechanically promote a staged evidence draft (`evidence/<id>.json.draft`) to its target and record the move — the Stage 0 promotion path (evidence carries no `review` block, so `approve` cannot promote it; no `--reviewer` needed) |
 | `ligature record-ruling --reviewer <name> --verdict ratified/rejected --artifact <path>…` | record a human ruling over an exact artifact set — the human-ruling gate `accept-promotion` enforces before it will mint a receipt (#82). A human checkpoint: never run it yourself |
 | `ligature record-assurance <work-package> --proof <obligation>=<path>…` | assemble a work package's assurance report from the verifier's own proof certificates and write it to the manifest's `report.emit` path — the achieved side `gate g14` reads (#87). Never hand-write that report: every field is derived from the certificate, the mapping you declare is checked, and the command refuses when the evidence does not establish the obligation |
-| `ligature report <report-id>` | generated review projections (ledger, contact sheet); regenerate, do not hand-edit |
+| `ligature report <report-id>` | generated review projections (ledger, contact sheet); regenerate, do not hand-edit — but `report feature-ledger` refuses (exit 1, file untouched) over a schema-valid assurance report, so run `record-assurance` after it (#88) |
 | `ligature doctor` | capability manifest + installed-file/version diagnostics |
 | `ligature migrate [--upgrade\|--prune\|--force <path>]` | recover from managed-file conflicts and version skew |
 

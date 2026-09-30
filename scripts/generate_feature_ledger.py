@@ -418,21 +418,54 @@ def generate_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) ->
     }
 
 
+def _refuse_assurance_report_collision(destination: Path, workspace: Path) -> None:
+    """Refuse to overwrite an assurance report (chainlink #88).
+
+    `record-assurance` writes the owning manifest's `report.emit` path --
+    the only path gate-g14 reads -- and some workspaces point that path
+    at ci/results/feature_ledger.json. Overwriting it with a generated
+    ledger (whose schema is incompatible) flips gate-g14 to BLOCKED even
+    though the proof state has not changed, with exit 0 and no warning.
+    A generated projection must never destroy the evidence it projects.
+    """
+    if not destination.exists() or not destination.is_file():
+        return
+    try:
+        data = json.loads(destination.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if list(load_assurance_report_validator().iter_errors(data)):
+        return
+    work_package = data.get("work_package", "?")
+    raise GenerationError(
+        f"refusing to overwrite the assurance report at {_relative(destination, workspace)} "
+        f"(work package {work_package!r}): `report feature-ledger` and `record-assurance` "
+        "must not share one path -- run `record-assurance` after `report feature-ledger` so the "
+        "report is recorded last, or point the manifest's report.emit at a free ci/results/*.json "
+        "path (e.g. ci/results/<work-package>.json) to separate the two artifacts"
+    )
+
+
 def write_ledger(workspace: Path, descriptor: dict, runner=subprocess.run) -> Path:
     """Generate, validate against the schema, and write atomically.
     Raises GenerationError -- writing NOTHING -- if the generated ledger
     is not schema-valid: a generated artifact this codebase's own
     schema rejects must never reach disk, the same "genuinely valid,
     not just present" discipline every other generator here applies to
-    its OWN output before trusting it."""
+    its OWN output before trusting it. Also raises GenerationError --
+    writing NOTHING -- if the destination already holds an assurance
+    report (chainlink #88): the ledger and the report share no schema,
+    and overwriting the report flips gate-g14 to BLOCKED without the
+    proof state changing."""
     ledger = generate_ledger(workspace, descriptor, runner=runner)
     errors = list(load_validator().iter_errors(ledger))
     if errors:
         raise GenerationError(
             f"generated feature ledger is not schema-valid, refusing to write it: {errors[0].message}"
         )
-    text = json.dumps(ledger, indent=2, sort_keys=True) + "\n"
     destination = ledger_path_for(workspace)
+    _refuse_assurance_report_collision(destination, workspace)
+    text = json.dumps(ledger, indent=2, sort_keys=True) + "\n"
     write_atomically(destination, text)
     return destination
 

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- #88: `report feature-ledger` silently overwrote `record-assurance`'s report at `ci/results/feature_ledger.json` and still exited 0, flipping `gate-g14` to BLOCKED on an unchanged proof state (the two schemas are incompatible: the overwritten file failed assurance-report validation with `'work_package' is a required property`, and every obligation read as "recorded no achieved assurance"). `write_ledger()` now refuses (exit 1, file untouched) when the destination already holds a schema-valid assurance report, with a message naming the work package and advising to run `record-assurance` after `report feature-ledger` or to point the manifest's `report.emit` at a free `ci/results/*.json` path; ledger-over-ledger regeneration is unaffected. Documented in `docs/trust-and-compatibility-boundaries.md` §5 (the `report feature-ledger` authority row) and the `cmd_generate_feature_ledger` docstring. Covered by new regression tests in `tests/test_generate_feature_ledger.py` (unit-level refusal plus byte-identity, ledger-over-ledger still allowed, and a `pipeline.main()` `report feature-ledger` refusal test).
+
 ## [1.1.0] - 2026-09-29
 
 ### Fixed

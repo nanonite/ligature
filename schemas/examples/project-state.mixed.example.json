@@ -109,6 +109,10 @@
     "state": "pinned",
     "details": "binary content_hash matches installed manifest"
   },
+  "write_set": {
+    "state": "clean",
+    "details": "write set is clean -- every file is accounted for by allowed_roots, protected_roots, the ownership manifest, a declared crate's specs/ tree, or a canonical pipeline location"
+  },
   "generated_observations": {
     "witness_summaries": [
       {

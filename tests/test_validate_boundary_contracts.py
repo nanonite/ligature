@@ -117,6 +117,52 @@ class ValidateBoundaryContractsTest(unittest.TestCase):
         self.assertIn("unverifiable", infos[0].reason)
         self.assertIn("no --specs-search-root given", infos[0].reason)
 
+    def test_g2_plus_dangling_constraint_id_is_an_error_when_search_root_resolves(self):
+        """chainlink #81 direction 3: when the search root IS available and
+        the spec resolved but the id matches no constraint in it, that is a
+        real dangling reference -- a defect in the boundary contract, not an
+        unverifiable note. Previously this was info-severity, so a wrong id
+        was indistinguishable from a correct one and `check` exited 0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            specs = root / "specs"
+            (specs / "_boundaries").mkdir(parents=True)
+            (specs / "task_queue.json").write_text(
+                json.dumps(
+                    {
+                        "concept": "TaskQueue",
+                        "constraints": [
+                            {
+                                "id": "C003",
+                                "english": "pop_ready returns None only when no task has deadline <= now",
+                                "logic": "true",
+                                "kind": "postcondition",
+                                "applies_to": ["pop_ready"],
+                            }
+                        ],
+                    }
+                )
+            )
+            (specs / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                        "caller": {"concept": "Scheduler", "method": "dispatch"},
+                        "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+                        "callee_guarantees": ["TaskQueue.C999"],
+                        "review": {"reviewer": "alice", "reviewed_at": "2026-08-25"},
+                    }
+                )
+            )
+            findings = validate(root, specs_search_root=specs)
+            errors = [f for f in findings if f.severity == "error"]
+            infos = [f for f in findings if f.severity == "info"]
+            self.assertEqual(infos, [], [str(f) for f in infos])
+            self.assertEqual(len(errors), 1, [str(f) for f in errors])
+            self.assertIn("dangling reference", errors[0].reason)
+            self.assertIn("C999", errors[0].reason)
+
 
 class G2PlusConceptResolutionTest(unittest.TestCase):
     """Chainlink #69: G2+'s concept resolver must skip underscore-prefixed

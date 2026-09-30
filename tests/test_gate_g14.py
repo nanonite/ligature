@@ -25,6 +25,7 @@ from gate_g14 import (  # noqa: E402
     EXIT_OK,
     PER_CLUSTER_NOTE,
     build_provider_index,
+    check_closure_kind,
     closure_context,
     compute_closure,
     cycles,
@@ -704,8 +705,94 @@ class ClosureKindTest(GateTestCase):
         self.assertTrue(any("makes the cluster's guarantee bounded" in e for e in errors))
         self.assertTrue(any("cross-verifier composition has no soundness theorem" in e for e in errors))
 
+    def test_partial_is_reported_with_the_outcome(self):
+        """chainlink #85: a partially-validated closure declares `partial`
+        and the gate reports the declared kind like any other, without a
+        new branch refusing it."""
+        self.ws.patch("specs/_closure/scheduler-core.json", lambda d: d.update({"closure_kind": "partial"}))
+        outcome, _ = self.ws.cluster()
+        self.assertEqual(self.errors(outcome), [])
+        self.assertEqual(outcome.status, "closes")
+        self.assertIn("closure_kind=partial", outcome.summary())
+
+    def test_partial_is_never_refuted_from_evidence_kinds(self):
+        """The same closure that refutes `deductive` (a Kani result three
+        hops down) says nothing against `partial`: that check polices the
+        uniform kinds' rounding, and `partial` claims strictly less than
+        either. Everything `partial` describes is still policed by the
+        findings that own it -- here, the cross-verifier condition."""
+        self.ws.patch("specs/_closure/scheduler-core.json", lambda d: d.update({"closure_kind": "partial"}))
+        self.ws.patch("ci/manifest/WP-C.json", lambda d: d["definition_of_done"]["provided_guarantees"][0][
+            "required_assurance"].update({"accepted_evidence_kinds": ["kani-bounded-model-check"]}))
+        self.ws.patch("ci/manifest/WP-B.json", lambda d: d["definition_of_done"]["required_guarantees"][0][
+            "required_assurance"].update({"accepted_evidence_kinds": ["kani-bounded-model-check"]}))
+        self.ws.patch("ci/results/WP-C.json", lambda d: d["obligation_records"][0].update(
+            {"record": achieved(kind="kani-bounded-model-check")}))
+        outcome, _ = self.ws.cluster()
+        self.assertFalse(any("closure_kind" in e for e in self.errors(outcome)))
+        # the shortfall is still visible, just not as a kind refutation
+        self.assertTrue(any("cross-verifier composition has no soundness theorem" in e
+                            for e in self.errors(outcome)))
+
+    def test_check_closure_kind_returns_nothing_for_partial(self):
+        """Unit-level contract of the missing branch: neither a mixed nor
+        an all-deductive closure produces a finding against `partial`."""
+        profile = {"cluster": "scheduler-core", "closure_kind": "partial"}
+        for kinds in (["creusot-deductive-check", "kani-bounded-model-check"],
+                      ["creusot-deductive-check"],
+                      ["kani-bounded-model-check"]):
+            with self.subTest(evidence_kinds=kinds):
+                self.assertEqual(check_closure_kind(profile, {"_evidence_kinds": kinds}), [])
+
 
 class DeclaredConditionTest(GateTestCase):
+    """chainlink #86: a declared condition bit is a claim to check.
+    Six of the seven are recomputed outright; the seventh (CG3) is
+    recomputed from artifact data whenever those data determine it, and
+    is otherwise a capability gap the gate refuses to pass without a
+    tracking record -- never a free pass, in either direction."""
+
+    CG3 = "generic_callees_type_universal_or_creusot_owned"
+
+    def make_closure_kani_only(self) -> None:
+        """Every achieved record in the closure -- obligation and bridge
+        alike -- a Kani result, with the profile agreeing that Kani owns
+        the cluster and the kind is `bounded`. This is the shape where
+        CG3's question is live and the artifacts cannot answer it: which
+        callees are generic is type information nothing here carries."""
+        for name in ("WP-A", "WP-B", "WP-C"):
+            self.ws.patch(f"ci/manifest/{name}.json", lambda d: [
+                entry["required_assurance"].update(
+                    {"accepted_evidence_kinds": ["kani-bounded-model-check"]}
+                )
+                for entry in (
+                    d["definition_of_done"]["provided_guarantees"]
+                    + d["definition_of_done"]["required_guarantees"]
+                    + d["definition_of_done"]["required_preconditions_to_establish"]
+                )
+            ])
+            self.ws.patch(f"ci/results/{name}.json", lambda d: [
+                entry["record"]["evidence"].update(
+                    {"kind": "kani-bounded-model-check", "verifier": "kani"}
+                )
+                for entry in d["obligation_records"] + d["bridge_records"]
+            ])
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda d: (
+                d.update({"closure_kind": "bounded"}),
+                d["conditions"].update({"owning_verifier": "kani"}),
+            ),
+        )
+
+    def cg3_record(self, failed_conditions) -> dict:
+        record = valid_degradation()
+        record["failed_conditions"] = list(failed_conditions)
+        record["ceiling"] = "per-instantiation"
+        record["capability_gap"] = "CG3"
+        record["tracking_issue"] = "chainlink:86"
+        return record
+
     def test_a_mis_declared_condition_is_rejected(self):
         self.ws.patch(
             "specs/_closure/scheduler-core.json",
@@ -714,18 +801,100 @@ class DeclaredConditionTest(GateTestCase):
         outcome, _ = self.ws.cluster()
         self.assertTrue(any("recomputed, never stored-and-trusted" in e for e in self.errors(outcome)))
 
-    def test_the_cg3_condition_is_reported_as_declared_not_verified(self):
+    def test_the_cg3_condition_is_verified_from_artifact_data(self):
+        """#86's first remedy: the all-deductive fixture determines the
+        condition -- every record in the closure is a creusot result,
+        so nothing it rests on is verified per monomorphization -- and
+        the gate says VERIFIED, not HUMAN DECLARATION."""
         outcome, _ = self.ws.cluster()
         infos = [str(f) for f in outcome.findings if f.severity == "info"]
-        self.assertTrue(any("HUMAN DECLARATION this gate cannot verify" in i for i in infos))
+        self.assertTrue(any("VERIFIED from artifact data" in i for i in infos), infos)
+        self.assertFalse(any("HUMAN DECLARATION" in i for i in infos), infos)
+        self.assertEqual(self.errors(outcome), [])
+        self.assertEqual(outcome.status, "closes")
 
-    def test_a_declared_false_cg3_condition_is_a_failing_condition(self):
+    def test_a_false_cg3_declaration_is_rejected_when_the_artifacts_determine_it(self):
+        """The other direction of #86: over a closure with no Kani
+        result anywhere, `false` is not an honest gap, it contradicts
+        the records -- and a mis-declared bit is never excusable by a
+        degradation record."""
         self.ws.patch(
             "specs/_closure/scheduler-core.json",
-            lambda d: d["conditions"].update({"generic_callees_type_universal_or_creusot_owned": False}),
+            lambda d: d["conditions"].update({self.CG3: False}),
+        )
+        self.ws.write("specs/_closure/scheduler-core.degradation.json", self.cg3_record([self.CG3]))
+        outcome, _ = self.ws.cluster()
+        self.assertTrue(
+            any("recomputed, never stored-and-trusted" in e for e in self.errors(outcome))
+        )
+        self.assertEqual(outcome.status, "blocked")
+
+    def test_a_true_cg3_declaration_no_artifact_can_verify_blocks(self):
+        """#86's own reproduction: a closure profile declaring
+        `generic_callees: true` over a Kani-only closure used to pass
+        with nothing checked. The condition is now a gap the gate
+        refuses to accept unverified."""
+        self.make_closure_kani_only()
+        outcome, _ = self.ws.cluster()
+        errors = self.errors(outcome)
+        self.assertTrue(any("cannot verify it" in e for e in errors), errors)
+        self.assertTrue(any("never a free pass" in e and "tracking issue" in e for e in errors), errors)
+        self.assertEqual(outcome.status, "blocked")
+
+    def test_a_tracked_cg3_gap_is_degraded_and_reported_with_its_record(self):
+        """#86's second remedy: the same declaration, beside a
+        degradation record naming the condition with capability_gap CG3
+        and a tracking issue, is released as a declared gap -- reported
+        explicitly, with the record, never silently accepted."""
+        self.make_closure_kani_only()
+        self.ws.write(
+            "specs/_closure/scheduler-core.degradation.json", self.cg3_record([self.CG3])
+        )
+        outcome, _ = self.ws.cluster()
+        self.assertEqual(self.errors(outcome), [])
+        self.assertEqual(outcome.status, "degraded")
+        self.assertTrue(
+            any("accepted as degradation under ceiling 'per-instantiation' (chainlink:86)" in d
+                for d in self.degraded(outcome)),
+            [str(f) for f in outcome.findings],
+        )
+        self.assertIn("does NOT close", outcome.summary())
+
+    def test_an_unrecorded_work_package_makes_cg3_unverifiable(self):
+        """No record at all is not evidence of no Kani result: a work
+        package with a cleared report cannot vouch for what verified
+        it, so the condition is a gap here too (and the missing record
+        blocks on its own as well)."""
+        self.ws.patch("ci/results/WP-C.json", lambda d: d["obligation_records"].clear())
+        outcome, _ = self.ws.cluster()
+        errors = self.errors(outcome)
+        self.assertTrue(any("cannot verify it" in e and "WP-C" in e for e in errors), errors)
+
+    def test_a_declared_false_cg3_condition_is_a_failing_condition(self):
+        """The pre-#86 path, preserved where it belongs: a Kani-only
+        cluster stating the CG3 gap declares it false, and that is an
+        excusable failing condition, not a mis-declaration."""
+        self.make_closure_kani_only()
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda d: d["conditions"].update({self.CG3: False}),
         )
         outcome, _ = self.ws.cluster()
         self.assertTrue(any("per monomorphization" in e for e in self.errors(outcome)))
+        self.assertFalse(any("recomputed, never stored-and-trusted" in e for e in self.errors(outcome)))
+
+    def test_a_cg3_tracking_record_the_evidence_outgrew_is_stale(self):
+        """The two-direction discipline applied where the evidence
+        lives: profile and record alone cannot tell an unverifiable
+        declaration from a verified one, so gate_g14 rejects the record
+        as stale the moment the closure's own records verify the
+        condition -- and the record must not be able to excuse itself."""
+        self.ws.write("specs/_closure/scheduler-core.degradation.json", self.cg3_record([self.CG3]))
+        outcome, _ = self.ws.cluster()
+        errors = self.errors(outcome)
+        self.assertTrue(any("stale tracking record" in e for e in errors), errors)
+        self.assertTrue(any("chainlink:86" in e for e in errors), errors)
+        self.assertEqual(outcome.status, "blocked")
 
 
 class DegradationTest(GateTestCase):

@@ -18,6 +18,13 @@ the pending/approved signal instead of inventing separate state:
     review.reviewer/review.reviewed_at, remove their drafts, and append audit
     entries to ci/results/review_log.jsonl -- append-only, so a human's
     approval is traceable even if an artifact changes again later.
+  - review_provenance_gaps() is this module's READER for that log. A
+    `review` block is pure data -- a hand-written one is byte-identical
+    to one approve() wrote -- so a gate that trusts the block trusts
+    whoever typed it. Reading the log back is what lets `accept-promotion`
+    prove an accepted artifact's review block came from one of the
+    writers above before minting a Stage 4.5 receipt over it
+    (chainlink #82).
   - approve() runs mechanical validation (a caller-supplied validate_fn,
     e.g. validate_boundary_contracts.validate_data) against the draft
     *before* writing anything, and refuses to promote on any error-severity
@@ -441,6 +448,152 @@ def auto_promote_if_mechanical(
         )
 
     return ApprovalResult(target_path, "mechanical", prior_review.get("reviewer"), prior_review.get("reviewed_at"))
+
+
+# The four fields every writer in this module puts on an audit entry
+# (approve(), approve_pair(), auto_promote_if_mechanical(), and
+# generate_promotion_receipt.accept_promotion(), which mirrors this
+# module's transaction discipline). An entry missing any of them did not
+# come from those writers, so it never counts as proof below.
+APPROVAL_ENTRY_FIELDS = ("target_path", "classification", "reviewer", "reviewed_at")
+
+
+def _entry_path_matches(entry_path: str, workspace_root: Path, artifact_resolved: Path) -> bool:
+    """Compare an audit entry's target_path against an accepted
+    artifact's real location. Entries name the target exactly as the
+    approving call received it -- an absolute path, or one relative to
+    the workspace it was approved in -- so a relative entry is resolved
+    against `workspace_root` before comparing resolved paths (the same
+    resolve()-then-compare discipline apply()'s own target anchoring and
+    validate_promotion_receipt's own containment checks use, so a `..`
+    or an unusual spelling cannot alias its way to a match)."""
+    try:
+        path = Path(entry_path)
+    except (TypeError, ValueError):
+        return False
+    if not path.is_absolute():
+        path = workspace_root / path
+    return path.resolve() == artifact_resolved
+
+
+def _entry_carries_review(entry: dict, reviewer, reviewed_at) -> bool:
+    """True when this audit entry records exactly the review block an
+    artifact carries: same reviewer, same reviewed_at.
+
+    The one deliberate exception is auto_promote_if_mechanical()'s
+    entry, which leaves the artifact's own `review` block untouched (the
+    whole point of the §7.2 mechanical carve-out is that the prior
+    human review carries forward) and records the carry-forward in its
+    own `reviewer` field instead -- so a mechanical entry written by
+    this module is matched when it carries that exact reviewer forward
+    at the same reviewed_at."""
+    entry_reviewer = entry.get("reviewer")
+    if entry_reviewer == reviewer:
+        return entry.get("reviewed_at") == reviewed_at
+    return (
+        entry.get("classification") == "mechanical"
+        and entry_reviewer == f"auto-promoted (carried forward from {reviewer!r})"
+        and entry.get("reviewed_at") == reviewed_at
+    )
+
+
+def review_provenance_gaps(
+    workspace_root: Path,
+    reviewed_artifacts: dict[str, dict],
+    review_log: Path,
+) -> list[str]:
+    """Prove that every review block in `reviewed_artifacts` was
+    produced by this module's sanctioned approve path (chainlink #82).
+
+    `reviewed_artifacts` maps a workspace-relative accepted-artifact path
+    to the `review` block that artifact itself carries; `review_log` is
+    the append-only audit log approve()/approve_pair()/
+    auto_promote_if_mechanical() write to. Returns one message per
+    review block with no matching approval entry (plus at most one for
+    the log itself when it cannot be read at all); an empty list means
+    every review block is provenanced.
+
+    Why this exists: the `review` block a normative artifact carries is
+    pure data -- `{"reviewer": ..., "reviewed_at": ...}` is exactly what
+    a hand-written JSON file contains, and nothing on disk distinguishes
+    it from the same block approve() wrote. A gate that accepts the
+    block on its own authority is therefore unenforceable: any string at
+    all satisfies `--reviewer`, which is the Stage 4.5 defect this
+    function closes (an unattended agent's review blocks, ruled
+    unauthorized, were enough to mint a promotion receipt over them).
+    The audit log is the only record that a review event happened
+    through the sanctioned path, so it -- not the block's self-assertion
+    -- is what proves provenance.
+
+    Deliberately fail-closed, with no default and no cwd-relative path
+    (the same lesson generate_promotion_receipt.accept_promotion()
+    already learned about REVIEW_LOG_DEFAULT): a missing, unreadable, or
+    unparseable log proves nothing, so it produces a gap rather than an
+    implicit pass. This is also where an entry whose `target_path`
+    cannot be resolved to this workspace is refused: a review recorded
+    somewhere else is not a review of this artifact.
+
+    Trust model, stated plainly: this log is an audit trail, not a
+    signature -- anyone who can write the workspace can append to it.
+    What the check forecloses is the silent path (a review block that
+    merely *exists* standing in for a recorded approval event); a
+    deliberate forgery is a deliberate, logged act, and re-approval
+    through the real path remains the sanctioned way to record a human
+    ruling on an out-of-band review block."""
+    if not reviewed_artifacts:
+        return []
+
+    try:
+        text = review_log.read_text()
+    except FileNotFoundError:
+        return [
+            f"no approval audit log at {review_log} -- {len(reviewed_artifacts)} accepted artifact(s) "
+            "carry a review block, and only an entry in that log (written by `approve`) proves the "
+            "block came from the sanctioned approve path rather than being hand-written: "
+            + ", ".join(sorted(reviewed_artifacts))
+        ]
+    except OSError as e:
+        return [f"approval audit log {review_log} cannot be read, so no review block can be proven: {e}"]
+
+    entries: list[dict] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            return [
+                f"approval audit log {review_log} line {lineno} is not valid JSON, so the log cannot be "
+                "read as the approval trail it is -- fix or remove the damaged line before promoting"
+            ]
+        if not isinstance(entry, dict) or any(field not in entry for field in APPROVAL_ENTRY_FIELDS):
+            # Not an approval entry at all -- skipped rather than an
+            # error: an artifact whose only candidate entry looks like
+            # this ends up unprovenanced below, which is the fail-closed
+            # outcome anyway, and unrelated lines in the log are not
+            # this check's business to reject.
+            continue
+        entries.append(entry)
+
+    gaps: list[str] = []
+    for artifact_path in sorted(reviewed_artifacts):
+        review = reviewed_artifacts[artifact_path]
+        reviewer = review.get("reviewer")
+        reviewed_at = review.get("reviewed_at")
+        artifact_resolved = (workspace_root / artifact_path).resolve()
+        matched = any(
+            _entry_path_matches(entry["target_path"], workspace_root, artifact_resolved)
+            and _entry_carries_review(entry, reviewer, reviewed_at)
+            for entry in entries
+        )
+        if not matched:
+            gaps.append(
+                f"{artifact_path}: its own review block (reviewer={reviewer!r}, reviewed_at={reviewed_at!r}) "
+                f"has no matching approval entry in {review_log} -- a review block that merely exists in "
+                "the artifact proves nothing about how it got there; re-run the review through the "
+                "sanctioned checkpoint (`approve`, which appends that entry) to record the human ruling"
+            )
+    return gaps
 
 
 def main(argv: list[str]) -> int:

@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_evidence import (  # noqa: E402
+    find_evidence_drafts,
     find_evidence_files,
     load_validator,
     main,
@@ -160,6 +161,62 @@ class FindEvidenceFilesTest(unittest.TestCase):
             (d / "E-0001.json").write_text("{}")
             found = find_evidence_files(Path(tmp))
             self.assertEqual(len(found), 1)
+
+
+class DraftSkipTest(unittest.TestCase):
+    """chainlink #79: a staged evidence draft (`<target>.draft`) is a
+    pending, not-yet-promoted artifact. It must be inert to validation --
+    neither discovered as a record nor counted -- matching the discipline
+    validate_boundary_contracts.py's own validate() already applies (it
+    skips non-.json files, which includes .draft staging files).
+    find_evidence_drafts() is the complement: it exposes the pending drafts
+    so `check next` can recommend promoting them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_find_evidence_files_skips_drafts(self):
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+        (evidence / "E-0001.json").write_text("{}")
+        (evidence / "E-0002.json.draft").write_text("{}")
+        found = find_evidence_files(self.root)
+        names = sorted(p.name for p in found)
+        self.assertEqual(names, ["E-0001.json"], "a staged draft must not be discovered as a record")
+
+    def test_find_evidence_files_still_finds_non_draft_non_json(self):
+        """Only .draft is excluded -- a .yaml file is still discovered (and
+        reported by check_naming), matching the pre-#79 behavior."""
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+        (evidence / "E-0001.yaml").write_text("{}")
+        found = find_evidence_files(self.root)
+        self.assertEqual([p.name for p in found], ["E-0001.yaml"])
+
+    def test_find_evidence_drafts_returns_pending_drafts(self):
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+        (evidence / "E-0001.json").write_text("{}")
+        (evidence / "E-0002.json.draft").write_text("{}")
+        drafts = find_evidence_drafts(self.root)
+        self.assertEqual([p.name for p in drafts], ["E-0002.json.draft"])
+
+    def test_find_evidence_drafts_empty_for_missing_root(self):
+        self.assertEqual(find_evidence_drafts(self.root / "nonexistent"), [])
+
+    def test_validate_passes_with_a_staged_draft_present(self):
+        """The core #79 repro: a staged evidence draft must not be a blocking
+        finding for validate-evidence."""
+        evidence = self.root / "evidence"
+        evidence.mkdir()
+        (evidence / "E-0143.json").write_text(json.dumps(load_valid()))
+        (evidence / "E-9001.json.draft").write_text(json.dumps(load_valid()))
+        findings = validate(self.root)
+        self.assertEqual(findings, [], [str(f) for f in findings])
 
 
 class StandaloneValidateAnchoringTest(unittest.TestCase):

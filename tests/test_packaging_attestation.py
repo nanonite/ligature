@@ -131,6 +131,11 @@ class BuildAttestationTest(unittest.TestCase):
         for module in inventory["python_modules"]:
             if module["disposition"] in build_zipapp.BUNDLE_DISPOSITIONS:
                 self.assertIn(Path(module["path"]).name, arcnames)
+                # chainlink #84: a module `init` copies into the target
+                # workspace must ALSO be readable as a resource --
+                # resources.resource_root() only exposes ligature_data/.
+                if module.get("installed_by_init"):
+                    self.assertIn(f"ligature_data/{module['path']}", arcnames)
         for key in ("schemas", "schema_examples", "prompts", "documentation_and_templates"):
             for entry in inventory[key]:
                 if entry["disposition"] in build_zipapp.BUNDLE_DISPOSITIONS:

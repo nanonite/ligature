@@ -13,9 +13,37 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import pipeline  # noqa: E402
+from generate_promotion_receipt import record_ruling  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "boundary_contracts"
 PROMPTS = ROOT / "prompts"
+
+
+def _record_approval(workspace: Path, artifact_path: str, review: dict) -> Path:
+    """Append the approval audit entry review_checkpoint.approve() writes
+    when an artifact is approved (chainlink #82), so a fixture whose
+    review block predates the provenance guard still models an artifact
+    that WAS approved. The real write path -- `approve` run through
+    pipeline.main() -- is exercised by
+    CmdAcceptPromotionProvenanceIntegrationTest below; this is fixture
+    setup for tests whose subject is something else."""
+    log = workspace / "ci" / "results" / "review_log.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "target_path": str(workspace / artifact_path),
+                    "classification": "new",
+                    "reviewer": review["reviewer"],
+                    "reviewed_at": review["reviewed_at"],
+                    "validation": "checked",
+                    "logged_at": "2026-09-01T00:00:00+00:00",
+                }
+            )
+            + "\n"
+        )
+    return log
 
 
 class RenderPromptTest(unittest.TestCase):
@@ -375,6 +403,7 @@ class SelectDraftValidateFnTest(unittest.TestCase):
         (self.workspace / "crate_a" / "specs" / "_exemptions").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_protocol_debt").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_bridges").mkdir(parents=True)
+        (self.workspace / "crate_a" / "specs" / "_witnesses").mkdir(parents=True)
         (self.workspace / "evidence").mkdir(parents=True)
         (self.workspace / "specs" / "_conflicts").mkdir(parents=True)
         self._write_real_evidence("E-0143")
@@ -728,6 +757,199 @@ class SelectDraftValidateFnTest(unittest.TestCase):
             },
         }
         self.assertEqual(self._findings(target, data), [])
+
+    def test_valid_pre_review_witness_draft_passes(self):
+        """chainlink #31's witness branch was missing from
+        _select_draft_validate_fn -- a witness draft would fail with
+        'no draft validator recognizes target' even though the approve-time
+        dispatcher has recognized witnesses since #31."""
+        target = self.workspace / "crate_a" / "specs" / "_witnesses" / "task_queue.load_factor.json"
+        data = {
+            "schema_version": "1.0",
+            "witness_id": "W-TQ-LOAD-FACTOR",
+            "concept": "TaskQueue",
+            "query": "load_factor",
+            "fixture": {
+                "fixture_id": "FX-TQ-LOAD-FACTOR-001",
+                "seed": 42,
+                "description": "A fixture with a known load factor",
+            },
+            "renderer": "scalar_field_svg",
+            "expectation": {
+                "renderer": "scalar_field_svg",
+                "coverage_region": "full-grid",
+                "value_distribution": "must-vary",
+                "fixture_family": "FX-TQ-LOAD-FACTOR-001",
+            },
+            "determinism": {
+                "value_hash": "sha256:" + "a" * 64,
+                "claim": "byte-identical-across-runs",
+                "platforms": ["x86_64-unknown-linux-gnu"],
+            },
+            "output": {
+                "path": "docs/witnesses/task_queue.load_factor.svg",
+                "render_hash": "sha256:" + "b" * 64,
+                "renderer_actual": "scalar_field_svg",
+            },
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_witness_draft_with_model_supplied_review_is_rejected(self):
+        target = self.workspace / "crate_a" / "specs" / "_witnesses" / "task_queue.load_factor.json"
+        data = {
+            "schema_version": "1.0",
+            "witness_id": "W-TQ-LOAD-FACTOR",
+            "concept": "TaskQueue",
+            "query": "load_factor",
+            "fixture": {
+                "fixture_id": "FX-TQ-LOAD-FACTOR-001",
+                "seed": 42,
+                "description": "A fixture with a known load factor",
+            },
+            "renderer": "scalar_field_svg",
+            "expectation": {
+                "renderer": "scalar_field_svg",
+                "coverage_region": "full-grid",
+                "value_distribution": "must-vary",
+                "fixture_family": "FX-TQ-LOAD-FACTOR-001",
+            },
+            "determinism": {
+                "value_hash": "sha256:" + "a" * 64,
+                "claim": "byte-identical-across-runs",
+                "platforms": ["x86_64-unknown-linux-gnu"],
+            },
+            "output": {
+                "path": "docs/witnesses/task_queue.load_factor.svg",
+                "render_hash": "sha256:" + "b" * 64,
+                "renderer_actual": "scalar_field_svg",
+            },
+            "review": {"reviewer": "a-model-should-not-write-this", "reviewed_at": "2026-09-02"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_witness_draft_renderer_mismatch_still_caught(self):
+        """check_renderer_consistency is G1b, self-contained -- still part
+        of immediate feedback."""
+        target = self.workspace / "crate_a" / "specs" / "_witnesses" / "task_queue.load_factor.json"
+        data = {
+            "schema_version": "1.0",
+            "witness_id": "W-TQ-LOAD-FACTOR",
+            "concept": "TaskQueue",
+            "query": "load_factor",
+            "fixture": {
+                "fixture_id": "FX-TQ-LOAD-FACTOR-001",
+                "seed": 42,
+                "description": "A fixture with a known load factor",
+            },
+            "renderer": "scalar_field_svg",
+            "expectation": {
+                "renderer": "text_fallback",
+                "coverage_region": "full-grid",
+                "value_distribution": "must-vary",
+                "fixture_family": "FX-TQ-LOAD-FACTOR-001",
+            },
+            "determinism": {
+                "value_hash": "sha256:" + "a" * 64,
+                "claim": "byte-identical-across-runs",
+                "platforms": ["x86_64-unknown-linux-gnu"],
+            },
+            "output": {
+                "path": "docs/witnesses/task_queue.load_factor.svg",
+                "render_hash": "sha256:" + "b" * 64,
+                "renderer_actual": "scalar_field_svg",
+            },
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(
+            any("does not match renderer" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_valid_pre_review_concept_spec_draft_passes(self):
+        """chainlink #80: concept specs had no draft template and no
+        draft-time validator -- _select_draft_validate_fn now recognizes
+        them at <crate_dir>/specs/<snake_case(concept)>.json."""
+        target = self.workspace / "crate_a" / "specs" / "task_queue.json"
+        data = {
+            "schema_version": "1.0",
+            "concept": "TaskQueue",
+            "cluster": "data-model",
+            "english_description": "A priority queue of tasks ordered by deadline",
+            "verifier": "creusot",
+            "queries": [
+                {
+                    "english": "Returns the number of tasks in the queue",
+                    "rust_sig": "fn len(&self) -> usize",
+                    "pure": True,
+                    "witness_required": False,
+                },
+            ],
+            "commands": [
+                {
+                    "english": "Adds a task to the queue",
+                    "rust_sig": "fn push(&mut self, task: Task)",
+                },
+            ],
+            "constraints": [
+                {
+                    "english": "The queue is never empty after a push",
+                    "logic": "self.len() > 0",
+                    "kind": "postcondition",
+                    "source": "hand",
+                    "id": "C001",
+                },
+            ],
+            "adversary_table": [
+                {
+                    "scenario": "Pushing a task with a deadline in the past",
+                    "violates": "deadline ordering",
+                    "resolution": "reject",
+                },
+            ],
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_concept_spec_draft_with_model_supplied_review_is_rejected(self):
+        target = self.workspace / "crate_a" / "specs" / "task_queue.json"
+        data = {
+            "schema_version": "1.0",
+            "concept": "TaskQueue",
+            "cluster": "data-model",
+            "english_description": "A priority queue of tasks ordered by deadline",
+            "verifier": "creusot",
+            "queries": [
+                {
+                    "english": "Returns the number of tasks in the queue",
+                    "rust_sig": "fn len(&self) -> usize",
+                    "pure": True,
+                },
+            ],
+            "commands": [
+                {
+                    "english": "Adds a task to the queue",
+                    "rust_sig": "fn push(&mut self, task: Task)",
+                },
+            ],
+            "constraints": [
+                {
+                    "english": "The queue is never empty after a push",
+                    "logic": "self.len() > 0",
+                    "kind": "postcondition",
+                    "source": "hand",
+                },
+            ],
+            "adversary_table": [
+                {
+                    "scenario": "Pushing a task with a deadline in the past",
+                    "violates": "deadline ordering",
+                    "resolution": "reject",
+                },
+            ],
+            "review": {"reviewer": "a-model-should-not-write-this", "reviewed_at": "2026-09-02"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
 
 
 class CmdDraftBoundaryEndToEndTest(unittest.TestCase):
@@ -1220,6 +1442,137 @@ class CmdValidateEvidenceIntegrationTest(unittest.TestCase):
     def test_artifact_under_mislocated_directory_is_rejected(self):
         self.assertEqual(self._run(EVIDENCE_FIXTURES / "mislocated"), 1)
 
+    def test_staged_draft_is_not_a_blocking_finding(self):
+        """chainlink #79 core repro: a staged evidence draft must not make
+        validate-evidence exit 1. Before the fix, evidence/E-1.json.draft
+        produced two G1b findings (suffix '.draft', stem 'E-1.json')."""
+        workspace = EVIDENCE_FIXTURES / "valid"
+        staged = workspace / "evidence" / "E-9001.json.draft"
+        staged.write_text(json.dumps({
+            "schema_version": "1.0",
+            "id": "E-9001",
+            "kind": "source-artifact",
+            "claim": "x",
+            "origin": {
+                "repository": "https://example.com/repro",
+                "commit": "a1b2c3d",
+                "symbol": "S::f",
+                "path": "src/f.cpp",
+                "content_hash": "sha256:" + "0" * 64,
+                "line_hint": "1-2",
+            },
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "R",
+        }))
+        self.addCleanup(staged.unlink)
+        self.assertEqual(self._run(workspace), 0)
+
+
+class CmdPromoteEvidenceIntegrationTest(unittest.TestCase):
+    """chainlink #79: the mechanical evidence-draft promotion path, end to
+    end through pipeline.main(). Exercised through the CLI from the start:
+    the review chain on validate-work-package found that an untested CLI
+    entrypoint is exactly how a wiring gap ships invisibly."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "evidence").mkdir(parents=True)
+        # The descriptor declares compatibility_policy.reliance_policy_path;
+        # a missing policy document is a #78 human-decision finding that
+        # would outrank the promote-evidence next-action, so create it.
+        (self.workspace / "docs").mkdir(parents=True)
+        (self.workspace / "docs" / "reliance-policy.md").write_text(
+            "# Reliance policy\n\n"
+            "Schema version this policy targets: `1.0`.\n"
+            "Owner: `platform-team`.\n"
+            "Policy version: `reliance-policy@1.2`\n"
+        )
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _stage_draft(self, evidence_id: str = "E-9001", **overrides) -> Path:
+        data = {
+            "schema_version": "1.0",
+            "id": evidence_id,
+            "kind": "source-artifact",
+            "claim": "pop_ready returns None only when no task has deadline <= now",
+            "origin": {
+                "repository": "https://example.com/repro",
+                "commit": "a1b2c3d",
+                "symbol": "TaskQueue::pop_ready",
+                "path": "src/queue.cpp",
+                "content_hash": "sha256:" + "0" * 64,
+                "line_hint": "118-160",
+            },
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "R",
+        }
+        data.update(overrides)
+        draft = self.workspace / "evidence" / f"{evidence_id}.json.draft"
+        draft.write_text(json.dumps(data, indent=2) + "\n")
+        return draft
+
+    def _run(self, *args) -> int:
+        return pipeline.main([
+            "--workspace", str(self.workspace),
+            "--descriptor", str(self.descriptor_path),
+            *args,
+        ])
+
+    def test_promote_evidence_end_to_end(self):
+        draft = self._stage_draft()
+        target = self.workspace / "evidence" / "E-9001.json"
+        rc = self._run("promote-evidence", str(target))
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.is_file())
+        self.assertFalse(draft.exists(), "draft must be consumed by the rename")
+        self.assertEqual(json.loads(target.read_text())["id"], "E-9001")
+        log = self.workspace / "ci" / "results" / "evidence_promotions.jsonl"
+        self.assertTrue(log.is_file())
+        self.assertEqual(json.loads(log.read_text())["kind"], "evidence-promotion")
+
+    def test_promote_evidence_refuses_a_missing_draft(self):
+        target = self.workspace / "evidence" / "E-9001.json"
+        rc = self._run("promote-evidence", str(target))
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_promote_evidence_refuses_a_non_evidence_target(self):
+        boundary = self.workspace / "crate_a" / "specs" / "_boundaries" / "B-1.json"
+        rc = self._run("promote-evidence", str(boundary))
+        self.assertEqual(rc, 1)
+
+    def test_promote_evidence_refuses_a_schema_invalid_draft(self):
+        draft = self._stage_draft()
+        data = json.loads(draft.read_text())
+        del data["origin"]
+        draft.write_text(json.dumps(data))
+        target = self.workspace / "evidence" / "E-9001.json"
+        rc = self._run("promote-evidence", str(target))
+        self.assertEqual(rc, 1)
+        self.assertTrue(draft.exists(), "refused draft is left intact for correction")
+        self.assertFalse(target.exists())
+
+    def test_check_next_recommends_promote_evidence_for_a_pending_draft(self):
+        """chainlink #79: the agent's loop (status -> check next -> perform
+        -> repeat) had no action_id for a pending evidence draft. With the
+        draft now inert, check next must name promote-evidence."""
+        self._stage_draft()
+        document = pipeline.build_consolidated_check(self.workspace, self.descriptor_path)
+        action = document["next_action"]
+        self.assertIsNotNone(action)
+        self.assertEqual(action["kind"], "automated-command")
+        self.assertEqual(action["action_id"], "promote-evidence")
+        self.assertIn("promote-evidence", action["command"])
+
 
 class CmdValidateConflictResolutionIntegrationTest(unittest.TestCase):
     def _run(self, workspace: Path) -> int:
@@ -1267,6 +1620,30 @@ class CmdValidatePromotionIntegrationTest(unittest.TestCase):
         finally:
             bad_receipt.unlink()
 
+    def test_missing_receipt_path_is_a_clean_one_line_error_not_a_traceback(self):
+        """chainlink #83 (date-ligature-030): validate-promotion and
+        validate-work-package share the same path-loading shape and
+        failed identically -- a raw FileNotFoundError traceback with an
+        exit code of 1. One shared guard, so this command reports
+        `error: receipt not found: <path>` and exits 1 the same way."""
+        missing = Path("/tmp/nonexistent-promo.json")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self._run(str(missing))
+        self.assertEqual(rc, 1)
+        self.assertEqual(err.getvalue().strip(), f"error: receipt not found: {missing}")
+        self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
+
+    def test_directory_in_place_of_a_receipt_is_a_clean_one_line_error(self):
+        """The directory half of the same defect (IsADirectoryError from
+        pathlib), reported by the same guard (chainlink #83)."""
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self._run("/tmp")
+        self.assertEqual(rc, 1)
+        self.assertEqual(err.getvalue().strip(), "error: receipt path is a directory, expected a file: /tmp")
+        self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
+
 
 class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
     """Exercised through pipeline.main() end to end -- chainlink #45's own
@@ -1305,6 +1682,9 @@ class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
         )
         boundary_dir = self.workspace / "crates" / "scheduler" / "specs" / "_boundaries"
         boundary_dir.mkdir(parents=True)
+        self.boundary_artifact = (
+            "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"
+        )
         (boundary_dir / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps({
             "schema_version": "1.0",
             "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
@@ -1313,10 +1693,27 @@ class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
             "callee_guarantees": ["TaskQueue.C003"],
             "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
         }))
+        # The boundary carries its own review block, so it needs the
+        # approval entry behind it before any acceptance here can
+        # succeed (chainlink #82). The guard itself is exercised by
+        # CmdAcceptPromotionProvenanceIntegrationTest below.
+        _record_approval(
+            self.workspace, self.boundary_artifact, {"reviewer": "alice", "reviewed_at": "2026-08-30"}
+        )
         self.artifacts = [
             "docs/reliance-policy.md",
-            "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+            self.boundary_artifact,
         ]
+        # ...and the human-ruling gate (chainlink #82) needs a recorded
+        # verdict over that set; the gate's own refusals are exercised by
+        # CmdHumanRulingGateIntegrationTest below.
+        record_ruling(
+            self.workspace,
+            self.artifacts,
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1354,6 +1751,8 @@ class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
         trail into this repository's own ci/results/review_log.jsonl."""
         repo_log = ROOT / "ci" / "results" / "review_log.jsonl"
         repo_log_size_before = repo_log.stat().st_size if repo_log.exists() else None
+        workspace_log = self.workspace / "ci" / "results" / "review_log.jsonl"
+        workspace_size_before = workspace_log.stat().st_size  # the seeded approval entry
 
         rc = self._run(
             "scheduling",
@@ -1364,8 +1763,11 @@ class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
 
-        workspace_log = self.workspace / "ci" / "results" / "review_log.jsonl"
         self.assertTrue(workspace_log.exists())
+        self.assertGreater(
+            workspace_log.stat().st_size, workspace_size_before,
+            "the promotion's own audit entry must be appended to the workspace's log",
+        )
         repo_log_size_after = repo_log.stat().st_size if repo_log.exists() else None
         self.assertEqual(repo_log_size_before, repo_log_size_after)
 
@@ -1478,6 +1880,24 @@ class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
             "callee_guarantees": ["TaskQueue.C003"],
             "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
         }))
+        # The stray copy carries the same review block as the real one,
+        # so it needs its own approval entry too (chainlink #82) -- a
+        # review block must be provenanced wherever the file sits, even
+        # where its schema_version is deliberately not trusted.
+        _record_approval(
+            self.workspace,
+            "junk/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+            {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        )
+        # ...and a ruling covering the stray copy too (chainlink #82's
+        # gate rules over exactly the paths named).
+        record_ruling(
+            self.workspace,
+            self.artifacts + ["junk/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"],
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
         rc = self._run(
             "scheduling",
             "--reviewer", "alice",
@@ -1489,6 +1909,365 @@ class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         data = json.loads((self.workspace / "specs" / "_promotions" / "scheduling.json").read_text())
         self.assertEqual(data["schema_versions"], {"boundary": "1.0"})
+
+    def test_policy_path_defaults_to_the_descriptor_declaration(self):
+        """chainlink #78: `--policy-path` is no longer required -- it
+        defaults to the descriptor's own
+        `compatibility_policy.reliance_policy_path`, so a workspace
+        promotes against the policy document it declares."""
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads((self.workspace / "specs" / "_promotions" / "scheduling.json").read_text())
+        self.assertEqual(data["policy_version"], "reliance-policy@1.2")
+
+    def test_policy_path_disagreeing_with_the_descriptor_is_refused(self):
+        """chainlink #78: an explicit `--policy-path` that disagrees with
+        the descriptor's declaration is refused -- a workspace must not be
+        able to promote against a different policy document than the one it
+        declares."""
+        rc = self._run(
+            "scheduling",
+            "--reviewer", "alice",
+            "--policy-path", "docs/other-policy.md",
+            "--artifact", self.artifacts[0],
+            "--artifact", self.artifacts[1],
+        )
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+
+class CmdAcceptPromotionProvenanceIntegrationTest(unittest.TestCase):
+    """chainlink #82, through the real CLI: `accept-promotion` must refuse
+    to mint a Stage 4.5 receipt over a review block the sanctioned
+    approve path never produced, and must still accept one it did. Both
+    directions run end to end, which also pins that `approve` records
+    its approval entry where `accept-promotion` reads it back from."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "project-descriptor.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "project": {"name": "repro", "crate_naming_convention": "^repro-[a-z]+"},
+            "mode": "greenfield",
+            "crates": [
+                {
+                    "crate_dir": "crates/scheduler",
+                    "contracts_crate": "contracts",
+                    "specs_search_root": "crates/scheduler/specs",
+                }
+            ],
+            "verifier_policy": {"default": "creusot"},
+            "compatibility_policy": {"reliance_policy_path": "docs/reliance-policy.md"},
+            "write_set": {"allowed_roots": [], "protected_roots": []},
+            "gate_integrity": [],
+            "review": {"reviewer": "repro", "reviewed_at": "2026-08-27"},
+        }))
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "reliance-policy.md").write_text(
+            "# Reliance policy\n\n"
+            "Schema version this policy targets: `1.0`.\n"
+            "Owner: `platform-team`.\n"
+            "Policy version: `reliance-policy@1.2`\n"
+        )
+        boundary_dir = self.workspace / "crates" / "scheduler" / "specs" / "_boundaries"
+        boundary_dir.mkdir(parents=True)
+        self.boundary_target = boundary_dir / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        # What a draft looks like BEFORE approve() runs: no review block
+        # at all -- approve() is what writes one, and appending the entry
+        # that proves it wrote it.
+        self.boundary_payload = {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+        }
+        self.artifacts = [
+            "docs/reliance-policy.md",
+            "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+        ]
+        self.workspace_log = self.workspace / "ci" / "results" / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _accept(self, reviewer: str = "alice") -> int:
+        return pipeline.main(
+            [
+                "--workspace", str(self.workspace), "accept-promotion", "scheduling",
+                "--reviewer", reviewer,
+                "--policy-path", "docs/reliance-policy.md",
+                "--artifact", self.artifacts[0],
+                "--artifact", self.artifacts[1],
+            ]
+        )
+
+    def _receipt_path(self) -> Path:
+        return self.workspace / "specs" / "_promotions" / "scheduling.json"
+
+    def test_a_review_block_that_no_approval_ever_produced_is_refused(self):
+        """The defect itself: a schema-valid boundary whose review block
+        was typed into the file, plus any `--reviewer` string at all.
+        Nothing else about the accepted set is wrong -- hashes, cross
+        references and schema versions are all real -- so the refusal is
+        the provenance guard and nothing else, and no audit entry is
+        appended on the way out."""
+        self.boundary_target.write_text(json.dumps({
+            **self.boundary_payload,
+            "review": {"reviewer": "chainlink-reviewer", "reviewed_at": "2026-09-20"},
+        }))
+        self.assertEqual(self._accept(reviewer="chainlink-reviewer"), 1)
+        self.assertFalse(self._receipt_path().exists())
+        self.assertFalse(self.workspace_log.exists())
+
+        # A different --reviewer name changes nothing: the guard is about
+        # provenance of the review block, not about who is asking.
+        self.assertEqual(self._accept(reviewer="some-human"), 1)
+        self.assertFalse(self._receipt_path().exists())
+        self.assertFalse(self.workspace_log.exists())
+
+    def test_approving_through_the_pipeline_then_accepting_succeeds(self):
+        """The sanctioned path, end to end: `approve` promotes the draft,
+        writes the artifact's own review block, and appends the approval
+        entry -- into the WORKSPACE's log, not whatever directory the CLI
+        ran from -- which is what `accept-promotion` then reads back."""
+        repo_log = ROOT / "ci" / "results" / "review_log.jsonl"
+        repo_size_before = repo_log.stat().st_size if repo_log.exists() else None
+
+        self.boundary_target.with_suffix(".json.draft").write_text(json.dumps(self.boundary_payload))
+        rc = pipeline.main(
+            [
+                "--workspace", str(self.workspace), "approve", str(self.boundary_target),
+                "--reviewer", "alice", "--reviewed-at", "2026-09-10",
+            ]
+        )
+        self.assertEqual(rc, 0)
+
+        repo_size_after = repo_log.stat().st_size if repo_log.exists() else None
+        self.assertEqual(
+            repo_size_before,
+            repo_size_after,
+            "approve must record into the workspace's own audit log -- the one accept-promotion reads",
+        )
+        entry = json.loads(self.workspace_log.read_text().strip().splitlines()[-1])
+        self.assertEqual(entry["target_path"], str(self.boundary_target))
+        self.assertEqual(entry["reviewer"], "alice")
+        self.assertEqual(entry["reviewed_at"], "2026-09-10")
+
+        # Approval alone does not clear Stage 4.5: no human ruling has
+        # been recorded for this set yet (chainlink #82's gate), so the
+        # promotion is refused -- provenance passed, the gate did not.
+        refused = io.StringIO()
+        with redirect_stderr(refused):
+            self.assertEqual(self._accept(), 1)
+        self.assertIn("record-ruling", refused.getvalue())
+        self.assertFalse(self._receipt_path().exists())
+
+        # The recorded ruling is what unblocks it.
+        self.assertEqual(
+            pipeline.main(
+                [
+                    "--workspace", str(self.workspace), "record-ruling",
+                    "--reviewer", "alice", "--verdict", "ratified",
+                    "--artifact", self.artifacts[0],
+                    "--artifact", self.artifacts[1],
+                ]
+            ),
+            0,
+        )
+        self.assertEqual(self._accept(), 0)
+        receipt = self._receipt_path()
+        self.assertTrue(receipt.exists())
+        data = json.loads(receipt.read_text())
+        self.assertEqual(data["reviewer"], "alice")
+        self.assertEqual(len(data["artifact_manifest"]), 2)
+
+    def test_editing_the_review_block_after_approval_is_refused(self):
+        """Same workspace, same approval -- then the review block is
+        re-written to name someone else. The bytes are still a valid
+        boundary contract and the log entry still exists, but no longer
+        describes THIS block, so the promotion is refused."""
+        self.boundary_target.with_suffix(".json.draft").write_text(json.dumps(self.boundary_payload))
+        self.assertEqual(
+            pipeline.main(
+                [
+                    "--workspace", str(self.workspace), "approve", str(self.boundary_target),
+                    "--reviewer", "alice", "--reviewed-at", "2026-09-10",
+                ]
+            ),
+            0,
+        )
+        edited = json.loads(self.boundary_target.read_text())
+        edited["review"] = {"reviewer": "someone-else", "reviewed_at": "2026-09-10"}
+        self.boundary_target.write_text(json.dumps(edited))
+
+        self.assertEqual(self._accept(reviewer="someone-else"), 1)
+        self.assertFalse(self._receipt_path().exists())
+
+
+class CmdHumanRulingGateIntegrationTest(unittest.TestCase):
+    """chainlink #82's second remedy, through the real CLI, in the shape
+    the defect was actually filed in: an accepted set whose review blocks
+    were approved by an UNATTENDED agent (a matching entry in the audit
+    log, so the provenance check passes by design) plus artifacts with no
+    `review` block at all (evidence records promoted outside any tool
+    path, which provenance cannot see either). Without a recorded human
+    ruling, `accept-promotion` must exit 1 and write no receipt -- the
+    pilot README's "#14 must not run before rulings 1 and 2 land" made
+    mechanically true."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_validate_evidence import load_valid  # noqa: E402
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "project-descriptor.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "project": {"name": "repro", "crate_naming_convention": "^repro-[a-z]+"},
+            "mode": "greenfield",
+            "crates": [
+                {
+                    "crate_dir": "crates/scheduler",
+                    "contracts_crate": "contracts",
+                    "specs_search_root": "crates/scheduler/specs",
+                }
+            ],
+            "verifier_policy": {"default": "creusot"},
+            "compatibility_policy": {"reliance_policy_path": "docs/reliance-policy.md"},
+            "write_set": {"allowed_roots": [], "protected_roots": []},
+            "gate_integrity": [],
+            "review": {"reviewer": "repro", "reviewed_at": "2026-08-27"},
+        }))
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "reliance-policy.md").write_text(
+            "# Reliance policy\n\n"
+            "Schema version this policy targets: `1.0`.\n"
+            "Owner: `platform-team`.\n"
+            "Policy version: `reliance-policy@1.2`\n"
+        )
+        boundary_dir = self.workspace / "crates" / "scheduler" / "specs" / "_boundaries"
+        boundary_dir.mkdir(parents=True)
+        self.boundary_artifact = (
+            "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"
+        )
+        # An UNATTENDED AGENT's approve run: the review block and the
+        # matching audit entry both say "chainlink-reviewer", exactly as
+        # in the date-creusot pilot, so provenance has nothing to object
+        # to -- this is the case provenance alone cannot stop.
+        (boundary_dir / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+            "review": {"reviewer": "chainlink-reviewer", "reviewed_at": "2026-09-25"},
+        }))
+        _record_approval(
+            self.workspace,
+            self.boundary_artifact,
+            {"reviewer": "chainlink-reviewer", "reviewed_at": "2026-09-25"},
+        )
+        # Evidence records: no `review` block at all (docs/evidence-schema.
+        # json declares none) -- promoted by hand in the pilot, invisible
+        # to the provenance check by construction.
+        self.evidence_artifacts = []
+        for record_id in ("E-1", "E-2"):
+            record = load_valid()
+            record["id"] = record_id
+            path = self.workspace / "evidence" / f"{record_id}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record))
+            self.evidence_artifacts.append(f"evidence/{record_id}.json")
+        self.artifacts = ["docs/reliance-policy.md", self.boundary_artifact] + self.evidence_artifacts
+        self.ruling_log = self.workspace / "ci" / "results" / "human_rulings.jsonl"
+        self.receipt_path = self.workspace / "specs" / "_promotions" / "scheduling.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _accept(self, reviewer: str = "chainlink-reviewer") -> tuple[int, str]:
+        """The issue's own command shape: cluster, --reviewer,
+        --policy-path, one --artifact per accepted artifact."""
+        argv = [
+            "--workspace", str(self.workspace), "accept-promotion", "scheduling",
+            "--reviewer", reviewer,
+            "--policy-path", "docs/reliance-policy.md",
+        ]
+        for artifact in self.artifacts:
+            argv += ["--artifact", artifact]
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            rc = pipeline.main(argv)
+        return rc, stderr.getvalue()
+
+    def _record_ruling(self, verdict: str, *artifacts: str) -> int:
+        argv = [
+            "--workspace", str(self.workspace), "record-ruling",
+            "--reviewer", "a-human", "--verdict", verdict,
+        ]
+        for artifact in (artifacts or self.artifacts):
+            argv += ["--artifact", artifact]
+        return pipeline.main(argv)
+
+    def test_the_defect_repro_is_refused_while_rulings_are_unrecorded(self):
+        """The reviewer's reproduction of the issue: the exact command,
+        agent-approved review blocks and all, before any ruling lands.
+        Must exit 1 with no receipt -- and the refusal must be the RULING
+        gate, not the provenance check, since provenance legitimately
+        passes these blocks."""
+        rc, stderr = self._accept()
+        self.assertEqual(rc, 1, stderr)
+        self.assertFalse(self.receipt_path.exists())
+        self.assertIn("record-ruling", stderr)
+        self.assertNotIn("approval provenance", stderr)
+        # Nothing was recorded on the way out, either.
+        self.assertFalse(self.ruling_log.exists())
+
+    def test_a_different_reviewer_name_does_not_bypass_the_gate(self):
+        rc, _ = self._accept(reviewer="some-human")
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.receipt_path.exists())
+
+    def test_record_ruling_then_accept_promotion_succeeds(self):
+        self.assertEqual(self._record_ruling("ratified"), 0)
+        rc, stderr = self._accept(reviewer="a-human")
+        self.assertEqual(rc, 0, stderr)
+        self.assertTrue(self.receipt_path.exists())
+        data = json.loads(self.receipt_path.read_text())
+        self.assertEqual(len(data["artifact_manifest"]), len(self.artifacts))
+        validate_rc = pipeline.main(
+            ["--workspace", str(self.workspace), "validate-promotion", str(self.receipt_path)]
+        )
+        self.assertEqual(validate_rc, 0)
+
+    def test_a_rejected_ruling_keeps_the_promotion_blocked(self):
+        """A recorded NO is not an absence: the promotion stays refused,
+        and the message says it was rejected rather than merely
+        unruling."""
+        self.assertEqual(self._record_ruling("rejected"), 0)
+        rc, stderr = self._accept()
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.receipt_path.exists())
+        self.assertIn("REJECTED", stderr)
+
+    def test_a_ruling_over_a_changed_artifact_does_not_carry_over(self):
+        """Rulings are bound to the bytes they ruled on: the human rules
+        on THIS set, and an edit afterward invalidates the ruling until
+        it is re-recorded."""
+        self.assertEqual(self._record_ruling("ratified"), 0)
+        policy = self.workspace / "docs" / "reliance-policy.md"
+        policy.write_text(policy.read_text() + "\nA later edit.\n")
+        rc, stderr = self._accept()
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.receipt_path.exists())
+        self.assertIn("different version", stderr)
 
 
 class CmdAcceptPromotionWitnessIntegrationTest(unittest.TestCase):
@@ -1539,7 +2318,19 @@ class CmdAcceptPromotionWitnessIntegrationTest(unittest.TestCase):
         (specs_dir / "task_queue.json").write_text(json.dumps(concept))
         self.witness_path = "crates/scheduler/specs/_witnesses/task_queue.load_factor.json"
         (specs_dir / "_witnesses" / "task_queue.load_factor.json").write_text(json.dumps(witness_spec()))
+        # The witness spec carries its own review block, so it needs the
+        # approval entry behind it before any acceptance here can
+        # succeed (chainlink #82).
+        _record_approval(self.workspace, self.witness_path, witness_spec()["review"])
         self.artifacts = ["docs/reliance-policy.md", self.witness_path]
+        # ...and the human-ruling gate needs a verdict over that set too.
+        record_ruling(
+            self.workspace,
+            self.artifacts,
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1717,6 +2508,63 @@ class CmdValidateWorkPackageIntegrationTest(unittest.TestCase):
             self.assertIn("acceptable at risk tier low only", buffer.getvalue())
         finally:
             bad_manifest.unlink()
+
+    def test_missing_manifest_path_is_a_clean_one_line_error_not_a_traceback(self):
+        """chainlink #83 (date-ligature-030, found by the date-creusot
+        pilot at Stage 7): `validate-work-package <missing path>` used to
+        die inside pathlib with a raw FileNotFoundError traceback -- the
+        exit code was already 1, but nothing named the offending argument
+        or said what the command expected. Now exactly one line on stderr
+        carrying both, and still exit 1."""
+        missing = Path("/tmp/nonexistent-wp.json")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self._run(str(missing))
+        self.assertEqual(rc, 1)
+        self.assertEqual(err.getvalue().strip(), f"error: manifest not found: {missing}")
+        self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
+
+    def test_directory_in_place_of_a_manifest_is_a_clean_one_line_error(self):
+        """The same shared path-loading defect's second shape: a
+        directory argument used to raise IsADirectoryError with the same
+        raw traceback. One guard, both shapes (chainlink #83)."""
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self._run("/tmp")
+        self.assertEqual(rc, 1)
+        self.assertEqual(err.getvalue().strip(), "error: manifest path is a directory, expected a file: /tmp")
+        self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
+
+    def test_missing_manifest_is_reported_before_the_workspace_descriptor(self):
+        """The positional argument is the one the user actually got
+        wrong, so it wins the error race: in a workspace with no
+        project-descriptor.json (the default --descriptor target), the
+        command still reports the bad manifest path rather than
+        whatever the workspace happens to lack next."""
+        with tempfile.TemporaryDirectory() as workspace:
+            missing = Path(workspace) / "wp.json"
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = pipeline.main(["--workspace", workspace, "validate-work-package", str(missing)])
+            self.assertEqual(rc, 1)
+            self.assertEqual(err.getvalue().strip(), f"error: manifest not found: {missing}")
+            self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
+
+    def test_missing_default_descriptor_is_a_clean_error_not_a_traceback(self):
+        """Same defect class, same command (chainlink #83): a manifest
+        that exists but a workspace with no project-descriptor.json used
+        to traceback out of load_project_descriptor(). Still fail-closed
+        -- the standalone CLI has never had a way to skip canonical-crate
+        restriction -- but the error now names the file it wanted."""
+        manifest = WP_FIXTURE_ROOT / "ci" / "manifest" / "WP-SCHED-001.json"
+        with tempfile.TemporaryDirectory() as workspace:
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = pipeline.main(["--workspace", workspace, "validate-work-package", str(manifest)])
+            self.assertEqual(rc, 1)
+            self.assertIn("error: cannot read project descriptor", err.getvalue())
+            self.assertIn("project-descriptor.json", err.getvalue())
+            self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
 
 
 class LoadProjectDescriptorTest(unittest.TestCase):
@@ -3127,6 +3975,23 @@ class Stage8cClosureIntegrationTest(unittest.TestCase):
         code, printed = self._run("validate-closure")
         self.assertEqual(code, 0, printed)
         self.assertIn("(1 discovered)", printed)
+
+    def test_a_partially_verified_closure_kind_is_accepted_end_to_end(self):
+        """chainlink #85's own repro shape: a pilot that cannot achieve
+        full deductive closure sets closure_kind on its profile and runs
+        validate-closure -- the declaration must be accepted instead of
+        refused as "is not one of ['deductive', 'bounded']", and gate-g14
+        must report the declared kind."""
+        profile_path = self.workspace / "specs" / "_closure" / "scheduler-core.json"
+        data = json.loads(profile_path.read_text())
+        data["closure_kind"] = "partial"
+        profile_path.write_text(json.dumps(data))
+        code, printed = self._run("validate-closure")
+        self.assertEqual(code, 0, printed)
+        self.assertNotIn("is not one of", printed)
+        code, printed = self._run("gate-g14")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("closes: closure_kind=partial", printed)
 
     def test_gate_g14_closes_the_cluster(self):
         code, printed = self._run("gate-g14")

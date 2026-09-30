@@ -25,6 +25,13 @@ entries reference a constraint by <Concept>.<id>, but concept-to-code does
 not yet expose a stable `id` field on constraint. Until that upstream change
 lands, cross-file resolution (used by the applies_to check) degrades to
 "unverifiable" rather than failing -- see _resolve_constraint below.
+
+The applies_to check resolves against a specs_search_root. The standalone
+CLI takes it via --specs-search-root; the pipeline commands that run G2+
+(`validate`, `validate-interaction`, `validate-bridge`, and `status`/`check`
+via project_state.analyze) read it from the project descriptor's
+crates[].specs_search_root -- the same per-crate resolution each of those
+commands already applies to every other cross-file check (chainlink #81).
 """
 from __future__ import annotations
 
@@ -280,16 +287,22 @@ def gate_g2_plus(
                 )
             )
         elif status == "dangling":
-            # Reference integrity (does the id exist at all) is G2's job,
-            # not this gate's -- but still worth a non-blocking note here
-            # since it's found in the course of the applies_to check anyway.
+            # chainlink #81 (direction 3): when the search root IS available
+            # and the spec resolved but the id matches no constraint in it,
+            # that is a real dangling reference, not an unverifiable note --
+            # the same fail-closed disposition every other cross-reference in
+            # this pipeline applies (validate_bridge, validate_exemption,
+            # validate_protocol_debt all reject a dangling id outright). The
+            # earlier info-severity note predates the descriptor's
+            # crates[].specs_search_root being consulted at all, so the tool
+            # could not distinguish a real id from an invented one; now that
+            # it can, an invented id is a defect in the boundary contract.
             findings.append(
                 Finding(
                     "G2+",
                     path,
                     f"{entry!r} does not match any constraint id in {ref_concept}'s "
-                    "resolved spec (dangling reference -- G2's concern, noted here for visibility)",
-                    severity="info",
+                    "resolved spec (dangling reference)",
                 )
             )
         elif status in ("no_search_root", "spec_not_found", "no_ids_in_spec"):

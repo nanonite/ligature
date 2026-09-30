@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -210,6 +212,31 @@ class StandaloneCliMainTest(unittest.TestCase):
             [str(RECEIPT_PATH), "--workspace-root", "/tmp"]
         )
         self.assertEqual(rc, 1)
+
+    def test_main_on_a_missing_receipt_is_one_clean_line_and_exit_1(self):
+        """chainlink #83 (date-ligature-030): this path argument went
+        straight to pathlib and escaped as a raw FileNotFoundError
+        traceback -- exit code already 1, but nothing naming the argument
+        or what the command expected. The path is checked before anything
+        else, so `error: receipt not found: <path>` is all a caller sees."""
+        import validate_promotion_receipt
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = validate_promotion_receipt.main(["/tmp/nonexistent-promo.json", "--workspace-root", str(FIXTURE_ROOT)])
+        self.assertEqual(rc, 1)
+        self.assertEqual(err.getvalue().strip(), "error: receipt not found: /tmp/nonexistent-promo.json")
+        self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
+
+    def test_main_on_a_directory_is_one_clean_line_and_exit_1(self):
+        """The directory half of the same defect (IsADirectoryError),
+        reported by the same shared guard (chainlink #83)."""
+        import validate_promotion_receipt
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = validate_promotion_receipt.main(["/tmp", "--workspace-root", str(FIXTURE_ROOT)])
+        self.assertEqual(rc, 1)
+        self.assertEqual(err.getvalue().strip(), "error: receipt path is a directory, expected a file: /tmp")
+        self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
 
 
 WITNESS_DESCRIPTOR = {

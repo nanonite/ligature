@@ -24,5 +24,6 @@
   "human_decisions": [],
   "change_requests": [],
   "gate_integrity": { "state": "unknown", "details": "no installation manifest present" },
+  "write_set": { "state": "unknown", "details": "no valid project descriptor present -- the write set cannot be evaluated" },
   "generated_observations": { "witness_summaries": [], "feature_ledger_generated_at": null }
 }

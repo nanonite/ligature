@@ -122,13 +122,20 @@
     },
     "verifier_policy": {
       "type": "object",
-      "description": "Default verifier per cluster (plan.md \u00a74). A cluster not listed as its own key uses 'default'.",
+      "description": "Default verifier per cluster (plan.md \u00a74). The key set is documented (chainlink #76): 'default' (required) is the verifier for every cluster not listed by name; any other key names a cluster and holds that cluster's verifier, so a cluster not listed as its own key uses 'default'; 'supporting' is the declared shape for a second or supporting verifier whose evidence backs the primary one (e.g. a deductive cluster with a model-checking fallback) -- arbitrary extra keys are per-cluster overrides, NOT a composition, and a key that matches no cluster is simply never read. Every value must be a member of the verifier enum.",
       "required": [
         "default"
       ],
       "properties": {
         "default": {
           "$ref": "#/$defs/verifier"
+        },
+        "supporting": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/verifier"
+          },
+          "description": "Additional verifiers whose evidence supports the primary one (chainlink #76) -- the real shape for multi-verifier composition, replacing the accident of an arbitrary extra key holding a second enum member (which validated while nothing ever read it). Order is not significant; duplicates are permitted but meaningless."
         }
       },
       "additionalProperties": {
@@ -139,9 +146,10 @@
       "type": "string",
       "enum": [
         "deductive",
-        "bounded"
+        "bounded",
+        "partial"
       ],
-      "description": "The project's intended closure_kind for its clusters, declared before any code exists (chainlink #73). plan.md §4's vocabulary: deductive = Creusot/Verus-owned (universal over inputs, modulo SMT completeness and trusted specs); bounded = Kani-owned (holds only within unwind/harness bounds and enumerated monomorphizations). This records intent only -- each cluster's closure profile (specs/_closure/<cluster>.json) remains the authoritative per-cluster declaration at Stage 8C, and gate g14 recomputes closure_kind from the evidence actually present, rejecting a profile whose declared kind disagrees with it. Optional and deliberately absent from the init template: a project that has not chosen an intent yet must not be silently defaulted to 'deductive'."
+      "description": "The project's intended closure_kind for its clusters, declared before any code exists (chainlink #73). plan.md §4's vocabulary: deductive = Creusot/Verus-owned (universal over inputs, modulo SMT completeness and trusted specs); bounded = Kani-owned (holds only within unwind/harness bounds and enumerated monomorphizations); partial = partially verified (chainlink #85) -- a pilot that knows it cannot achieve full deductive closure may declare that intent here instead of being limited to the two uniform claims its clusters can only round to. This records intent only -- each cluster's closure profile (specs/_closure/<cluster>.json) remains the authoritative per-cluster declaration at Stage 8C, and gate g14 recomputes closure_kind from the evidence actually present, rejecting a uniform kind the evidence refutes (a `deductive` claim over a closure containing a Kani result is a G17 hard error). Optional and deliberately absent from the init template: a project that has not chosen an intent yet must not be silently defaulted to 'deductive'."
     },
     "verifier_backends": {
       "type": "object",
@@ -232,6 +240,7 @@
         "protected_roots"
       ],
       "additionalProperties": false,
+      "description": "The enforcement boundary for where the implementing agent may write (chainlink #77). Enforced read-only by `ligature write-set-check`: a file outside every allowed_roots pattern and not accounted for by protected_roots, the ownership manifest, a declared crate's specs/ tree, a canonical pipeline location, or the pinned upstream checkout is an out-of-set write, reported as a high-severity write-set finding in check --json and as status --json's write_set.state. A pattern matching every path (e.g. \"**\") or an empty protected_roots declares no boundary and is itself reported as a violation.",
       "properties": {
         "allowed_roots": {
           "type": "array",
@@ -300,7 +309,8 @@
         "kani",
         "creusot",
         "verus"
-      ]
+      ],
+      "description": "The verifier systems this pipeline dispatches to: 'creusot' (deductive verification for Rust), 'verus' (deductive verification for Rust), 'kani' (model checking for Rust). Case-sensitive, exact match -- no composition ('verus+kani' is not a value; declare a second verifier under verifier_policy.supporting), no whitespace tolerance."
     },
     "review": {
       "type": "object",

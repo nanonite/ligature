@@ -141,6 +141,14 @@ def owning_verifier_by_bridge(workspace: Path, descriptor: dict) -> dict[str, st
         if "profile" not in entry:
             continue
         verifier = policy.get(cluster, policy["default"])
+        # chainlink #76: `supporting` is now a declared verifier_policy
+        # key holding a LIST, so a cluster literally named "supporting"
+        # resolves to the composition declaration rather than a verifier
+        # name. That claim is unresolvable -- skip it and let the bridge
+        # fall back to verifier_policy.default, rather than adding an
+        # unhashable list to the verifier set.
+        if not isinstance(verifier, str):
+            continue
         for work_package in entry["profile"][1]["work_packages"]:
             manifest = manifests.get(work_package)
             if manifest is None:

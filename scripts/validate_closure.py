@@ -25,7 +25,14 @@ of the two validators to load the other's artifacts anyway.
            declares it true is the "profile bits inconsistent with
            degradation record" case from §12, and it is a hard error in
            both directions (a profile declaring a condition false with
-           no record covering it is an undeclared degradation);
+           no record covering it is an undeclared degradation). One
+           documented exception (chainlink #86): for
+           generic_callees_type_universal_or_creusot_owned -- the CG3
+           condition nothing here can verify either way -- a record
+           naming it beside a `true` declaration is the tracking record
+           plan.md §3 requires of every capability gap, not a stale
+           excuse. gate_g14 polices staleness for that one key where the
+           closure's evidence lives;
          * `closure_kind: deductive` is refused when the profile's own
            owning_verifier is kani -- §12's other G17 clause, and
            §4's whole reason for having a kind: a Kani-owned cluster is
@@ -208,6 +215,14 @@ def check_profile_record_consistency(
         artifact and covered by nothing, which is precisely the state
         plan.md §4 replaces with 'a declared state, not a failure'.
 
+    The first direction has exactly one exception, chainlink #86:
+    generic_callees_type_universal_or_creusot_owned is the one condition
+    no artifact here can settle either way (CG3), so beside a `true`
+    declaration a record naming it is the tracking record plan.md §3
+    demands, and gate_g14 -- which CAN see the closure's evidence --
+    both requires it when the declaration is unverifiable and rejects it
+    as stale once the records verify the condition.
+
     `unresolved_indirect_calls_at_or_above_medium` is an integer, not a
     boolean: it 'fails' when it is non-zero (plan.md §4's own closure
     condition is that it be 0)."""
@@ -230,6 +245,19 @@ def check_profile_record_consistency(
     excused = set(degradation[1]["failed_conditions"]) if degradation is not None else set()
 
     for key in sorted(excused - failing):
+        if key == "generic_callees_type_universal_or_creusot_owned":
+            # chainlink #86: for this ONE condition the profile bit is a
+            # human declaration that nothing at profile/record level can
+            # ever show closed -- no artifact here carries the type
+            # information CG3 needs, and validate_closure has no closure
+            # evidence either way. A record naming it beside a `true`
+            # declaration is therefore the tracking record plan.md §3
+            # demands of every capability gap, not a stale excuse.
+            # Staleness for this key is policed by gate_g14 instead,
+            # where the closure's own records CAN show the condition
+            # verified -- and where an unverifiable declaration with no
+            # record beside it stays blocked (#86's false `true`).
+            continue
         findings.append(
             Finding(
                 "G17", degradation[0],

@@ -27,11 +27,11 @@ artifact type is NOT wired into pipeline.py's `approve` dispatcher:
 `review_checkpoint.approve()` unconditionally injects a `review` block
 into whatever it promotes (see its own docstring), which this schema's
 `additionalProperties: false` would reject outright. Evidence records can
-be staged via `pipeline.py draft` (Stage 0) but have no promotion path
-through `approve()` -- that's a deliberate scope boundary, not an
-oversight, the same kind of boundary already drawn for
-manifest/promotion-receipt *generation* in `pipeline.py`'s
-`NOT_YET_IMPLEMENTED`.
+be staged via `pipeline.py draft` (Stage 0) and are promoted by
+`pipeline.py promote-evidence` (chainlink #79) -- a mechanical path with
+no human checkpoint, matching evidence's non-normative status. That
+promotion path lives in scripts/promote_evidence.py, not here; this
+module owns validation and file discovery only.
 
 Deliberately out of scope here: G4/G5 (evidence tracing to
 obligations/grounding) -- neither is named in chainlink #20's own
@@ -125,17 +125,46 @@ def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
 
 
 def find_evidence_files(root: Path) -> list[Path]:
-    """Every file anywhere under an `evidence` directory, at any depth --
-    mirrors find_interaction_files/find_exemption_files/find_protocol_debt_files
-    so nested placements surface as G1b violations instead of going
-    unchecked.
+    """Every non-draft file anywhere under an `evidence` directory, at any
+    depth -- mirrors find_interaction_files/find_exemption_files/
+    find_protocol_debt_files so nested placements surface as G1b
+    violations instead of going unchecked.
+
+    Staged drafts (`<target>.draft`, written by review_checkpoint.
+    stage_draft via `pipeline.py draft`) are excluded: a draft is a
+    pending, not-yet-promoted artifact, and chainlink #79 found that a
+    staged evidence draft was a *blocking finding* for the very commands
+    meant to consume it (`validate-evidence` exited 1 on
+    `evidence/E-1.json.draft` for its `.draft` suffix and its
+    `E-1.json` stem). Excluding drafts here -- in the ONE discovery
+    function both the validation scan and count_discovered's pass-line
+    count wrap -- keeps a pending draft inert (neither reported nor
+    counted) until `pipeline.py promote-evidence` promotes it. This
+    matches the discipline validate_boundary_contracts.py's own
+    validate() already applies (it skips non-.json files, which includes
+    .draft staging files). Use find_evidence_drafts() to see the pending
+    drafts themselves.
 
     Raises if `root` doesn't exist: a typo'd workspace path must be a loud
     failure, not a silent 'OK: 0 findings' (same discipline established
     throughout this pipeline)."""
     if not root.is_dir():
         raise FileNotFoundError(f"evidence scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob("**/evidence/**/*") if p.is_file()]
+    return [p for p in root.glob("**/evidence/**/*") if p.is_file() and p.suffix != ".draft"]
+
+
+def find_evidence_drafts(root: Path) -> list[Path]:
+    """Every staged evidence draft (`<target>.draft`) anywhere under an
+    `evidence` directory, at any depth -- the pending, not-yet-promoted
+    artifacts `pipeline.py promote-evidence` exists to promote (chainlink
+    #79). The complement of find_evidence_files' draft exclusion: a draft
+    is invisible to validation (inert) but visible here, so `check next`
+    can recommend promoting it. Returns [] for a missing root (unlike
+    find_evidence_files, which raises -- a workspace with no evidence
+    directory at all has no pending drafts, not a scan error)."""
+    if not root.is_dir():
+        return []
+    return [p for p in root.glob("**/evidence/**/*") if p.is_file() and p.suffix == ".draft"]
 
 
 def validate(root: Path) -> list[Finding]:

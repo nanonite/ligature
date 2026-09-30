@@ -358,6 +358,16 @@ class ClosureKindTest(GateTestCase):
         ledger = self.generate()
         self.assertEqual(self.feature(ledger)["closure_kind"], "n/a")
 
+    def test_a_partially_verified_kind_is_carried_through(self):
+        """chainlink #85: the ledger projects the profile's declared kind
+        verbatim -- `partial` must reach the generated document without
+        the ledger's own schema rejecting the value `validate-closure`
+        accepts."""
+        self.ws.write_concept_spec(cluster="scheduling")
+        self.ws.write_closure_profile("scheduling", closure_kind="partial")
+        ledger = self.generate()
+        self.assertEqual(self.feature(ledger)["closure_kind"], "partial")
+
     def test_a_fully_observed_feature_can_still_have_no_closure_profile(self):
         self.ws.write_concept_spec()
         happy_path_witness_and_rendering(self.ws)

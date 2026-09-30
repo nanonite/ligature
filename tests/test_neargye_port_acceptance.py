@@ -53,13 +53,16 @@ _CONTRACT_VERBS = {
     "init", "doctor", "version", "status", "check",
     "validate", "gate", "draft", "approve", "migrate", "report",
 }
-_MANAGED = (
-    ".codex/skills/ligature/SKILL.md",
-    ".ligature/schemas/project-state.schema.json",
-    ".ligature/schemas/consolidated-check.schema.json",
-    ".ligature/prompts/stage-0-evidence-intake.md",
-    ".ligature/prompts/stage-3-boundary-drafting.md",
-    ".ligature/prompts/stage-3-interaction-drafting.md",
+# The managed files `init` writes, derived from the installer's own
+# registry rather than restated here: this list had already gone stale
+# twice (#76's project-root descriptor schema, #80's six extra prompt
+# templates), and chainlink #84 adds two more (the witness-renderer
+# scripts G13 hash-pins). Deriving it means the next managed file cannot
+# silently break `test_05`'s count assertion.
+_MANAGED = tuple(
+    entry.path
+    for entry in ligature_install.file_registry("port", "neargye", "project-descriptor.json")
+    if entry.ownership == ligature_install.MANAGED
 )
 _USER_OWNED = ("project-descriptor.json", "docs/reliance-policy.md")
 
@@ -88,12 +91,18 @@ def _archive_members(pyz: Path) -> dict[str, str]:
 
 def _expected_bundle_members(inventory: dict) -> set[str]:
     """Re-derive the bundle independently of build_zipapp.py: read the
-    inventory's dispositions here, in the test, and expect exactly this set
-    in the archive (plus the attestation, which is checked separately)."""
+    inventory's dispositions (and its `installed_by_init` flags) here, in
+    the test, and expect exactly this set in the archive (plus the
+    attestation, which is checked separately)."""
     members: set[str] = set()
     for module in inventory["python_modules"]:
         if module["disposition"] in BUNDLE_DISPOSITIONS:
             members.add(Path(module["path"]).name)
+            if module.get("installed_by_init"):
+                # chainlink #84: `init` copies these into the target
+                # workspace, so a packaged `init` reads them as resources
+                # from ligature_data/ (what resource_root() exposes).
+                members.add(f"ligature_data/{module['path']}")
     for key in ("schemas", "schema_examples", "prompts", "documentation_and_templates"):
         for entry in inventory[key]:
             if entry["disposition"] in BUNDLE_DISPOSITIONS:

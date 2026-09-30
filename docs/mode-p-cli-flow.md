@@ -71,9 +71,9 @@ spec exists, but reports little until interactions declaring
 |---|---|---|---|
 | Stage P0 (bootstrap) | `ligature init --mode port` writes managed files + a **schema-valid but placeholder-content** descriptor (see §4) | `init` | operator |
 | — (operator, off-CLI) | operator replaces the placeholder `port_source`, `verifier_policy`, `crates[]`, `review` fields with real project values; `check`/`status` report a `P0` finding while the descriptor still holds the shipped example values (`check next` recommends editing it), though `draft`/`validate` themselves still do not gate on it — see §4 | `check`, `status` | read-only |
-| Stage 0 | evidence intake: claim + origin + semantic_disposition + lifecycle | `draft evidence-intake` → `approve draft` | LLM-side → human |
-| Stage 1/2 | concepts (L1), intra-contracts (L2) | `draft` (concept templates, if configured) | LLM-side |
-| Stage 3 | interactions (I) + reliance (O) + boundary contracts + bridge specs + witness specs + exemptions + protocol-debt records — independent candidate sources | `draft boundary-drafting`/`interaction-drafting` → `approve draft`/`pair`/`exemption-pair` | LLM-side → human |
+| Stage 0 | evidence intake: claim + origin + semantic_disposition + lifecycle | `draft evidence-intake` → `promote-evidence` | LLM-side → mechanical |
+| Stage 1/2 | concepts (L1), intra-contracts (L2) | `draft concept-to-code` (concept spec + constraint-id production) | LLM-side |
+| Stage 3 | interactions (I) + reliance (O) + boundary contracts + bridge specs + witness specs + exemptions + protocol-debt records + conflict resolutions — independent candidate sources | `draft boundary-drafting`/`interaction-drafting`/`bridge-drafting`/`witness-drafting`/`exemption-drafting`/`protocol-debt-drafting`/`conflict-resolution-drafting` → `approve draft`/`pair`/`exemption-pair` | LLM-side → human |
 | Stage 4 | adjudication: G1a/G1b/G2/G2+/R2/G4/G5/G11/G15, **plus G18** (witness coverage) | `validate boundary\|interaction\|exemption\|protocol-debt\|bridge\|evidence\|conflict-resolution\|witness`, `gate g18` | read-only |
 | Stage 4.5 | promotion (detached receipt, explicit `artifact_manifest`); **G20** (witness degeneracy, warn); generated projections | `approve promotion`, `validate promotion`, `gate g20`, `report feature-ledger`, `report contact-sheet` | deterministic+human / read-only / projection |
 | Stage 5 | emission (`emit_stubs.py`, G8) — not yet implemented in this codebase as of this writing | — | — |
@@ -82,7 +82,7 @@ spec exists, but reports little until interactions declaring
 | — (orchestration) | one issue → one owner → one worktree → one PR; real implementation happens here (`crates/*/src/`, the actual port) | *(not a `ligature` command)* | — |
 | Stage 8A | implementation verification: C_static extraction, callsite scope, bridge checks, R1/G16, **G19** (witness determinism, re-dispatches `witness_backend` fresh and compares against the witness spec's stored `determinism.value_hash` — it does not parse `render-witness`'s output file, though `render-witness` is what puts a value there to compare against in the first place) | `extract-c-static`, `validate callsites`, `check-bridges`, `gate g9`, `gate r1-g16`, `render-witness`, `gate g19` | read-only (internal ops write, §3) |
 | Stage 8B | acceptance (non-normative): Mode P = differential testing, Mode R = G10R | *(project-specific tooling, not a `ligature` command — plan.md's own G10 is not implemented anywhere in this codebase; nothing in `gate <gate-id>` reads `ci/results/differential_ledger.json` or any equivalent)* | — |
-| Stage 8C | release closure: **G14** `satisfies()` over the transitive closure + CG6 well-foundedness discharge, reading a pre-authored closure profile (`specs/_closure/<cluster>.json` — G14 refuses if the directory is absent; it does not create the file) against work-package manifests, callsite reports, and bridge data → confirms `closure_kind` or names a degradation record | `validate closure`, `gate g14` | read-only |
+| Stage 8C | release closure: **G14** `satisfies()` over the transitive closure + CG6 well-foundedness discharge, reading a pre-authored closure profile (`specs/_closure/<cluster>.json` — G14 refuses if the directory is absent; it does not create the file) against work-package manifests, callsite reports, and bridge data → confirms `closure_kind` or names a degradation record. The ACHIEVED side G14 evaluates against is produced by **`record-assurance`** (#87) from the verifier's own proof certificates — nothing else can write it | `validate closure`, `record-assurance`, `gate g14` | read-only (`record-assurance` writes the report, §3) |
 | (cross-cutting) | pilot-cluster ranking, gold-set measurement — not stage-bound, meaningful once concept/verifier/edge structure exists | `report pilot-cluster`, `validate gold-set`, `report gold-set-measurement` | read-only / projection |
 
 Two corrections to a natural first reading of this table:
@@ -108,13 +108,15 @@ Two corrections to a natural first reading of this table:
 
 | command | earliest invocable state | prerequisite data | regime | mutates |
 |---|---|---|---|---|
-| `init --mode port` | Stage P0 (first run); rerun with a **different** binary now reports an `adjudicator pin mismatch` conflict instead of silently re-pinning — use `migrate --upgrade`/`--force` to re-pin deliberately (#65, fixed) | none | operator | managed files, `.codex/skills/`, `.ligature/`, **and** `project-descriptor.json` + `docs/reliance-policy.md` (written once, then marked user-owned) |
+| `init --mode port` | Stage P0 (first run); rerun with a **different** binary now reports an `adjudicator pin mismatch` conflict instead of silently re-pinning — use `migrate --upgrade`/`--force` to re-pin deliberately (#65, fixed) | none | operator | managed files, `.codex/skills/`, `.ligature/`, `scripts/` (the two witness-renderer scripts G13 hash-pins — #84), **and** `project-descriptor.json` + `docs/reliance-policy.md` (written once, then marked user-owned) |
 | `doctor` | any state, including before `init` | none — reports `installation: not-initialized` | read-only | — |
 | `version [--verify]` | any state, including before `init` (inspects the running binary, not the workspace) | none | read-only | — |
 | `status [--json]` | any state, including before `init` — reports `descriptor.state: absent` | none | read-only | — |
 | `check [--json]` | any state, including before `init` — reports exit 2, `conditions: [invalid_input]`, `next_action: null` | none | read-only | — |
+| `write-set-check [--json]` | any state with a schema-valid descriptor (before `init`: `unknown`, exit 2) | a `project-descriptor.json` with a `write_set` | read-only | — |
 | `draft <kind>` | Stage 0/3 | a valid `<crate>/specs/` layout per the descriptor | LLM-side | writes `<target>.draft` only |
-| `approve draft \| pair \| exemption-pair` | Stage 0/3, one draft must exist | a staged `.draft` file | human checkpoint | promotes a draft to its target path |
+| `approve draft \| pair \| exemption-pair` | Stage 3, one draft must exist (evidence excluded -- it carries no `review` block) | a staged `.draft` file | human checkpoint | promotes a draft to its target path |
+| `promote-evidence` | Stage 0, one evidence draft must exist | a staged `evidence/<id>.json.draft` | mechanical (no `--reviewer`; evidence is non-normative) | renames the draft to its target + an audit entry (chainlink #79) |
 | `validate boundary\|interaction\|exemption\|protocol-debt\|bridge\|evidence\|conflict-resolution\|witness` | Stage 4 | the relevant `specs/_<kind>/` directory | read-only | — |
 | `gate g18` | Stage 4 | witness specs + interactions declaring `witness_required` | read-only | — |
 | `approve promotion` | Stage 4.5, post-`validate` | a clean validation pass | human checkpoint (`--reviewer` + `--policy-path` + `--artifact...`) | `specs/_promotions/<cluster>.json` |
@@ -132,6 +134,7 @@ Two corrections to a natural first reading of this table:
 | `gate g19` | Stage 8A | a witness spec with a stored `determinism.value_hash` | read-only | — |
 | `validate closure` | Stage 8C | a closure profile | read-only | — |
 | `gate g14` | Stage 8C | closure profile **+** work-package manifests **+** callsite reports **+** bridge data | read-only | — |
+| `record-assurance <work-package> --proof <obligation>=<path>` | Stage 8C, once a verifier run has left proof certificates (e.g. `cargo creusot`'s `verif/**/proof.json`) | a schema-valid work-package manifest **+** a why3find proof certificate per obligation it is asked to record | mechanical (every field derived from evidence + manifest; no `--reviewer`) | the manifest's own `report.emit` path — an assurance report (chainlink #87); refuses instead of writing when a certificate has a stuck subgoal, is older than its Coma program, or cannot be shown to be about the obligation |
 | `report pilot-cluster` | any state with authored clusters (Stage 3+) | concept/verifier/edge structure | read-only | stdout only |
 | `validate gold-set` | any state with a gold set authored | a gold-set fixture | read-only | — |
 | `report gold-set-measurement` | any state with a gold set + candidate predictions | same | projection, no authority | `ci/results/gold_set/` (unless `--no-write`) |
@@ -201,8 +204,9 @@ record the intent outside the tool (its `analysis/ligature/closure-intent.json`)
 which the tool cannot read back at G14 time.
 
 The descriptor schema now has the field the pilot was looking for: a
-top-level, optional `closure_kind` (`deductive` | `bounded`, plan.md §4's
-vocabulary). It records **intent only** — each cluster's closure profile
+top-level, optional `closure_kind` (`deductive` | `bounded` | `partial`,
+plan.md §4's vocabulary — the third value added by chainlink #85, see
+below). It records **intent only** — each cluster's closure profile
 (`specs/_closure/<cluster>.json`) remains the authoritative per-cluster
 declaration at Stage 8C, and gate g14 recomputes `closure_kind` from the
 evidence actually present, so a declared intent can never launder a
@@ -211,6 +215,37 @@ from the init template: a project that has not chosen an intent yet must
 not be silently defaulted to `deductive`. `status --json` reads the
 declaration back as `descriptor.closure_kind` (null when absent, invalid,
 or undeclared).
+
+### Declaring a partially-verified closure (chainlink #85)
+
+The same vocabulary gap existed one layer down, at the declaration that
+is actually authoritative: `docs/closure-profile-schema.json`'s
+`closure_kind` accepted only `deductive` and `bounded`, so a pilot that
+cannot achieve full deductive closure had no way to state its actual
+state — `validate-closure` rejected `partial` (and `mixed`, `degraded`)
+at G1a with `'…' is not one of ['deductive', 'bounded']`, leaving only
+rounding the claim up to `deductive` (over-claiming) or down to
+`bounded` (claiming a uniform guarantee over a closure that does not
+deliver one uniformly).
+
+The enum gains exactly one value, `partial` (plan.md §4): partially
+verified — part of the closure carries the guarantee its evidence
+supports and part does not. `deductive` and `bounded` are uniform claims
+over the whole closure; `partial` claims strictly less than either, so
+gate g14's evidence-kind check never refutes it (that check polices
+`deductive` over a Kani result, and `bounded` under an all-deductive
+closure), while everything `partial` describes is still policed by the
+findings that own it: a missing achieved record blocks whatever the kind
+says, and a failing closure condition still needs its own degradation
+record. The value is accepted everywhere the vocabulary appears — the
+descriptor's intent field, `status --json`'s descriptor and per-cluster
+echoes (`schemas/project-state.schema.json`), and the feature ledger.
+`mixed` and `degraded` are deliberately not kinds: `degraded` already
+names g14's own outcome for a cluster released under a degradation
+record (orthogonal to whichever kind it declares), and the
+evidence-composition fact `mixed` would name is already carried by
+`conditions.single_verifier_system` and the closure's own evidence
+kinds.
 
 ### An invalid descriptor names its offender (chainlink #73)
 
@@ -232,6 +267,137 @@ finding, and its gate-integrity detail reads "project descriptor is
 present but invalid: …" so the two states stay distinguishable. The same
 diagnostic is in the `ProjectDescriptorError` message every
 `load_project_descriptor` caller already prints.
+
+### `verifier_policy`: the open object, the undisclosed enum, the unexpressible second verifier (chainlink #76)
+
+`verifier_policy` was the only object in the descriptor that permitted
+unknown keys — every other object is `additionalProperties: false`. The
+rule was "arbitrary keys, every value a member of an undocumented
+three-value enum", which produced three defects in the one field a
+`creusot`/`verus`/`kani` pilot is named after:
+
+1. **Silent acceptance.** A misspelled key (`defualt: "kani"`) validated,
+   `check` exited 0 with `findings: []`, and the typo was
+   indistinguishable from a real key.
+2. **An undiscoverable, unreported value domain.** Exactly `creusot` |
+   `verus` | `kani` were accepted (case-sensitive, exact, no composition,
+   no whitespace tolerance) — and no command reported the effective
+   policy: `status --json` and `check --json` contained zero occurrences
+   of the string "verifier" in either the valid or the invalid case.
+3. **An unexpressible — but fake-writable — second verifier.** Every
+   composition shape (`verifiers: [...]`, `additional: [...]`,
+   `per_kind: {...}`, `default: "verus+kani"`) was rejected, while an
+   arbitrary extra key holding a second enum member validated and was
+   then silently discarded by every reader.
+
+The fix documents rather than closes the object, because per-cluster
+overrides are load-bearing: gate g9 resolves `policy.get(cluster,
+policy["default"])`, and the shipped greenfield example itself declares
+`"verifier_policy": { "default": "creusot", "scheduling": "kani" }`. The
+schema's `verifier_policy` description now states the key set —
+`default` (required), any other key naming a cluster and holding that
+cluster's verifier, and `supporting` — and the `$defs/verifier`
+description names the three permitted values and the exact-match rule,
+so the value domain is discoverable from the schema itself rather than
+from a rejection message. `supporting` (an array of enum members) is the
+declared shape for multi-verifier composition — the P3 crypto-mixed
+pilot's `verus` + `kani` in one workspace, and the epic's "Kani
+supporting evidence" probe, get a real descriptor-level home instead of
+an accident of `additionalProperties`. The Defect-1 hazard is mitigated
+by observability: `status --json` echoes the effective policy as
+`descriptor.verifier_policy` (`default`, `clusters`, `supporting` — the
+shape gate g9 consumes), so a typo shows up under `clusters` as an
+override for a cluster literally named `defualt`, visibly not the default
+the user meant. `init` also ships `schemas/project-descriptor.schema.json`
+into the project root itself (managed, attested), not only into
+`.ligature/schemas/`, so the schema governing the user-owned descriptor
+is present on disk where a black-box probe can find it.
+
+### `write_set`: the enforcement boundary that nothing enforced (chainlink #77)
+
+`project-descriptor.json`'s `write_set` (`allowed_roots` /
+`protected_roots`) is the only thing the descriptor says keeps an
+implementation inside its crate's `src/` and `tests/` and away from the
+pinned upstream checkout, `ci/manifest/**` and the specs. In v1.0 it was
+consumed by nothing and mentioned in no file `init` generates — not the
+hash-pinned skill authority region, not any of the three prompts — and the
+descriptor accepted every shape of the object, including
+`allowed_roots: ["**"]` and `protected_roots: []`, rejecting only the
+object's total removal. The date-creusot pilot's repro (`rust/rogue/evil.rs`,
+`rust/rogue/notes.txt`, `docs/evil.md` next to a filled descriptor) was
+reported by every command as nothing: `check --json` exited 0 with
+`findings: []`, `status --json` carried no write-set state, and `doctor`'s
+command list had no write-set verb.
+
+The fix makes the boundary machine-checked rather than merely declared,
+in the report's option (a) shape. `scripts/write_set.py` evaluates the
+write set against the workspace's actual files: a file is accounted for by
+an `allowed_roots` pattern, a `protected_roots` pattern, the ownership
+manifest (`ci/manifest/installation.json`), a declared crate's `specs/`
+tree, a canonical pipeline location (`ci/`, `evidence/`, workspace-level
+`specs/_<kind>/`, `docs/witnesses/` — places the pipeline writes, not the
+agent), or the pinned upstream checkout (`port_source.repository` when it
+names a directory inside the workspace). Everything else is an out-of-set
+write. `ligature write-set-check [--json]` reports the violations and
+exits 0/1/2 per the exit-code contract; `status --json` carries the
+verdict as `write_set.state` (`clean` / `violations` / `unknown`) — the
+`status.gate_integrity`-style state, so #74's missing-check-gate problem
+does not repeat; `check --json` carries one high-severity `write-set`
+finding per violation, so `check` exits 1 on the pilot's repro. The
+vacuous declaration shapes the schema accepts (`allowed_roots: ["**"]`,
+`protected_roots: []`) are flagged as violations of the write set's own
+purpose rather than rejected by the schema — descriptor schemas are a
+stable public contract (§1 of trust-and-compatibility-boundaries.md), and
+the codebase's own precedent for exactly this situation (#67's Stage-P0
+placeholder) is a conservative finding, not a schema rule. Files inside
+`protected_roots` that nothing vouches for are reported separately as a
+non-blocking protected-surface audit: the check cannot distinguish a
+project's own protected files from an agent's intrusion into a protected
+area and must not fail closed on the former. The same change closes the
+descriptor-level `gate_integrity` path-escape gap (companion evidence on
+#74): an entry resolving outside the workspace (absolute, or a `../`
+traversal) is refused rather than hashed against someone else's file. The
+installed skill's authority region gains a binding write-set rule and the
+command table gains the verb; all three prompts gain a write-set note.
+
+### The normative user-owned document that nothing drift-checked (chainlink #78)
+
+`docs/reliance-policy.md` is user-owned — `init` installs the template and
+never overwrites it — but it is also a **normative input**: the standing
+governance document Stage 3 boundary drafting applies its resolution rule
+from, and whose `Policy version: <name>@<major>.<minor>` line
+`accept-promotion` reads to compute a promotion receipt's
+`policy_version`. The ownership manifest recorded `base_hash` and
+`expected_hash` for it, implying a guarantee nothing made: neither value
+was ever compared, so the document could be rewritten — including to
+contradict its own fixed resolution table — while `doctor`, `check` and
+`status` all reported healthy. The only detectable state was a deleted
+file, and only `doctor` noticed that, as one `MISSING` line. The
+descriptor's `compatibility_policy.reliance_policy_path` pointer was
+equally inert: read by nothing, so a workspace could declare a nonexistent
+policy document (or one outside the project root) and still validate as
+`present-valid` with `check` exit 0, and nothing checked that
+`accept-promotion --policy-path` named the file the descriptor declares.
+
+The fix compares what the manifest already records. A normative
+user-owned document's on-disk content is checked against the manifest's
+reviewed `base_hash`: a mismatch (or a missing file) makes `doctor`
+report `DRIFTED`/`MISSING` and exit 1, makes `check` emit a high-severity
+`policy-drift` finding and exit 1, and drops `status --json`'s
+`installation_manifest.state` from `current` to `drifted` with the drift
+carried as an open finding. The recorded base moves only through the
+explicit accept path `ligature accept-policy --reviewer <name>` —
+`init`/`migrate` never re-base a normative user-owned file to whatever is
+on disk, so a reviewed edit is recorded rather than silent — and the
+document must carry exactly one `Policy version:` marker line, the same
+convention `accept-promotion` reads, so the recorded hash always
+corresponds to a policy that can yield a policy_version. The descriptor's
+`reliance_policy_path` is now validated (`check` fails closed when it
+names a nonexistent file or a path outside the project root) and consumed
+as the default for both accept commands, with a disagreeing explicit
+`--policy-path` refused. A legacy manifest that records no `base_hash`
+adopts the on-disk content once, so a pre-#78 workspace becomes
+drift-checkable rather than permanently unverifiable.
 
 ## 5. The adjudicator trust-pin sub-state-machine
 
@@ -371,7 +537,8 @@ kept here so error-case work starts from what's already known:
   and a null `next_action`, and `status`'s gate integrity claimed "no
   project descriptor present" while the descriptor file sat right there.
   The descriptor schema gains an optional top-level `closure_kind`
-  (`deductive` | `bounded`) recording intent only — per-cluster closure
+  (`deductive` | `bounded` — the vocabulary #85 later extended with
+  `partial`) recording intent only — per-cluster closure
   profiles remain authoritative at Stage 8C — which `status --json` reads
   back as `descriptor.closure_kind`. An invalid descriptor now produces a
   `P0` finding naming the offending property with its JSON path and the

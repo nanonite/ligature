@@ -80,6 +80,9 @@ from gate_g18 import collect_declared_features  # noqa: E402
 from gate_g18 import collect_valid_witnesses  # noqa: E402
 from gate_g19 import collect_valid_witness_entries  # noqa: E402
 from generate_feature_ledger import LEDGER_RELATIVE_PATH  # noqa: E402
+from manifest_input import ManifestInputError  # noqa: E402
+from manifest_input import ensure_manifest_path  # noqa: E402
+from manifest_input import read_manifest_text  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -664,7 +667,9 @@ def validate_data(
 
 
 def _load_receipt(path: Path) -> dict:
-    text = path.read_text()
+    # Read through the shared path guard (chainlink #83): a missing path
+    # or a directory reached pathlib here and escaped as a raw traceback.
+    text = read_manifest_text(path, "receipt")
     if path.suffix in (".yaml", ".yml"):
         return yaml.safe_load(text)
     return json.loads(text)
@@ -673,6 +678,11 @@ def _load_receipt(path: Path) -> dict:
 def validate_file(
     path: Path, validator: Draft202012Validator, workspace_root: Path, descriptor: dict | None = None
 ) -> list[Finding]:
+    # A bad path argument raises ManifestInputError (chainlink #83)
+    # instead of being turned into a Finding: there is no artifact here
+    # to have an opinion about yet, and the CLI reports it as
+    # `error: ...` with exit 1 rather than as a FAIL line about a file
+    # that was never read.
     try:
         data = _load_receipt(path)
     except (json.JSONDecodeError, yaml.YAMLError) as e:
@@ -695,6 +705,16 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Checked before anything else (chainlink #83): a missing receipt
+    # path or a directory must report the argument the user actually got
+    # wrong -- `error: receipt not found: <path>`, exit 1 -- instead of a
+    # raw FileNotFoundError/IsADirectoryError traceback from pathlib.
+    try:
+        ensure_manifest_path(args.receipt, "receipt")
+    except ManifestInputError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
     descriptor = None
     descriptor_path = args.descriptor or (args.workspace_root / "project-descriptor.json")
     if args.descriptor is not None or descriptor_path.is_file():
@@ -705,7 +725,14 @@ def main(argv: list[str]) -> int:
             return 2
 
     validator = load_validator()
-    findings = validate_file(args.receipt, validator, args.workspace_root, descriptor)
+    try:
+        findings = validate_file(args.receipt, validator, args.workspace_root, descriptor)
+    except ManifestInputError as e:
+        # The pre-flight above already caught the ordinary shapes; this
+        # is the read-time remainder (a path removed or replaced between
+        # the two checks, a permission denial), reported identically.
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
     if not findings:
         print("OK: promotion receipt passes G1a and §7.1 checks")

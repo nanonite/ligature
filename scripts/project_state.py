@@ -50,6 +50,8 @@ from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
+import write_set  # noqa: E402
+from validate_evidence import find_evidence_drafts  # noqa: E402
 
 # Re-exported from the adjudicator, which is the single source of the
 # running product's identity (#57). Callers that imported these names from
@@ -337,6 +339,18 @@ def _gate_integrity_evaluate(
                 )
             continue
         target = workspace / rel
+        # chainlink #77 (companion evidence on #74): a gate_integrity path
+        # that resolves outside the workspace -- absolute, or a ../
+        # traversal -- would be checked against someone else's file, which
+        # is just as dangerous as not checking at all (the same discipline
+        # validate_work_package.check_gate_integrity already applies to
+        # work-package manifests). Refuse the path rather than hashing
+        # whatever it points at.
+        try:
+            target.resolve().relative_to(workspace)
+        except ValueError:
+            drifted.append(f"{rel}: gate_integrity path escapes the workspace")
+            continue
         if rel not in recorded:
             drifted.append(f"{rel}: no recorded hash")
         elif not target.is_file():
@@ -390,6 +404,117 @@ def _gate_integrity_findings(gate_integrity: dict, problems: list[str]) -> list[
             provenance="scripts/project_state.py:_gate_integrity_findings",
         )
     ]
+
+
+def _normative_drift_records(workspace: Path) -> list[dict]:
+    """The drift records behind check's policy-drift gate (chainlink #78),
+    computed by ligature_install (which owns the registry of normative
+    user-owned documents and the manifest's recorded hashes). Imported
+    lazily to avoid the import cycle (`ligature_install` imports this module
+    at load time) -- the same pattern `_descriptor_placeholder_findings`
+    already uses. Any failure to compute yields no records rather than an
+    exception, so a corrupt manifest degrades to honest-unknown instead of
+    crashing the check run."""
+    try:
+        from ligature_install import normative_drift_records
+    except ImportError:
+        return []
+    try:
+        return normative_drift_records(workspace)
+    except Exception:
+        return []
+
+
+def _policy_drift_findings(records: list[dict]) -> list[NormalizedFinding]:
+    """check's policy-drift gate (chainlink #78): one high-severity finding
+    per normative user-owned document (the reliance policy) that is missing
+    from the workspace or whose on-disk content differs from the reviewed
+    hash the ownership manifest records. High severity, blocking: the
+    reliance policy is the standing governance document Stage 3 boundary
+    drafting applies its resolution rule from, so an unreviewed edit that
+    inverts the rule it exists to enforce must never read as a clean bill
+    of health. The finding names the accept path, so the fix is one
+    command away."""
+    findings: list[NormalizedFinding] = []
+    for record in records:
+        if record["state"] == "missing":
+            reason = (
+                f"normative user-owned document {record['path']} is missing from the workspace; "
+                "restore it (or accept its removal deliberately) -- `ligature accept-policy "
+                "--reviewer <name>` records a reviewed policy document"
+            )
+        else:
+            reason = (
+                f"normative user-owned document {record['path']} has drifted from its reviewed "
+                f"content (recorded {record['recorded_hash']}, current {record['current_hash']}); "
+                "review the change and record it with `ligature accept-policy --reviewer <name>` "
+                "(chainlink #78)"
+            )
+        findings.append(
+            NormalizedFinding(
+                gate_id="policy-drift",
+                severity="high",
+                subject=record["path"],
+                reason=reason,
+                authority="mechanized-gate",
+                provenance="scripts/ligature_install.py:normative_drift_records",
+            )
+        )
+    return findings
+
+
+def _descriptor_policy_path_findings(descriptor: dict | None, workspace: Path) -> list[NormalizedFinding]:
+    """chainlink #78: the descriptor's
+    `compatibility_policy.reliance_policy_path` was read by nothing -- a
+    pointer that named a nonexistent file, or a path outside the project
+    root, validated as `present-valid` and left `check` exit 0. The field
+    is the project's own declaration of where its policy lives, so the
+    validation is semantic (existence + containment), not schema: the
+    schema stays a stable public contract, and `check` remains the detail
+    surface. High severity: a workspace whose declared policy document is
+    missing or unreachable cannot drift-check or promote against it."""
+    if descriptor is None:
+        return []
+    compat = descriptor.get("compatibility_policy")
+    if not isinstance(compat, dict):
+        return []
+    rel = compat.get("reliance_policy_path")
+    if not isinstance(rel, str) or not rel:
+        return []
+    try:
+        target = workspace / rel
+        target.resolve().relative_to(workspace)
+    except (ValueError, OSError):
+        return [
+            NormalizedFinding(
+                gate_id="P0",
+                severity="high",
+                subject=str(rel),
+                reason=(
+                    f"compatibility_policy.reliance_policy_path {rel!r} resolves outside the "
+                    "project root; fix the declaration to name the policy document inside the "
+                    "workspace (chainlink #78)"
+                ),
+                authority="mechanized-gate",
+                provenance="scripts/project_state.py:_descriptor_policy_path_findings",
+            )
+        ]
+    if not target.is_file():
+        return [
+            NormalizedFinding(
+                gate_id="P0",
+                severity="high",
+                subject=str(rel),
+                reason=(
+                    f"compatibility_policy.reliance_policy_path {rel!r} names a file that does "
+                    "not exist in the workspace; restore the policy document or fix the "
+                    "declaration (chainlink #78)"
+                ),
+                authority="mechanized-gate",
+                provenance="scripts/project_state.py:_descriptor_policy_path_findings",
+            )
+        ]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -845,9 +970,11 @@ class Analysis:
     gate_runs: list[dict]
     installation: dict
     gate_integrity: dict
+    write_set: dict
     observations: dict
     conditions: set[str] = field(default_factory=set)
     descriptor_diagnostics: list[str] = field(default_factory=list)
+    pending_evidence_drafts: list[Path] = field(default_factory=list)
 
     @property
     def descriptor_rel(self) -> str:
@@ -869,9 +996,67 @@ _VALIDATE_MODULES = (
 )
 
 
-def _run_standalone_validators(workspace: Path) -> list[NormalizedFinding]:
+def _validate_boundaries_with_descriptor(
+    workspace: Path, descriptor: dict | None
+) -> list[NormalizedFinding]:
+    """Run validate_boundary_contracts with the descriptor's own
+    crates[].specs_search_root (chainlink #81).
+
+    Mirrors cmd_validate's own per-crate iteration: each crate's boundaries
+    are scanned under that crate's crate_dir and its callee_guarantees ids
+    are resolved against that crate's specs_search_root -- the same
+    per-crate resolution cmd_validate_interaction and cmd_validate_bridge
+    already apply. Without a descriptor (absent/invalid/unreadable) the scan
+    falls back to the unanchored workspace-wide walk with no search root,
+    so the applies_to check degrades to its info-severity "unverifiable"
+    finding exactly as before (a missing descriptor is not a boundary-
+    contract defect, and every other command already reports it)."""
+    import validate_boundary_contracts
+
+    if descriptor is None:
+        try:
+            raw = validate_boundary_contracts.validate(workspace)
+        except FileNotFoundError:
+            return []
+        return [
+            _normalize_finding(
+                f,
+                str(getattr(f, "gate", "") or "G1a/G1b/G2+"),
+                "scripts/validate_boundary_contracts.py:validate",
+            )
+            for f in raw
+        ]
+
+    findings: list[NormalizedFinding] = []
+    for crate in descriptor.get("crates", []):
+        crate_dir = crate.get("crate_dir")
+        specs_root = crate.get("specs_search_root")
+        if not crate_dir or not specs_root:
+            continue
+        try:
+            raw = validate_boundary_contracts.validate(workspace / crate_dir, workspace / specs_root)
+        except FileNotFoundError:
+            continue
+        findings.extend(
+            _normalize_finding(
+                f,
+                str(getattr(f, "gate", "") or "G1a/G1b/G2+"),
+                "scripts/validate_boundary_contracts.py:validate",
+            )
+            for f in raw
+        )
+    return findings
+
+
+def _run_standalone_validators(workspace: Path, descriptor: dict | None = None) -> list[NormalizedFinding]:
     findings: list[NormalizedFinding] = []
     for module_name, _ in _VALIDATE_MODULES:
+        if module_name == "validate_boundary_contracts":
+            # chainlink #81: G2+'s applies_to check needs the descriptor's
+            # crates[].specs_search_root; pass it per-crate, the same way
+            # cmd_validate/cmd_validate_interaction/cmd_validate_bridge do.
+            findings.extend(_validate_boundaries_with_descriptor(workspace, descriptor))
+            continue
         try:
             module = __import__(module_name)
         except Exception:
@@ -1204,6 +1389,11 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
 
     promotions = _promotion_manifest(workspace)
     installation = _installation_manifest(workspace)
+    # chainlink #78: the normative user-owned documents' drift records (the
+    # reliance policy's on-disk content vs. the manifest's reviewed hash),
+    # computed once here and consumed by both the installation state and
+    # the policy-drift findings below.
+    policy_drift_records = _normative_drift_records(workspace)
     artifacts = _artifacts(workspace, descriptor, promotions)
     obligations = _obligations(workspace, descriptor)
     clusters = _clusters(workspace, descriptor)
@@ -1212,18 +1402,64 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
         workspace, descriptor, installation, descriptor_state, descriptor_diagnostics
     )
     gate_integrity = {"state": gate_state, "details": gate_details}
+    # chainlink #77: the descriptor's write_set is the enforcement boundary
+    # for where the implementing agent may write -- and until now it was
+    # consumed by no command and mentioned in no generated file. The same
+    # run reports it here (status carries the state, check carries the
+    # findings) so the boundary is machine-checked, not merely declared.
+    write_set_state = write_set.check_write_set(workspace, descriptor, descriptor_path)
+    write_set_doc = {"state": write_set_state.state, "details": write_set_state.details}
     # chainlink #75: installation_manifest.state must not read "current"
     # while the gate definitions it pins are drifted or unverifiable --
     # a consumer reading only `status --json` was told the installation is
     # current in a workspace whose gate definitions had been altered.
-    if installation["state"] == "current" and gate_state != "pinned":
-        installation["state"] = "drifted" if gate_state == "drifted" else "unknown"
+    # chainlink #78 extends the same fail-closed discipline to the
+    # normative user-owned documents (the reliance policy): a consumer
+    # reading only `status --json` must not be told the installation is
+    # current while the governance document it pins is missing or edited.
+    if installation["state"] == "current":
+        if gate_state == "drifted" or policy_drift_records:
+            installation["state"] = "drifted"
+        elif gate_state != "pinned":
+            installation["state"] = "unknown"
 
-    findings = _run_standalone_validators(workspace)
+    findings = _run_standalone_validators(workspace, descriptor)
+    # chainlink #79: a staged evidence draft is inert (validate-evidence skips
+    # *.draft), so it produces no finding -- but it is still a pending artifact
+    # the agent must promote. Track it here so `check next` can recommend
+    # `promote-evidence` (the action_id the issue found missing) instead of
+    # leaving the agent with no machine-consumable next step for it.
+    pending_evidence_drafts = find_evidence_drafts(workspace)
     if gate_integrity["state"] != "pinned":
         findings.extend(_gate_integrity_findings(gate_integrity, gate_problems))
+    # chainlink #78: one high-severity finding per normative user-owned
+    # document that is missing or drifted from its reviewed content.
+    findings.extend(_policy_drift_findings(policy_drift_records))
+    # chainlink #77: one high-severity finding per write-set violation (an
+    # out-of-set file, or a vacuous declaration that enforces nothing).
+    # High severity: a file no declaration accounts for, or a write set
+    # that declares no boundary, is exactly the enforcement-boundary
+    # violation this check exists to catch -- it blocks. The
+    # protected-surface audit (protected_unvouched) is deliberately not a
+    # check finding: it is non-blocking and lives in the dedicated
+    # `write-set-check` command's own report.
+    for violation in write_set_state.violations:
+        findings.append(
+            NormalizedFinding(
+                gate_id="write-set",
+                severity="high",
+                subject=violation.path,
+                reason=violation.reason,
+                authority="mechanized-gate",
+                provenance="scripts/write_set.py:check_write_set",
+            )
+        )
     findings.extend(_descriptor_placeholder_findings(descriptor, descriptor_state, descriptor_path))
     findings.extend(_descriptor_invalid_findings(descriptor_state, descriptor_diagnostics, descriptor_path))
+    # chainlink #78: the descriptor's reliance_policy_path pointer is
+    # validated (exists + inside the project root) rather than advisory --
+    # see _descriptor_policy_path_findings.
+    findings.extend(_descriptor_policy_path_findings(descriptor, workspace))
     gate_runs, gate_findings, witness_backend = _run_gates(workspace, descriptor)
     findings.extend(gate_findings)
     findings.extend(_lifecycle_findings(artifacts))
@@ -1259,8 +1495,10 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
         gate_runs=gate_runs,
         installation=installation,
         gate_integrity=gate_integrity,
+        write_set=write_set_doc,
         observations=observations,
         conditions=conditions,
+        pending_evidence_drafts=pending_evidence_drafts,
     )
 
 
@@ -1283,6 +1521,33 @@ def build_project_state(workspace: Path, descriptor_path: Path) -> dict:
         # in status output rather than living only in the descriptor file
         # (chainlink #73). null when absent, invalid, or undeclared.
         descriptor_doc["closure_kind"] = descriptor.get("closure_kind") if descriptor else None
+        # The effective verifier policy, read back here so a pilot's core
+        # declaration is observable in status output (chainlink #76) --
+        # previously no command reported it: `status --json` and
+        # `check --json` contained zero occurrences of the string
+        # "verifier" in either the valid or the invalid case, so the value
+        # domain (creusot | verus | kani) and the per-cluster overrides
+        # were discoverable only by opening the descriptor file or probing
+        # the schema by trial and error. Normalized into the shape the
+        # pipeline actually consumes (gate g9 resolves
+        # policy.get(cluster, policy["default"])): `default`, the
+        # per-cluster overrides under `clusters`, and the declared
+        # multi-verifier composition under `supporting`. null when the
+        # descriptor is present but invalid; omitted when it is absent or
+        # unreadable, matching mode/schema_version/closure_kind.
+        policy = descriptor.get("verifier_policy") if descriptor is not None else None
+        if isinstance(policy, dict):
+            descriptor_doc["verifier_policy"] = {
+                "default": policy.get("default"),
+                "clusters": {
+                    key: value
+                    for key, value in policy.items()
+                    if key not in ("default", "supporting")
+                },
+                "supporting": policy.get("supporting", []),
+            }
+        else:
+            descriptor_doc["verifier_policy"] = None
 
     open_findings: dict[str, dict] = {}
     human_decisions: dict[str, dict] = {}
@@ -1328,6 +1593,7 @@ def build_project_state(workspace: Path, descriptor_path: Path) -> dict:
         "human_decisions": [human_decisions[key] for key in sorted(human_decisions)],
         "change_requests": change_requests,
         "gate_integrity": analysis.gate_integrity,
+        "write_set": analysis.write_set,
         "generated_observations": analysis.observations,
     }
 
@@ -1401,6 +1667,29 @@ def _next_action(analysis: Analysis) -> dict | None:
                 "description": f"{f.reason} (subject: {f.subject})",
                 "command": None,
             }
+
+    # 0.5. A staged evidence draft is inert (validate-evidence skips *.draft,
+    #    chainlink #79) so it raises no finding -- but it is a ready,
+    #    already-validated Stage 0 artifact, and the agent's loop (status ->
+    #    check next -> perform -> repeat) had no action_id for it: `check
+    #    next` named `refresh-c-static` (a Stage 8A refresh) and said
+    #    nothing about the pending draft. Recommend the mechanical promotion
+    #    ahead of the gate refreshes below, which are about missing
+    #    prerequisites for LATER stages, not a task that is ready now. It
+    #    still sits below the invalid-descriptor and P0 checks above, which
+    #    are about the project being undescribed.
+    if analysis.pending_evidence_drafts:
+        draft = analysis.pending_evidence_drafts[0]
+        target = draft.with_suffix("")  # strip the .draft staging suffix
+        return {
+            "kind": "automated-command",
+            "action_id": "promote-evidence",
+            "description": (
+                f"staged evidence draft {draft.name} is pending promotion; "
+                f"run `ligature promote-evidence {target}` to make it a real evidence record"
+            ),
+            "command": f"ligature promote-evidence {target}",
+        }
 
     # 1. A blocked gate whose missing prerequisite is one of the three
     #    internal refresh operations check may recommend but never runs.

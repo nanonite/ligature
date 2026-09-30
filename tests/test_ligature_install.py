@@ -27,11 +27,17 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import adjudicator  # noqa: E402
 import ligature_install  # noqa: E402
 import pipeline  # noqa: E402
+import validate_work_package  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
 DESCRIPTOR_SCHEMA = json.loads((ROOT / "schemas" / "project-descriptor.schema.json").read_text())
 SKILL_REL = ".codex/skills/ligature/SKILL.md"
 MANAGED_SCHEMA_REL = ".ligature/schemas/project-state.schema.json"
+# chainlink #84: which scripts `init` must ship is G13's requirement to
+# declare, not this file's -- derived from the gate's own constant so the
+# two cannot drift apart (tests/test_inventory_drift.py pins the third
+# declaration, the inventory flag, to the same set).
+RENDERER_SCRIPTS = tuple(validate_work_package.WITNESS_RENDERER_INTEGRITY_PATHS)
 
 
 class InstallFixture(unittest.TestCase):
@@ -120,6 +126,7 @@ class FreshInitTest(InstallFixture):
             SKILL_REL,
             ".ligature/schemas/project-state.schema.json",
             "ci/manifest/installation.json",
+            *RENDERER_SCRIPTS,
         ):
             self.assertEqual(stat.S_IMODE((self.workspace / rel).stat().st_mode), expected, rel)
 
@@ -148,6 +155,27 @@ class FreshInitTest(InstallFixture):
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
         self.assertIn("unchanged  .ligature/schemas/project-descriptor.schema.json", out)
+
+    def test_init_installs_the_descriptor_schema_into_the_project_root(self):
+        """chainlink #76: the schema that governs the user-owned descriptor
+        is shipped into the project root itself, not only into
+        `.ligature/schemas/` -- the root cause recorded on #73/#74, where a
+        black-box probe of the v1.0 surface could not discover the
+        descriptor's permitted shape (the verifier enum in particular)
+        from anything `init` wrote, because the schema lived only inside
+        the binary's attested resource bundle."""
+        code, _, _ = self.init("port", name="myport")
+        self.assertEqual(code, 0)
+        installed = self.workspace / "schemas" / "project-descriptor.schema.json"
+        self.assertTrue(installed.is_file())
+        self.assertEqual(installed.read_text(), (ROOT / "schemas" / "project-descriptor.schema.json").read_text())
+        paths = {f["path"]: f for f in self.manifest()["files"]}
+        self.assertEqual(paths["schemas/project-descriptor.schema.json"]["ownership"], "managed")
+        self.assertEqual(paths["schemas/project-descriptor.schema.json"]["expected_hash"], "sha256:" + hashlib.sha256(installed.read_bytes()).hexdigest())
+        # doctor inventories it as an unchanged managed file.
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("unchanged  schemas/project-descriptor.schema.json", out)
 
     def test_project_name_defaults_to_the_workspace_directory(self):
         self.init("greenfield")
@@ -181,9 +209,17 @@ class IdempotenceTest(InstallFixture):
         edited = "# my own policy\n" + self.read("docs/reliance-policy.md")
         (self.workspace / "docs" / "reliance-policy.md").write_text(edited)
         code, out, _ = self.init("greenfield", name="myproj")
-        self.assertEqual(code, 0)
+        # chainlink #78: the reliance policy is a NORMATIVE user-owned
+        # document, so the edit is reported as drift (non-zero exit, the
+        # accept-policy note) -- but it is still never overwritten, and the
+        # recorded base is never silently re-based to the edited content.
+        self.assertEqual(code, 1)
+        self.assertIn("installation: drifted", out)
+        self.assertIn("DRIFTED  docs/reliance-policy.md", out)
+        self.assertIn("accept-policy", out)
         self.assertEqual(self.read("docs/reliance-policy.md"), edited)
-        self.assertIn("user-owned", out)
+        record = next(f for f in self.manifest()["files"] if f["path"] == "docs/reliance-policy.md")
+        self.assertNotEqual(record["base_hash"], "sha256:" + hashlib.sha256(edited.encode()).hexdigest())
 
 
 class ConflictAndAuthorityTest(InstallFixture):
@@ -282,6 +318,100 @@ class ConflictAndAuthorityTest(InstallFixture):
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
         self.assertIn("skill authority hash: verified", out)
+
+
+class WitnessRendererScriptsInstallTest(InstallFixture):
+    """chainlink #84: `validate-work-package`'s G13 requires a
+    `gate_integrity` entry for EACH of `scripts/witness_renderer.py` and
+    `scripts/xml_escape.py` whose runner resolves to a real file inside
+    the workspace -- unconditional for every manifest, project-agnostic
+    (plan.md §16.5, chainlink #35). v1.0's `init` installed neither, so
+    no pilot root even had a `scripts/` directory and Stage 7 could only
+    ever report `gate_integrity runner not found`.
+
+    What `init` ships is the product's OWN implementation,
+    byte-identical, recorded as a managed file: a locally edited renderer
+    is a CONFLICT `migrate --force` recovers explicitly -- never a
+    silently accepted substitution, and never a stand-in that would let a
+    fake pass through the gate meant to protect real evidence."""
+
+    def _installed_sha(self, rel: str) -> str:
+        return "sha256:" + hashlib.sha256((self.workspace / rel).read_bytes()).hexdigest()
+
+    def test_fresh_init_installs_both_scripts_byte_identical_to_the_product(self):
+        code, out, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 0, out)
+        records = {f["path"]: f for f in self.manifest()["files"]}
+        for rel in RENDERER_SCRIPTS:
+            target = self.workspace / rel
+            self.assertTrue(target.is_file(), rel)
+            self.assertEqual(target.read_bytes(), (ROOT / rel).read_bytes(), rel)
+            record = records[rel]
+            self.assertEqual(record["ownership"], "managed", rel)
+            self.assertEqual(record["base_hash"], self._installed_sha(rel), rel)
+            self.assertEqual(record["expected_hash"], self._installed_sha(rel), rel)
+
+    def test_installed_scripts_do_not_make_the_write_set_dirty(self):
+        """`scripts/**` is in every example descriptor's protected_roots,
+        and the installed files are product-managed -- so `init` must not
+        leave a freshly initialized workspace with an out-of-set or
+        unvouched file under scripts/."""
+        code, out, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 0, out)
+        code, out, _ = self.run_cli("write-set-check")
+        self.assertEqual(code, 0, out)
+        self.assertIn("write set is clean", out)
+
+    def test_rerun_is_unchanged_and_a_local_edit_is_a_conflict(self):
+        self.init("greenfield", name="myproj")
+        code, out, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 0, out)
+        for rel in RENDERER_SCRIPTS:
+            self.assertIn(f"unchanged  {rel}", out)
+
+        edited = self.read("scripts/witness_renderer.py") + "\n# local edit\n"
+        (self.workspace / "scripts" / "witness_renderer.py").write_text(edited)
+        code, out, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 1, out)
+        self.assertIn("CONFLICT  scripts/witness_renderer.py", out)
+        # never overwritten: a substituted renderer is exactly what G13 exists to catch
+        self.assertEqual(self.read("scripts/witness_renderer.py"), edited)
+
+        code, out, _ = self.run_cli("migrate", "--force", "scripts/witness_renderer.py")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(
+            (self.workspace / "scripts" / "witness_renderer.py").read_bytes(),
+            (ROOT / "scripts" / "witness_renderer.py").read_bytes(),
+        )
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0, out)
+        self.assertIn("installation: current", out)
+
+    def test_a_workspace_initialized_before_84_gains_the_scripts_on_a_plain_rerun(self):
+        """The upgrade path every existing pilot workspace takes: no
+        `scripts/` directory and no ownership-manifest record for one. A
+        plain `init` rerun creates both files -- no migrate dance, no
+        hand-copying out of the binary."""
+        self.init("greenfield", name="myproj")
+        for rel in RENDERER_SCRIPTS:
+            (self.workspace / rel).unlink()
+        (self.workspace / "scripts").rmdir()
+        manifest = self.manifest()
+        manifest["files"] = [f for f in manifest["files"] if f["path"] not in RENDERER_SCRIPTS]
+        self.write_manifest(manifest)
+
+        code, out, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 0, out)
+        records = {f["path"]: f for f in self.manifest()["files"]}
+        for rel in RENDERER_SCRIPTS:
+            self.assertIn(f"create  {rel}", out)
+            self.assertEqual((self.workspace / rel).read_bytes(), (ROOT / rel).read_bytes(), rel)
+            # recorded as managed from here on, so later drift is detectable
+            self.assertEqual(records[rel]["ownership"], "managed", rel)
+
+        code, out, _ = self.run_cli("status", "--json")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(out)["gate_integrity"]["state"], "pinned")
 
 
 class UpgradePruneIncompatibilityTest(InstallFixture):
@@ -547,6 +677,276 @@ class DoctorDescriptorSchemaTest(InstallFixture):
         with mock.patch.object(Path, "read_text", side_effect=OSError("permission denied")):
             report = ligature_install.descriptor_schema_report(self.workspace, "project-descriptor.json")
         self.assertEqual(report.state, "unreadable")
+
+
+class NormativePolicyDriftTest(InstallFixture):
+    """chainlink #78: a user-owned normative document (the reliance policy)
+    cannot be drift-checked, and the ownership manifest records hashes for
+    it that are never compared -- so `doctor`, `check` and `status` all
+    report healthy before and after an unreviewed edit that inverts the
+    document's own resolution rule. These tests pin the fixed behavior:
+    on-disk content is compared against the manifest's recorded base_hash,
+    drift is reported by all three commands, the recorded base moves only
+    through the explicit `accept-policy` path, and the descriptor's
+    `compatibility_policy.reliance_policy_path` is validated (exists, inside
+    the project root) and consumed as the accept commands' default."""
+
+    POLICY = "docs/reliance-policy.md"
+
+    def edited_policy(self) -> str:
+        """The installed policy plus an unreviewed governance edit and a
+        filled-in version marker (the template's own placeholder line is
+        not a valid marker, so accept-policy refuses until it is replaced)."""
+        text = self.read(self.POLICY)
+        text = text.replace(
+            "Policy version: `<policy-name>@<major>.<minor>`",
+            "Policy version: `reliance-policy@1.2`",
+        )
+        return text + "\n## Unreviewed change\n\nWeaken the resolution rule.\n"
+
+    def accept_policy(self, *extra):
+        return self.run_cli("accept-policy", "--reviewer", "alice", *extra)
+
+    def policy_record(self) -> dict:
+        return next(f for f in self.manifest()["files"] if f["path"] == self.POLICY)
+
+    def test_doctor_reports_an_unreviewed_policy_edit_as_drift(self):
+        """The defect report's exact scenario: append a section that
+        inverts the resolution rule -- `doctor` must report DRIFTED and
+        exit 1, not `installation: current` / `user-owned` / exit 0."""
+        self.init("greenfield", name="myproj")
+        edited = self.edited_policy()
+        (self.workspace / self.POLICY).write_text(edited)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("installation: drifted", out)
+        self.assertIn(f"DRIFTED  {self.POLICY}", out)
+        self.assertIn("accept-policy", out)
+        # The file is never overwritten, and the recorded base is never
+        # silently re-based to the edited content.
+        self.assertEqual(self.read(self.POLICY), edited)
+        self.assertNotEqual(
+            self.policy_record()["base_hash"],
+            "sha256:" + hashlib.sha256(edited.encode()).hexdigest(),
+        )
+
+    def test_doctor_reports_a_deleted_policy_as_missing(self):
+        self.init("greenfield", name="myproj")
+        (self.workspace / self.POLICY).unlink()
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("installation: drifted", out)
+        self.assertIn(f"MISSING  {self.POLICY}", out)
+
+    def test_check_fails_on_policy_drift_and_names_the_accept_path(self):
+        self.init("greenfield", name="myproj")
+        (self.workspace / self.POLICY).write_text(self.edited_policy())
+        code, out, _ = self.run_cli("check", "--json")
+        self.assertEqual(code, 1)
+        document = json.loads(out)
+        self.assertIn("blocking_findings", document["result"]["conditions"])
+        drift = [f for f in document["findings"] if f["gate_id"] == "policy-drift"]
+        self.assertEqual(len(drift), 1)
+        self.assertEqual(drift[0]["subject"], self.POLICY)
+        self.assertEqual(drift[0]["severity"], "high")
+        self.assertIn("accept-policy", drift[0]["reason"])
+
+    def test_check_fails_on_a_deleted_policy(self):
+        self.init("greenfield", name="myproj")
+        (self.workspace / self.POLICY).unlink()
+        code, out, _ = self.run_cli("check", "--json")
+        self.assertEqual(code, 1)
+        document = json.loads(out)
+        drift = [f for f in document["findings"] if f["gate_id"] == "policy-drift"]
+        self.assertEqual(len(drift), 1)
+        self.assertIn("missing", drift[0]["reason"])
+
+    def test_status_reports_the_drifted_installation(self):
+        """A consumer reading only `status --json` must not be told the
+        installation is current while the governance document it pins is
+        edited or missing."""
+        self.init("greenfield", name="myproj")
+        code, out, _ = self.run_cli("status", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["installation_manifest"]["state"], "current")
+
+        (self.workspace / self.POLICY).write_text(self.edited_policy())
+        code, out, _ = self.run_cli("status", "--json")
+        self.assertEqual(code, 0)  # status itself is a read-only query
+        document = json.loads(out)
+        self.assertEqual(document["installation_manifest"]["state"], "drifted")
+        self.assertTrue(
+            any(f["gate_id"] == "policy-drift" for f in document["open_findings"]),
+            "the drift must be an open finding, not only a state transition",
+        )
+
+    def test_init_rerun_reports_drift_without_rebasing(self):
+        self.init("greenfield", name="myproj")
+        edited = self.edited_policy()
+        (self.workspace / self.POLICY).write_text(edited)
+        code, out, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 1)
+        self.assertIn("installation: drifted", out)
+        self.assertIn(f"DRIFTED  {self.POLICY}", out)
+        self.assertEqual(self.read(self.POLICY), edited)
+        self.assertNotEqual(
+            self.policy_record()["base_hash"],
+            "sha256:" + hashlib.sha256(edited.encode()).hexdigest(),
+        )
+
+    def test_migrate_does_not_rebase_the_recorded_base_either(self):
+        """`migrate --upgrade` is the explicit recovery path for MANAGED
+        files; a normative user-owned document's base must move only
+        through `accept-policy`."""
+        self.init("greenfield", name="myproj")
+        edited = self.edited_policy()
+        (self.workspace / self.POLICY).write_text(edited)
+        code, out, _ = self.run_cli("migrate", "--upgrade")
+        self.assertEqual(code, 1)
+        self.assertIn("installation: drifted", out)
+        self.assertEqual(self.read(self.POLICY), edited)
+        self.assertNotEqual(
+            self.policy_record()["base_hash"],
+            "sha256:" + hashlib.sha256(edited.encode()).hexdigest(),
+        )
+
+    def test_accept_policy_records_the_reviewed_change(self):
+        """The documented accept path: a reviewed edit stops reading as
+        drift, and the recorded base moves to the reviewed content."""
+        self.init("greenfield", name="myproj")
+        edited = self.edited_policy()
+        (self.workspace / self.POLICY).write_text(edited)
+        code, out, _ = self.accept_policy()
+        self.assertEqual(code, 0)
+        self.assertIn("accepted policy: " + self.POLICY, out)
+        self.assertIn("reviewer: alice", out)
+        self.assertIn("policy version: reliance-policy@1.2", out)
+        self.assertEqual(
+            self.policy_record()["base_hash"],
+            "sha256:" + hashlib.sha256(edited.encode()).hexdigest(),
+        )
+        # The drift signal clears -- all three commands report healthy.
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("installation: current", out)
+        self.assertIn(f"user-owned  {self.POLICY}", out)
+        code, out, _ = self.run_cli("check", "--json")
+        document = json.loads(out)
+        self.assertFalse([f for f in document["findings"] if f["gate_id"] == "policy-drift"])
+
+    def test_accept_policy_defaults_to_the_descriptors_declaration(self):
+        """`--policy-path` defaults to the descriptor's
+        `compatibility_policy.reliance_policy_path`."""
+        self.init("greenfield", name="myproj")
+        (self.workspace / self.POLICY).write_text(self.edited_policy())
+        code, out, _ = self.run_cli("accept-policy", "--reviewer", "alice")
+        self.assertEqual(code, 0)
+        self.assertIn("accepted policy: " + self.POLICY, out)
+
+    def test_accept_policy_refuses_a_path_that_disagrees_with_the_descriptor(self):
+        self.init("greenfield", name="myproj")
+        (self.workspace / self.POLICY).write_text(self.edited_policy())
+        code, _, err = self.accept_policy("--policy-path", "docs/other-policy.md")
+        self.assertEqual(code, 2)
+        self.assertIn("disagrees with the project descriptor", err)
+        # Nothing was recorded.
+        self.assertNotEqual(
+            self.policy_record()["base_hash"],
+            "sha256:" + hashlib.sha256(self.read(self.POLICY).encode()).hexdigest(),
+        )
+
+    def test_accept_policy_requires_a_reviewer(self):
+        """`--reviewer` is a required argument (argparse enforces it with
+        exit 2 before the command runs) -- no default, no LLM-supplied
+        value."""
+        self.init("greenfield", name="myproj")
+        (self.workspace / self.POLICY).write_text(self.edited_policy())
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_cli("accept-policy")
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_accept_policy_refuses_an_unrecorded_path(self):
+        """With no descriptor declaration to disagree with, an explicit path
+        the manifest does not record is refused -- the manifest records
+        what `ligature init` installed."""
+        self.init("greenfield", name="myproj")
+        descriptor = json.loads(self.read("project-descriptor.json"))
+        del descriptor["compatibility_policy"]
+        (self.workspace / "project-descriptor.json").write_text(json.dumps(descriptor))
+        code, _, err = self.accept_policy("--policy-path", "docs/other-policy.md")
+        self.assertEqual(code, 2)
+        self.assertIn("does not record", err)
+
+    def test_accept_policy_refuses_a_non_normative_path(self):
+        """The descriptor is user-owned but NOT normative -- its integrity
+        mechanism is schema validation, not a hash pin."""
+        self.init("greenfield", name="myproj")
+        descriptor = json.loads(self.read("project-descriptor.json"))
+        del descriptor["compatibility_policy"]
+        (self.workspace / "project-descriptor.json").write_text(json.dumps(descriptor))
+        code, _, err = self.accept_policy("--policy-path", "project-descriptor.json")
+        self.assertEqual(code, 2)
+        self.assertIn("not a normative policy document", err)
+
+    def test_accept_policy_refuses_a_missing_file(self):
+        self.init("greenfield", name="myproj")
+        (self.workspace / self.POLICY).unlink()
+        code, _, err = self.accept_policy()
+        self.assertEqual(code, 2)
+        self.assertIn("missing", err)
+
+    def test_accept_policy_refuses_a_document_without_a_version_marker(self):
+        """The recorded hash must always correspond to a policy that can
+        yield a policy_version -- the same convention accept-promotion
+        reads."""
+        self.init("greenfield", name="myproj")
+        (self.workspace / self.POLICY).write_text("# Reliance policy\n\nNo marker.\n")
+        code, _, err = self.accept_policy()
+        self.assertEqual(code, 2)
+        self.assertIn("Policy version", err)
+
+    def test_accept_policy_on_an_uninitialized_workspace_is_an_error(self):
+        code, _, err = self.accept_policy()
+        self.assertEqual(code, 2)
+        self.assertIn("not initialized", err)
+
+    def test_accept_policy_refuses_an_incompatible_manifest(self):
+        self.init("greenfield", name="myproj")
+        manifest = self.manifest()
+        manifest["manifest_schema_version"] = "2.0"
+        self.write_manifest(manifest)
+        code, _, err = self.accept_policy()
+        self.assertEqual(code, 2)
+        self.assertIn("incompatible", err)
+
+    def test_a_legacy_manifest_without_a_base_hash_adopts_the_on_disk_content_once(self):
+        """A pre-#78 workspace records no base_hash for the policy: the
+        first init/migrate adopts the on-disk content (so the workspace
+        becomes drift-checkable rather than permanently unverifiable), and
+        only a LATER edit reads as drift."""
+        self.init("greenfield", name="myproj")
+        manifest = self.manifest()
+        for record in manifest["files"]:
+            if record["path"] == self.POLICY:
+                del record["base_hash"]
+        self.write_manifest(manifest)
+        edited = self.edited_policy()
+        (self.workspace / self.POLICY).write_text(edited)
+
+        code, out, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 0)
+        self.assertIn("installation: current", out)
+        self.assertEqual(
+            self.policy_record()["base_hash"],
+            "sha256:" + hashlib.sha256(edited.encode()).hexdigest(),
+        )
+
+        # A further edit now reads as drift against the adopted base.
+        further = edited + "\n## Another unreviewed change\n"
+        (self.workspace / self.POLICY).write_text(further)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("installation: drifted", out)
 
 
 def _identity(content_hash, *, kind="zipapp", version=ligature_install.PRODUCT_VERSION) -> dict:

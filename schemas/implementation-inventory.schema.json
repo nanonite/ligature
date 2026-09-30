@@ -158,7 +158,11 @@
           "enum": ["entrypoint", "gate", "validator", "generator", "witness", "helper", "shared-loader"]
         },
         "disposition": { "$ref": "#/$defs/disposition" },
-        "summary": { "type": "string", "minLength": 1 }
+        "summary": { "type": "string", "minLength": 1 },
+        "installed_by_init": {
+          "type": "boolean",
+          "description": "true when `ligature init` ALSO copies this module's source into a target repo (chainlink #84). The bundle then carries it twice: at the archive root for the product to import, and under ligature_data/<path> so a packaged `init` can read it as a resource -- resources.resource_root() only exposes ligature_data/. Must be paired with a disposition the bundle actually ships (runtime-required or installed-template); tests/test_inventory_drift.py enforces that pairing and its agreement with ligature_install.file_registry."
+        }
       }
     },
     "inventory_entry": {

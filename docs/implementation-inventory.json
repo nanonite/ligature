@@ -185,10 +185,10 @@
     },
     {
       "gate_id": "CG3",
-      "title": "Generic-callee type universality (human-declared, presence-checked only)",
+      "title": "Generic-callee type universality (recomputed from closure evidence when those records determine it; tracked capability gap when they do not)",
       "stage": "Stage 8C",
       "implemented": true,
-      "module": "scripts/gate_g14.py (reports declared-not-verified; no artifact carries the type information to check it)",
+      "module": "scripts/gate_g14.py (generic_callees_verification: verified from artifact data when no closure record is a Kani result and every work package is recorded, otherwise a CG3 gap that blocks without a degradation record naming it plus a tracking issue)",
       "cli_command": "gate-g14"
     },
     {
@@ -258,6 +258,26 @@
       "name": "accept-promotion",
       "func": "cmd_accept_promotion",
       "stable_mapping": "approve promotion"
+    },
+    {
+      "name": "accept-policy",
+      "func": "cmd_accept_policy",
+      "stable_mapping": "stable accept path for reviewed normative-policy drift -- records the on-disk reliance-policy document as the manifest's reviewed base_hash (chainlink #78, docs/cli-contract.md §8)"
+    },
+    {
+      "name": "promote-evidence",
+      "func": "cmd_promote_evidence",
+      "stable_mapping": "stable mechanical evidence-draft promotion -- re-validates a staged evidence/*.json.draft (G1a/G1b), renames it to its target, and records the move (chainlink #79, docs/cli-contract.md §1/§10)"
+    },
+    {
+      "name": "record-ruling",
+      "func": "cmd_record_ruling",
+      "stable_mapping": "stable human-ruling record over an exact artifact set -- the gate accept-promotion enforces before minting a receipt (chainlink #82, docs/cli-contract.md §1/§5/§10)"
+    },
+    {
+      "name": "record-assurance",
+      "func": "cmd_record_assurance",
+      "stable_mapping": "stable assurance-recording command -- assembles a work package's assurance report at its manifest's own report.emit path from why3find proof certificates, with only the obligation-to-certificate mapping declared by the caller and that declaration checked (chainlink #87, docs/cli-contract.md §1/§10)"
     },
     {
       "name": "draft",
@@ -375,6 +395,11 @@
       "stable_mapping": "stable read-only consolidated gate run + one recommended next action (chainlink #56, docs/cli-contract.md \u00a77)"
     },
     {
+      "name": "write-set-check",
+      "func": "cmd_write_set_check",
+      "stable_mapping": "stable read-only write-set conformance report -- files outside allowed_roots / inside protected_roots relative to the project descriptor (chainlink #77, docs/cli-contract.md \u00a78)"
+    },
+    {
       "name": "doctor",
       "func": "cmd_doctor",
       "stable_mapping": "stable capability manifest; owns the text `status` used to print (docs/cli-contract.md \u00a78)"
@@ -382,7 +407,7 @@
     {
       "name": "init",
       "func": "cmd_init",
-      "stable_mapping": "stable; installs mode-correct managed files + versioned skill (chainlink #58, docs/cli-contract.md \u00a78)"
+      "stable_mapping": "stable; installs mode-correct managed files + versioned skill, plus the two witness-renderer scripts G13 hash-pins (chainlink #58/#84, docs/cli-contract.md \u00a78/\u00a710)"
     },
     {
       "name": "migrate",
@@ -632,7 +657,8 @@
       "path": "scripts/witness_renderer.py",
       "role": "witness",
       "disposition": "runtime-required",
-      "summary": "The renderer contract: fail loudly, never substitute."
+      "installed_by_init": true,
+      "summary": "The renderer contract: fail loudly, never substitute. Also installed by `init` so a work-package manifest can hash-pin it under G13 (chainlink #84)."
     },
     {
       "path": "scripts/witness_result.py",
@@ -644,13 +670,26 @@
       "path": "scripts/xml_escape.py",
       "role": "helper",
       "disposition": "runtime-required",
-      "summary": "Shared XML/SVG text escaping."
+      "installed_by_init": true,
+      "summary": "Shared XML/SVG text escaping. Also installed by `init`: witness_renderer.py imports it directly, so G13 pins it too (chainlink #84)."
     },
     {
       "path": "scripts/project_state.py",
       "role": "helper",
       "disposition": "runtime-required",
       "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`."
+    },
+    {
+      "path": "scripts/write_set.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "chainlink #77: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state."
+    },
+    {
+      "path": "scripts/promote_evidence.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "chainlink #79: mechanical evidence-draft promotion -- re-validates a staged evidence/*.json.draft (G1a/G1b), renames it to its target, and records the move, behind `ligature promote-evidence`."
     },
     {
       "path": "scripts/ligature_install.py",
@@ -681,6 +720,18 @@
       "role": "generator",
       "disposition": "excluded",
       "summary": "Release build tool (#57): derives the bundle from this inventory, writes a deterministic attested zipapp plus SHA256SUMS/PROVENANCE/NOTICE/THIRD_PARTY_NOTICES. Records the working tree's source provenance (`source_commit`, `source_dirty`, `working_tree_diff_hash`) honestly rather than assuming a clean tree (#64). Source-only; never itself bundled into the artifact."
+    },
+    {
+      "path": "scripts/manifest_input.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "The path guard shared by the two path-taking validators (#83): `ensure_manifest_path()` pre-flights a CLI's positional argument and `read_manifest_text()` does the same immediately before the read, so a missing path or a directory raises the user-facing `ManifestInputError` (`error: <kind> not found: <path>`, exit 1) instead of escaping as a raw FileNotFoundError/IsADirectoryError traceback."
+    },
+    {
+      "path": "scripts/record_assurance.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "chainlink #87: the producer gate-g14's achieved side never had -- assembles a work package's assurance report from why3find proof certificates (`proof.json`) and writes it to the manifest's own report.emit path, every field derived from evidence or the manifest, with only the obligation-to-certificate mapping declared by the caller and that declaration checked (concept anchor, containment, staleness), behind `ligature record-assurance`."
     }
   ],
   "schemas": [
@@ -852,6 +903,36 @@
     },
     {
       "path": "prompts/stage-3-interaction-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-bridge-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-witness-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-exemption-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-protocol-debt-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-conflict-resolution-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-concept-to-code.md",
       "disposition": "runtime-required",
       "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
     }
@@ -1093,6 +1174,16 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_write_set.py",
+      "kind": "regression",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_promote_evidence.py",
+      "kind": "regression",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_ligature_install.py",
       "kind": "regression",
       "disposition": "test-only"
@@ -1114,6 +1205,16 @@
     },
     {
       "path": "tests/test_neargye_port_acceptance.py",
+      "kind": "regression",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_manifest_input.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_record_assurance.py",
       "kind": "regression",
       "disposition": "test-only"
     }
@@ -1268,13 +1369,13 @@
       "documentation": 14,
       "excluded": 1,
       "installed-template": 4,
-      "runtime-required": 75,
-      "test-only": 65,
+      "runtime-required": 85,
+      "test-only": 69,
       "vendored-runtime": 1
     },
-    "total_entries": 160,
-    "test_count": 52,
-    "registered_cli_command_count": 39
+    "total_entries": 174,
+    "test_count": 56,
+    "registered_cli_command_count": 44
   },
   "documentation_and_templates": [
     {

@@ -73,6 +73,17 @@ class WorkspaceFixture(unittest.TestCase):
         # not be flagged on that field alone (chainlink #67).
         descriptor["review"]["reviewer"] = "real-reviewer"
         self.descriptor_path.write_text(json.dumps(descriptor))
+        # The descriptor declares compatibility_policy.reliance_policy_path
+        # (docs/reliance-policy.md) -- a real workspace has that file
+        # (`ligature init` installs it), so the fixture writes it too;
+        # otherwise every check run reports the declared policy document
+        # as missing (chainlink #78).
+        self.write(
+            "docs/reliance-policy.md",
+            (ROOT / "docs" / "reliance-policy.template.md").read_text().replace(
+                "# Reliance policy — `<project name>`", "# Reliance policy — `example-greenfield`", 1
+            ),
+        )
         return descriptor
 
     def init_workspace(self, mode="greenfield", name="myproj", crates=("crates/a",)):
@@ -311,6 +322,18 @@ class ProjectStateDocumentTest(WorkspaceFixture):
         self.assertEqual([c["target"] for c in doc["change_requests"]], ["specs/_closure/mcmc-chain.json"])
         self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
 
+    def test_a_partially_verified_cluster_kind_is_echoed(self):
+        """chainlink #85: a closure profile declaring `partial` must flow
+        through `status --json` and still validate against the
+        project-state schema -- the echo must not reject the value
+        `validate-closure` accepts."""
+        self.write_descriptor()
+        self.write("specs/_closure/mcmc-chain.json", {"cluster": "mcmc-chain", "closure_kind": "partial"})
+        _, doc = self.status()
+        cluster = next(c for c in doc["clusters"] if c["cluster"] == "mcmc-chain")
+        self.assertEqual(cluster["closure_kind"], "partial")
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+
     def test_installed_manifest_states(self):
         self.write_descriptor()
         self.assertNotEqual(self.status()[1]["installation_manifest"]["state"], "current")
@@ -423,6 +446,7 @@ class NextActionSelectionTest(unittest.TestCase):
             gate_runs=list(gate_runs),
             installation={},
             gate_integrity={},
+            write_set={},
             observations={},
             descriptor_diagnostics=list(descriptor_diagnostics),
         )
@@ -990,6 +1014,21 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
         self.assertEqual(doc["descriptor"]["state"], "present-valid")
         self.assertIsNone(doc["descriptor"]["closure_kind"])
 
+    def test_partial_closure_intent_is_read_back_by_status(self):
+        """chainlink #85: a project that knows it cannot achieve full
+        deductive closure declares `partial` intent in the descriptor; the
+        status echo must carry it and the document must still validate,
+        instead of the echo rejecting the value the descriptor accepted."""
+        descriptor = self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d.__setitem__("closure_kind", "partial"),
+        )
+        self.assertEqual(descriptor["closure_kind"], "partial")
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "present-valid")
+        self.assertEqual(doc["descriptor"]["closure_kind"], "partial")
+
     def test_invalid_descriptor_check_is_deterministic(self):
         self.write_example_descriptor(
             "project-descriptor.port.example.json",
@@ -1014,11 +1053,283 @@ class DeclaredClosureKindTest(WorkspaceFixture):
         descriptor = json.loads(ligature_install._render_descriptor("port", "myproj"))
         descriptor["closure_kind"] = "deductive"
         self.descriptor_path.write_text(json.dumps(descriptor))
+        # The rendered descriptor declares
+        # compatibility_policy.reliance_policy_path (docs/reliance-policy.md);
+        # a real workspace has that file, so the fixture writes it too --
+        # otherwise the #78 policy-path finding fires alongside the #67
+        # placeholder finding and the count below is 2, not 1.
+        self.write(
+            "docs/reliance-policy.md",
+            (ROOT / "docs" / "reliance-policy.template.md").read_text().replace(
+                "# Reliance policy — `<project name>`", "# Reliance policy — `myproj`", 1
+            ),
+        )
         code, doc = self.check()
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
         p0 = [f for f in doc["findings"] if f["gate_id"] == "P0"]
         self.assertEqual(len(p0), 1)
         self.assertIn("review.reviewer", p0[0]["reason"])
+
+
+class DescriptorPolicyPathTest(WorkspaceFixture):
+    """chainlink #78: the descriptor's
+    `compatibility_policy.reliance_policy_path` was read by nothing -- a
+    pointer naming a nonexistent file, or a path outside the project root,
+    validated as `present-valid` and left `check` exit 0. The field is the
+    project's own declaration of where its policy lives, so `check`
+    validates it semantically (existence + containment) and fails closed,
+    and the accept commands default to it rather than second-guessing it.
+    """
+
+    def test_a_declared_policy_path_that_does_not_exist_fails_check(self):
+        self.init_workspace()
+        descriptor = json.loads(self.descriptor_path.read_text())
+        descriptor["compatibility_policy"]["reliance_policy_path"] = "docs/no-such-policy.md"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        code, doc = self.check()
+        # init_workspace pins the gate hashes, so the policy-path finding
+        # is the run's own signal: exit 1 (blocking findings), not 5 (the
+        # gate-integrity fail-closed code an unpinned workspace would give).
+        self.assertEqual(code, 1)
+        self.assertIn("blocking_findings", doc["result"]["conditions"])
+        findings = [f for f in doc["findings"] if "reliance_policy_path" in f["reason"]]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], "high")
+        self.assertEqual(findings[0]["subject"], "docs/no-such-policy.md")
+        self.assertIn("does not exist", findings[0]["reason"])
+
+    def test_a_declared_policy_path_outside_the_project_root_fails_check(self):
+        self.init_workspace()
+        descriptor = json.loads(self.descriptor_path.read_text())
+        descriptor["compatibility_policy"]["reliance_policy_path"] = "/etc/hostname"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        code, doc = self.check()
+        self.assertEqual(code, 1)
+        findings = [f for f in doc["findings"] if "reliance_policy_path" in f["reason"]]
+        self.assertEqual(len(findings), 1)
+        self.assertIn("outside the project root", findings[0]["reason"])
+
+    def test_a_declared_policy_path_that_exists_inside_the_root_is_clean(self):
+        """The happy path: the declared policy document exists (init
+        installed it), so no policy-path finding fires."""
+        self.init_workspace()
+        code, doc = self.check()
+        self.assertFalse(
+            [f for f in doc["findings"] if "reliance_policy_path" in f["reason"]],
+            "a resolvable in-root policy path must not produce a finding",
+        )
+
+
+class VerifierPolicyEchoTest(WorkspaceFixture):
+    """chainlink #76: no command in the v1.0 surface reported the effective
+    verifier policy -- `status --json` and `check --json` contained zero
+    occurrences of the string "verifier" in either the valid or the invalid
+    case, so the field a pilot is named after was observable only by
+    opening the descriptor file. `status --json` now reads the policy back
+    in the same shape the pipeline consumes it (gate g9 resolves
+    policy.get(cluster, policy["default"])): `default`, the per-cluster
+    overrides under `clusters`, and the declared multi-verifier
+    composition under `supporting`."""
+
+    def write_example_descriptor(self, example: str, mutate) -> dict:
+        descriptor = json.loads((EXAMPLES / example).read_text())
+        mutate(descriptor)
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        return descriptor
+
+    def test_status_echoes_the_effective_verifier_policy(self):
+        descriptor = self.write_descriptor()
+        descriptor["verifier_policy"] = {
+            "default": "verus",
+            "supporting": ["kani"],
+            "crypto-mixed": "kani",
+        }
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "present-valid")
+        self.assertEqual(
+            doc["descriptor"]["verifier_policy"],
+            {
+                "default": "verus",
+                "clusters": {"crypto-mixed": "kani"},
+                "supporting": ["kani"],
+            },
+        )
+
+    def test_status_echoes_the_declared_policy(self):
+        self.write_descriptor()
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        # The greenfield example declares one per-cluster override
+        # ("scheduling": "kani") alongside the default -- the echo carries
+        # it under `clusters`, normalized into the shape gate g9 consumes.
+        self.assertEqual(
+            doc["descriptor"]["verifier_policy"],
+            {"default": "creusot", "clusters": {"scheduling": "kani"}, "supporting": []},
+        )
+
+    def test_status_echoes_the_policy_for_a_misspelled_key(self):
+        """Defect 1's hazard was silent acceptance: the typo was
+        indistinguishable from a real key. The echo makes it visible --
+        `defualt` shows up under `clusters` as an override for a cluster
+        literally named 'defualt', not as the default the user meant
+        (chainlink #76)."""
+        descriptor = self.write_descriptor()
+        descriptor["verifier_policy"]["defualt"] = "kani"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "present-valid")
+        self.assertEqual(doc["descriptor"]["verifier_policy"]["default"], "creusot")
+        # The typo sits next to the example's real "scheduling" override,
+        # visibly NOT the default the user meant.
+        self.assertEqual(
+            doc["descriptor"]["verifier_policy"]["clusters"],
+            {"defualt": "kani", "scheduling": "kani"},
+        )
+
+    def test_status_verifier_policy_is_null_for_an_invalid_descriptor(self):
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d["verifier_policy"].__setitem__("default", "creusot-rust"),
+        )
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "present-invalid")
+        self.assertIsNone(doc["descriptor"]["verifier_policy"])
+
+    def test_status_verifier_policy_is_omitted_for_an_absent_descriptor(self):
+        """Same discipline as mode/schema_version/closure_kind: the echo
+        is present (null) when the descriptor file exists but is invalid,
+        and omitted when there is no descriptor at all."""
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "absent")
+        self.assertNotIn("verifier_policy", doc["descriptor"])
+
+    def test_status_text_distinguishes_present_invalid_from_absent(self):
+        """chainlink #76 Defect 6: both states printed 'no project
+        descriptor present'. The human-readable status line and the
+        gate-integrity detail must tell a descriptor that is present but
+        invalid from one that is not there at all."""
+        code, out = self.run_cli("status")
+        self.assertEqual(code, 0)
+        self.assertIn("descriptor: absent", out)
+        self.assertIn("no project descriptor present", out)
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d["verifier_policy"].__setitem__("default", "creusot-rust"),
+        )
+        code, out = self.run_cli("status")
+        self.assertEqual(code, 0)
+        self.assertIn("descriptor: present-invalid", out)
+        self.assertIn("present but invalid", out)
+        self.assertIn("$.verifier_policy.default", out)
+        self.assertNotIn("descriptor: absent", out)
+
+
+class BoundaryG2PlusSearchRootTest(WorkspaceFixture):
+    """chainlink #81: the G2+ applies_to check was permanently degraded to
+    "applies_to unverifiable -- no --specs-search-root given" on every
+    boundary contract, because `_run_standalone_validators` (the path
+    `status` and `check` both take) called
+    `validate_boundary_contracts.validate(workspace)` with no
+    specs_search_root, and the descriptor's crates[].specs_search_root --
+    already in the schema, already required, already filled in real roots --
+    was read by nothing on this path. The check can now never succeed, so a
+    wrong or dangling constraint id is indistinguishable from a correct one
+    in every command reachable from the CLI."""
+
+    def _write_concept_spec(self, constraint_id="C003", applies_to=("pop_ready",)):
+        self.write(
+            "crates/a/specs/task_queue.json",
+            {
+                "concept": "TaskQueue",
+                "constraints": [
+                    {
+                        "id": constraint_id,
+                        "english": "pop_ready returns None only when no task has deadline <= now",
+                        "logic": "true",
+                        "kind": "postcondition",
+                        "applies_to": list(applies_to),
+                    }
+                ],
+            },
+        )
+
+    def test_status_resolves_callee_guarantees_against_the_descriptor_search_root(self):
+        """The exact reproduction of chainlink #81: with the descriptor
+        declaring crates[].specs_search_root and a concept spec present,
+        `status --json` must NOT report 'applies_to unverifiable -- no
+        --specs-search-root given' -- the id resolves and the applies_to
+        check runs."""
+        self.write_descriptor()
+        self._write_concept_spec()
+        self.write("crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json", BOUNDARY)
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        g2_findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertEqual(g2_findings, [], [f["summary"] for f in g2_findings])
+
+    def test_check_resolves_callee_guarantees_against_the_descriptor_search_root(self):
+        """Same fix on the `check` path -- the consolidated check must not
+        carry the permanent info finding either."""
+        self.write_descriptor()
+        self._write_concept_spec()
+        self.write("crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json", BOUNDARY)
+        code, doc = self.check()
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        g2_findings = [f for f in doc["findings"] if f["gate_id"] == "G2+"]
+        self.assertEqual(g2_findings, [], [f["reason"] for f in g2_findings])
+
+    def test_a_dangling_constraint_id_is_an_error_not_an_unverifiable_note(self):
+        """chainlink #81 direction 3: when the search root IS available and
+        the spec resolved but the id matches no constraint in it, that is a
+        real dangling reference -- a defect in the boundary contract, not an
+        unverifiable note. Previously this was info-severity, so `check`
+        exited 0 and a wrong id was indistinguishable from a correct one."""
+        self.write_descriptor()
+        self._write_concept_spec(constraint_id="C003")
+        self.write(
+            "crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+            {**BOUNDARY, "callee_guarantees": ["TaskQueue.C999"]},
+        )
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        g2_findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertEqual(len(g2_findings), 1, [f["summary"] for f in g2_findings])
+        self.assertEqual(g2_findings[0]["severity"], "high")
+        self.assertIn("dangling reference", g2_findings[0]["summary"])
+
+    def test_an_applies_to_mismatch_is_an_error_when_the_search_root_resolves(self):
+        """The applies_to check itself: a constraint that does not apply to
+        the boundary's callee method is a real error once the search root is
+        available (this already worked via `cmd_validate`; it must also work
+        through the `status`/`check` path)."""
+        self.write_descriptor()
+        self._write_concept_spec(applies_to=("other_method",))
+        self.write("crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json", BOUNDARY)
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        g2_findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertEqual(len(g2_findings), 1, [f["summary"] for f in g2_findings])
+        self.assertEqual(g2_findings[0]["severity"], "high")
+        self.assertIn("applies_to", g2_findings[0]["summary"])
+
+    def test_without_a_descriptor_the_check_still_degrades_to_info(self):
+        """The fallback is unchanged: with no descriptor at all there is no
+        search root to resolve against, so the applies_to check degrades to
+        its info-severity 'unverifiable' finding -- a missing descriptor is
+        not a boundary-contract defect, and every other command already
+        reports it."""
+        self.write("crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json", BOUNDARY)
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        g2_findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertEqual(len(g2_findings), 1, [f["summary"] for f in g2_findings])
+        self.assertEqual(g2_findings[0]["severity"], "info")
+        self.assertIn("no --specs-search-root given", g2_findings[0]["summary"])
 
 
 if __name__ == "__main__":

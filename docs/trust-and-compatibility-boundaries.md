@@ -45,11 +45,11 @@ reclassified. Its stability guarantee is "drift-tested," not "frozen."
 
 ## 4. Which commands are read-only
 
-`status`, `check`, every `validate <kind>`, every `gate <gate-id>`, and
-`doctor`/`version` (once implemented). None of these write to the
-workspace under any circumstances. This is enforced today by construction
-(none of the corresponding `cmd_*` functions call any write path) and is
-schema-enforced going forward for `check` via
+`status`, `check`, `write-set-check`, every `validate <kind>`, every
+`gate <gate-id>`, and `doctor`/`version` (once implemented). None of
+these write to the workspace under any circumstances. This is enforced
+today by construction (none of the corresponding `cmd_*` functions call
+any write path) and is schema-enforced going forward for `check` via
 `consolidated-check.schema.json`'s required `mutated_workspace: const
 false` field — which also means `check` may never internally invoke
 `extract-c-static`/`check-bridges`/`render-witness` (docs/cli-contract.md
@@ -59,6 +59,10 @@ via `next_action`, never run it itself.
 `report <report-id>` is **not** in this read-only list — see §5. Three of
 its four report-ids write a generated projection file; only
 `report pilot-cluster` is genuinely read-only.
+
+`record-assurance` (#87) is **not** in this read-only list either — it
+writes the one artifact `gate g14` reads, a work package's assurance
+report at its manifest's own `report.emit` path (see §5).
 
 ## 5. Which operations may write, and under what authority
 
@@ -71,6 +75,11 @@ its four report-ids write a generated projection file; only
 | `report feature-ledger` | `ci/results/feature_ledger.json` | none required — a generated projection, always safe to regenerate/overwrite |
 | `report contact-sheet` | `docs/witnesses/_contact_sheet.svg` | none required — same as above |
 | `report gold-set-measurement` | `ci/results/gold_set/` (default; `--no-write` suppresses it) | none required — same as above |
+| `accept-promotion` (#45, #82) | a promotion receipt under `specs/_promotions/` | `--reviewer` (required, human identity); the accepted artifact set and the policy document's own `Policy version:` line are the authority inputs, each accepted artifact's own `review` block must be provable to the sanctioned approve path (a matching entry in `ci/results/review_log.jsonl`) **and** every artifact in the set must carry a `ratified` human ruling over its current content in `ci/results/human_rulings.jsonl` -- a block that merely exists in the file, or an approval an unattended agent recorded, is not authority, and neither is silence (#82) |
+| `record-ruling` (#82) | one append-only entry in `ci/results/human_rulings.jsonl` | `--reviewer` (required, human identity) plus an explicit `--verdict ratified\|rejected` over an explicit `--artifact` set; this is the human-decision event Stage 4.5 is gated on, so it is a human checkpoint exactly like `approve` -- an agent must not run it either |
+| `accept-policy` (#78) | the ownership manifest's reviewed `base_hash` for the normative reliance-policy document | `--reviewer` (required, human identity); the only path through which a normative user-owned document's recorded base moves — `init`/`migrate` never re-base it (#78) |
+| `promote-evidence` (#79) | renames a staged evidence draft (`evidence/<id>.json.draft`) to its target, plus an audit entry in `ci/results/evidence_promotions.jsonl` | none required — evidence is non-normative (no `review` block, not a human checkpoint per plan.md §7.2), so promotion is mechanical (G1a/G1b re-validate + atomic rename); the human checkpoint remains on evidence-conflict-resolution, not evidence itself |
+| `record-assurance` (#87) | a work package's assurance report at its manifest's own `report.emit` path (the achieved side `gate g14` reads) | none required — every record field is derived from the verifier's own proof certificate and the manifest's provenance, never from a caller's word for what was proved (docs/achieved-assurance-schema.json: a hand-authored achieved record would be indistinguishable from fabricating a verification result), so there is no `review` block to checkpoint and no human identity to record. The only caller declaration — which certificate is about which obligation — is checked (the obligation must be one this manifest provides; the certificate must sit under a directory named for that obligation's concept; it must not be older than the Coma program it certifies), and a certificate with a stuck subgoal records nothing at all. A feature ledger already occupying the path is replaced with a warning naming the collision; content that is neither artifact is refused rather than destroyed |
 
 `report pilot-cluster` writes nothing (stdout only) and belongs in §4's
 read-only list in every respect except that it shares the `report` verb
@@ -118,6 +127,28 @@ entry in `project-state.schema.json` moves from `pending` to `recorded`
 only through a real human review event (which `approve`/`accept-promotion`
 already record via `review`/`--reviewer`), never through a mechanized gate
 run reclassifying it on its own.
+
+A `review` block on its own is also not that event (#82): it is
+self-asserted data, indistinguishable on disk from a block somebody
+typed. `accept-promotion` therefore proves each accepted artifact's
+block against `ci/results/review_log.jsonl` -- the append-only record
+`approve` writes -- and refuses the promotion when no approval entry
+matches, so crossing the Stage 4.5 checkpoint still requires a real
+review event, not a plausible-looking field.
+
+That still is not sufficient, and Stage 4.5 says so: an unattended
+agent can run `approve` itself, leaving audit entries no provenance
+check can tell apart from a human's, and artifacts with no `review`
+block at all (evidence records promoted outside any tool path) are
+invisible to the check by construction. So `accept-promotion` also
+requires a recorded human ruling -- `record-ruling --reviewer <name>
+--verdict ratified|rejected --artifact <path>...`, appended to
+`ci/results/human_rulings.jsonl` -- covering every artifact of the
+accepted set at its current content. Missing, `rejected`, stale (the
+file changed since the ruling) or unreadable all refuse. Like `approve`,
+`record-ruling` is a human checkpoint: a human ruling on a review block
+written out-of-band, or on a set promoted by hand, is recorded there,
+never inferred and never supplied by the agent.
 
 ## 9. Witnesses and differential agreement falsify, never prove
 

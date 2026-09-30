@@ -93,6 +93,15 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
         self.assertEqual(errors, [], [e.message for e in errors])
         self.assertTrue((self.workspace / ".codex" / "skills" / "ligature" / "SKILL.md").is_file())
         self.assertTrue((self.workspace / ".ligature" / "prompts" / "stage-0-evidence-intake.md").is_file())
+        # chainlink #84: the artifact alone must also ship -- and `init`
+        # must install -- the two scripts G13 hash-pins. The bundle keeps
+        # them under ligature_data/ (what resource_root() exposes) as well
+        # as at the archive root (what the product imports); if that
+        # second copy were missing, only this run would notice.
+        for rel in ("scripts/witness_renderer.py", "scripts/xml_escape.py"):
+            installed = self.workspace / rel
+            self.assertTrue(installed.is_file(), rel)
+            self.assertEqual(installed.read_bytes(), (ROOT / rel).read_bytes(), rel)
 
         status = self.run_artifact("--workspace", str(self.workspace), "status", "--json")
         self.assertEqual(status.returncode, 0, status.stdout + status.stderr)

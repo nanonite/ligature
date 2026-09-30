@@ -53,6 +53,15 @@ class ImplementationInventorySchemaTest(unittest.TestCase):
         doc["python_modules"][0]["path"] = "somewhere/else.py"
         self.assertTrue(list(self.validator.iter_errors(doc)))
 
+    def test_installed_by_init_must_be_a_boolean(self):
+        """chainlink #84: the flag build_zipapp branches on to ship a
+        second copy of a module under ligature_data/ for `init` -- a
+        stringy truthy value would silently never match `.get(...)`, so
+        the packaged installer would read a file the bundle omitted."""
+        doc = self._load()
+        doc["python_modules"][0]["installed_by_init"] = "yes"
+        self.assertTrue(list(self.validator.iter_errors(doc)))
+
     def test_never_release_entries_require_a_reason(self):
         doc = self._load()
         del doc["never_release"][0]["reason"]

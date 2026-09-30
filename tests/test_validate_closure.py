@@ -82,9 +82,28 @@ class ProfileSchemaTest(unittest.TestCase):
         self.assertTrue(findings_for(profile, PROFILE_PATH))
 
     def test_closure_kind_vocabulary_is_closed(self):
+        """Exactly three values (chainlink #85): the two uniform claims
+        over the whole closure plus `partial`. `mixed` and `degraded` are
+        rejected on purpose, not overlooked -- `degraded` already names
+        gate g14's outcome for a cluster released under a degradation
+        record, and the evidence composition `mixed` would name is
+        already carried by conditions.single_verifier_system."""
         profile = valid_profile()
-        profile["closure_kind"] = "proved"
-        self.assertTrue(findings_for(profile, PROFILE_PATH))
+        for kind in ("proved", "mixed", "degraded"):
+            with self.subTest(closure_kind=kind):
+                profile["closure_kind"] = kind
+                self.assertTrue(findings_for(profile, PROFILE_PATH))
+
+    def test_partial_is_an_accepted_closure_kind(self):
+        """chainlink #85's own repro: a pilot that cannot achieve full
+        deductive closure declares `partial` in specs/_closure/<cluster>.json
+        and `validate-closure` must accept it at G1a instead of refusing
+        the only honest state it can declare."""
+        for kind in ("partial", "deductive", "bounded"):
+            with self.subTest(closure_kind=kind):
+                profile = valid_profile()
+                profile["closure_kind"] = kind
+                self.assertEqual(findings_for(profile, PROFILE_PATH), [])
 
     def test_a_cluster_must_name_its_work_packages(self):
         profile = valid_profile()
@@ -215,6 +234,15 @@ class G17Test(unittest.TestCase):
         profile["closure_kind"] = "bounded"
         self.assertEqual(findings_for(profile, PROFILE_PATH), [])
 
+    def test_partial_is_fine_for_a_kani_owned_cluster(self):
+        """`partial` claims strictly less than `deductive`, so the G17
+        clause that refuses `deductive` over a Kani owner has nothing to
+        refuse (chainlink #85)."""
+        profile = valid_profile()
+        profile["conditions"]["owning_verifier"] = "kani"
+        profile["closure_kind"] = "partial"
+        self.assertEqual(findings_for(profile, PROFILE_PATH), [])
+
 
 class WorkspaceTest(unittest.TestCase):
     def setUp(self):
@@ -243,6 +271,23 @@ class WorkspaceTest(unittest.TestCase):
         self.write("specs/_closure/scheduler-core.degradation.json", valid_degradation())
         findings = [str(f) for f in validate(self.workspace)]
         self.assertTrue(any("stale excuse" in f for f in findings))
+
+    def test_a_cg3_tracking_record_is_not_a_stale_excuse(self):
+        """chainlink #86: a record naming
+        generic_callees_type_universal_or_creusot_owned beside a `true`
+        declaration is the tracking record plan.md §3 requires of every
+        capability gap (CG3), not a stale excuse -- this module cannot
+        see closure evidence either way, so whether such a record is
+        still needed, or has gone stale, is gate_g14's to decide from
+        the closure's own achieved records. Every OTHER condition keeps
+        the stale-excuse rule exactly as it was."""
+        record = valid_degradation()
+        record["failed_conditions"] = ["generic_callees_type_universal_or_creusot_owned"]
+        record["ceiling"] = "per-instantiation"
+        record["capability_gap"] = "CG3"
+        self.write("specs/_closure/scheduler-core.json", valid_profile())
+        self.write("specs/_closure/scheduler-core.degradation.json", record)
+        self.assertEqual([str(f) for f in validate(self.workspace)], [])
 
     def test_undeclared_degradation_is_rejected(self):
         profile = valid_profile()

@@ -60,13 +60,14 @@ the issue this implements does not ask for.
 Architectural limitation: non-generic is rarely mechanically knowable
 before a pilot exists
 -----------------------------------------------------------------------
-`generic_callees_type_universal_or_creusot_owned` is, by this
-pipeline's own established design (gate_g14.py's own CG3 comment: "a
-HUMAN DECLARATION this gate cannot verify -- no artifact in this
-pipeline carries the type information it would need"), never
-mechanically computed anywhere in this codebase. The ONLY place it is
-captured at all is a closure profile's own declared condition -- an
-artifact that, by construction, does not normally exist yet for a
+`generic_callees_type_universal_or_creusot_owned` is not mechanically
+knowable at selection time (gate_g14.py's CG3 handling, chainlink #86:
+computed from a closure's OWN achieved records when those records
+determine it, and reported as a capability gap needing a tracking
+record when they do not -- and a cluster nobody has picked as a pilot
+has no closure records at all). The ONLY place it is captured before
+then is a closure profile's own declared condition -- an artifact that,
+by construction, does not normally exist yet for a
 cluster nobody has picked as a pilot. Per this issue's own explicit
 requirement ("do not assume a cluster is non-generic merely because
 generic information is unavailable"), this module treats an absent or
@@ -415,8 +416,10 @@ def evaluate_clusters(
         if generic_status == "unknown":
             reasons.append(
                 "non-generic status unknown -- no genuinely valid, reviewed closure profile for this "
-                "cluster declares generic_callees_type_universal_or_creusot_owned (this pipeline never "
-                "computes this condition; it is a human declaration recorded only in a closure profile)"
+                "cluster declares generic_callees_type_universal_or_creusot_owned (this pipeline "
+                "computes that condition only from a closure's own achieved records at gate-g14 "
+                "(chainlink #86), which a cluster ranked here does not have yet; before then it is "
+                "a human declaration recorded only in a closure profile)"
             )
         elif generic_status == "generic":
             reasons.append(

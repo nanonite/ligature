@@ -6,7 +6,6 @@ a model following the template correctly would produce -- actually survives
 the real pipeline (stage_draft -> approve -> G1a/G1b/G2+), proving the
 contract is satisfiable, not just plausible-looking prose.
 """
-import json
 import sys
 import tempfile
 import unittest
@@ -15,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import pipeline  # noqa: E402
 from review_checkpoint import SKIP_VALIDATION, approve, stage_draft  # noqa: E402
 from validate_boundary_contracts import validate_file, validate_data, load_validator  # noqa: E402
 
@@ -37,6 +37,95 @@ class PromptTemplateScaffoldingTest(unittest.TestCase):
         self.assertIn("semantic_disposition", text)
         self.assertIn("lifecycle", text)
         self.assertIn("claim", text)
+
+    def test_stage_3_bridge_template_has_required_scaffolding(self):
+        text = (PROMPTS / "stage-3-bridge-drafting.md").read_text()
+        self.assertIn("Output **only** the JSON object", text)
+        self.assertIn("{{finding}}", text)
+        self.assertIn("{{prior_artifact}}", text)
+        self.assertIn("docs/bridge-schema.json", text)
+        self.assertIn("caller-postcondition", text.lower())
+
+    def test_stage_3_witness_template_has_required_scaffolding(self):
+        text = (PROMPTS / "stage-3-witness-drafting.md").read_text()
+        self.assertIn("Output **only** the JSON object", text)
+        self.assertIn("{{finding}}", text)
+        self.assertIn("{{prior_artifact}}", text)
+        self.assertIn("docs/witness-spec-schema.json", text)
+        self.assertIn("value_hash", text)
+
+    def test_stage_3_exemption_template_has_required_scaffolding(self):
+        text = (PROMPTS / "stage-3-exemption-drafting.md").read_text()
+        self.assertIn("Output **only** the JSON object", text)
+        self.assertIn("{{finding}}", text)
+        self.assertIn("{{prior_artifact}}", text)
+        self.assertIn("docs/exemption-schema.json", text)
+        self.assertIn("rationale", text)
+
+    def test_stage_3_protocol_debt_template_has_required_scaffolding(self):
+        text = (PROMPTS / "stage-3-protocol-debt-drafting.md").read_text()
+        self.assertIn("Output **only** the JSON object", text)
+        self.assertIn("{{finding}}", text)
+        self.assertIn("{{prior_artifact}}", text)
+        self.assertIn("docs/protocol-debt-schema.json", text)
+        self.assertIn("tracking_issue", text)
+
+    def test_stage_3_conflict_resolution_template_has_required_scaffolding(self):
+        text = (PROMPTS / "stage-3-conflict-resolution-drafting.md").read_text()
+        self.assertIn("Output **only** the JSON object", text)
+        self.assertIn("{{finding}}", text)
+        self.assertIn("{{prior_artifact}}", text)
+        self.assertIn("docs/conflict-resolution-schema.json", text)
+        self.assertIn("selected_authority", text)
+
+    def test_stage_3_concept_to_code_template_has_required_scaffolding(self):
+        text = (PROMPTS / "stage-3-concept-to-code.md").read_text()
+        self.assertIn("Output **only** the JSON object", text)
+        self.assertIn("{{finding}}", text)
+        self.assertIn("{{prior_artifact}}", text)
+        self.assertIn("spec.schema.json", text)
+        self.assertIn("constraint", text)
+
+
+class WriteSetDeclarationTest(unittest.TestCase):
+    """chainlink #77: the write set was consumed by no command AND
+    mentioned in no file `init` generates -- not the hash-pinned skill
+    authority region, not any of the three prompts -- so the one
+    declaration that keeps an implementation inside its crate's `src/`
+    and `tests/` was invisible to the agent that would violate it. These
+    tests pin the agent-facing half of the fix: every generated
+    agent-facing document states that the write set exists and is
+    binding."""
+
+    def test_skill_declares_the_write_set_binding(self):
+        text = (ROOT / "docs" / "ligature-skill.template.md").read_text()
+        self.assertIn("write_set", text)
+        self.assertIn("allowed_roots", text)
+        self.assertIn("protected_roots", text)
+        # binding, not advisory: the agent is told to write only under
+        # allowed_roots and never into protected_roots
+        self.assertIn("Write only under", text)
+        self.assertIn("never write into `protected_roots`", text)
+        # the enforcement command is in the skill's command table
+        self.assertIn("write-set-check", text)
+
+    def test_every_prompt_mentions_the_write_set(self):
+        for name in (
+            "stage-0-evidence-intake.md",
+            "stage-3-boundary-drafting.md",
+            "stage-3-interaction-drafting.md",
+            "stage-3-bridge-drafting.md",
+            "stage-3-witness-drafting.md",
+            "stage-3-exemption-drafting.md",
+            "stage-3-protocol-debt-drafting.md",
+            "stage-3-conflict-resolution-drafting.md",
+            "stage-3-concept-to-code.md",
+        ):
+            with self.subTest(prompt=name):
+                text = (PROMPTS / name).read_text()
+                self.assertIn("write_set", text)
+                self.assertIn("allowed_roots", text)
+                self.assertIn("protected_roots", text)
 
 
 class SimulatedCompliantOutputTest(unittest.TestCase):
@@ -114,6 +203,300 @@ class SimulatedCompliantOutputTest(unittest.TestCase):
         validator = load_validator()
         findings = validate_file(self.target, validator, specs_search_root=None)
         self.assertTrue(any(f.gate == "G2+" for f in findings))
+
+
+class SimulatedBridgeOutputTest(unittest.TestCase):
+    """A hand-written stand-in for 'what a model following
+    stage-3-bridge-drafting.md correctly would emit' -- no review block
+    (per the template's instruction), pushed through the real pipeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.target = (
+            self.root
+            / "crate_a"
+            / "specs"
+            / "_bridges"
+            / "BR-SCHED-TQ-001.json"
+        )
+        self.log = self.root / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_simulated_bridge_output_survives_stage_and_draft_validation(self):
+        simulated_llm_output = {
+            "schema_version": "1.0",
+            "bridge_id": "BR-SCHED-TQ-001",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "callee_requirement": "TaskQueue.C003",
+            "available_contract_facts": [
+                {"obligation_id": "Scheduler.C010", "role": "caller-precondition"},
+            ],
+            "target_expression": "TaskQueue.pop_ready(args, callee_state)",
+            "protocol_class": "pairwise",
+            "bridge_logic": {
+                "bindings": {"caller_self": "Scheduler"},
+                "premises": ["caller_self.ready()"],
+                "conclusion": {"obligation_id": "TaskQueue.C003"},
+            },
+        }
+        self.assertNotIn("review", simulated_llm_output)
+
+        from validate_bridge import load_draft_validator, validate_draft_data
+
+        validator = load_draft_validator()
+        findings = validate_draft_data(self.target, simulated_llm_output, validator)
+        errors = [f for f in findings if f.severity == "error"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
+
+
+class SimulatedWitnessOutputTest(unittest.TestCase):
+    """A hand-written stand-in for 'what a model following
+    stage-3-witness-drafting.md correctly would emit' -- no review block
+    (per the template's instruction), pushed through the real pipeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.target = (
+            self.root
+            / "crate_a"
+            / "specs"
+            / "_witnesses"
+            / "task_queue.load_factor.json"
+        )
+        self.log = self.root / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_simulated_witness_output_survives_stage_and_draft_validation(self):
+        simulated_llm_output = {
+            "schema_version": "1.0",
+            "witness_id": "W-TQ-LOAD-FACTOR",
+            "concept": "TaskQueue",
+            "query": "load_factor",
+            "fixture": {
+                "fixture_id": "FX-TQ-LOAD-FACTOR-001",
+                "seed": 42,
+                "description": "A fixture with a known load factor",
+            },
+            "renderer": "scalar_field_svg",
+            "expectation": {
+                "renderer": "scalar_field_svg",
+                "coverage_region": "full-grid",
+                "value_distribution": "must-vary",
+                "fixture_family": "FX-TQ-LOAD-FACTOR-001",
+            },
+            "determinism": {
+                "value_hash": "sha256:" + "a" * 64,
+                "claim": "byte-identical-across-runs",
+                "platforms": ["x86_64-unknown-linux-gnu"],
+            },
+            "output": {
+                "path": "docs/witnesses/task_queue.load_factor.svg",
+                "render_hash": "sha256:" + "b" * 64,
+                "renderer_actual": "scalar_field_svg",
+            },
+        }
+        self.assertNotIn("review", simulated_llm_output)
+
+        from validate_witness import load_draft_validator, validate_draft_data
+
+        validator = load_draft_validator()
+        findings = validate_draft_data(self.target, simulated_llm_output, validator)
+        errors = [f for f in findings if f.severity == "error"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
+
+
+class SimulatedExemptionOutputTest(unittest.TestCase):
+    """A hand-written stand-in for 'what a model following
+    stage-3-exemption-drafting.md correctly would emit' -- no review block
+    (per the template's instruction), pushed through the real pipeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.target = (
+            self.root
+            / "crate_a"
+            / "specs"
+            / "_exemptions"
+            / "I-SCHED-TQ-002.json"
+        )
+        self.log = self.root / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_simulated_exemption_output_survives_stage_and_draft_validation(self):
+        simulated_llm_output = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-002",
+            "rationale": "Prototype scaffolding boundary, tracked for removal",
+        }
+        self.assertNotIn("review", simulated_llm_output)
+
+        from validate_exemption import load_draft_validator, validate_draft_data
+
+        validator = load_draft_validator()
+        findings = validate_draft_data(self.target, simulated_llm_output, validator)
+        errors = [f for f in findings if f.severity == "error"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
+
+
+class SimulatedProtocolDebtOutputTest(unittest.TestCase):
+    """A hand-written stand-in for 'what a model following
+    stage-3-protocol-debt-drafting.md correctly would emit' -- no review
+    block (per the template's instruction), pushed through the real
+    pipeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.target = (
+            self.root
+            / "crate_a"
+            / "specs"
+            / "_protocol_debt"
+            / "I-SCHED-TQ-003.json"
+        )
+        self.log = self.root / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_simulated_protocol_debt_output_survives_stage_and_draft_validation(self):
+        simulated_llm_output = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-003",
+            "rationale": "Multi-step handshake protocol, not yet modeled",
+            "no_promoted_obligation_depends_on_protocol": True,
+            "no_work_package_touches_its_path": True,
+            "no_release_claim_includes_it": True,
+            "tracking_issue": "chainlink:#99",
+        }
+        self.assertNotIn("review", simulated_llm_output)
+
+        from validate_protocol_debt import load_draft_validator, validate_draft_data
+
+        validator = load_draft_validator()
+        findings = validate_draft_data(self.target, simulated_llm_output, validator)
+        errors = [f for f in findings if f.severity == "error"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
+
+
+class SimulatedConflictResolutionOutputTest(unittest.TestCase):
+    """A hand-written stand-in for 'what a model following
+    stage-3-conflict-resolution-drafting.md correctly would emit' -- no
+    review block (per the template's instruction), pushed through the real
+    pipeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.target = (
+            self.root
+            / "specs"
+            / "_conflicts"
+            / "EC-004.json"
+        )
+        self.log = self.root / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_simulated_conflict_resolution_output_survives_stage_and_draft_validation(self):
+        simulated_llm_output = {
+            "schema_version": "1.0",
+            "conflict_id": "EC-004",
+            "evidence": ["E-0143", "E-0201"],
+            "status": "resolved",
+            "resolution": {
+                "selected_authority": "E-0201",
+                "disposition_of_other": "incidental",
+                "rationale": "compatibility policy: do not preserve the legacy defect",
+            },
+        }
+        self.assertNotIn("review", simulated_llm_output)
+
+        from validate_conflict_resolution import load_draft_validator, validate_draft_data
+
+        validator = load_draft_validator()
+        findings = validate_draft_data(self.target, simulated_llm_output, validator)
+        errors = [f for f in findings if f.severity == "error"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
+
+
+class SimulatedConceptSpecOutputTest(unittest.TestCase):
+    """A hand-written stand-in for 'what a model following
+    stage-3-concept-to-code.md correctly would emit' -- no review block
+    (per the template's instruction), pushed through the real pipeline."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.target = (
+            self.root
+            / "crate_a"
+            / "specs"
+            / "task_queue.json"
+        )
+        self.log = self.root / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_simulated_concept_spec_output_survives_stage_and_draft_validation(self):
+        simulated_llm_output = {
+            "schema_version": "1.0",
+            "concept": "TaskQueue",
+            "cluster": "data-model",
+            "english_description": "A priority queue of tasks ordered by deadline",
+            "verifier": "creusot",
+            "queries": [
+                {
+                    "english": "Returns the number of tasks in the queue",
+                    "rust_sig": "fn len(&self) -> usize",
+                    "pure": True,
+                    "witness_required": False,
+                },
+            ],
+            "commands": [
+                {
+                    "english": "Adds a task to the queue",
+                    "rust_sig": "fn push(&mut self, task: Task)",
+                },
+            ],
+            "constraints": [
+                {
+                    "english": "The queue is never empty after a push",
+                    "logic": "self.len() > 0",
+                    "kind": "postcondition",
+                    "source": "hand",
+                    "id": "C001",
+                },
+            ],
+            "adversary_table": [
+                {
+                    "scenario": "Pushing a task with a deadline in the past",
+                    "violates": "deadline ordering",
+                    "resolution": "reject",
+                },
+            ],
+        }
+        self.assertNotIn("review", simulated_llm_output)
+
+        from select_pilot_cluster import load_concept_spec_validator
+
+        validator = load_concept_spec_validator()
+        findings = pipeline._validate_concept_spec_draft_data(
+            self.target, simulated_llm_output, validator
+        )
+        errors = [f for f in findings if f.severity == "error"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
 
 
 if __name__ == "__main__":

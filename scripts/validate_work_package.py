@@ -72,6 +72,11 @@ implements the Rust code -- this schema IS the interface spec for
     coverage (the same product-automaton engine, not a second matcher)
     -- this adds only "the renderer's own entries must be present and
     correctly covered," nothing new to the underlying machinery.
+    chainlink #84: `ligature init` installs both files (managed,
+    byte-identical to the product's own implementation), so a workspace
+    the shipped binary initialized can satisfy this requirement at all
+    -- before that, no pilot root had a scripts/ directory and this
+    check could only ever report "runner not found".
   - a witness-kind mitigation is rejected unless its assumption's risk is
     low, even alongside a stronger mitigation on the same entry, and a
     low-risk witness still requires its own human-risk-acceptance
@@ -109,6 +114,9 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from manifest_input import ManifestInputError  # noqa: E402
+from manifest_input import ensure_manifest_path  # noqa: E402
+from manifest_input import read_manifest_text  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
@@ -667,7 +675,9 @@ def validate_data(
 
 
 def _load_manifest(path: Path) -> dict:
-    text = path.read_text()
+    # Read through the shared path guard (chainlink #83): a missing path
+    # or a directory reached pathlib here and escaped as a raw traceback.
+    text = read_manifest_text(path, "manifest")
     if path.suffix in (".yaml", ".yml"):
         return yaml.safe_load(text)
     return json.loads(text)
@@ -680,6 +690,11 @@ def validate_file(
     specs_search_root: Path | None = None,
     allowed_boundary_dirs: list[Path] | None = None,
 ) -> list[Finding]:
+    # A bad path argument raises ManifestInputError (chainlink #83)
+    # instead of being turned into a Finding: there is no artifact here
+    # to have an opinion about yet, and the CLI reports it as
+    # `error: ...` with exit 1 rather than as a FAIL/found-n-findings
+    # line about a file that was never read.
     try:
         data = _load_manifest(path)
     except (json.JSONDecodeError, yaml.YAMLError) as e:
@@ -714,6 +729,17 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Checked before anything else (chainlink #83): a missing manifest
+    # path or a directory must report the argument the user actually got
+    # wrong -- `error: manifest not found: <path>`, exit 1 -- instead of
+    # a raw FileNotFoundError/IsADirectoryError traceback from pathlib,
+    # or an unrelated flag error standing in front of the bad path.
+    try:
+        ensure_manifest_path(args.manifest, "manifest")
+    except ManifestInputError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
     if args.descriptor is not None and args.allowed_boundary_dir:
         print("error: --descriptor and --allowed-boundary-dir are mutually exclusive", file=sys.stderr)
         return 2
@@ -723,6 +749,13 @@ def main(argv: list[str]) -> int:
             descriptor = load_project_descriptor(args.descriptor)
         except ProjectDescriptorError as e:
             print(f"error: {e}", file=sys.stderr)
+            return 2
+        except OSError as e:
+            # Same defect class as the manifest check above (chainlink
+            # #83): a --descriptor naming a missing path or a directory
+            # used to escape as a raw traceback; the promotion receipt's
+            # standalone CLI already reports this cleanly.
+            print(f"error: cannot read project descriptor {args.descriptor}: {e}", file=sys.stderr)
             return 2
         allowed_boundary_dirs = boundary_dirs_for_descriptor(descriptor, args.workspace_root)
     elif args.allowed_boundary_dir:
@@ -749,7 +782,14 @@ def main(argv: list[str]) -> int:
     specs_search_root = args.specs_search_root if args.specs_search_root is not None else args.workspace_root
 
     validator = load_validator()
-    findings = validate_file(args.manifest, validator, args.workspace_root, specs_search_root, allowed_boundary_dirs)
+    try:
+        findings = validate_file(args.manifest, validator, args.workspace_root, specs_search_root, allowed_boundary_dirs)
+    except ManifestInputError as e:
+        # The pre-flight above already caught the ordinary shapes; this
+        # is the read-time remainder (a path removed or replaced between
+        # the two checks, a permission denial), reported identically.
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
 

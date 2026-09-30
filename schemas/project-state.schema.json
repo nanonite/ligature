@@ -8,7 +8,7 @@
     "schema_version", "product", "installation_manifest", "descriptor",
     "binary_identity", "artifacts", "obligations", "clusters",
     "open_findings", "human_decisions", "change_requests",
-    "gate_integrity", "generated_observations"
+    "gate_integrity", "write_set", "generated_observations"
   ],
   "additionalProperties": false,
   "properties": {
@@ -51,8 +51,25 @@
         "schema_version": { "type": ["string", "null"] },
         "closure_kind": {
           "type": ["string", "null"],
-          "enum": ["deductive", "bounded", null],
+          "enum": ["deductive", "bounded", "partial", null],
           "description": "The closure_kind the project declared in project-descriptor.json (chainlink #73), read back here so the recorded intent is visible in status output rather than only living in the descriptor file. null when the descriptor is absent, invalid, or declares no intent. Additive optional field: a descriptor without it still validates against schema_version 1.0."
+        },
+        "verifier_policy": {
+          "type": ["object", "null"],
+          "description": "The effective verifier policy read back from project-descriptor.json (chainlink #76): `default` (the verifier for every cluster not listed by name), `clusters` (per-cluster overrides, keyed by cluster name), and `supporting` (additional verifiers whose evidence backs the primary one). Read back so a pilot's core declaration -- the field the workspace is named after -- is observable in status output instead of being discoverable only by opening the descriptor file or probing the schema by trial and error. null when the descriptor is present but invalid; the key is omitted when the descriptor is absent or unreadable, matching mode/schema_version/closure_kind. Additive optional field: a descriptor without it still validates against schema_version 1.0.",
+          "required": ["default"],
+          "additionalProperties": false,
+          "properties": {
+            "default": { "type": "string", "enum": ["kani", "creusot", "verus"] },
+            "clusters": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "enum": ["kani", "creusot", "verus"] }
+            },
+            "supporting": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["kani", "creusot", "verus"] }
+            }
+          }
         }
       }
     },
@@ -105,6 +122,17 @@
       "additionalProperties": false,
       "properties": {
         "state": { "type": "string", "enum": ["pinned", "unpinned", "drifted", "unknown"] },
+        "details": { "type": "string" }
+      }
+    },
+
+    "write_set": {
+      "type": "object",
+      "required": ["state"],
+      "additionalProperties": false,
+      "description": "The descriptor's write_set (allowed_roots / protected_roots) evaluated against the workspace's actual files (chainlink #77) -- the enforcement boundary made machine-checked rather than merely declared. `clean`: every file is accounted for by allowed_roots, protected_roots, the ownership manifest, a declared crate's specs/ tree, or a canonical pipeline location. `violations`: files outside every allowed root that no declaration accounts for, or a vacuous declaration (an allowed_roots pattern matching every path, or an empty protected_roots) that enforces nothing. `unknown`: no valid project descriptor -- the write set cannot be evaluated. Additive required field: a status document without it does not validate against schema_version 1.0.",
+      "properties": {
+        "state": { "type": "string", "enum": ["clean", "violations", "unknown"] },
         "details": { "type": "string" }
       }
     },
@@ -211,7 +239,7 @@
       "additionalProperties": false,
       "properties": {
         "cluster": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
-        "closure_kind": { "type": "string", "enum": ["deductive", "bounded", "unknown"] },
+        "closure_kind": { "type": "string", "enum": ["deductive", "bounded", "partial", "unknown"] },
         "state": { "type": "string", "enum": ["closes", "degraded", "blocked", "unknown"] },
         "limitations": {
           "type": "array",

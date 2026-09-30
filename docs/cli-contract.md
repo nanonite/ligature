@@ -26,6 +26,11 @@ ligature doctor                              # #57/#58
 ligature version [--verify]                  # #57
 ligature status [--json]                     # #56 -- project-state query
 ligature check [--json] [next]               # #56 -- consolidated gate run + next action
+ligature write-set-check [--json]            # #77 -- read-only write-set conformance
+ligature accept-policy --reviewer <name>     # #78 -- record a reviewed governance change
+ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
+ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
+ligature record-assurance <work-package> --proof <obligation>=<path> [...]  # #87 -- assemble a work package's assurance report from verifier proof certificates
 ligature validate <artifact-kind> <target>   # deterministic, per-artifact
 ligature gate <gate-id> [args...]            # deterministic, cross-artifact
 ligature draft <artifact-kind> <target>      # Stage 0/3, one-shot LLM
@@ -57,6 +62,26 @@ the four report-ids.
 
 `--workspace` and `--descriptor` remain global flags on every subcommand,
 unchanged from today's `build_parser()`.
+
+`record-assurance` (#87) is a top-level verb rather than a flag on
+`gate g14` because the two are the two halves of one artifact with three
+different jobs between them: `gate g14` *reads* the achieved side,
+`record-assurance` *writes* it, and `check` must stay read-only (§7). It
+is the producer `docs/assurance-report-schema.json` never had for its
+obligation half (the bridge half already has
+`gate_g9.bridge_records_for()`): it assembles a work package's report at
+that manifest's own `report.emit` path from the verifier's own proof
+certificates, so `gate g14` can check whether obligations are discharged
+instead of reporting "recorded no achieved assurance" for a workspace
+whose proofs are complete (the date-creusot pilot, chainlink #87). Every
+field of the record is derived from the certificate and the manifest --
+never asserted -- and the one thing the caller does declare, which
+certificate is about which obligation (`--proof <obligation>=<path>`,
+repeatable), is checked rather than trusted: the obligation must be one
+the manifest provides, and the certificate must sit under a directory
+named for that obligation's own concept. It writes nothing on a refusal
+and exits 0 (recorded) / 1 (the evidence does not establish the
+obligation) / 2 (invalid input), per docs/exit-code-contract.md.
 
 There is no `ligature start` or other supervisory verb that runs the phase
 loop autonomously. `approve`/`promote` are human-authority checkpoints
@@ -90,6 +115,17 @@ arguments and each command's own flags carry over unchanged.
 | `gold-set` | `validate-gold-set` | |
 | `closure` | `validate-closure` | G1a/G1b/G17 |
 
+For the two path-taking kinds, `work-package` and `promotion`, the
+positional `manifest`/`receipt` path is checked before anything else the
+command would load: a missing path or a directory is refused with one
+line on stderr naming the path and the kind of file the command expected
+(`error: manifest not found: <path>`, `error: receipt not found: <path>`,
+`error: manifest path is a directory, expected a file: <path>`), exit 1,
+never a Python traceback (chainlink #83). `validate-work-package` and
+`validate-promotion` -- the §10 aliases for `validate work-package` /
+`validate promotion` -- report exactly this line: an alias is routing,
+never a second error policy (§9).
+
 ## 3. `gate <gate-id>`
 
 The six standalone cross-artifact gates become one verb. Gates that are
@@ -112,9 +148,11 @@ call that exercises them.
 
 Already effectively nested: `draft <stage> <template_name> <target>` keeps
 its shape unchanged, `template_name` filling the `<artifact-kind>` slot
-(`evidence-intake`, `boundary-drafting`, `interaction-drafting` today, one
-per `prompts/*.md`). No legacy flat commands to reconcile — `draft` was
-never flat.
+(`evidence-intake`, `boundary-drafting`, `interaction-drafting`,
+`bridge-drafting`, `witness-drafting`, `exemption-drafting`,
+`protocol-debt-drafting`, `conflict-resolution-drafting`, `concept-to-code`
+— one per `prompts/*.md`). No legacy flat commands to reconcile — `draft`
+was never flat.
 
 ## 5. `approve <operation>`
 
@@ -124,6 +162,31 @@ never flat.
 | `pair` | `approve-pair` | `--reviewer`, interaction + protocol-debt, atomic |
 | `exemption-pair` | `approve-exemption-pair` | `--reviewer`, interaction + exemption, atomic (R2 bootstrap) |
 | `promotion` | `accept-promotion` | `--reviewer` + `--policy-path` + repeatable `--artifact`; Stage 4.5's own deterministic, no-LLM generator |
+
+`promotion` is the one operation whose inputs must already carry both
+requirements of #82 before anything is written:
+
+- **provenance** — `accept-promotion` reads every accepted artifact's own
+  `review` block back against the approval audit log
+  (`ci/results/review_log.jsonl`, the append-only trail `approve` writes)
+  and refuses when no matching approval entry exists — so `--reviewer`
+  names *who is accepting the promotion*, never who approved the
+  artifacts being promoted, and a `review` block that was merely typed
+  into a file cannot pass. Artifacts with no `review` block (the reliance
+  policy document, evidence records, concept specs) have nothing to
+  prove *here*, which is exactly the hole the second requirement fills;
+- **a human ruling** — every artifact in the manifest must also carry a
+  `ratified` verdict over its current content in
+  `ci/results/human_rulings.jsonl`, recorded by `record-ruling --reviewer
+  <name> --verdict ratified|rejected --artifact <path> [--artifact
+  <path> ...]` (§1, §10). Provenance cannot ask whether a human has ruled
+  on the accepted *set*: an unattended agent can run `approve` itself (its
+  audit entries are indistinguishable), and records promoted outside any
+  tool path have no review block to check. A `rejected` ruling, a missing
+  ruling, or one recorded over an older version of the file all refuse.
+
+A refusal exits 1 per the exit-code contract, names the offending
+artifacts, and writes no receipt and no audit entry.
 
 ## 6. `report <report-id>`
 
@@ -182,9 +245,10 @@ exposes separately:
 | `refresh-bridge-checks` | run `check-bridges` | `ligature check-bridges` |
 | `refresh-witness` | run `render-witness` | `ligature render-witness <witness_id> --renderer <...>` |
 | `author-interaction` | draft an interaction spec (see `schemas/examples/consolidated-check.blocked.example.json`) | `ligature draft interaction <target>` |
+| `promote-evidence` | promote a staged evidence draft (chainlink #79) | `ligature promote-evidence <target>` |
 
 `action_id` is required whenever `next_action.kind` is `automated-command`
-and forbidden otherwise, and is schema-closed to exactly the four values
+and forbidden otherwise, and is schema-closed to exactly the five values
 above as of v1.0 (round-4 external review: an earlier revision left this
 field an open pattern, which let any well-formed but undefined string —
 `invented-unstable-action` was the confirmed repro — validate; that is
@@ -304,6 +368,57 @@ above that file's `CONFLICT` line, and `init` installs
 `schemas/project-descriptor.schema.json` into `.ligature/schemas/`
 alongside the other two bundled schemas.
 
+**Implemented by #77.** `ligature write-set-check` makes the descriptor's
+`write_set` (`allowed_roots` / `protected_roots`) machine-checked rather
+than merely declared: it reports the files in the workspace that are
+outside every `allowed_roots` pattern and not otherwise accounted for by
+`protected_roots`, the ownership manifest, a declared crate's `specs/`
+tree, or a canonical pipeline location (`ci/`, `evidence/`, workspace-
+level `specs/_<kind>/`, `docs/witnesses/`) -- the date-creusot pilot's
+`rust/rogue/evil.rs` repro, which every v1.0 command reported nothing
+for. It also reports the files inside `protected_roots` that nothing
+vouches for (the protected-surface audit, non-blocking), and flags the
+vacuous declaration shapes the schema accepts -- an `allowed_roots`
+pattern matching every path (`"**"`) and an empty `protected_roots` --
+as violations of the write set's own purpose. `status --json` carries
+the verdict as `write_set.state` (`clean` / `violations` / `unknown`),
+`check --json` carries one high-severity `write-set` finding per
+violation (so `check` exits 1 on an out-of-set file, the same
+blocking-findings code every other high-severity finding uses), and the
+command itself exits 0/1/2 per the exit-code contract. The same change
+closes the descriptor-level `gate_integrity` path-escape gap: an entry
+resolving outside the workspace (absolute, or a `../` traversal) is
+refused rather than hashed against someone else's file -- the discipline
+`validate_work_package.check_gate_integrity` already applies to
+work-package manifests.
+
+**Implemented by #78.** A user-owned normative document (`docs/reliance-policy.md`)
+could not be drift-checked, and the ownership manifest recorded
+`base_hash`/`expected_hash` for it that were never compared -- the
+standing governance document could be rewritten, including to contradict
+its own fixed resolution table, while `doctor`, `check` and `status`
+all reported healthy. The on-disk content of a normative user-owned
+document is now compared against the manifest's reviewed `base_hash`:
+a mismatch or a missing file makes `doctor` report `DRIFTED`/`MISSING`
+and exit 1, makes `check` emit a high-severity `policy-drift` finding
+and exit 1, and drops `status --json`'s `installation_manifest.state`
+from `current` to `drifted` with the drift carried as an open finding.
+The recorded base moves only through the new explicit accept path
+`ligature accept-policy --reviewer <name>` (analogous to
+`accept-promotion`): `init`/`migrate` never re-base a normative
+user-owned file to whatever is on disk, and the document must carry
+exactly one `Policy version: <name>@<major>.<minor>` marker line -- the
+same convention `accept-promotion` reads -- so the recorded hash always
+corresponds to a policy that can yield a policy_version. The
+descriptor's `compatibility_policy.reliance_policy_path` pointer was
+also read by nothing: it is now validated (`check` fails closed when it
+names a nonexistent file or a path outside the project root) and
+consumed as the default for both `accept-policy --policy-path` and
+`accept-promotion --policy-path`, with an explicit path that disagrees
+with the declaration refused. A legacy manifest that records no
+`base_hash` adopts the on-disk content once, so a pre-#78 workspace
+becomes drift-checkable rather than permanently unverifiable.
+
 ## 9. Compatibility alias policy
 
 Every legacy flat command not listed in §7 (internal) becomes a
@@ -323,7 +438,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 39/39)
+## 10. Legacy command → disposition (complete, 44/44)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -332,6 +447,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 
 | legacy command | disposition |
 |---|---|
+| `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` / inside `protected_roots` relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json` (#77, §8) |
 | `validate` | alias → `validate boundary` |
 | `validate-interaction` | alias → `validate interaction` |
 | `validate-exemption` | alias → `validate exemption` |
@@ -356,6 +472,10 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `approve-pair` | alias → `approve pair` |
 | `approve-exemption-pair` | alias → `approve exemption-pair` |
 | `accept-promotion` | alias → `approve promotion` |
+| `accept-policy` | stable; records a reviewed change to the normative reliance-policy document as the manifest's reviewed `base_hash` (the explicit accept path for governance drift; `--policy-path` defaults to the descriptor's `compatibility_policy.reliance_policy_path`, and a disagreeing explicit path is refused) (#78, §8) |
+| `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1) |
+| `record-ruling` | stable; records an explicit human verdict (`ratified`\|`rejected`) over an exact artifact set in `ci/results/human_rulings.jsonl` -- the human-ruling gate `accept-promotion` enforces: no receipt is minted until every artifact in the accepted set carries a `ratified` ruling over its current content (#82, §5) |
+| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from the verifier's proof certificates (`proof.json`) and writes it atomically -- the achieved side `gate g14` reads, and the producer the obligation half of `docs/assurance-report-schema.json` never had (#87, §1). Every record field is derived (certificate + manifest provenance); the caller's only declaration, `--proof <obligation>=<path>`, is checked (obligation provided by this manifest; certificate under a directory named for the obligation's concept; certificate not older than its Coma program) and a certificate with a stuck subgoal records nothing. A feature ledger already sitting at that path is replaced with a warning naming the collision; unrecognizable content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
 | `select-pilot-cluster` | alias → `report pilot-cluster` |
 | `measure-gold-set` | alias → `report gold-set-measurement` |
 | `generate-feature-ledger` | alias → `report feature-ledger` |
@@ -369,11 +489,11 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation, and both report the build's source provenance (`source_commit`, and `source_dirty`/`working_tree_diff_hash` for a dirty tree) (§1, §8, #57, #64) |
 | `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3 (#57 grammar v1.0) |
 | `report` | stable; nested reporting verb, `report <report-id>` dispatches the four report generators in §6 (#57 grammar v1.0) |
-| `init` | stable; installs mode-correct managed files + versioned skill into a target repo (§8, #58) |
+| `init` | stable; installs mode-correct managed files + versioned skill into a target repo, plus the two witness-renderer scripts G13 hash-pins (#84, §8, #58) |
 | `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 39 has a nested home, an internal-operation classification,
+every one of the 44 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

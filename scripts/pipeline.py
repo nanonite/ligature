@@ -76,8 +76,27 @@ Implemented now, against schemas that actually exist:
             leaves neither behind) -- the dedicated acceptance operation
             this schema needs, since approve()'s nested review: {} write
             is incompatible with this schema's top-level reviewer/
-            accepted_at and additionalProperties: false. See
-            scripts/generate_promotion_receipt.py.
+            accepted_at and additionalProperties: false. Two guards run
+            before anything is written (chainlink #82): a review-
+            provenance check (every accepted artifact's own `review`
+            block must match an entry in the approval audit log
+            ci/results/review_log.jsonl) and the human-ruling gate
+            (every manifest entry must carry a `ratified` human ruling
+            over that exact version in ci/results/human_rulings.jsonl).
+            See scripts/generate_promotion_receipt.py.
+  record-ruling  The human-ruling gate's writer (chainlink #82): records
+            an explicit, named human verdict -- `ratified` or
+            `rejected` -- over an exact accepted-artifact set, with the
+            hashes computed by the SAME manifest routine
+            accept-promotion uses, appended to the workspace's
+            ci/results/human_rulings.jsonl. `accept-promotion` refuses
+            to mint a receipt until every artifact in its accepted set
+            is covered by a `ratified` ruling over its current content
+            -- the Stage 4.5 gate the provenance check cannot be, since
+            an unattended agent can run `approve` itself and artifacts
+            with no review block (evidence promoted outside any tool
+            path) escape provenance entirely. Not a validation pass:
+            kind validators still run at acceptance.
   validate-interaction  Stage 4's G1a/G1b/G2++/G15 over interaction (I)
             specs (#16/#17/#19): schema plus COMPUTED eligibility (plan.md
             §5.2) -- eligibility is derived from edge_class, never
@@ -318,6 +337,11 @@ Implemented now, against schemas that actually exist:
             cluster's profile and degradation record must agree about
             which conditions failed -- in both directions, since a stale
             excuse and an undeclared degradation each hide something.
+            One documented exception (chainlink #86): a record naming
+            generic_callees_type_universal_or_creusot_owned beside a
+            `true` declaration is the CG3 tracking record, not a stale
+            excuse -- gate-g14, which can see closure evidence, decides
+            whether such a record is still needed.
   gate-g14  Stage 8C's release closure (plan.md §8.5): loads every
             required-guarantee dependency, computes the TRANSITIVE
             closure, detects cycles, evaluates satisfies() on every
@@ -326,8 +350,14 @@ Implemented now, against schemas that actually exist:
             §8.5's motivating case is a depth-2 assumption that every
             direct check passes over. A cycle closes only with an
             explicit well-foundedness discharge naming exactly its
-            members (CG6). Outcome is per cluster and never global:
-            closes / degraded-under-an-accepted-record / blocked.
+            members (CG6). The one condition no artifact can always
+            settle (CG3's generic-callee type universality) is
+            recomputed from the closure's own records when those
+            determine it, and is otherwise a capability gap that
+            blocks without a degradation record naming it and carrying
+            a tracking issue (chainlink #86). Outcome is per cluster and
+            never global: closes / degraded-under-an-accepted-record /
+            blocked.
 
 Not yet implemented -- the schemas these stages need don't exist yet
 (tracked as the named chainlink issues, not guessed at here):
@@ -375,6 +405,9 @@ from gate_r1_g16 import gate_workspace as gate_r1_g16_workspace  # noqa: E402
 from gate_r1_g16 import report_findings as report_r1_g16_findings  # noqa: E402
 from generate_promotion_receipt import PromotionReceiptError  # noqa: E402
 from generate_promotion_receipt import accept_promotion  # noqa: E402
+from generate_promotion_receipt import record_ruling  # noqa: E402
+from manifest_input import ManifestInputError  # noqa: E402
+from manifest_input import ensure_manifest_path  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import boundary_dir_for as _boundary_dir_for  # noqa: E402
 from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
@@ -383,6 +416,7 @@ from project_descriptor import conflict_dir_for as _conflict_dir_for  # noqa: E4
 from project_descriptor import evidence_dir_for as _evidence_dir_for  # noqa: E402
 from project_descriptor import exemption_dir_for as _exemption_dir_for  # noqa: E402
 from project_descriptor import interaction_dir_for as _interaction_dir_for  # noqa: E402
+from project_descriptor import is_underscore_artifact_path  # noqa: E402
 from project_descriptor import load_project_descriptor as _load_project_descriptor  # noqa: E402
 from project_descriptor import protocol_debt_dir_for as _protocol_debt_dir_for  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
@@ -415,8 +449,10 @@ from validate_gold_set import gold_set_dir_for as _gold_set_dir_for  # noqa: E40
 from validate_gold_set import validate_workspace as validate_gold_set_workspace  # noqa: E402
 from validate_witness import count_discovered as _count_witnesses  # noqa: E402
 from validate_witness import count_results as _count_witness_results  # noqa: E402
+from validate_witness import load_draft_validator as load_witness_draft_validator  # noqa: E402
 from validate_witness import load_validator as load_witness_validator  # noqa: E402
 from validate_witness import validate_crate as validate_witness_crate  # noqa: E402
+from validate_witness import validate_draft_data as validate_witness_draft_data  # noqa: E402
 from validate_witness import validate_results as validate_witness_results  # noqa: E402
 from validate_witness import witness_dir_for as _witness_dir_for  # noqa: E402
 from gate_g20 import validate_witness_for_approval  # noqa: E402
@@ -433,6 +469,10 @@ from validate_evidence import valid_evidence_ids  # noqa: E402
 from validate_evidence import validate_data as validate_evidence_data  # noqa: E402
 from validate_evidence import validate_workspace as validate_evidence_workspace  # noqa: E402
 from validate_evidence import count_discovered as _count_evidence  # noqa: E402
+from promote_evidence import EvidencePromotionError, promote_evidence  # noqa: E402
+from record_assurance import LEDGER_COLLISION_NOTE  # noqa: E402
+from record_assurance import RecordAssuranceError  # noqa: E402
+from record_assurance import record_assurance  # noqa: E402
 from validate_exemption import load_draft_validator as load_exemption_draft_validator  # noqa: E402
 from validate_exemption import load_validator as load_exemption_validator  # noqa: E402
 from validate_exemption import validate_crate as validate_exemption_crate  # noqa: E402
@@ -460,6 +500,7 @@ from validate_work_package import load_validator as load_work_package_validator 
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from select_pilot_cluster import exit_code_for as _pilot_exit_code_for  # noqa: E402
+from select_pilot_cluster import load_concept_spec_validator  # noqa: E402
 from select_pilot_cluster import render_report as _render_pilot_report  # noqa: E402
 from select_pilot_cluster import select_pilot  # noqa: E402
 from project_state import build_consolidated_check  # noqa: E402
@@ -468,8 +509,11 @@ from project_state import canonical_json  # noqa: E402
 from project_state import render_check_text  # noqa: E402
 from project_state import render_next_action_text  # noqa: E402
 from project_state import render_status_text  # noqa: E402
+from project_state import _rel  # noqa: E402
+import write_set  # noqa: E402
 from ligature_install import MANIFEST_RELATIVE_PATH  # noqa: E402
 from ligature_install import InstallError  # noqa: E402
+from ligature_install import accept_policy  # noqa: E402
 from ligature_install import default_project_name  # noqa: E402
 from ligature_install import inspect_adjudicator_pin  # noqa: E402
 from ligature_install import init_workspace  # noqa: E402
@@ -657,6 +701,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_work_package(args: argparse.Namespace) -> int:
+    # The positional argument is checked before anything else (chainlink
+    # #83): a missing path or a directory must name the argument the user
+    # got wrong -- `error: manifest not found: <path>`, exit 1 -- not
+    # traceback out of pathlib, and not report whatever else the
+    # workspace happens to lack (a descriptor, a schema) first.
+    ensure_manifest_path(args.manifest, "manifest")
+
     # Default to the workspace root, never None -- omitting --specs-search-root
     # must not silently disable assumption-ref resolution (external review,
     # high severity: a real manifest with trusted_assumptions printed OK
@@ -668,7 +719,13 @@ def cmd_validate_work_package(args: argparse.Namespace) -> int:
     # a schema-shaped JSON file dropped anywhere under a directory named
     # _boundaries counts as "a real boundary contract" (external review:
     # reproduced with junk/not-a-crate/_boundaries/anything.json).
-    descriptor = load_project_descriptor(args.descriptor)
+    try:
+        descriptor = load_project_descriptor(args.descriptor)
+    except OSError as e:
+        # Same defect class, same command (chainlink #83): an absent
+        # default descriptor used to escape as a FileNotFoundError
+        # traceback instead of naming the file it wanted.
+        raise PipelineError(f"cannot read project descriptor {args.descriptor}: {e}")
     allowed_boundary_dirs = boundary_dirs_for_descriptor(descriptor, args.workspace)
 
     validator = load_work_package_validator()
@@ -694,6 +751,13 @@ def cmd_validate_work_package(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_promotion(args: argparse.Namespace) -> int:
+    # Checked first, for the same reason cmd_validate_work_package checks
+    # its manifest first (chainlink #83): the receipt argument is the
+    # thing the user controls directly, so a missing path or a directory
+    # reports `error: receipt not found: <path>` (exit 1) rather than a
+    # traceback or an unrelated workspace problem.
+    ensure_manifest_path(args.receipt, "receipt")
+
     # Optional, not required: most receipts have no witnesses at all,
     # and this fixture-level workspace may have no project descriptor
     # (chainlink #35). Loaded only when it genuinely exists, so a
@@ -729,6 +793,72 @@ def cmd_accept_promotion(args: argparse.Namespace) -> int:
     except (PromotionReceiptError, ApprovalRefused, ValueError, ProjectDescriptorError) as e:
         raise PipelineError(str(e))
     print(f"accepted: {target_path}")
+    return 0
+
+
+def cmd_record_ruling(args: argparse.Namespace) -> int:
+    """`ligature record-ruling --reviewer <name> --verdict ratified|rejected
+    --artifact <path> [--artifact <path> ...] [--ruled-at <YYYY-MM-DD>]`
+    (docs/cli-contract.md §1, §10): the explicit human event Stage 4.5 is
+    gated on (chainlink #82). Writes nothing but its own append-only
+    entry in `ci/results/human_rulings.jsonl`.
+
+    Exit codes: 0 recorded; 1 refused (empty `--reviewer`, a verdict
+    outside `ratified|rejected`, a malformed `--ruled-at`, an artifact
+    path that cannot be hashed into a manifest -- missing, escaping the
+    workspace, an alias of another entry, a generated review projection --
+    or a missing/invalid project descriptor, since the descriptor's
+    crates are what anchor the same manifest computation
+    accept-promotion will compare against)."""
+    try:
+        entry = record_ruling(
+            workspace_root=args.workspace,
+            artifact_paths=args.artifact,
+            reviewer=args.reviewer,
+            verdict=args.verdict,
+            descriptor_path=args.descriptor,
+            ruled_at=args.ruled_at,
+        )
+    except (PromotionReceiptError, ValueError, ProjectDescriptorError) as e:
+        raise PipelineError(str(e))
+    print(f"recorded ruling: {entry['verdict']} over {len(entry['artifacts'])} artifact(s)")
+    print(f"reviewer: {entry['reviewer']} at {entry['ruled_at']}")
+    print(f"log: {args.workspace / 'ci' / 'results' / 'human_rulings.jsonl'}")
+    return 0
+
+
+def cmd_accept_policy(args: argparse.Namespace) -> int:
+    """`ligature accept-policy --reviewer <name> [--policy-path <path>]`
+    (docs/cli-contract.md §1, §8): record a reviewed governance change to a
+    normative user-owned document -- the reliance policy -- as the
+    manifest's reviewed `base_hash`, so the edit stops reading as drift
+    (chainlink #78). The explicit accept path analogous to
+    `accept-promotion`: the recorded base moves through this command and
+    nothing else, which is what makes the drift signal trustworthy.
+
+    `--policy-path` defaults to the descriptor's
+    `compatibility_policy.reliance_policy_path`; an explicit path that
+    disagrees with the declaration is refused. The document must carry
+    exactly one `Policy version: <name>@<major>.<minor>` marker line, the
+    same convention `accept-promotion` reads.
+
+    Exit codes per docs/exit-code-contract.md: 0 recorded; 2 refused
+    (uninitialized workspace, unresolvable/disagreeing path, missing or
+    malformed document, empty reviewer)."""
+    try:
+        result = accept_policy(
+            workspace=args.workspace,
+            reviewer=args.reviewer,
+            policy_path=args.policy_path,
+        )
+    except InstallError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(f"accepted policy: {result['path']}")
+    print(f"reviewer: {result['reviewer']}")
+    print(f"policy version: {result['policy_version']}")
+    print(f"previous hash: {result['previous_hash']}")
+    print(f"accepted hash: {result['accepted_hash']}")
     return 0
 
 
@@ -1557,6 +1687,36 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     )
 
 
+def _validate_concept_spec_draft_data(path: Path, data: dict, validator) -> list:
+    """Stage 0/3 immediate feedback for a concept spec draft. Concept specs
+    are validated against the extended concept spec schema (vendor/concept-
+    to-code/schemas/spec.schema.json + this pipeline's own witness_required/
+    id extensions, chainlink #33/#40). No `review` block -- concept specs
+    are not routed through this pipeline's approve (concept-to-code's own
+    tooling consumes them directly), and the schema's additionalProperties:
+    false rejects one outright."""
+
+    class _Finding:
+        def __init__(self, gate: str, path: Path, reason: str, severity: str = "error"):
+            self.gate = gate
+            self.path = path
+            self.reason = reason
+            self.severity = severity
+
+        def __str__(self) -> str:
+            return f"[{self.gate}/{self.severity}] {self.path}: {self.reason}"
+
+    if "review" in data:
+        return [
+            _Finding(
+                "G1b", path,
+                "draft must not include its own `review` block -- concept specs are not "
+                "routed through approve(); review is never attached to them",
+            )
+        ]
+    return [_Finding("G1a", path, e.message) for e in validator.iter_errors(data)]
+
+
 def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
     """Immediate Stage 0/3 feedback validator for a freshly generated
     draft -- plan.md §6.1: "the output ... is immediately run through
@@ -1621,13 +1781,28 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
         if resolved_parent == _bridge_dir_for(crate, workspace):
             validator = load_bridge_draft_validator()
             return lambda path, data: validate_bridge_draft_data(path, data, validator)
+        if resolved_parent == _witness_dir_for(crate, workspace):
+            validator = load_witness_draft_validator()
+            return lambda path, data: validate_witness_draft_data(path, data, validator)
+        # Concept specs live at <crate_dir>/specs/<snake_case(concept)>.json --
+        # directly under specs/, NOT in a _-prefixed subdirectory. This branch
+        # must come AFTER every underscore-prefixed directory check above so it
+        # doesn't shadow them. Validated against the extended concept spec schema
+        # (vendor/concept-to-code/schemas/spec.schema.json + this pipeline's own
+        # witness_required/id extensions, chainlink #33/#40).
+        specs_search_root = _specs_search_root_for(target, workspace, descriptor)
+        if specs_search_root is not None and not is_underscore_artifact_path(target, specs_search_root):
+            validator = load_concept_spec_validator()
+            return lambda path, data: _validate_concept_spec_draft_data(path, data, validator)
     raise PipelineError(
         f"no draft validator recognizes target {target} -- this pipeline only "
         "validates drafts for boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
         "interactions at <crate_dir>/specs/_interactions/*.json, exemptions "
         "at <crate_dir>/specs/_exemptions/*.json, protocol-debt records at "
         "<crate_dir>/specs/_protocol_debt/*.json, bridges at "
-        "<crate_dir>/specs/_bridges/*.json, evidence at evidence/*.json "
+        "<crate_dir>/specs/_bridges/*.json, witnesses at "
+        "<crate_dir>/specs/_witnesses/*.json, concept specs at "
+        "<crate_dir>/specs/<snake_case(concept)>.json, evidence at evidence/*.json "
         "(workspace-level), and conflict-resolution records at specs/_conflicts/*.json "
         "(workspace-level) today."
     )
@@ -1864,6 +2039,22 @@ def _select_interaction_exemption_pair_validate_fn(
     return validate_pair
 
 
+def _workspace_review_log(workspace: Path) -> Path:
+    """Where `approve` records its audit entry (chainlink #82).
+
+    review_checkpoint.REVIEW_LOG_DEFAULT is cwd-relative, so approving an
+    artifact belonging to ANOTHER workspace wrote the approval entry into
+    whatever repo the CLI happened to be invoked from -- while the new
+    review-provenance guard on `accept-promotion` reads
+    `<workspace>/ci/results/review_log.jsonl`. Without this, the
+    sanctioned path and the guard would read two different logs and every
+    legitimately approved artifact in an external workspace would be
+    refused as unprovenanced. Workspace-scoped, matching
+    generate_promotion_receipt.accept_promotion()'s own default (and the
+    same cwd-relative-default lesson #45 already learned there)."""
+    return workspace / "ci" / "results" / "review_log.jsonl"
+
+
 def cmd_approve(args: argparse.Namespace) -> int:
     descriptor = load_project_descriptor(args.descriptor)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
@@ -1872,7 +2063,12 @@ def cmd_approve(args: argparse.Namespace) -> int:
     draft_path = args.target.with_suffix(args.target.suffix + ".draft")
     try:
         result = checkpoint_approve(
-            draft_path, args.target, reviewer=args.reviewer, reviewed_at=args.reviewed_at, validate_fn=validate_fn
+            draft_path,
+            args.target,
+            reviewer=args.reviewer,
+            reviewed_at=args.reviewed_at,
+            review_log=_workspace_review_log(args.workspace),
+            validate_fn=validate_fn,
         )
     except ApprovalRefused as e:
         raise PipelineError(str(e))
@@ -1896,6 +2092,7 @@ def cmd_approve_pair(args: argparse.Namespace) -> int:
             targets,
             reviewer=args.reviewer,
             reviewed_at=args.reviewed_at,
+            review_log=_workspace_review_log(args.workspace),
             validate_fn=validate_fn,
         )
     except ApprovalRefused as e:
@@ -1921,12 +2118,95 @@ def cmd_approve_exemption_pair(args: argparse.Namespace) -> int:
             targets,
             reviewer=args.reviewer,
             reviewed_at=args.reviewed_at,
+            review_log=_workspace_review_log(args.workspace),
             validate_fn=validate_fn,
         )
     except ApprovalRefused as e:
         raise PipelineError(str(e))
     for result in results:
         print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
+    return 0
+
+
+def cmd_promote_evidence(args: argparse.Namespace) -> int:
+    """`ligature promote-evidence <target>` (docs/cli-contract.md §1, §10):
+    the mechanical promotion path for a staged evidence draft (chainlink
+    #79). Evidence records carry no `review` block (plan.md §7.2's
+    human-checkpoint list names evidence-conflict-resolution, not evidence
+    itself), so they cannot go through `approve` -- review_checkpoint.
+    approve() unconditionally injects a `review` block, which
+    docs/evidence-schema.json's `additionalProperties: false` rejects.
+    This is the tool-owned path that closes the Stage 0 dead end: it
+    re-validates the staged `<target>.draft` (G1a/G1b) against the target
+    path, atomically renames it to the target, and records the move in
+    `ci/results/evidence_promotions.jsonl` -- so the `.draft` suffix never
+    reaches the validator and no hand `mv` step is needed.
+
+    No `--reviewer`: evidence is non-normative, so promotion is mechanical,
+    not a human checkpoint. Refuses (exit 1) without writing anything if
+    the draft is missing, unreadable, or fails G1a/G1b -- the draft is
+    left intact for correction."""
+    descriptor = load_project_descriptor(args.descriptor)
+    _require_target_in_workspace(args.target, args.workspace, descriptor)
+    if args.target.suffix != ".json" or args.target.resolve().parent != _evidence_dir_for(args.workspace):
+        raise PipelineError(
+            f"target {args.target} is not an evidence record at evidence/*.json "
+            "(workspace-level) -- promote-evidence only promotes evidence drafts"
+        )
+    draft_path = args.target.with_suffix(args.target.suffix + ".draft")
+    try:
+        target_path = promote_evidence(draft_path, args.target, args.workspace)
+    except EvidencePromotionError as e:
+        raise PipelineError(str(e))
+    print(f"promoted: {target_path}")
+    return 0
+
+
+def cmd_record_assurance(args: argparse.Namespace) -> int:
+    """`ligature record-assurance <work-package> --proof <obligation>=<path>
+    [--proof ...]` (docs/cli-contract.md §1, §10): assemble a work
+    package's assurance report from the verifier's own proof certificates
+    and write it to the manifest's `report.emit` path (chainlink #87) --
+    the producer gate-g14's achieved side never had, which is why the
+    date-creusot pilot reported all five obligations as "recorded no
+    achieved assurance" with no command able to change it.
+
+    The report is machine-assembled (see scripts/record_assurance.py's
+    docstring for what is derived from where): nothing here accepts a
+    caller's word for what was proved, only a declaration of which
+    certificate is about which obligation, and that declaration is checked
+    against the manifest and the certificate's own location.
+
+    Exit codes per docs/exit-code-contract.md: 0 recorded; 1 the evidence
+    does not establish the obligation (stuck subgoals, a certificate older
+    than the Coma program it certifies, a record satisfies() would refuse);
+    2 invalid input (a malformed `--proof`, a manifest not where gate-g14
+    reads it, an evidence path that is not a proof certificate). Nothing
+    is written on any non-zero exit."""
+    try:
+        outcome = record_assurance(args.workspace, args.work_package, args.proof)
+    except RecordAssuranceError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return e.exit_code
+    if outcome.replaced == "feature-ledger":
+        print(
+            f"warning: {outcome.report_relative} held a generated feature ledger, which was "
+            f"replaced by this work package's assurance report -- {LEDGER_COLLISION_NOTE}",
+            file=sys.stderr,
+        )
+    print(f"recorded assurance: {outcome.report_relative} (work package {outcome.work_package})")
+    for entry in outcome.recorded:
+        print(
+            f"  {entry.obligation_id}: {entry.evidence_kind} supported -- {entry.goals} proved "
+            f"goal(s) <- {', '.join(entry.targets)}"
+        )
+    if outcome.preserved_obligation_records:
+        print(
+            f"  preserved {outcome.preserved_obligation_records} existing obligation record(s) "
+            "this run did not record"
+        )
+    if outcome.bridge_records:
+        print(f"  bridge_records: {outcome.bridge_records} (from the checks that ran)")
     return 0
 
 
@@ -1996,7 +2276,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "traffic-light witness/determinism/degeneracy columns kept visually distinct from a "
         "never-green assurance_status/closure_kind column, chainlink #32), "
         "select-pilot-cluster (plan.md §14 mechanized, verifier-agnostic first-pilot-cluster "
-        "ranking, chainlink #4)"
+        "ranking, chainlink #4), "
+        "write-set-check (read-only write-set conformance: files outside allowed_roots and "
+        "inside protected_roots relative to the project descriptor, chainlink #77), "
+        "accept-policy (record a reviewed change to the normative reliance-policy document, "
+        "chainlink #78), "
+        "promote-evidence (mechanically promote a staged evidence draft to its target and record "
+        "the move -- the Stage 0 promotion path approve() cannot provide, chainlink #79), "
+        "record-assurance (assemble a work package's assurance report from verifier proof "
+        "certificates -- the achieved side gate-g14 reads, chainlink #87)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -2051,7 +2339,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 2
     sys.stdout.write(render_installation_report(report))
     print(f"ownership manifest: {MANIFEST_RELATIVE_PATH}")
-    return 1 if report.conflicts or report.status == "conflict" else 0
+    # chainlink #78: a drifted normative user-owned document (the reliance
+    # policy) makes the rerun report `installation: drifted` and exit 1 --
+    # the same non-zero signal `doctor`/`migrate` give -- while still
+    # writing nothing over the user-owned file. `accept-policy` is the
+    # explicit path that records a reviewed change.
+    return 1 if report.conflicts or report.status in ("conflict", "drifted") else 0
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
@@ -2114,6 +2407,84 @@ def cmd_check(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(render_check_text(document))
     return document["result"]["exit_code"]
+
+
+def cmd_write_set_check(args: argparse.Namespace) -> int:
+    """`ligature write-set-check [--json]` (docs/cli-contract.md §8, §10):
+    the descriptor's write_set evaluated against the workspace's actual
+    files (chainlink #77) -- the enforcement boundary made machine-checked
+    rather than merely declared. Read-only: walks the workspace and reads
+    the ownership manifest, writes nothing.
+
+    Exit codes follow docs/exit-code-contract.md: 0 clean, 1 violations
+    (out-of-set files or a vacuous declaration -- the same blocking-
+    findings code `check` reports them under), 2 no valid project
+    descriptor (the write set cannot be evaluated)."""
+    descriptor_path = args.descriptor or (args.workspace / "project-descriptor.json")
+    descriptor: dict | None = None
+    descriptor_state = "absent"
+    if descriptor_path.is_file():
+        try:
+            descriptor = load_project_descriptor(descriptor_path)
+            descriptor_state = "present-valid"
+        except PipelineError as e:
+            # pipeline.py's load_project_descriptor wrapper re-raises the
+            # schema diagnostics as PipelineError (main()'s own handling
+            # doesn't need a second exception type) -- catch that here so
+            # the command reports the invalid descriptor as data (state
+            # `unknown`, exit 2) rather than crashing.
+            print(f"error: {e}", file=sys.stderr)
+            descriptor_state = "present-invalid"
+        except OSError as e:
+            print(f"error: cannot read project descriptor {descriptor_path}: {e}", file=sys.stderr)
+            descriptor_state = "unknown"
+    report = write_set.check_write_set(args.workspace, descriptor, descriptor_path)
+
+    if args.json:
+        descriptor_rel = (
+            _rel(descriptor_path, args.workspace) if descriptor_path.is_absolute() else str(descriptor_path)
+        )
+        document = {
+            "schema_version": "1.0",
+            "mutated_workspace": False,
+            "descriptor": {"state": descriptor_state, "path": descriptor_rel},
+            "write_set": {
+                "state": report.state,
+                "details": report.details,
+                "violations": [
+                    {"path": violation.path, "reason": violation.reason}
+                    for violation in report.violations
+                ],
+                "protected_unvouched": list(report.protected_unvouched),
+            },
+        }
+        if descriptor is not None:
+            write_set_declaration = descriptor.get("write_set")
+            if isinstance(write_set_declaration, dict):
+                document["write_set"]["allowed_roots"] = list(write_set_declaration.get("allowed_roots") or [])
+                document["write_set"]["protected_roots"] = list(write_set_declaration.get("protected_roots") or [])
+        sys.stdout.write(canonical_json(document))
+    else:
+        print(f"write set: {report.state}")
+        print(f"descriptor: {descriptor_state} ({descriptor_path})")
+        if descriptor is not None:
+            write_set_declaration = descriptor.get("write_set")
+            if isinstance(write_set_declaration, dict):
+                allowed = [str(p) for p in (write_set_declaration.get("allowed_roots") or [])]
+                protected = [str(p) for p in (write_set_declaration.get("protected_roots") or [])]
+                print(f"allowed_roots: {', '.join(allowed) if allowed else '(none)'}")
+                print(f"protected_roots: {', '.join(protected) if protected else '(none)'}")
+        print(f"details: {report.details}")
+        for violation in report.violations:
+            print(f"  violation: {violation.path}: {violation.reason}")
+        for rel in report.protected_unvouched:
+            print(f"  protected (not product-managed): {rel}")
+
+    if report.state == "violations":
+        return 1
+    if report.state == "unknown":
+        return 2
+    return 0
 
 
 _GATE_VERBS = {
@@ -2227,11 +2598,13 @@ def build_parser() -> argparse.ArgumentParser:
     accept_promo_p.add_argument("--reviewer", required=True)
     accept_promo_p.add_argument("--accepted-at", default=None)
     accept_promo_p.add_argument(
-        "--policy-path", required=True,
+        "--policy-path", default=None,
         help=(
             "workspace-relative path to the accepted policy document (e.g. docs/reliance-policy.md) "
             "-- must itself be one of --artifact; its own 'Policy version: <name>@<major>.<minor>' "
-            "line is read to compute policy_version"
+            "line is read to compute policy_version. Defaults to the descriptor's "
+            "compatibility_policy.reliance_policy_path; an explicit path that disagrees with "
+            "that declaration is refused (chainlink #78)"
         ),
     )
     accept_promo_p.add_argument(
@@ -2239,6 +2612,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="workspace-relative path being accepted into this promotion, repeatable",
     )
     accept_promo_p.set_defaults(func=cmd_accept_promotion)
+
+    record_ruling_p = sub.add_parser(
+        "record-ruling",
+        help=(
+            "Record an explicit human verdict over an exact artifact set -- the human-ruling gate "
+            "accept-promotion enforces before minting a receipt (chainlink #82)"
+        ),
+    )
+    record_ruling_p.add_argument(
+        "--reviewer", required=True,
+        help="the named human making the ruling -- no default, no LLM-supplied value",
+    )
+    record_ruling_p.add_argument(
+        "--verdict", required=True, choices=["ratified", "rejected"],
+        help=(
+            "`ratified`: this artifact may be promoted as it stands; `rejected`: it must not be "
+            "(accept-promotion refuses either way for a rejected artifact, with the rejection named)"
+        ),
+    )
+    record_ruling_p.add_argument(
+        "--artifact", action="append", default=[], required=True,
+        help="workspace-relative path being ruled on, repeatable -- the same paths accept-promotion takes",
+    )
+    record_ruling_p.add_argument(
+        "--ruled-at", default=None,
+        help="YYYY-MM-DD date of the ruling (defaults to today)",
+    )
+    record_ruling_p.set_defaults(func=cmd_record_ruling)
+
+    accept_policy_p = sub.add_parser(
+        "accept-policy",
+        help="Record a reviewed change to the normative reliance-policy document (chainlink #78)",
+    )
+    accept_policy_p.add_argument("--reviewer", required=True)
+    accept_policy_p.add_argument(
+        "--policy-path", default=None,
+        help=(
+            "workspace-relative path of the policy document being accepted. Defaults to the "
+            "descriptor's compatibility_policy.reliance_policy_path; an explicit path that "
+            "disagrees with that declaration is refused"
+        ),
+    )
+    accept_policy_p.set_defaults(func=cmd_accept_policy)
 
     draft_p = sub.add_parser("draft", help="Stage 0/3: one-shot LLM draft")
     draft_p.add_argument("stage", choices=["0", "3"])
@@ -2275,6 +2691,46 @@ def build_parser() -> argparse.ArgumentParser:
     approve_exemption_pair_p.add_argument("--reviewer", required=True)
     approve_exemption_pair_p.add_argument("--reviewed-at", default=None)
     approve_exemption_pair_p.set_defaults(func=cmd_approve_exemption_pair)
+
+    promote_evidence_p = sub.add_parser(
+        "promote-evidence",
+        help=(
+            "Mechanically promote a staged evidence draft to its target (evidence/*.json) and "
+            "record the move -- the Stage 0 promotion path approve() cannot provide (chainlink #79)"
+        ),
+    )
+    promote_evidence_p.add_argument("target", type=Path)
+    promote_evidence_p.set_defaults(func=cmd_promote_evidence)
+
+    record_assurance_p = sub.add_parser(
+        "record-assurance",
+        help=(
+            "Assemble a work package's assurance report from verifier proof certificates and "
+            "write it to the manifest's report.emit path -- the achieved side gate-g14 reads "
+            "(chainlink #87)"
+        ),
+    )
+    record_assurance_p.add_argument(
+        "work_package",
+        help=(
+            "work-package id (e.g. WP-DATE-CREUSOT) or the manifest itself, "
+            "ci/manifest/<id>.json -- the file gate-g14 reads"
+        ),
+    )
+    record_assurance_p.add_argument(
+        "--proof",
+        action="append",
+        default=[],
+        metavar="OBLIGATION=PATH",
+        help=(
+            "which proof certificate discharges which obligation -- repeatable, once per "
+            "obligation; PATH is workspace-relative and is a directory holding why3find's "
+            "proof.json or that certificate itself (e.g. "
+            "--proof Weekday.C1=rust/date-creusot-core/verif/date_creusot_core_rlib/weekday/"
+            "weekday_from_days)"
+        ),
+    )
+    record_assurance_p.set_defaults(func=cmd_record_assurance)
 
     extract_c_static_p = sub.add_parser(
         "extract-c-static",
@@ -2424,6 +2880,13 @@ def build_parser() -> argparse.ArgumentParser:
     check_p.add_argument("next", nargs="?", help="print only the recommended next action")
     check_p.set_defaults(func=cmd_check)
 
+    write_set_p = sub.add_parser(
+        "write-set-check",
+        help="Read-only write-set conformance report: files outside allowed_roots / inside protected_roots (chainlink #77)",
+    )
+    write_set_p.add_argument("--json", action="store_true", help="emit the versioned JSON write-set report")
+    write_set_p.set_defaults(func=cmd_write_set_check)
+
     gate_p = sub.add_parser("gate", help="Cross-artifact gate runner: `gate <gate-id>` (docs/cli-contract.md §3)")
     gate_p.add_argument("gate_id", choices=sorted(_GATE_VERBS), metavar="GATE-ID")
     gate_p.set_defaults(func=cmd_gate)
@@ -2462,7 +2925,11 @@ def main(argv: list[str]) -> int:
 
     try:
         return args.func(args)
-    except PipelineError as e:
+    except (PipelineError, ManifestInputError) as e:
+        # One error surface for both: a bad argument (a missing/directory
+        # manifest or receipt path, chainlink #83) and every other
+        # fail-closed pipeline refusal print the same one line and exit 1,
+        # never a Python traceback.
         print(f"error: {e}", file=sys.stderr)
         return 1
 

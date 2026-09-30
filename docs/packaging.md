@@ -53,6 +53,16 @@ copies in exactly the entries whose `disposition` is:
 * `installed-template` — the descriptor examples, reliance-policy template
   and skill template that `ligature init` (which runs *from this artifact*)
   copies into a target repo;
+* `installed_by_init: true` on a `python_module` entry — a runtime module
+  `init` *also* copies into a target repo (today: `scripts/witness_renderer.py`
+  and `scripts/xml_escape.py`, the two files G13 hash-pins, chainlink #84).
+  Such a module is shipped **twice**: at the archive root, where the product
+  imports it, and again under `ligature_data/<path>`, because
+  `resources.resource_root()` only ever exposes `ligature_data/` — that
+  second copy is what the packaged `init` reads. Both copies come from the
+  same source-relative path in the same build, so they cannot disagree;
+  `tests/test_inventory_drift.py` asserts the flag, the install registry
+  and the bundle all name the same files;
 * `required_at_runtime: true` in `vendored_runtime_assets` — the vendored
   concept-to-code spec schema.
 

@@ -30,7 +30,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 from schema_utils import make_validator  # noqa: E402
+import build_zipapp  # noqa: E402
+import ligature_install  # noqa: E402
 import pipeline  # noqa: E402
+import validate_work_package  # noqa: E402
 import vendored_resources  # noqa: E402
 
 INVENTORY_PATH = ROOT / "docs" / "implementation-inventory.json"
@@ -480,6 +483,73 @@ class VendorBypassDetectorUnitTest(unittest.TestCase):
     def test_unrelated_path_is_not_detected(self):
         offenses = self._offenses_for('from pathlib import Path\nX = Path(__file__) / "docs" / "foo.json"\n')
         self.assertEqual(offenses, [])
+
+
+class InitInstalledScriptDriftTest(unittest.TestCase):
+    """chainlink #84: two declarations of ONE fact -- which scripts
+    `ligature init` copies into a target workspace.
+
+    `docs/implementation-inventory.json`'s `installed_by_init` flag tells
+    `build_zipapp` to ship a second copy under `ligature_data/<path>`,
+    because `resources.resource_root()` only ever exposes `ligature_data/`
+    (the archive-root copy of the same module exists to be imported, not
+    to be read). `ligature_install.file_registry` is what `init` actually
+    writes. If they disagree, either a packaged `init` reads a file the
+    bundle never shipped, or the bundle ships bytes nothing installs --
+    and G13 would pin whatever happened to be on disk.
+
+    Both directions are asserted, and the flag is checked against the
+    bundle itself, so neither declaration can drift alone: the same
+    bidirectional discipline `VendoredResourceRegistryTest` applies to
+    the vendored-resource registry."""
+
+    def setUp(self):
+        self.inventory = _load_inventory()
+
+    def _flagged(self) -> set[str]:
+        return {
+            module["path"]
+            for module in self.inventory["python_modules"]
+            if module.get("installed_by_init")
+        }
+
+    def _installed_scripts(self) -> set[str]:
+        registry = ligature_install.file_registry("greenfield", "myproj", "project-descriptor.json")
+        return {entry.path for entry in registry if entry.path.startswith("scripts/")}
+
+    def test_every_flagged_module_is_actually_installed_by_init(self):
+        extra = self._flagged() - self._installed_scripts()
+        self.assertEqual(
+            extra, set(),
+            f"flagged installed_by_init but never installed by file_registry: {sorted(extra)}",
+        )
+
+    def test_every_installed_script_is_flagged(self):
+        missing = self._installed_scripts() - self._flagged()
+        self.assertEqual(
+            missing, set(),
+            f"installed by init but not flagged in the inventory: {sorted(missing)}",
+        )
+
+    def test_flagged_modules_are_bundled_for_the_packaged_installer(self):
+        """A flag on a module the bundle refuses to ship (test-only,
+        excluded) would leave a packaged `init` reading a file that was
+        never in the artifact."""
+        arcnames = {arc for _src, arc in build_zipapp.bundle_entries(self.inventory)}
+        for path in sorted(self._flagged()):
+            self.assertIn(f"ligature_data/{path}", arcnames, path)
+            self.assertIn(Path(path).name, arcnames, path)
+
+    def test_the_shipped_set_is_exactly_the_set_g13_requires(self):
+        """A third declaration of the same fact: `check_witness_renderer_
+        integrity` is what makes `init` ship these files at all. If the
+        gate ever starts requiring a path `init` does not install, Stage 7
+        regresses to `runner not found` exactly as chainlink #84 describes
+        -- and nothing before a pilot would notice."""
+        self.assertEqual(
+            self._installed_scripts(),
+            set(validate_work_package.WITNESS_RENDERER_INTEGRITY_PATHS),
+        )
 
 
 class CountsConsistencyTest(unittest.TestCase):

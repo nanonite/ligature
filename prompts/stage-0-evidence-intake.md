@@ -83,3 +83,16 @@ a separate, human-authored artifact — this template only produces the
 evidence record itself, one record, one piece of source material. Do not
 attempt to resolve a conflict with another evidence record even if you can
 see one; surface it as `{{finding}}` for the next stage instead.
+
+## Write set
+
+This record is a pipeline artifact at `evidence/`, not an implementation
+file — the project descriptor's `write_set` does not govern where it goes.
+`origin.path` names the file the claim was read from, which is often the
+pinned upstream checkout (`port_source.repository`) or another location
+outside the write set's `allowed_roots`: those are read-only inputs you
+read from, never places to write. Implementation files go only under
+`allowed_roots` (the crate `src/` and `tests/` trees); `protected_roots`
+(specs, CI manifests, gate scripts, schemas, policy docs, Cargo/build
+files, harnesses, toolchain pins) are off-limits to you. If a finding ever
+implies writing outside `allowed_roots`, surface it instead of writing.

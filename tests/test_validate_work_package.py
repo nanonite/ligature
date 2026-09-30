@@ -1,13 +1,18 @@
-import copy
+import hashlib
+import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import pipeline  # noqa: E402
+import validate_work_package  # noqa: E402
 from validate_work_package import validate_data, validate_file, load_validator  # noqa: E402
 
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "work_packages" / "valid"
@@ -614,6 +619,163 @@ class WitnessRendererIntegrityTest(unittest.TestCase):
         from validate_work_package import _patterns_can_overlap
         self.assertTrue(_patterns_can_overlap("scripts/**", "scripts/witness_renderer.py"))
         self.assertTrue(_patterns_can_overlap("scripts/**", "scripts/xml_escape.py"))
+
+
+class InitShipsRendererScriptsTest(unittest.TestCase):
+    """chainlink #84 -- the date-creusot pilot's Stage 7 blocker,
+    reproduced end to end through the shipped CLI.
+
+    G13 requires a `gate_integrity` entry for EACH of
+    `scripts/witness_renderer.py` and `scripts/xml_escape.py` whose
+    runner resolves to a real file inside the workspace --
+    `check_witness_renderer_integrity` is unconditional for every
+    manifest and project-agnostic (plan.md §16.5, chainlink #35). v1.0's
+    `init` installed neither file, so no pilot root had a `scripts/`
+    directory at all and the check could only ever report
+    `gate_integrity runner not found` for both paths -- with no shipped
+    command able to create them (the pilot pinned placeholder zero
+    hashes instead, documented rather than satisfied, because
+    fabricating a renderer would launder a fake pass through the very
+    gate meant to protect it).
+
+    The fixture workspace is copied and its two renderer stand-ins
+    removed: that is exactly the pre-fix state. The fixture's OTHER
+    pinned gate (`scripts/dummy_gate.py`) is left in place as a control
+    -- it must keep validating in both runs, so a pass proves the fix is
+    about the two missing files rather than about the check going quiet."""
+
+    RENDERERS = tuple(validate_work_package.WITNESS_RENDERER_INTEGRITY_PATHS)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name).resolve() / "wp"
+        shutil.copytree(FIXTURE_ROOT, self.workspace)
+        # A v1.0-initialized workspace: the renderer scripts were never
+        # installed. scripts/dummy_gate.py stays -- it is pinned by the
+        # same manifest and is NOT part of this issue.
+        for rel in self.RENDERERS:
+            (self.workspace / rel).unlink()
+        self.manifest_path = self.workspace / "ci" / "manifest" / "WP-SCHED-001.json"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _manifest(self) -> dict:
+        """The fixture manifest with the two renderer entries pinned to
+        the product's own implementation -- the bytes `init` installs
+        byte-identically, which is what a Stage 7 manifest generator
+        would record once the files exist."""
+        data = json.loads(self.manifest_path.read_text())
+        for entry in data["gate_integrity"]:
+            if entry["runner"] in self.RENDERERS:
+                entry["hash"] = "sha256:" + hashlib.sha256((ROOT / entry["runner"]).read_bytes()).hexdigest()
+        return data
+
+    def _write_manifest(self, data: dict) -> None:
+        self.manifest_path.write_text(json.dumps(data, indent=2) + "\n")
+
+    def _run_cli(self) -> tuple[int, str]:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = pipeline.main(
+                ["--workspace", str(self.workspace), "validate-work-package", str(self.manifest_path)]
+            )
+        return code, out.getvalue()
+
+    def test_before_init_both_required_runners_are_missing_and_the_control_gate_still_validates(self):
+        """The issue's exact symptom: exit 1, two `runner not found`
+        findings naming the renderer paths -- and only those two, since
+        the control gate resolves fine."""
+        self._write_manifest(self._manifest())
+        code, out = self._run_cli()
+        self.assertEqual(code, 1, out)
+        self.assertIn("gate_integrity runner not found: scripts/witness_renderer.py", out)
+        self.assertIn("gate_integrity runner not found: scripts/xml_escape.py", out)
+        self.assertNotIn("dummy_gate", out)
+
+    def test_init_installs_the_real_implementation_and_the_same_manifest_then_passes(self):
+        """Same manifest, one `init` later: the runners resolve to the
+        product's own bytes, so every pinned hash verifies and Stage 7
+        reaches a clean exit 0."""
+        self._write_manifest(self._manifest())
+        code, out = self._run_cli()
+        self.assertEqual(code, 1, out)  # precondition: the issue is reproduced
+
+        init_out = io.StringIO()
+        with redirect_stdout(init_out):
+            init_code = pipeline.main(
+                ["--workspace", str(self.workspace), "init", "--mode", "greenfield", "--name", "wp-fixture"]
+            )
+        self.assertEqual(init_code, 0, init_out.getvalue())
+
+        for rel in self.RENDERERS:
+            target = self.workspace / rel
+            self.assertTrue(target.is_file(), rel)
+            # the REAL implementation, byte-identical to the product's
+            # own -- a stand-in here would defeat the point of pinning it
+            self.assertEqual(target.read_bytes(), (ROOT / rel).read_bytes(), rel)
+
+        code, out = self._run_cli()
+        self.assertEqual(code, 0, out)
+        self.assertIn("OK: work package manifest passes G1a and §10.1 checks", out)
+
+
+class StandaloneBadPathTest(unittest.TestCase):
+    """chainlink #83 (date-ligature-030): the standalone CLI carried the
+    exact defect the pipeline one did -- the path argument went straight
+    to pathlib, so a missing path or a directory escaped as a raw
+    FileNotFoundError/IsADirectoryError traceback (exit code already 1,
+    but nothing naming the argument or the expectation).
+
+    The path is checked before the --descriptor/--allowed-boundary-dir
+    requirement below it, so the message names the argument the user
+    actually typed even when the flags are absent too."""
+
+    def _main(self, *args):
+        import validate_work_package
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = validate_work_package.main(list(args))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_missing_manifest_is_one_clean_line_and_exit_1(self):
+        rc, out, err = self._main("/tmp/nonexistent-wp.json")
+        self.assertEqual(rc, 1)
+        self.assertEqual(err.strip(), "error: manifest not found: /tmp/nonexistent-wp.json")
+        self.assertNotIn("Traceback", out + err)
+
+    def test_directory_argument_is_one_clean_line_and_exit_1(self):
+        rc, out, err = self._main("/tmp")
+        self.assertEqual(rc, 1)
+        self.assertEqual(err.strip(), "error: manifest path is a directory, expected a file: /tmp")
+        self.assertNotIn("Traceback", out + err)
+
+    def test_missing_descriptor_is_one_clean_line_and_exit_2(self):
+        """Same defect class on the same command (chainlink #83): an
+        unreadable --descriptor target used to traceback too. Exit 2,
+        matching validate_promotion_receipt's own unreadable-descriptor
+        handling (invalid input, per docs/exit-code-contract.md)."""
+        rc, out, err = self._main(
+            str(MANIFEST_PATH),
+            "--workspace-root", str(FIXTURE_ROOT),
+            "--specs-search-root", str(SPECS_SEARCH_ROOT),
+            "--descriptor", "/tmp/nonexistent-descriptor.json",
+        )
+        self.assertEqual(rc, 2)
+        self.assertTrue(
+            err.startswith("error: cannot read project descriptor /tmp/nonexistent-descriptor.json:"),
+            err,
+        )
+        self.assertNotIn("Traceback", out + err)
+
+    def test_valid_manifest_still_validates(self):
+        rc, out, err = self._main(
+            str(MANIFEST_PATH),
+            "--workspace-root", str(FIXTURE_ROOT),
+            "--specs-search-root", str(SPECS_SEARCH_ROOT),
+            "--allowed-boundary-dir", str(SPECS_SEARCH_ROOT / "_boundaries"),
+        )
+        self.assertEqual(rc, 0, out + err)
 
 
 if __name__ == "__main__":

@@ -3,28 +3,39 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import generate_promotion_receipt  # noqa: E402
 from generate_promotion_receipt import (  # noqa: E402
     PromotionReceiptError,
     accept_promotion,
     build_receipt,
+    collect_review_blocks,
     compute_artifact_manifest,
     compute_promotion_id,
     compute_schema_versions,
     extract_policy_version,
+    record_ruling,
     required_witness_paths,
+    ruling_gaps,
 )
 from review_checkpoint import ApprovalRefused  # noqa: E402
+from review_checkpoint import SKIP_VALIDATION  # noqa: E402
+from review_checkpoint import approve  # noqa: E402
+from review_checkpoint import review_provenance_gaps  # noqa: E402
+from review_checkpoint import stage_draft  # noqa: E402
 from validate_promotion_receipt import RequiredWitnessError  # noqa: E402
 from validate_promotion_receipt import load_validator, validate_file  # noqa: E402
 from validate_witness import witness_promotion_digest  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
+from test_validate_evidence import load_valid as valid_evidence_record  # noqa: E402
 from test_validate_witness import concept_spec, witness_spec  # noqa: E402
 
 DESCRIPTOR = {
@@ -96,6 +107,61 @@ def _write_json(workspace: Path, relative: str, data: dict) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data))
     return relative
+
+
+def _record_approval(
+    workspace: Path,
+    artifact_path: str,
+    review: dict,
+    *,
+    reviewer=None,
+    reviewed_at=None,
+    classification: str = "new",
+    entry_target_path: str | None = None,
+) -> Path:
+    """Append the approval audit entry review_checkpoint.approve() would
+    have written when this fixture artifact was approved (chainlink
+    #82), so tests whose subject is NOT the provenance guard can keep
+    exercising it as a fixture precondition. The sanctioned write path
+    itself is exercised end to end by test_pipeline.py's
+    CmdAcceptPromotionProvenanceIntegrationTest (real `approve` through
+    pipeline.main()), and the guard's own refusal cases live in
+    ReviewProvenanceTest below -- this is setup, not a bypass under
+    test."""
+    log = workspace / "ci" / "results" / "review_log.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "target_path": entry_target_path or str(workspace / artifact_path),
+        "classification": classification,
+        "reviewer": review["reviewer"] if reviewer is None else reviewer,
+        "reviewed_at": review["reviewed_at"] if reviewed_at is None else reviewed_at,
+        "validation": "checked",
+        "logged_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with log.open("a") as stream:
+        stream.write(json.dumps(entry) + "\n")
+    return log
+
+
+@contextmanager
+def _failing_audit_fsync():
+    """Fail the FIRST os.fsync accept_promotion() performs -- the audit
+    append's own fsync -- then let the rollback's fsync through, so the
+    prepared-entry rollback runs for real (chainlink #82 keeps #45's
+    transactional coverage honest: the original repro put a directory
+    in place of review_log, which now trips the provenance READ first
+    and is a different, earlier refusal)."""
+    real_fsync = generate_promotion_receipt.os.fsync
+    calls = {"count": 0}
+
+    def flaky_fsync(fd: int):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise OSError(28, "No space left on device")
+        return real_fsync(fd)
+
+    with mock.patch.object(generate_promotion_receipt.os, "fsync", flaky_fsync):
+        yield
 
 
 class ComputeArtifactManifestTest(unittest.TestCase):
@@ -455,26 +521,50 @@ class AcceptPromotionTest(unittest.TestCase):
     discovery over a fixture crate tree, end to end against the real
     validator -- chainlink #45's own scope."""
 
+    BOUNDARY_ARTIFACT = f"crates/scheduler/specs/_boundaries/{VALID_BOUNDARY['boundary_id']}.json"
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self.tmp.name)
         _write_descriptor(self.workspace)
         self.boundary_bytes = json.dumps(VALID_BOUNDARY).encode()
-        _write_json(
-            self.workspace, f"crates/scheduler/specs/_boundaries/{VALID_BOUNDARY['boundary_id']}.json",
-            VALID_BOUNDARY,
-        )
+        _write_json(self.workspace, self.BOUNDARY_ARTIFACT, VALID_BOUNDARY)
         self.policy_bytes = POLICY_TEXT.encode()
         (self.workspace / "docs").mkdir()
         (self.workspace / "docs" / "reliance-policy.md").write_bytes(self.policy_bytes)
         self.review_log = self.workspace / "ci" / "results" / "review_log.jsonl"
         self.artifact_paths = [
             "docs/reliance-policy.md",
-            f"crates/scheduler/specs/_boundaries/{VALID_BOUNDARY['boundary_id']}.json",
+            self.BOUNDARY_ARTIFACT,
         ]
+        # Chainlink #82's human-ruling gate: every acceptance below also
+        # needs a `ratified` ruling over the accepted set. Seeded here so
+        # these tests keep exercising whatever else they are about; the
+        # gate's own refusals live in HumanRulingGateTest below.
+        record_ruling(
+            self.workspace,
+            self.artifact_paths,
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def _seed_boundary_approval(self, artifact_path: str | None = None, **overrides) -> Path:
+        """Record the boundary fixture's own review block in the approval
+        audit log, exactly as review_checkpoint.approve() would have
+        written it (chainlink #82): without this, EVERY acceptance in
+        this class is refused, since a `review` block with no approval
+        entry behind it is what the new guard exists to refuse. Pass
+        `artifact_path` to record the entry against some other file."""
+        return _record_approval(
+            self.workspace,
+            self.BOUNDARY_ARTIFACT if artifact_path is None else artifact_path,
+            VALID_BOUNDARY["review"],
+            **overrides,
+        )
 
     def _accept(self, **overrides):
         kwargs = dict(
@@ -490,6 +580,7 @@ class AcceptPromotionTest(unittest.TestCase):
         return accept_promotion(**kwargs)
 
     def test_writes_a_receipt_with_computed_metadata_and_real_hashes(self):
+        self._seed_boundary_approval()
         target_path = self._accept()
         self.assertEqual(target_path, self.workspace / "specs" / "_promotions" / "scheduling.json")
         self.assertTrue(target_path.exists())
@@ -512,15 +603,23 @@ class AcceptPromotionTest(unittest.TestCase):
         self.assertNotIn("review", data)
 
     def test_generated_receipt_passes_the_real_validator_end_to_end(self):
+        self._seed_boundary_approval()
         target_path = self._accept()
         findings = validate_file(target_path, load_validator(), self.workspace)
         self.assertEqual(findings, [], [str(f) for f in findings])
 
     def test_appends_an_audit_log_entry(self):
-        self.assertFalse(self.review_log.exists())
+        self._seed_boundary_approval()
+        size_before = self.review_log.stat().st_size
         target_path = self._accept()
         self.assertTrue(self.review_log.exists())
-        entry = json.loads(self.review_log.read_text().strip().splitlines()[-1])
+        # The seeded approval entry is still there, and the promotion's
+        # own audit entry was APPENDED after it (append-only, never a
+        # rewrite of the trail that proves provenance).
+        self.assertGreater(self.review_log.stat().st_size, size_before)
+        lines = self.review_log.read_text().strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        entry = json.loads(lines[-1])
         self.assertEqual(entry["target_path"], str(target_path))
         self.assertEqual(entry["reviewer"], "alice")
         self.assertEqual(entry["reviewed_at"], "2026-09-05")
@@ -532,13 +631,24 @@ class AcceptPromotionTest(unittest.TestCase):
         accepting a promotion for an external workspace silently wrote
         its audit trail into whatever repo the CLI happened to run
         from. Omitting review_log entirely must land inside
-        workspace_root, never outside it."""
+        workspace_root, never outside it. The approval entry that now
+        proves provenance (chainlink #82) is seeded first, so what is
+        asserted here is WHERE the promotion's own new entry went --
+        not whether the file could start from nothing."""
         default_log = self.workspace / "ci" / "results" / "review_log.jsonl"
-        self.assertFalse(default_log.exists())
+        self._seed_boundary_approval()
+        workspace_size_before = default_log.stat().st_size
+        repo_log = ROOT / "ci" / "results" / "review_log.jsonl"
+        repo_size_before = repo_log.stat().st_size if repo_log.exists() else None
+
         self._accept(review_log=None)
-        self.assertTrue(default_log.exists())
+
+        self.assertGreater(default_log.stat().st_size, workspace_size_before)
+        repo_size_after = repo_log.stat().st_size if repo_log.exists() else None
+        self.assertEqual(repo_size_before, repo_size_after)
 
     def test_descriptor_path_defaults_to_workspace_project_descriptor_json(self):
+        self._seed_boundary_approval()
         target_path = self._accept(descriptor_path=None)
         self.assertTrue(target_path.exists())
 
@@ -592,6 +702,21 @@ class AcceptPromotionTest(unittest.TestCase):
         stray_path = _write_json(
             self.workspace, f"junk/_boundaries/{VALID_BOUNDARY['boundary_id']}.json", VALID_BOUNDARY
         )
+        # Both copies carry VALID_BOUNDARY's own review block, so both
+        # need an approval entry behind them (chainlink #82) -- the
+        # stray copy is hashed as an opaque artifact, but a review block
+        # is still a review block wherever the file sits.
+        self._seed_boundary_approval()
+        self._seed_boundary_approval(artifact_path=stray_path)
+        # ...and the human-ruling gate needs the stray copy ruled too:
+        # a ruling covers exactly the paths it names (chainlink #82).
+        record_ruling(
+            self.workspace,
+            self.artifact_paths + [stray_path],
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
         target_path = self._accept(artifact_paths=self.artifact_paths + [stray_path])
         data = json.loads(target_path.read_text())
         self.assertEqual(data["schema_versions"], {"boundary": "1.0"})
@@ -629,34 +754,55 @@ class AcceptPromotionTest(unittest.TestCase):
             self._accept()
         self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
 
-    def test_audit_log_failure_leaves_no_receipt_installed(self):
+    def test_unreadable_review_log_fails_closed_before_writing(self):
+        """The directory-in-place-of-review_log repro (chainlink #45's
+        own reviewer payload). It used to fail at the audit *append*;
+        the review-provenance read (chainlink #82) now reaches the log
+        first and refuses it as unprovable -- either way the acceptance
+        is refused and nothing is written."""
+        review_log = self.workspace / "ci" / "results" / "review_log.jsonl"
+        review_log.parent.mkdir(parents=True, exist_ok=True)
+        review_log.mkdir()  # a directory where the log file should be
+        with self.assertRaises(PromotionReceiptError) as caught:
+            self._accept(review_log=review_log)
+        self.assertIn("approval audit log", str(caught.exception))
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_audit_append_failure_leaves_no_receipt_installed(self):
         """External review, high severity: the receipt used to be
         written before the audit append, so a failure appending the
         audit entry left an accepted-but-unaudited receipt behind.
-        Reproduced here with a directory in place of review_log (the
-        reviewer's own repro) -- accept_promotion() must raise and
-        write nothing."""
-        review_log = self.workspace / "ci" / "results" / "review_log.jsonl"
-        review_log.parent.mkdir(parents=True)
-        review_log.mkdir()  # a directory where the log file should be
+        Reproduced here by failing the append's own fsync (the original
+        #45 repro -- a directory in place of review_log -- is covered
+        above, where the provenance read now catches it first):
+        accept_promotion() must raise, roll the prepared entry back,
+        and write no receipt."""
+        self._seed_boundary_approval()
         with self.assertRaises(Exception):
-            self._accept(review_log=review_log)
+            with _failing_audit_fsync():
+                self._accept()
         self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+        # The seeded approval entry -- the trail provenance depends on --
+        # is intact and alone: the rollback removed only the entry this
+        # failed append prepared.
+        self.assertEqual(len(self.review_log.read_text().strip().splitlines()), 1)
 
-    def test_audit_log_failure_does_not_disturb_a_prior_receipt(self):
+    def test_audit_append_failure_does_not_disturb_a_prior_receipt(self):
         """The rollback/transaction discipline must also hold on a
         re-acceptance: if the audit append fails, the PRIOR receipt (if
         any) must be left exactly as it was, not replaced with a
         half-written or missing file."""
+        self._seed_boundary_approval()
         first = self._accept()
         original_bytes = first.read_bytes()
+        log_before = self.review_log.read_bytes()
 
-        review_log = self.workspace / "ci" / "results" / "review_log.jsonl"
-        review_log.unlink()
-        review_log.mkdir()  # now a directory -- the next append will fail
         with self.assertRaises(Exception):
-            self._accept(accepted_at="2026-09-06", review_log=review_log)
+            with _failing_audit_fsync():
+                self._accept(accepted_at="2026-09-06")
+
         self.assertEqual(first.read_bytes(), original_bytes)
+        self.assertEqual(self.review_log.read_bytes(), log_before)
 
     def test_reaccepting_the_same_cluster_overwrites_the_prior_receipt(self):
         """Re-generating a receipt for the same cluster (e.g. after the
@@ -664,12 +810,426 @@ class AcceptPromotionTest(unittest.TestCase):
         approve()'s own overwrite-on-reapprove behavior. promotion_id
         stays stable across the re-acceptance since it's derived purely
         from cluster."""
+        self._seed_boundary_approval()
         first = self._accept()
         second = self._accept(accepted_at="2026-09-06")
         self.assertEqual(first, second)
         data = json.loads(second.read_text())
         self.assertEqual(data["accepted_at"], "2026-09-06")
         self.assertEqual(data["promotion_id"], "PROM-SCHEDULING-001")
+
+
+class ReviewProvenanceTest(unittest.TestCase):
+    """chainlink #82: the review-provenance guard itself. The exact
+    defect was that `accept-promotion --reviewer <any string>` minted a
+    Stage 4.5 receipt over every accepted artifact's review block
+    without ever asking where those blocks came from -- here, both
+    directions are pinned: a block with no approval behind it refuses
+    (nothing written), and a block whose approval IS recorded is still
+    accepted."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        _write_descriptor(self.workspace)
+        _write_json(self.workspace, AcceptPromotionTest.BOUNDARY_ARTIFACT, VALID_BOUNDARY)
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "reliance-policy.md").write_text(POLICY_TEXT)
+        self.review_log = self.workspace / "ci" / "results" / "review_log.jsonl"
+        self.artifact_paths = ["docs/reliance-policy.md", AcceptPromotionTest.BOUNDARY_ARTIFACT]
+        self.boundary_path = self.workspace / AcceptPromotionTest.BOUNDARY_ARTIFACT
+        # Seed the human-ruling gate too (chainlink #82): these tests are
+        # about PROVENANCE, and the ruling gate runs after it, so a
+        # provenance refusal still fires first while a provenance pass
+        # does not then bounce off a missing ruling.
+        record_ruling(
+            self.workspace,
+            self.artifact_paths,
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _accept(self, **overrides):
+        kwargs = dict(
+            workspace_root=self.workspace,
+            cluster="scheduling",
+            reviewer="alice",
+            policy_path="docs/reliance-policy.md",
+            artifact_paths=self.artifact_paths,
+            accepted_at="2026-09-10",
+            review_log=self.review_log,
+        )
+        kwargs.update(overrides)
+        return accept_promotion(**kwargs)
+
+    def _refused(self, **overrides) -> str:
+        with self.assertRaises(PromotionReceiptError) as caught:
+            self._accept(**overrides)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+        return str(caught.exception)
+
+    def test_a_hand_written_review_block_with_no_approval_entry_is_refused(self):
+        """THE defect repro: a fully valid accepted set (real hashes, real
+        schema_versions, real policy marker, validator-clean receipt)
+        whose only review block was typed into the file, plus whatever
+        `--reviewer` string the caller supplied. Refused, with the
+        artifact named -- and no audit entry appended, since the refusal
+        happens before the write transaction."""
+        message = self._refused()
+        self.assertIn(AcceptPromotionTest.BOUNDARY_ARTIFACT, message)
+        self.assertIn("approval provenance", message)
+        self.assertFalse(self.review_log.exists())
+
+    def test_an_approval_recorded_through_the_real_approve_path_is_accepted(self):
+        """The sanctioned path, end to end: review_checkpoint.approve()
+        writes the artifact's review block AND the audit entry in one
+        call, which is exactly what the guard reads back. Nothing in
+        this test seeds the log by hand."""
+        draft_path = stage_draft(json.loads(self.boundary_path.read_text()), self.boundary_path)
+        approve(
+            draft_path,
+            self.boundary_path,
+            reviewer="alice",
+            reviewed_at="2026-09-10",
+            review_log=self.review_log,
+            validate_fn=SKIP_VALIDATION,
+        )
+        # approve() rewrote the block, so the file's bytes changed and the
+        # ruling seeded in setUp is stale by design (chainlink #82's gate
+        # binds a ruling to the version it ruled on) -- re-rule, as a human
+        # would after approving.
+        record_ruling(
+            self.workspace,
+            self.artifact_paths,
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
+        receipt = self._accept()
+        self.assertTrue(receipt.exists())
+        self.assertEqual(
+            json.loads(self.boundary_path.read_text())["review"], {"reviewer": "alice", "reviewed_at": "2026-09-10"}
+        )
+
+    def test_editing_the_reviewer_after_approval_is_refused(self):
+        """Provenance is about the block, not just the path: re-writing
+        review.reviewer after the approval happened (naming whoever is
+        convenient) no longer matches the entry that approval wrote."""
+        _record_approval(self.workspace, AcceptPromotionTest.BOUNDARY_ARTIFACT, VALID_BOUNDARY["review"])
+        tampered = dict(VALID_BOUNDARY)
+        tampered["review"] = {"reviewer": "whoever-is-convenient", "reviewed_at": "2026-08-30"}
+        self.boundary_path.write_text(json.dumps(tampered))
+        message = self._refused()
+        self.assertIn("whoever-is-convenient", message)
+
+    def test_editing_the_reviewed_date_after_approval_is_refused(self):
+        _record_approval(self.workspace, AcceptPromotionTest.BOUNDARY_ARTIFACT, VALID_BOUNDARY["review"])
+        tampered = dict(VALID_BOUNDARY)
+        tampered["review"] = {"reviewer": "alice", "reviewed_at": "2026-09-01"}
+        self.boundary_path.write_text(json.dumps(tampered))
+        with self.assertRaises(PromotionReceiptError):
+            self._accept()
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_an_approval_entry_for_a_different_artifact_proves_nothing(self):
+        _record_approval(
+            self.workspace,
+            "crates/scheduler/specs/_boundaries/somebody_else.json",
+            VALID_BOUNDARY["review"],
+        )
+        message = self._refused()
+        self.assertIn(AcceptPromotionTest.BOUNDARY_ARTIFACT, message)
+
+    def test_a_relative_approval_entry_still_resolves_into_this_workspace(self):
+        """Approvals recorded with a workspace-relative target_path (the
+        natural form when the CLI runs inside the workspace) must match,
+        not silently fail as 'some other path'."""
+        _record_approval(
+            self.workspace,
+            AcceptPromotionTest.BOUNDARY_ARTIFACT,
+            VALID_BOUNDARY["review"],
+            entry_target_path=AcceptPromotionTest.BOUNDARY_ARTIFACT,
+        )
+        self.assertTrue(self._accept().exists())
+
+    def test_a_mechanical_carry_forward_entry_proves_the_review_it_carried(self):
+        """auto_promote_if_mechanical() deliberately leaves the artifact's
+        own review block untouched -- the prior human review IS the
+        approval being carried forward -- and records that in its entry's
+        own reviewer field instead."""
+        _record_approval(
+            self.workspace,
+            AcceptPromotionTest.BOUNDARY_ARTIFACT,
+            VALID_BOUNDARY["review"],
+            classification="mechanical",
+            reviewer=f"auto-promoted (carried forward from {VALID_BOUNDARY['review']['reviewer']!r})",
+        )
+        self.assertTrue(self._accept().exists())
+
+    def test_a_damaged_audit_log_fails_closed(self):
+        """A log that cannot be read as the append-only approval trail
+        it claims to be proves nothing, so it refuses rather than
+        degrading to 'no entry found, treat the block as fine'."""
+        self.review_log.parent.mkdir(parents=True, exist_ok=True)
+        self.review_log.write_text(
+            json.dumps(
+                {
+                    "target_path": str(self.boundary_path),
+                    "classification": "new",
+                    "reviewer": "alice",
+                    "reviewed_at": "2026-08-30",
+                }
+            )
+            + "\n"
+            + "this line is not JSON\n"
+        )
+        message = self._refused()
+        self.assertIn("not valid JSON", message)
+
+    def test_an_entry_missing_the_approval_shape_is_not_proof(self):
+        """An arbitrary JSON object dropped into the log (a stray line,
+        an unrelated audit trail sharing the file) is not an approval
+        entry -- every writer in review_checkpoint emits all four of
+        target_path/classification/reviewer/reviewed_at."""
+        self.review_log.parent.mkdir(parents=True, exist_ok=True)
+        self.review_log.write_text(
+            json.dumps(
+                {
+                    "target_path": str(self.boundary_path),
+                    "reviewer": "alice",
+                    "reviewed_at": "2026-08-30",
+                }
+            )
+            + "\n"
+        )
+        with self.assertRaises(PromotionReceiptError):
+            self._accept()
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling.json").exists())
+
+    def test_collect_review_blocks_only_reports_artifacts_that_carry_one(self):
+        """The policy document (a normative markdown file with no review
+        block at all) has nothing to prove and must never be reported as
+        a review-bearing artifact -- only the boundary contract is."""
+        reviewed = collect_review_blocks(self.workspace, self.artifact_paths)
+        self.assertEqual(sorted(reviewed), [AcceptPromotionTest.BOUNDARY_ARTIFACT])
+        self.assertEqual(reviewed[AcceptPromotionTest.BOUNDARY_ARTIFACT], VALID_BOUNDARY["review"])
+
+    def test_nothing_to_prove_is_not_a_refusal(self):
+        """An empty set of review-bearing artifacts leaves no gaps -- the
+        guard refuses unprovenanced blocks, not promotions in general."""
+        self.assertEqual(review_provenance_gaps(self.workspace, {}, self.review_log), [])
+
+
+class HumanRulingGateTest(unittest.TestCase):
+    """chainlink #82's second remedy -- the human-ruling gate. Provenance
+    asks where a review block came from; this asks whether a human has
+    ruled on the accepted SET, which is the pilot's own constraint
+    ("#14's accept-promotion must not run before rulings 1 and 2 land")
+    and the only thing that covers artifacts provenance cannot see:
+    blocks approved by an unattended agent, and records with no review
+    block at all."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        _write_descriptor(self.workspace)
+        _write_json(self.workspace, AcceptPromotionTest.BOUNDARY_ARTIFACT, VALID_BOUNDARY)
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "reliance-policy.md").write_text(POLICY_TEXT)
+        # Provenance already satisfied, so every refusal below is the
+        # RULING gate's and nothing else's (except the one test that
+        # deliberately takes provenance away).
+        _record_approval(self.workspace, AcceptPromotionTest.BOUNDARY_ARTIFACT, VALID_BOUNDARY["review"])
+        self.artifact_paths = ["docs/reliance-policy.md", AcceptPromotionTest.BOUNDARY_ARTIFACT]
+        self.ruling_log = self.workspace / "ci" / "results" / "human_rulings.jsonl"
+        self.review_log = self.workspace / "ci" / "results" / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _accept(self, **overrides):
+        kwargs = dict(
+            workspace_root=self.workspace,
+            cluster="scheduling",
+            reviewer="alice",
+            policy_path="docs/reliance-policy.md",
+            artifact_paths=self.artifact_paths,
+            accepted_at="2026-09-12",
+            review_log=self.review_log,
+            ruling_log=self.ruling_log,
+        )
+        kwargs.update(overrides)
+        return accept_promotion(**kwargs)
+
+    def _rule(self, **overrides) -> dict:
+        kwargs = dict(
+            workspace_root=self.workspace,
+            artifact_paths=self.artifact_paths,
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+            ruling_log=self.ruling_log,
+        )
+        kwargs.update(overrides)
+        return record_ruling(**kwargs)
+
+    def _refused(self, **overrides) -> str:
+        receipt = self.workspace / "specs" / "_promotions" / "scheduling.json"
+        had_receipt = receipt.exists()
+        with self.assertRaises(PromotionReceiptError) as caught:
+            self._accept(**overrides)
+        # Nothing NEW written: a receipt left over from an earlier
+        # successful acceptance in the same test must be untouched, and a
+        # refusal must never install one.
+        self.assertEqual(receipt.exists(), had_receipt)
+        return str(caught.exception)
+
+    def test_a_promotion_nobody_ruled_on_is_refused(self):
+        """The gate at rest: a fully valid accepted set -- real hashes,
+        provenanced review blocks, validator-clean receipt -- with no
+        recorded ruling anywhere. Refused, with the command that records
+        one named in the message, and no ruling log created on the way
+        out."""
+        message = self._refused()
+        self.assertIn("record-ruling", message)
+        self.assertIn(AcceptPromotionTest.BOUNDARY_ARTIFACT, message)
+        self.assertIn("docs/reliance-policy.md", message)
+        self.assertFalse(self.ruling_log.exists())
+
+    def test_a_ratified_ruling_over_the_accepted_set_is_accepted(self):
+        entry = self._rule()
+        self.assertEqual(entry["verdict"], "ratified")
+        receipt = self._accept()
+        self.assertTrue(receipt.exists())
+
+    def test_a_rejected_ruling_blocks_the_promotion(self):
+        """A recorded NO is a refusal, not a silent absence -- the
+        pilot's ruling 1 has exactly this shape."""
+        self._rule(verdict="rejected")
+        message = self._refused()
+        self.assertIn("REJECTED", message)
+        self.assertIn(AcceptPromotionTest.BOUNDARY_ARTIFACT, message)
+
+    def test_a_ruling_over_an_older_version_of_an_artifact_does_not_carry_over(self):
+        """Rulings are bound to the bytes they ruled on: ratify, then
+        change the file, and the ruling no longer applies until re-ruled.
+        The policy document is edited here because it carries no review
+        block, so provenance is untouched and the stale ruling is
+        unambiguously what refused."""
+        self._rule()
+        policy = self.workspace / "docs" / "reliance-policy.md"
+        policy.write_text(policy.read_text() + "\nA later edit.\n")
+        message = self._refused()
+        self.assertIn("different version", message)
+
+    def test_a_partial_ruling_covers_only_the_artifacts_it_names(self):
+        self._rule(artifact_paths=["docs/reliance-policy.md"])
+        message = self._refused()
+        self.assertIn(AcceptPromotionTest.BOUNDARY_ARTIFACT, message)
+        self.assertNotIn("docs/reliance-policy.md:", message)
+
+    def test_an_artifact_with_no_review_block_still_needs_a_ruling(self):
+        """The pilot's ruling 2, in miniature: evidence records carry no
+        `review` block, so the provenance check is silent about them by
+        design -- the ruling gate is what still requires a human to rule
+        on them before they are promoted."""
+        evidence_path = "evidence/E-0143.json"
+        _write_json(self.workspace, evidence_path, valid_evidence_record())
+        self.artifact_paths.append(evidence_path)
+        message = self._refused()
+        self.assertIn(evidence_path, message)
+        self._rule()
+        self.assertTrue(self._accept().exists())
+
+    def test_a_damaged_rulings_log_fails_closed(self):
+        self.ruling_log.parent.mkdir(parents=True, exist_ok=True)
+        self.ruling_log.write_text("this line is not JSON\n")
+        message = self._refused()
+        self.assertIn("not valid JSON", message)
+
+    def test_an_unrecognized_verdict_cannot_satisfy_the_gate(self):
+        """record_ruling() refuses unknown verdicts outright, so only a
+        hand-written entry can put one in the log -- and the gate must
+        not treat "some verdict" as "a ruling"."""
+        self.ruling_log.parent.mkdir(parents=True, exist_ok=True)
+        self.ruling_log.write_text(
+            json.dumps(
+                {
+                    "artifacts": compute_artifact_manifest(
+                        self.workspace, self.artifact_paths, DESCRIPTOR
+                    ),
+                    "verdict": "maybe",
+                    "reviewer": "alice",
+                    "ruled_at": "2026-09-12",
+                }
+            )
+            + "\n"
+        )
+        message = self._refused()
+        self.assertIn("maybe", message)
+
+    def test_the_latest_ruling_wins_in_either_direction(self):
+        """The log is append-only, so a human supersedes an earlier
+        decision by recording a new one -- never by editing history."""
+        self._rule(verdict="rejected")
+        self.assertIn("REJECTED", self._refused())
+        self._rule(verdict="ratified")
+        self.assertTrue(self._accept().exists())
+        self._rule(verdict="rejected")
+        self.assertIn("REJECTED", self._refused())
+
+    def test_provenance_is_checked_before_the_ruling_gate(self):
+        """Take the provenance trail away as well and the refusal is
+        provenance's, not the ruling gate's -- ordering matters, since a
+        genuinely unprovenanced review block must be reported for what it
+        is rather than as bookkeeping."""
+        self.review_log.unlink()
+        message = self._refused()
+        self.assertIn("approval provenance", message)
+        self.assertNotIn("record-ruling", message)
+
+    def test_a_recorded_ruling_carries_the_same_hashes_the_receipt_will(self):
+        """record_ruling() must use compute_artifact_manifest() -- the
+        receipt's own routine -- otherwise the gate would compare hashes
+        the two sides derive differently (witness promotion digests above
+        all)."""
+        entry = self._rule()
+        expected = compute_artifact_manifest(self.workspace, self.artifact_paths, DESCRIPTOR)
+        self.assertEqual(entry["artifacts"], expected)
+        self.assertEqual([a["path"] for a in entry["artifacts"]], self.artifact_paths)
+
+    def test_record_ruling_refuses_an_empty_reviewer(self):
+        with self.assertRaises(ValueError):
+            self._rule(reviewer="")
+        self.assertFalse(self.ruling_log.exists())
+
+    def test_record_ruling_refuses_an_unknown_verdict(self):
+        with self.assertRaises(PromotionReceiptError):
+            self._rule(verdict="probably-fine")
+        self.assertFalse(self.ruling_log.exists())
+
+    def test_record_ruling_refuses_a_malformed_ruled_at_date(self):
+        with self.assertRaises(PromotionReceiptError):
+            self._rule(ruled_at="soon")
+        self.assertFalse(self.ruling_log.exists())
+
+    def test_record_ruling_refuses_a_missing_artifact_before_writing_anything(self):
+        with self.assertRaises(PromotionReceiptError):
+            self._rule(artifact_paths=["does/not/exist.json"])
+        self.assertFalse(self.ruling_log.exists())
+
+    def test_record_ruling_fails_closed_without_a_project_descriptor(self):
+        (self.workspace / "project-descriptor.json").unlink()
+        with self.assertRaises(Exception):
+            self._rule()
+        self.assertFalse(self.ruling_log.exists())
+
+    def test_ruling_gaps_is_vacuous_for_an_empty_manifest(self):
+        self.assertEqual(ruling_gaps(self.workspace, [], self.ruling_log), [])
 
 
 TASK_QUEUE_WITNESS_PATH = "crates/scheduler/specs/_witnesses/task_queue.load_factor.json"
@@ -722,10 +1282,23 @@ class WitnessPromotionIntegrityTest(unittest.TestCase):
         (self.workspace / "docs").mkdir()
         (self.workspace / "docs" / "reliance-policy.md").write_text(POLICY_TEXT)
         _write_declared_feature(self.workspace)
+        # The witness spec carries its own review block, so it needs the
+        # approval entry behind it before ANY acceptance here can succeed
+        # (chainlink #82); no test in this class inspects the log itself.
+        _record_approval(self.workspace, TASK_QUEUE_WITNESS_PATH, witness_spec()["review"])
         self.artifact_paths = [
             "docs/reliance-policy.md",
             TASK_QUEUE_WITNESS_PATH,
         ]
+        # ...and the human-ruling gate needs a ruling over that same set
+        # (chainlink #82) before any acceptance here can succeed either.
+        record_ruling(
+            self.workspace,
+            self.artifact_paths,
+            reviewer="alice",
+            verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -859,7 +1432,7 @@ class WitnessPromotionIntegrityTest(unittest.TestCase):
         svg_bytes = b"<svg></svg>"
         (self.workspace / "docs" / "witnesses" / "task_queue.load_factor.svg").write_bytes(svg_bytes)
         (self.workspace / "docs" / "witnesses" / "_contact_sheet.svg").write_bytes(svg_bytes)
-        (self.workspace / "ci" / "results").mkdir(parents=True)
+        (self.workspace / "ci" / "results").mkdir(parents=True, exist_ok=True)
         ledger_bytes = b'{"schema_version": "1.0", "generated_from": {}, "features": []}'
         (self.workspace / "ci" / "results" / "feature_ledger.json").write_bytes(ledger_bytes)
 

@@ -183,11 +183,24 @@ def load_inventory(source_root: Path) -> dict:
 
 def bundle_entries(inventory: dict) -> list[tuple[str, str]]:
     """[(source-relative path, archive name)] derived solely from the
-    inventory's disposition fields."""
+    inventory's disposition fields (plus its `installed_by_init` flag,
+    which mirrors the same rule for the two files `init` copies out of
+    the bundle)."""
     entries: list[tuple[str, str]] = []
     for module in inventory["python_modules"]:
-        if module["disposition"] in BUNDLE_DISPOSITIONS:
-            entries.append((module["path"], Path(module["path"]).name))
+        if module["disposition"] not in BUNDLE_DISPOSITIONS:
+            continue
+        entries.append((module["path"], Path(module["path"]).name))
+        if module.get("installed_by_init"):
+            # chainlink #84: `init` copies this file into the target
+            # workspace, so a PACKAGED `init` has to be able to read it
+            # as a resource. resources.resource_root() only ever exposes
+            # ligature_data/ (see scripts/resources.py), so the module is
+            # shipped twice: once at the archive root for the product to
+            # import, once under ligature_data/<path> for `init` to copy.
+            # Duplicated bytes, single source: both copies come from the
+            # same source-relative path in the same build.
+            entries.append((module["path"], f"ligature_data/{module['path']}"))
     for key in ("schemas", "schema_examples", "prompts", "documentation_and_templates"):
         for entry in inventory[key]:
             if entry["disposition"] in BUNDLE_DISPOSITIONS:
@@ -342,7 +355,9 @@ def build(out_dir: Path, *, source_root: Path = ROOT) -> dict:
         "working_tree_diff_hash": git_state["diff_hash"],
         "bundle_manifest_derivation": (
             "docs/implementation-inventory.json dispositions runtime-required, "
-            "installed-template, and required_at_runtime vendored assets"
+            "installed-template, and required_at_runtime vendored assets; "
+            "python modules flagged installed_by_init also ship a second copy "
+            "under ligature_data/<path> for `init` to copy into a target repo"
         ),
         "bundle_file_count": len(manifest),
         "bundled_schemas": attestation["bundled_schemas"],

@@ -67,6 +67,18 @@ AUTHORITY_END = "<!-- LIGATURE-AUTHORITY-END -->"
 AUTHORITY_HASH_TOKEN = "__LIGATURE_AUTHORITY_HASH__"
 _AUTHORITY_HASH_RE = re.compile(r"LIGATURE-AUTHORITY-BEGIN sha256:([0-9a-f]{64})")
 
+# The reliance policy's own version-marker convention
+# (docs/reliance-policy.template.md): exactly one
+# "Policy version: <name>@<major>.<minor>" line. Shared by
+# generate_promotion_receipt.extract_policy_version (which reads
+# policy_version from it at promotion time) and accept_policy below (which
+# refuses to record a hash for a document that cannot yield one), so the two
+# can never disagree about what a well-formed policy document is
+# (chainlink #78).
+POLICY_VERSION_MARKER_RE = re.compile(
+    r"^Policy version:\s*`?([a-z][a-z0-9-]*@[0-9]+(?:\.[0-9]+)*)`?\s*$", re.MULTILINE
+)
+
 MANAGED = "managed"
 USER = "user"
 
@@ -96,6 +108,12 @@ _PROMPTS = (
     "stage-0-evidence-intake.md",
     "stage-3-boundary-drafting.md",
     "stage-3-interaction-drafting.md",
+    "stage-3-bridge-drafting.md",
+    "stage-3-witness-drafting.md",
+    "stage-3-exemption-drafting.md",
+    "stage-3-protocol-debt-drafting.md",
+    "stage-3-conflict-resolution-drafting.md",
+    "stage-3-concept-to-code.md",
 )
 
 
@@ -111,6 +129,14 @@ class RegistryEntry:
     ownership: str
     kind: str  # "descriptor" | "policy" | "skill" | "copy"
     skill: bool = False
+    # A user-owned file that is a NORMATIVE input to the pipeline (the
+    # reliance policy, and any future governance doc): its on-disk content
+    # is drift-checked against the manifest's recorded base_hash, and an
+    # unreviewed change is reported rather than silently adopted
+    # (chainlink #78). The descriptor is user-owned but NOT normative --
+    # its integrity mechanism is schema validation (#74), not a hash pin,
+    # because it is meant to be freely edited by the project.
+    normative: bool = False
 
 
 def file_registry(mode: str, name: str, descriptor_rel: str) -> list[RegistryEntry]:
@@ -119,11 +145,43 @@ def file_registry(mode: str, name: str, descriptor_rel: str) -> list[RegistryEnt
     descriptor_example = ROOT / "schemas" / "examples" / f"project-descriptor.{mode}.example.json"
     entries = [
         RegistryEntry(descriptor_rel, descriptor_example, USER, "descriptor"),
-        RegistryEntry("docs/reliance-policy.md", ROOT / "docs" / "reliance-policy.template.md", USER, "policy"),
+        RegistryEntry(
+            "docs/reliance-policy.md", ROOT / "docs" / "reliance-policy.template.md", USER, "policy", normative=True
+        ),
         RegistryEntry(SKILL_RELATIVE_PATH, ROOT / "docs" / "ligature-skill.template.md", MANAGED, "skill", skill=True),
+        # chainlink #76: the schema that governs the user-owned descriptor
+        # is also shipped into the project root itself, not only into
+        # .ligature/schemas/ -- a black-box probe of the v1.0 surface could
+        # not discover the descriptor's permitted shape (the verifier enum
+        # in particular) from anything `init` wrote, because the schema
+        # lived only inside the binary's attested resource bundle.
+        RegistryEntry("schemas/project-descriptor.schema.json", ROOT / "schemas" / "project-descriptor.schema.json", MANAGED, "copy"),
         RegistryEntry(".ligature/schemas/project-descriptor.schema.json", ROOT / "schemas" / "project-descriptor.schema.json", MANAGED, "copy"),
         RegistryEntry(".ligature/schemas/project-state.schema.json", ROOT / "schemas" / "project-state.schema.json", MANAGED, "copy"),
         RegistryEntry(".ligature/schemas/consolidated-check.schema.json", ROOT / "schemas" / "consolidated-check.schema.json", MANAGED, "copy"),
+        # chainlink #84: `validate-work-package`'s G13 requires a
+        # gate_integrity entry for EACH of these two paths with a runner
+        # that resolves to a REAL file inside the workspace --
+        # unconditionally, for every manifest (plan.md §16.5, chainlink
+        # #35, check_witness_renderer_integrity) -- but v1.0's `init`
+        # installed neither, so no shipped CLI could ever satisfy the
+        # gate (the date-creusot pilot's Stage 7 blocker; the pilot
+        # worked around it with placeholder zero hashes rather than
+        # fabricating a renderer, which would have laundered a fake pass
+        # through the very gate meant to protect it).
+        #
+        # Installed MANAGED, never user-owned: the renderer is
+        # gate-adjacent code, so a locally modified copy is a CONFLICT
+        # that `migrate --force` recovers explicitly -- never a template
+        # the target repo is free to edit. Their path set is pinned to
+        # `validate_work_package.WITNESS_RENDERER_INTEGRITY_PATHS` by a
+        # test, so G13's requirements and what `init` ships cannot drift
+        # apart. `scripts/xml_escape.py` ships alongside because
+        # witness_renderer.py imports it directly for its own text
+        # escaping -- pinning only the entrypoint would leave the helper
+        # it executes unpinned.
+        RegistryEntry("scripts/witness_renderer.py", ROOT / "scripts" / "witness_renderer.py", MANAGED, "copy"),
+        RegistryEntry("scripts/xml_escape.py", ROOT / "scripts" / "xml_escape.py", MANAGED, "copy"),
     ]
     for prompt in _PROMPTS:
         entries.append(RegistryEntry(f".ligature/prompts/{prompt}", ROOT / "prompts" / prompt, MANAGED, "copy"))
@@ -354,12 +412,13 @@ def _manifest_files(manifest: dict | None) -> dict[str, dict]:
 class FilePlan:
     path: str
     ownership: str
-    outcome: str  # create|unchanged|upgrade|conflict|user-owned|missing|obsolete
+    outcome: str  # create|unchanged|upgrade|conflict|user-owned|drifted|missing|obsolete
     content: str | None
     base_hash: str | None
     expected_hash: str | None
     authority_hash: str | None = None
     reason: str = ""
+    normative: bool = False
 
 
 @dataclass
@@ -414,10 +473,20 @@ def plan_install(
         if entry.ownership == USER:
             if disk is None:
                 outcome, content = "create", rendered
+            elif entry.normative and base is not None and disk != base:
+                # chainlink #78: a normative user-owned document whose bytes
+                # differ from the reviewed (manifest-recorded) content is
+                # DRIFTED -- reported, never silently overwritten and never
+                # silently re-based. `accept-policy` is the only path that
+                # moves the recorded base.
+                outcome, content = "drifted", None
             else:
                 outcome, content = "user-owned", None
             report.files.append(
-                FilePlan(entry.path, USER, outcome, content, base or (expected if content else disk), expected, reason="user-owned template; never overwritten")
+                FilePlan(
+                    entry.path, USER, outcome, content, base or (expected if content else disk), expected,
+                    reason="user-owned template; never overwritten", normative=entry.normative,
+                )
             )
             continue
         if disk is None:
@@ -497,6 +566,12 @@ def _overall_status(report: InstallReport) -> str:
         return "conflict"
     if any(f.outcome == "missing" for f in managed):
         return "drifted"
+    # chainlink #78: a normative user-owned document (the reliance policy)
+    # that is missing or drifted from its reviewed content makes the whole
+    # installation `drifted` -- `installation: current` is not evidence that
+    # any user-owned file is the file that was reviewed.
+    if any(f.outcome in ("missing", "drifted") for f in report.files if f.ownership == USER and f.normative):
+        return "drifted"
     if any(f.outcome == "upgrade" for f in managed):
         return "upgradable"
     return "current"
@@ -537,6 +612,16 @@ def apply_plan(
         target = workspace / plan.path
         disk = _sha256_file(target) if target.is_file() else None
         if plan.outcome == "conflict":
+            base = plan.base_hash
+        elif plan.ownership == USER and plan.normative and plan.base_hash is not None:
+            # chainlink #78: a normative user-owned document's recorded base
+            # moves ONLY through the explicit accept path (`ligature
+            # accept-policy`). Re-basing it to whatever is on disk here would
+            # silently clear the drift signal the manifest exists to keep --
+            # the same silent-acceptance defect, one layer down. (A legacy
+            # manifest with no recorded base still adopts the on-disk content
+            # once, so a pre-#78 workspace becomes drift-checkable rather
+            # than permanently unverifiable.)
             base = plan.base_hash
         else:
             base = disk
@@ -786,8 +871,13 @@ def inspect(workspace: Path) -> InstallReport:
         target = safe_target(workspace, entry.path)
         disk = _sha256_file(target) if target.is_file() else None
         if entry.ownership == USER:
-            outcome = "user-owned" if disk is not None else "missing"
-            report.files.append(FilePlan(entry.path, USER, outcome, None, base, expected))
+            if disk is None:
+                outcome = "missing"
+            elif entry.normative and base is not None and disk != base:
+                outcome = "drifted"
+            else:
+                outcome = "user-owned"
+            report.files.append(FilePlan(entry.path, USER, outcome, None, base, expected, normative=entry.normative))
             continue
         outcome = _classify_managed(disk, base, expected)
         report.files.append(
@@ -879,6 +969,175 @@ def _manifest_descriptor_rel(manifest: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Normative user-owned document drift + acceptance (chainlink #78)
+# ---------------------------------------------------------------------------
+def normative_drift_records(workspace: Path) -> list[dict]:
+    """Per-file drift for normative user-owned documents (chainlink #78):
+    one record per normative registry entry (today: the reliance policy)
+    whose on-disk content is missing from the workspace or differs from the
+    manifest's recorded `base_hash` -- the reviewed content.
+
+    Each record is `{"path", "state" ("missing"|"drifted"),
+    "recorded_hash", "current_hash"}`. Empty when the workspace is not
+    initialized, the manifest is incompatible, or nothing has drifted. An
+    unreadable manifest yields no records rather than an exception, so
+    `check`/`status` stay honest instead of crashing; `doctor` remains the
+    detail surface for a corrupt manifest."""
+    try:
+        manifest = load_manifest(workspace)
+    except InstallError:
+        return []
+    if manifest is None:
+        return []
+    if manifest.get("manifest_schema_version") != MANIFEST_SCHEMA_VERSION:
+        return []
+    try:
+        mode = str(manifest.get("mode", ""))
+        name = str(manifest.get("project_name", ""))
+        descriptor_rel = _manifest_descriptor_rel(manifest)
+        registry = file_registry(mode, name, descriptor_rel)
+    except InstallError:
+        return []
+    records = _manifest_files(manifest)
+    drift: list[dict] = []
+    for entry in registry:
+        if not entry.normative:
+            continue
+        record = records.get(entry.path, {})
+        base = record.get("base_hash")
+        try:
+            target = safe_target(workspace, entry.path)
+        except InstallError:
+            continue
+        disk = _sha256_file(target) if target.is_file() else None
+        if disk is None:
+            drift.append({"path": entry.path, "state": "missing", "recorded_hash": base, "current_hash": None})
+        elif base is not None and disk != base:
+            drift.append({"path": entry.path, "state": "drifted", "recorded_hash": base, "current_hash": disk})
+    return drift
+
+
+def _declared_policy_path(workspace: Path, manifest: dict) -> str | None:
+    """The descriptor's `compatibility_policy.reliance_policy_path`, or
+    None when the descriptor is absent, unreadable, schema-invalid, or
+    declares no usable value. Read-only: the descriptor is user-owned and
+    never repaired here (chainlink #78 -- the field is the project's own
+    declaration of where its policy lives, and the accept commands default
+    to it rather than second-guessing it)."""
+    descriptor_rel = _manifest_descriptor_rel(manifest)
+    try:
+        target = safe_target(workspace, descriptor_rel)
+    except InstallError:
+        return None
+    if not target.is_file():
+        return None
+    try:
+        data = json.loads(target.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    compat = data.get("compatibility_policy")
+    if not isinstance(compat, dict):
+        return None
+    value = compat.get("reliance_policy_path")
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def accept_policy(
+    workspace: Path,
+    reviewer: str,
+    policy_path: str | None = None,
+) -> dict:
+    """`ligature accept-policy` (chainlink #78): the documented accept path
+    for an intentional governance change, analogous to `accept-promotion`.
+
+    Records the current on-disk content of a normative user-owned document
+    (the reliance policy) as its reviewed `base_hash` in the ownership
+    manifest, so a reviewed edit stops reading as drift. The recorded base
+    moves through this function and nothing else -- `init`/`migrate` never
+    re-base a normative user-owned file to whatever is on disk (see
+    `apply_plan`), which is what makes the drift signal trustworthy.
+
+    `policy_path` defaults to the descriptor's
+    `compatibility_policy.reliance_policy_path`; an explicit path that
+    disagrees with the declaration is refused, so a workspace cannot
+    quietly promote against a different policy document than the one it
+    declares. The document must carry exactly one
+    `Policy version: <name>@<major>.<minor>` marker line -- the same
+    convention `accept-promotion` reads -- so the recorded hash always
+    corresponds to a policy that can yield a policy_version.
+
+    Refuses (InstallError) before touching the manifest when: the workspace
+    is not initialized; no path can be resolved; the path is not a
+    manifest-recorded, registry-normative, user-owned file; the file is
+    missing; the marker line is absent/ambiguous; or the reviewer is empty.
+    """
+    if not reviewer:
+        raise InstallError("accept-policy requires a non-empty reviewer -- no default, no LLM-supplied value")
+    manifest = load_manifest(workspace)
+    if manifest is None:
+        raise InstallError("workspace is not initialized; run `ligature init --mode <mode>` first")
+    _require_compatible(manifest)
+    declared = _declared_policy_path(workspace, manifest)
+    if policy_path is None:
+        if declared is None:
+            raise InstallError(
+                "no --policy-path given and the project descriptor declares no "
+                "compatibility_policy.reliance_policy_path to default to"
+            )
+        policy_path = declared
+    elif declared is not None and policy_path != declared:
+        raise InstallError(
+            f"--policy-path {policy_path!r} disagrees with the project descriptor's "
+            f"compatibility_policy.reliance_policy_path {declared!r}"
+        )
+    record = _manifest_files(manifest).get(policy_path)
+    if record is None:
+        raise InstallError(
+            f"accept-policy names a path the ownership manifest does not record: {policy_path!r} "
+            "(the manifest records what `ligature init` installed; a policy file it does not "
+            "record was never installed by the product)"
+        )
+    if record.get("ownership") != USER:
+        raise InstallError(f"accept-policy names a path that is not user-owned: {policy_path!r}")
+    mode = str(manifest.get("mode", ""))
+    name = str(manifest.get("project_name", ""))
+    registry = file_registry(mode, name, _manifest_descriptor_rel(manifest))
+    entry = next((e for e in registry if e.path == policy_path), None)
+    if entry is None or not entry.normative:
+        raise InstallError(
+            f"accept-policy names a path that is not a normative policy document: {policy_path!r}"
+        )
+    target = safe_target(workspace, policy_path)
+    if not target.is_file():
+        raise InstallError(f"policy document is missing from the workspace: {policy_path}")
+    try:
+        text = target.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InstallError(f"policy document {policy_path!r} is unreadable: {exc}") from exc
+    matches = POLICY_VERSION_MARKER_RE.findall(text)
+    if len(matches) != 1:
+        raise InstallError(
+            f"{policy_path!r} must have exactly one 'Policy version: <name>@<major>.<minor>' marker "
+            f"line (docs/reliance-policy.template.md's own convention) -- found {len(matches)}"
+        )
+    previous = record.get("base_hash")
+    accepted = _sha256_file(target)
+    record["base_hash"] = accepted
+    _write_manifest(workspace, manifest)
+    return {
+        "path": policy_path,
+        "reviewer": reviewer,
+        "policy_version": matches[0],
+        "previous_hash": previous,
+        "accepted_hash": accepted,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Executable (adjudicator) trust pin
 # ---------------------------------------------------------------------------
 def running_adjudicator_record() -> dict:
@@ -950,6 +1209,7 @@ _OUTCOME_GLYPH = {
     "upgrade": "upgrade",
     "conflict": "CONFLICT",
     "user-owned": "user-owned",
+    "drifted": "DRIFTED",
     "missing": "MISSING",
     "obsolete": "obsolete",
 }
@@ -982,6 +1242,8 @@ def render_report_text(report: InstallReport) -> str:
         line = f"  {_OUTCOME_GLYPH.get(plan.outcome, plan.outcome):>9}  {plan.path}"
         if plan.path == report.descriptor_path and report.descriptor_schema is not None:
             line += _descriptor_schema_note(report.descriptor_schema)
+        elif plan.outcome == "drifted":
+            line += "  (unreviewed change; record it with `ligature accept-policy --reviewer <name>`)"
         lines.append(line)
     for path in sorted(report.obsolete):
         lines.append(f"  {'obsolete':>9}  {path}")

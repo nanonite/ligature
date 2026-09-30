@@ -87,7 +87,7 @@
         },
         "closure_kind": {
           "type": "string",
-          "enum": ["deductive", "bounded", "n/a"],
+          "enum": ["deductive", "bounded", "partial", "n/a"],
           "description": "The owning cluster's genuinely valid closure profile's own declared closure_kind (docs/closure-profile-schema.json), or 'n/a' when no genuinely valid closure profile exists for this cluster. Kept strictly separate from witness/coverage state, the same discipline plan.md §16.4 already names."
         }
       }

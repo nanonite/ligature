@@ -210,3 +210,14 @@ Omit the `review` field entirely. Your output is a draft
 added only by `approve`/`approve-pair`, from an explicit human-supplied
 reviewer. Do not guess a reviewer name or date, and do not claim a review
 happened.
+
+## Write set
+
+The interaction record lands in the crate's `_interactions/` directory —
+a `protected_roots` path. That directory is written only through this
+draft → `approve`/`approve-pair` path, never by hand and never by writing
+the file directly: the project descriptor's `write_set` declares the spec
+trees off-limits to free-form writes, and `ligature write-set-check`
+reports any file that appears outside `allowed_roots` (the crate `src/`
+and `tests/` trees) without a declaration accounting for it. If a finding
+implies writing anywhere else, surface it instead of writing.

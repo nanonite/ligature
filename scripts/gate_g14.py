@@ -25,6 +25,20 @@ requirements. An assumption three hops down that the cluster's entry
 policy would never have allowed fails here even though every individual
 edge passed.
 
+CG3 (chainlink #86), the one condition with no artifact behind it that
+can ALWAYS settle it: `generic_callees_type_universal_or_creusot_owned`.
+Which callees are generic is type information nothing in this pipeline
+carries, so the condition is never taken on its declaration alone. It is
+computed from the closure's own records whenever those records determine
+it -- see generic_callees_verification() -- and when they do not (a Kani
+result anywhere, an unrecorded work package), it is a declared capability
+gap: an error the gate refuses to pass silently, excused only by a
+degradation record that names the condition and carries a tracking issue,
+which reports the cluster as degraded under that ceiling rather than
+closed. A tracking record the artifacts have outgrown is rejected as
+stale, the same two-direction discipline G17 applies to profile and
+record where no closure evidence is visible.
+
 For cycles (CG6): mutual satisfaction is not soundness. An O-SCC closes
 only with all of -- every body meets its provided contracts, every bridge
 requirement passes, every assumption satisfies policy, AND an explicit
@@ -99,6 +113,8 @@ VERIFIER_BY_EVIDENCE_KIND = {
     "verus-deductive-check": "verus",
     "kani-bounded-model-check": "kani",
 }
+
+GENERIC_CALLEES_CONDITION = "generic_callees_type_universal_or_creusot_owned"
 
 PER_CLUSTER_NOTE = (
     "closure is a per-cluster property with a kind; this gate never asserts a pipeline-wide "
@@ -403,7 +419,9 @@ def load_assurance_reports(
                 Finding(
                     "G14", work_package,
                     f"no assurance report at its manifest's own report.emit path ({emit}) -- "
-                    "nothing achieved has been recorded for this work package",
+                    "nothing achieved has been recorded for this work package; record one from "
+                    "the verifier's own proof certificates with `ligature record-assurance "
+                    "<work-package> --proof <obligation>=<path>` (docs/cli-contract.md §1)",
                 )
             )
             continue
@@ -467,7 +485,9 @@ def check_provided_guarantees(
                     Finding(
                         "G14", obligation,
                         f"{work_package} provides this obligation but recorded no achieved "
-                        "assurance for it",
+                        "assurance for it -- record one from this work package's proof "
+                        "certificates with `ligature record-assurance "
+                        f"{work_package} --proof {obligation}=<path>`",
                     )
                 )
                 continue
@@ -510,7 +530,9 @@ def check_requirements(
                 Finding(
                     "G14", obligation,
                     f"required by {work_package} at closure depth {depth}, provided by {provider}, "
-                    "which recorded no achieved assurance for it",
+                    "which recorded no achieved assurance for it -- the providing work package "
+                    "records its own evidence with `ligature record-assurance "
+                    f"{provider} --proof {obligation}=<path>`",
                 )
             )
             continue
@@ -849,6 +871,66 @@ def observed_verifiers(closure: Closure, reports: dict[str, dict]) -> tuple[set[
     return kinds, {VERIFIER_BY_EVIDENCE_KIND[k] for k in kinds if k in VERIFIER_BY_EVIDENCE_KIND}
 
 
+def generic_callees_verification(
+    closure: Closure, reports: dict[str, dict]
+) -> tuple[bool, str]:
+    """CG3's own question, answered from the artifact data or refused
+    honestly (chainlink #86): (verifiable, the reason it is not).
+
+    `generic_callees_type_universal_or_creusot_owned` is the one
+    condition no artifact can ALWAYS settle -- which callees are generic
+    is type information nothing in this pipeline carries (CG3,
+    plan.md §3). But the gap CG3 names is KANI's: Kani verifies per
+    monomorphization, while a creusot/verus result is universal over
+    type parameters the way it is over inputs (plan.md §4's own table).
+    So the closure's own records DO determine the condition whenever all
+    of them are such results:
+
+      * every work package in the closure must have a readable report
+        carrying at least one achieved record -- evidence nothing wrote
+        down could be anything, and a report this gate could not read
+        already blocks on its own; and
+      * no achieved record anywhere in the closure may be a Kani
+        result. With no Kani-owned assurance in the closure, nothing
+        this closure rests on is verified per monomorphization, so no
+        generic callee it covers can be the Kani-owned,
+        not-type-universal case CG3's placement rule exists to prevent.
+
+    Anything else -- a Kani result three hops down, an unrecorded work
+    package, an empty closure -- is NOT verified and must never read as
+    checked: the returned reason is exactly what the gate prints beside
+    the gap it then requires a tracking record for. The claim is always
+    relative to this closure, the per-cluster scope g14 has always
+    certified, never a pipeline-wide one (plan.md §4)."""
+    if not closure.work_packages:
+        return False, "the closure itself contains no work package at all"
+    unrecorded = [
+        work_package
+        for work_package in closure.work_packages
+        if work_package not in reports
+        or not (
+            reports[work_package]["obligation_records"]
+            or reports[work_package]["bridge_records"]
+        )
+    ]
+    if unrecorded:
+        return False, (
+            "no achieved assurance record at all for "
+            + ", ".join(sorted(unrecorded))
+            + " -- until every work package in the closure has recorded evidence, a Kani "
+            "result nobody wrote down cannot be ruled out"
+        )
+    kinds, _ = observed_verifiers(closure, reports)
+    bounded = sorted(kinds & BOUNDED_EVIDENCE_KINDS)
+    if bounded:
+        return False, (
+            f"the closure's own achieved records include {bounded} results, and Kani verifies "
+            "generics per monomorphization -- whether every generic callee is type-universal or "
+            "creusot-owned needs type information no artifact in this pipeline carries (CG3)"
+        )
+    return True, ""
+
+
 def recompute_conditions(
     closure: Closure,
     reports: dict[str, dict],
@@ -858,11 +940,20 @@ def recompute_conditions(
     has_cycle: bool,
     all_cycles_discharged: bool,
 ) -> dict[str, object]:
-    """Every condition this gate can compute, computed. The one absent
-    key is generic_callees_type_universal_or_creusot_owned (CG3): no
-    artifact in this pipeline carries the type information it needs, so
-    it stays a human declaration and is reported as declared-not-verified
-    rather than being quietly counted as checked."""
+    """Every condition this gate can compute, computed.
+
+    The other six conditions are computed from the closure and its
+    observations exactly as before. The seventh,
+    generic_callees_type_universal_or_creusot_owned (CG3), is computed
+    only when the closure's own evidence determines it
+    (generic_callees_verification) and otherwise stays OUT of this dict
+    with its refusal reason under `_cg3_unverified`: an unverifiable
+    condition is a capability gap gate_cluster reports and demands a
+    tracking record for (chainlink #86), never a checked one -- and
+    check_declared_conditions skips keys that are absent, so a
+    declaration the artifacts cannot speak to is never refuted by
+    silence either. Silence accepted a false `true` before #86; it must
+    not start rejecting an honest one now."""
     kinds, verifiers = observed_verifiers(closure, reports)
     computed: dict[str, object] = {
         "single_verifier_system": len(verifiers) <= 1,
@@ -874,6 +965,11 @@ def recompute_conditions(
         computed["owning_verifier"] = next(iter(verifiers))
     if unresolved_at_or_above_medium_count is not None:
         computed["unresolved_indirect_calls_at_or_above_medium"] = unresolved_at_or_above_medium_count
+    verifiable, reason = generic_callees_verification(closure, reports)
+    if verifiable:
+        computed[GENERIC_CALLEES_CONDITION] = True
+    else:
+        computed["_cg3_unverified"] = reason
     computed["_evidence_kinds"] = sorted(kinds)
     return computed
 
@@ -908,7 +1004,22 @@ def check_closure_kind(profile: dict, computed: dict) -> list[Finding]:
     two fields (validate_closure.py already checks those against each
     other): a profile may declare owning_verifier: creusot and
     closure_kind: deductive perfectly consistently while its closure
-    contains a Kani result three hops down."""
+    contains a Kani result three hops down.
+
+    `partial` (chainlink #85) deliberately has no branch here. The two
+    uniform kinds are claims about EVERY obligation in the closure, so
+    evidence kinds can refute one (a Kani result anywhere makes
+    `deductive` false) or under-claim the other (`bounded` over an
+    all-deductive closure hides that it could close deductively).
+    `partial` is the opposite declaration -- only part of the closure is
+    verified -- so it claims strictly less than either uniform kind and
+    no evidence-kind combination can over-claim through it; and whether
+    it is justified is a coverage question (which obligations lack
+    records), which this function cannot answer from kinds and whose
+    answer is already emitted by the missing-record findings that own
+    it. A `partial` profile is therefore reported as declared
+    (ClusterOutcome.summary()) and policed everywhere else exactly like
+    any other kind."""
     kinds = set(computed.get("_evidence_kinds") or [])
     if profile["closure_kind"] == "deductive" and (kinds & BOUNDED_EVIDENCE_KINDS):
         return [
@@ -1070,25 +1181,68 @@ def gate_cluster(
                 condition="unresolved_indirect_calls_at_or_above_medium",
             )
         )
-    if profile["conditions"]["generic_callees_type_universal_or_creusot_owned"] is not True:
+
+    # chainlink #86: the CG3 condition is never accepted on its
+    # declaration alone. Three outcomes, in the order the evidence
+    # allows them: the closure's own records determine it (reported as
+    # verified from artifact data, and a profile bit disagreeing with it
+    # is already refused by check_declared_conditions above, in both
+    # directions); the records do not determine it and the profile
+    # declares it false (a stated gap -- the pre-existing, excusable
+    # finding); the records do not determine it and the profile declares
+    # it true (THE false declaration #86 names: an error, so a false
+    # `true` can never pass silently, excused only by a degradation
+    # record naming the condition -- with one the cluster is released as
+    # a declared gap under a tracked ceiling, without one it stays
+    # BLOCKED). The fourth direction lives here rather than in G17: a
+    # tracking record the closure's own evidence has outgrown is stale,
+    # and only this gate can see that, because profile and record alone
+    # can never tell an unverifiable declaration from a verified one.
+    generic_declared = profile["conditions"][GENERIC_CALLEES_CONDITION]
+    if GENERIC_CALLEES_CONDITION in computed:
+        if generic_declared is True:
+            findings.append(
+                Finding(
+                    "G14", cluster,
+                    "generic_callees_type_universal_or_creusot_owned is VERIFIED from artifact "
+                    "data, not taken on declaration: every work package in the closure has a "
+                    f"recorded achievement and none of them is a Kani result ({computed['_evidence_kinds']}) "
+                    "-- with no per-monomorphization assurance anywhere in the closure, no "
+                    "generic callee it rests on is Kani-owned (CG3, plan.md §3)",
+                    severity="info",
+                    condition=GENERIC_CALLEES_CONDITION,
+                )
+            )
+        if degradation is not None and GENERIC_CALLEES_CONDITION in degradation["failed_conditions"]:
+            findings.append(
+                Finding(
+                    "G14", cluster,
+                    "the cluster's degradation record still names "
+                    f"{GENERIC_CALLEES_CONDITION!r} in failed_conditions, but this closure's own "
+                    "records verify the condition -- a stale tracking record keeps a closed gap "
+                    "reading as degraded; remove it and shut the tracking issue "
+                    f"({degradation['tracking_issue']})",
+                )
+            )
+    elif generic_declared is not True:
         findings.append(
             Finding(
                 "G14", cluster,
                 "generic_callees_type_universal_or_creusot_owned is declared as not holding (CG3: "
                 "Kani verifies generics per monomorphization)",
-                condition="generic_callees_type_universal_or_creusot_owned",
+                condition=GENERIC_CALLEES_CONDITION,
             )
         )
     else:
         findings.append(
             Finding(
                 "G14", cluster,
-                "generic_callees_type_universal_or_creusot_owned is a HUMAN DECLARATION this gate "
-                "cannot verify -- no artifact in this pipeline carries the type information it "
-                "would need (CG3). It is not a checked condition, and is reported every run so it "
-                "never reads as one",
-                severity="info",
-                condition="generic_callees_type_universal_or_creusot_owned",
+                "generic_callees_type_universal_or_creusot_owned is declared as true, but this "
+                f"closure's artifacts cannot verify it: {computed['_cg3_unverified']}. That is a "
+                "capability gap, not a checked condition (plan.md §3): an unverifiable declaration "
+                "is never a free pass, and releasing this cluster needs a degradation record "
+                "naming this condition with a tracking issue",
+                condition=GENERIC_CALLEES_CONDITION,
             )
         )
 

@@ -151,6 +151,17 @@ class ProjectStateSchemaTest(unittest.TestCase):
         errors = list(self.validator.iter_errors(doc))
         self.assertEqual(errors, [])
 
+    def test_partial_closure_kind_is_carried_through_both_echoes(self):
+        """chainlink #85: `status --json` echoes the descriptor's declared
+        intent AND each cluster's declared closure_kind -- both must accept
+        `partial` or declaring it would break status output one layer
+        above the profile that accepted it."""
+        doc = self._load("project-state.mixed.example.json")
+        doc["descriptor"]["closure_kind"] = "partial"
+        doc["clusters"][0]["closure_kind"] = "partial"
+        errors = list(self.validator.iter_errors(doc))
+        self.assertEqual(errors, [], [e.message for e in errors])
+
     def test_witness_summary_never_carries_an_assurance_field(self):
         """generated_observations must not smuggle in an assurance verdict
         -- additionalProperties:false on witness_summary is what actually

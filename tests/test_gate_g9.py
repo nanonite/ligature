@@ -305,6 +305,30 @@ class OwningVerifierTest(G9TestCase):
         self.assertTrue((harness_dir_for(self.root) / f"{BRIDGE_ID}.verus.rs").is_file())
         self.assertEqual(self.check_record()["verifier"], "verus")
 
+    def test_a_cluster_named_supporting_does_not_crash_the_resolution(self):
+        """chainlink #76: `supporting` is now a declared verifier_policy
+        key holding a LIST. A cluster literally named "supporting" would
+        resolve to that list -- unhashable, so the ownership scan would
+        raise TypeError. The unresolvable claim is skipped and the bridge
+        falls back to verifier_policy.default."""
+        from test_validate_closure import valid_profile  # noqa: E402
+
+        descriptor = descriptor_with(fake_backend(), default="kani")
+        descriptor["verifier_policy"]["supporting"] = ["kani"]
+        (self.root / "project-descriptor.json").write_text(json.dumps(descriptor))
+        # Rename the workspace's cluster to "supporting" so the ownership
+        # scan hits the list-valued declared key.
+        profile = valid_profile()
+        profile["cluster"] = "supporting"
+        profile["work_packages"] = ["WP-A"]
+        (self.root / "specs/_closure/scheduler-core.json").unlink()
+        (self.root / "specs/_closure/supporting.json").write_text(json.dumps(profile))
+        owned = owning_verifier_by_bridge(self.root, descriptor)
+        # The colliding cluster's claim is dropped, so the bridge is
+        # unclaimed -- and falls back to the default rather than crashing.
+        self.assertEqual(owned, {})
+        self.assertEqual(resolve_verifier(BRIDGE_ID, owned, descriptor), "kani")
+
 
 class ReportingTest(G9TestCase):
     def test_no_bridges_fails_closed(self):

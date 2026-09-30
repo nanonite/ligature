@@ -90,19 +90,56 @@ A third finding from round 4 (low severity): extract_policy_version()
 used to return the *first* regex match, so a policy document containing
 two conflicting "Policy version:" lines silently picked one. Fixed:
 exactly one marker line is now required.
+
+Chainlink #82 (the Stage 4.5 instance of the unenforceable-human-
+checkpoint gap): accept_promotion() had no review-provenance guard. It
+required only a non-empty `--reviewer` string, then deterministically
+computed hashes/promotion_id/schema_versions and validated the receipt
+-- but validate_data() checks hashes, containment and cross-references,
+never WHERE a review block came from, so a receipt could be minted over
+every artifact in the accepted set the moment anyone supplied a name,
+including review blocks written out-of-band by an unattended agent and
+ruled unauthorized. The guard added here reads each accepted artifact's
+own `review` block back against ci/results/review_log.jsonl -- the
+append-only audit trail review_checkpoint.approve() writes, and the only
+record that a review event happened through the sanctioned path -- via
+review_checkpoint.review_provenance_gaps(); a block with no matching
+approval entry refuses the whole acceptance (PromotionReceiptError,
+nothing written). The last gate before the write transaction, so every
+other refusal still fires first with its own real reason.
+
+The same issue's second remedy is in this module too: a human-ruling
+gate. Provenance proves where a review block came from; it cannot ask
+whether a human has ruled on the SET being promoted, because an
+unattended agent's own `approve` run leaves perfectly valid provenance
+entries behind (the date-creusot pilot's eight contested blocks all have
+them) and artifacts with no `review` block at all -- evidence records
+promoted outside any tool path -- are invisible to it by construction.
+So accept_promotion() ALSO requires, for every manifest entry, a
+`ratified` human ruling over that exact version of the file
+(ruling_gaps(), reading ci/results/human_rulings.jsonl), recorded by
+record_ruling() / the `record-ruling` CLI command: missing, rejected,
+stale (the file changed since the ruling), an unrecognized verdict, or
+an unreadable log all refuse, with nothing written. That is what makes
+the pilot README's own constraint -- "#14's accept-promotion must not
+run before rulings 1 and 2 land" -- mechanically true rather than
+prose.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import re
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ligature_install import POLICY_VERSION_MARKER_RE  # noqa: E402
+from ligature_install import safe_target  # noqa: E402
 from project_descriptor import boundary_dir_for  # noqa: E402
 from project_descriptor import conflict_dir_for  # noqa: E402
 from project_descriptor import evidence_dir_for  # noqa: E402
@@ -111,6 +148,7 @@ from project_descriptor import interaction_dir_for  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
 from project_descriptor import protocol_debt_dir_for  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
+from review_checkpoint import review_provenance_gaps  # noqa: E402
 from validate_boundary_contracts import load_validator as _load_boundary_validator  # noqa: E402
 from validate_boundary_contracts import validate_data as _validate_boundary_data  # noqa: E402
 from validate_boundary_contracts import valid_boundary_edges_from_crate  # noqa: E402
@@ -481,11 +519,6 @@ def compute_schema_versions(workspace_root: Path, descriptor: dict, artifact_pat
     return versions
 
 
-_POLICY_VERSION_MARKER_RE = re.compile(
-    r"^Policy version:\s*`?([a-z][a-z0-9-]*@[0-9]+(?:\.[0-9]+)*)`?\s*$", re.MULTILINE
-)
-
-
 def extract_policy_version(workspace_root: Path, policy_path: str) -> str:
     """Mechanically read policy_version from the accepted policy
     document's own content (docs/reliance-policy.template.md's own
@@ -498,19 +531,76 @@ def extract_policy_version(workspace_root: Path, policy_path: str) -> str:
     so a policy document containing two different "Policy version:"
     lines (e.g. "reliance-policy@1.2" and "reliance-policy@9.9") was
     silently accepted as whichever came first -- ambiguous, not
-    verified. Zero matches or more than one are both hard stops."""
-    resolved = workspace_root / policy_path
+    verified. Zero matches or more than one are both hard stops.
+
+    chainlink #78: the path is resolved through ligature_install's own
+    safe_target first, so an absolute path or a `../` traversal can no
+    longer read a policy document from OUTSIDE the workspace (the
+    descriptor's `compatibility_policy.reliance_policy_path` pointing at
+    e.g. /etc/hostname used to be read and hashed as if it were the
+    project's policy)."""
+    try:
+        resolved = safe_target(workspace_root, policy_path)
+    except Exception as e:
+        raise PromotionReceiptError(f"policy document {policy_path!r} is not a safe workspace-relative path: {e}")
     try:
         text = resolved.read_text()
     except OSError as e:
         raise PromotionReceiptError(f"could not read policy document {policy_path!r}: {e}")
-    matches = _POLICY_VERSION_MARKER_RE.findall(text)
+    matches = POLICY_VERSION_MARKER_RE.findall(text)
     if len(matches) != 1:
         raise PromotionReceiptError(
             f"{policy_path!r} must have exactly one 'Policy version: <name>@<major>.<minor>' marker "
             f"line (docs/reliance-policy.template.md's own convention) -- found {len(matches)}"
         )
     return matches[0]
+
+
+def collect_review_blocks(workspace_root: Path, artifact_paths: list[str]) -> dict[str, dict]:
+    """Every accepted artifact that carries its own non-empty `review`
+    block, keyed by its workspace-relative path -- exactly the set a
+    review-provenance check has to prove (chainlink #82).
+
+    Artifacts that carry no `review` block are simply absent, never
+    "assumed proven": the reliance policy document (a normative markdown
+    file), evidence records (docs/evidence-schema.json has no `review`
+    property at all), and concept specs (the vendored concept-to-code
+    schema declares none either, under `additionalProperties: false`)
+    have nothing to prove, while boundary/interaction/exemption/
+    protocol-debt/bridge/witness/conflict-resolution artifacts all do.
+
+    Path strings are returned exactly as the caller supplied them, so
+    review_provenance_gaps() compares them against the audit entries'
+    own target_path values without a second round of normalization.
+
+    An artifact whose bytes do not parse as a JSON/YAML object is
+    skipped rather than refused: whether such a file is a valid
+    artifact of its kind is the kind validators' question, and they
+    have already had their say by the time this runs
+    (compute_schema_versions, then the receipt validator above). Only
+    an artifact that actually HAS a review block is this check's
+    business -- and for every recognized kind, G1a requires exactly
+    that block before anything else reaches here."""
+    reviewed: dict[str, dict] = {}
+    for entry_path in artifact_paths:
+        resolved = (workspace_root / entry_path).resolve()
+        suffix = resolved.suffix.lower()
+        if suffix not in {".json", ".yaml", ".yml"}:
+            continue
+        try:
+            text = resolved.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            data = json.loads(text) if suffix == ".json" else yaml.safe_load(text)
+        except Exception:  # noqa: BLE001 -- any parse failure means "no review block to prove here"
+            continue
+        if not isinstance(data, dict):
+            continue
+        review = data.get("review")
+        if isinstance(review, dict) and review:
+            reviewed[entry_path] = review
+    return reviewed
 
 
 def build_receipt(
@@ -555,11 +645,12 @@ def accept_promotion(
     workspace_root: Path,
     cluster: str,
     reviewer: str,
-    policy_path: str,
+    policy_path: str | None,
     artifact_paths: list[str],
     descriptor_path: Path | None = None,
     accepted_at: str | None = None,
     review_log: Path | None = None,
+    ruling_log: Path | None = None,
 ) -> Path:
     """The dedicated Stage 4.5 acceptance operation (chainlink #45).
 
@@ -574,7 +665,10 @@ def accept_promotion(
 
     `policy_path` (e.g. "docs/reliance-policy.md") must itself be one of
     `artifact_paths` -- its own content is where policy_version is read
-    from (extract_policy_version), not a caller-supplied guess.
+    from (extract_policy_version), not a caller-supplied guess. It
+    defaults to the descriptor's own
+    `compatibility_policy.reliance_policy_path` (chainlink #78), and an
+    explicit path that disagrees with that declaration is refused.
 
     Writes to <workspace_root>/specs/_promotions/<cluster>.json -- the
     same canonical directory scripts/validate_promotion_receipt.py's own
@@ -595,9 +689,40 @@ def accept_promotion(
     own validator so the two can never disagree about completeness)
     must be present in `artifact_paths`, or generation refuses outright
     rather than producing a receipt that silently omits evidence that
-    was part of what was reviewed. Refuses
-    (ApprovalRefused) without writing anything if the assembled receipt
-    fails the real validator. Once past both checks, the audit entry and
+    was part of what was reviewed.
+
+    Finally -- chainlink #82 -- a review-provenance check: every accepted
+    artifact carrying its own `review` block must have a matching entry
+    in the approval audit log (review_checkpoint.review_provenance_gaps,
+    reading `review_log`), i.e. the block must have been produced by the
+    sanctioned approve path rather than typed into the file. A `review`
+    block is self-asserted data; without this check any non-empty
+    `--reviewer` argument was enough to mint a Stage 4.5 receipt over
+    artifacts nobody approved through `approve`, including ones whose
+    review blocks a human has ruled unauthorized. Artifacts with no
+    `review` block (the policy document, evidence records, concept
+    specs) have nothing to prove. Refuses (PromotionReceiptError) with
+    the offending artifacts named, and writes nothing.
+
+    Then -- chainlink #82's second remedy, the human-ruling gate -- every
+    artifact in the manifest must be covered by a recorded human ruling
+    with verdict `ratified` over that exact version of the file
+    (ruling_gaps, reading `ruling_log`, which defaults to
+    `workspace_root / "ci" / "results" / "human_rulings.jsonl"`), written
+    by record_ruling()/`record-ruling`. Provenance above asks "did the
+    sanctioned approve path produce this review block?"; this asks "has a
+    human ruled on THIS accepted set?". The two are deliberately
+    independent: an approve() entry can exist for an artifact an
+    unattended agent approved (the date-creusot pilot's eight contested
+    blocks), and artifacts with no `review` block at all -- evidence
+    records promoted outside any tool path (the pilot's ruling 2) --
+    escape provenance entirely, so neither question answers the pilot's
+    "must not run before rulings 1 and 2 land". A missing ruling, a
+    `rejected` ruling, a ruling over an older version of the file, or an
+    unreadable/damaged rulings log all refuse, and nothing is written.
+
+    Refuses (ApprovalRefused) without writing anything if the assembled receipt
+    fails the real validator. Once past all of those checks, the audit entry and
     the receipt write happen as one transaction: the audit append is
     durable before the receipt is swapped into place, and a failure
     swapping the receipt in rolls the audit entry back -- there is no
@@ -605,16 +730,42 @@ def accept_promotion(
     entry, or vice versa. Returns the path written."""
     if not reviewer:
         raise ValueError("accept_promotion() requires a non-empty reviewer -- no default, no LLM-supplied value")
-    if policy_path not in artifact_paths:
-        raise PromotionReceiptError(
-            f"policy_path {policy_path!r} must itself be one of the accepted artifacts"
-        )
     if descriptor_path is None:
         descriptor_path = workspace_root / "project-descriptor.json"
     if review_log is None:
         review_log = workspace_root / "ci" / "results" / "review_log.jsonl"
 
     descriptor = load_project_descriptor(descriptor_path)
+
+    # chainlink #78: --policy-path defaults to the descriptor's own
+    # compatibility_policy.reliance_policy_path, and an explicit path that
+    # disagrees with the declaration is refused -- a workspace must not be
+    # able to promote against a different policy document than the one it
+    # declares. (The field used to be read by nothing: the flag was the
+    # only binding, so a correct descriptor and a promotion against some
+    # other policy document could coexist silently.)
+    declared_policy_path = None
+    compat = descriptor.get("compatibility_policy")
+    if isinstance(compat, dict):
+        value = compat.get("reliance_policy_path")
+        if isinstance(value, str) and value:
+            declared_policy_path = value
+    if policy_path is None:
+        if declared_policy_path is None:
+            raise PromotionReceiptError(
+                "no --policy-path given and the project descriptor declares no "
+                "compatibility_policy.reliance_policy_path to default to"
+            )
+        policy_path = declared_policy_path
+    elif declared_policy_path is not None and policy_path != declared_policy_path:
+        raise PromotionReceiptError(
+            f"--policy-path {policy_path!r} disagrees with the project descriptor's "
+            f"compatibility_policy.reliance_policy_path {declared_policy_path!r}"
+        )
+    if policy_path not in artifact_paths:
+        raise PromotionReceiptError(
+            f"policy_path {policy_path!r} must itself be one of the accepted artifacts"
+        )
 
     try:
         required_witnesses = required_witness_paths(descriptor, workspace_root, cluster)
@@ -649,6 +800,44 @@ def accept_promotion(
         raise ApprovalRefused(
             f"generated promotion receipt fails validation, refusing to write {target_path}:\n"
             + "\n".join(f"  - {f}" for f in errors)
+        )
+
+    # chainlink #82 -- the review-provenance guard, last gate before the
+    # write transaction. validate_data() above checks hashes, containment
+    # and cross-references; it never asks WHERE a review block came from,
+    # and a hand-written `{"reviewer": ...}` is indistinguishable on disk
+    # from one approve() wrote. So the accepted set's own review blocks
+    # are checked against the approval audit log -- the record of the
+    # sanctioned approve path -- before anything is minted. Runs after
+    # every other refusal so a genuinely broken artifact is still refused
+    # for its real reason first, and before the audit append so a refusal
+    # leaves the workspace untouched.
+    provenance_gaps = review_provenance_gaps(
+        workspace_root, collect_review_blocks(workspace_root, artifact_paths), review_log
+    )
+    if provenance_gaps:
+        raise PromotionReceiptError(
+            "refusing to mint a promotion receipt over review block(s) with no approval provenance "
+            "(the review must have been recorded through the sanctioned `approve` path):\n"
+            + "\n".join(f"  - {gap}" for gap in provenance_gaps)
+        )
+
+    # chainlink #82's second remedy -- the human-ruling gate, also last
+    # before the write transaction. Provenance proves each review block's
+    # ORIGIN; this proves a human has ruled on the accepted set itself,
+    # which is what covers artifacts provenance cannot see (evidence
+    # records promoted outside any tool path) and artifacts an
+    # unattended agent pushed through `approve`. Deliberately AFTER the
+    # provenance check, so an artifact with a genuinely unprovenanced
+    # review block is still refused for that reason first.
+    if ruling_log is None:
+        ruling_log = _ruling_log_path(workspace_root)
+    ruling_problems = ruling_gaps(workspace_root, artifact_manifest, ruling_log)
+    if ruling_problems:
+        raise PromotionReceiptError(
+            "refusing to mint a promotion receipt: no complete human ruling covers this accepted set "
+            "(Stage 4.5 is gated on an explicit `record-ruling` verdict for every artifact):\n"
+            + "\n".join(f"  - {gap}" for gap in ruling_problems)
         )
 
     payload = json.dumps(receipt, indent=2) + "\n"
@@ -694,3 +883,186 @@ def accept_promotion(
         raise
 
     return target_path
+
+
+RULING_VERDICTS = ("ratified", "rejected")
+"""The closed vocabulary a human ruling may use. `ratified` means "I read
+this artifact and it may be promoted as it stands"; `rejected` means it
+must not be -- accept-promotion still refuses a rejected artifact, with a
+message that says so, so a rejection is a recorded decision rather than a
+silent absence (the pilot's ruling 1 is exactly this shape: eight review
+blocks a human must ratify or reject, not quietly promote)."""
+
+
+def _ruling_log_path(workspace_root: Path) -> Path:
+    """Where rulings live. Workspace-scoped from the start, applying the
+    cwd-relative lesson #45 already taught accept_promotion()'s audit-log
+    default rather than re-learning it here."""
+    return workspace_root / "ci" / "results" / "human_rulings.jsonl"
+
+
+def record_ruling(
+    workspace_root: Path,
+    artifact_paths: list[str],
+    reviewer: str,
+    verdict: str,
+    descriptor_path: Path | None = None,
+    ruled_at: str | None = None,
+    ruling_log: Path | None = None,
+) -> dict:
+    """Record an explicit human ruling over an exact accepted-artifact
+    set (chainlink #82's human-ruling gate) -- the counterpart
+    accept_promotion() requires before it will mint a receipt.
+
+    This is the remedy the provenance check cannot be: provenance asks
+    whether each `review` block was produced by the sanctioned approve
+    path, but an unattended agent can run `approve` too (the date-creusot
+    pilot's eight contested blocks all have matching audit entries), and
+    artifacts with no `review` block at all -- evidence records promoted
+    outside any tool path -- escape provenance by construction. A ruling
+    is a separate, explicitly named human event over the SET being
+    promoted, so neither question can stand in for it.
+
+    The recorded hashes come from compute_artifact_manifest() -- the same
+    containment, alias and witness-promotion-digest rules
+    accept_promotion() uses -- so a ruling's `artifacts[].hash` IS the
+    hash the gate later compares the receipt's manifest against: ratify,
+    then edit the file, and the ruling no longer applies until re-ruled.
+
+    `reviewer` must be a non-empty name (a ruling with no named human is
+    not a ruling, same rule as approve()/accept_promotion()), `verdict`
+    must be one of RULING_VERDICTS, `ruled_at` a YYYY-MM-DD date. The
+    descriptor must load (fail closed, like accept-promotion): its crates
+    are what anchors the manifest computation. Appends one entry to
+    `ruling_log` (default `workspace_root/ci/results/human_rulings.jsonl`)
+    and returns the entry written.
+
+    Deliberately NOT a validation pass: kind validators still run in
+    accept_promotion(), so ruling on a broken artifact cannot smuggle it
+    past G1a/G1b -- a ruling records a decision, never a check result."""
+    if not reviewer:
+        raise ValueError("record_ruling() requires a non-empty reviewer -- a ruling with no named human is not a ruling")
+    if verdict not in RULING_VERDICTS:
+        raise PromotionReceiptError(
+            f"ruling verdict {verdict!r} must be one of: {', '.join(RULING_VERDICTS)}"
+        )
+    if not artifact_paths:
+        raise PromotionReceiptError("record_ruling() requires at least one artifact to rule on")
+    if ruled_at is None:
+        ruled_at = datetime.now(timezone.utc).date().isoformat()
+    else:
+        try:
+            if datetime.strptime(ruled_at, "%Y-%m-%d").strftime("%Y-%m-%d") != ruled_at:
+                raise ValueError(ruled_at)
+        except (TypeError, ValueError):
+            raise PromotionReceiptError(f"--ruled-at {ruled_at!r} must be a YYYY-MM-DD date")
+    if descriptor_path is None:
+        descriptor_path = workspace_root / "project-descriptor.json"
+    descriptor = load_project_descriptor(descriptor_path)
+    if ruling_log is None:
+        ruling_log = _ruling_log_path(workspace_root)
+
+    artifacts = compute_artifact_manifest(workspace_root, artifact_paths, descriptor)
+    entry = {
+        "artifacts": artifacts,
+        "verdict": verdict,
+        "reviewer": reviewer,
+        "ruled_at": ruled_at,
+        "logged_at": datetime.now(timezone.utc).isoformat(),
+    }
+    ruling_log.parent.mkdir(parents=True, exist_ok=True)
+    with ruling_log.open("a") as stream:
+        stream.write(json.dumps(entry) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return entry
+
+
+def ruling_gaps(workspace_root: Path, artifact_manifest: list[dict], ruling_log: Path) -> list[str]:
+    """Check an assembled receipt manifest against the human-ruling log
+    (chainlink #82's Stage 4.5 gate). Returns one message per artifact
+    that is not covered by a `ratified` ruling over this exact version of
+    the file; an empty list means the whole set is ruled.
+
+    Failure semantics mirror review_provenance_gaps(): fail closed, no
+    default, no cwd-relative path -- a missing, unreadable or damaged
+    rulings log proves no ruling, so it refuses. Only entries shaped like
+    something record_ruling() would have written (an `artifacts` list and
+    a `verdict`) count as rulings at all; the LAST ruling naming an
+    artifact wins, so a human can supersede an earlier decision in either
+    direction (reject after ratify, ratify after reject) without editing
+    the append-only log.
+
+    Trust model, same as the review log: an audit trail, not a signature.
+    What it forecloses is promotion by default -- Stage 4.5 now needs a
+    named human's recorded verdict before it can write anything."""
+    if not artifact_manifest:
+        return []
+
+    try:
+        text = ruling_log.read_text()
+    except FileNotFoundError:
+        return [
+            f"no human ruling log at {ruling_log} -- none of the {len(artifact_manifest)} artifact(s) about to be "
+            "promoted has been ruled on: " + ", ".join(item["path"] for item in artifact_manifest)
+            + "; record the ruling first with `record-ruling --reviewer <name> "
+            "--verdict ratified|rejected --artifact <path> [--artifact <path> ...]`"
+        ]
+    except OSError as e:
+        return [f"human ruling log {ruling_log} cannot be read, so no ruling can be proven: {e}"]
+
+    entries: list[dict] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            return [
+                f"human ruling log {ruling_log} line {lineno} is not valid JSON, so the log cannot be read "
+                "as the ruling trail it is -- fix or remove the damaged line before promoting"
+            ]
+        if not isinstance(entry, dict) or not isinstance(entry.get("artifacts"), list) or "verdict" not in entry:
+            continue  # not a ruling entry -- irrelevant lines are not this check's business to reject
+        entries.append(entry)
+
+    # Latest ruling per artifact wins. Keyed by RESOLVED path, so a
+    # differently-spelled but identical path still matches -- the same
+    # discipline _entry_path_matches() applies to the review log.
+    latest: dict[Path, tuple[object, dict]] = {}
+    for entry in entries:
+        for item in entry["artifacts"]:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                continue
+            latest[(workspace_root / item["path"]).resolve()] = (item.get("hash"), entry)
+
+    gaps: list[str] = []
+    for item in artifact_manifest:
+        path = item["path"]
+        hit = latest.get((workspace_root / path).resolve())
+        if hit is None:
+            gaps.append(
+                f"{path}: no human ruling recorded for this artifact -- record one with "
+                f"`record-ruling --reviewer <name> --verdict ratified --artifact {path}`"
+            )
+            continue
+        ruling_hash, entry = hit
+        verdict = entry.get("verdict")
+        if verdict == "rejected":
+            gaps.append(
+                f"{path}: a human ruling REJECTED this artifact (ruled by {entry.get('reviewer')!r} at "
+                f"{entry.get('ruled_at')!r}) -- a rejected artifact must not be promoted; drop it from the "
+                "accepted set, or record a new ruling over it if the decision changed"
+            )
+        elif verdict not in RULING_VERDICTS:
+            gaps.append(
+                f"{path}: the recorded ruling's verdict {verdict!r} is not one of {', '.join(RULING_VERDICTS)} "
+                "-- an unrecognized verdict cannot satisfy the gate"
+            )
+        elif ruling_hash != item["hash"]:
+            gaps.append(
+                f"{path}: the ratified ruling was recorded over a different version of this artifact "
+                f"(ruled {ruling_hash!r}, current {item['hash']!r}) -- re-run `record-ruling` after the "
+                "change so the ruling covers what is actually being promoted"
+            )
+    return gaps

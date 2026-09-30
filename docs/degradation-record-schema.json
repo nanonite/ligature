@@ -37,7 +37,7 @@
           "scc_wellfoundedness_discharged"
         ]
       },
-      "description": "Exactly the condition keys of docs/closure-profile-schema.json's `conditions` block. A record may only excuse conditions it actually names, and G14 rejects a record naming a condition that in fact holds (G17: 'profile bits inconsistent with degradation record') -- a stale excuse is as misleading as a missing one, and would keep a cluster reading as degraded after the gap closed."
+      "description": "Exactly the condition keys of docs/closure-profile-schema.json's `conditions` block. A record may only excuse conditions it actually names, and G14 rejects a record naming a condition that in fact holds (G17: 'profile bits inconsistent with degradation record') -- a stale excuse is as misleading as a missing one, and would keep a cluster reading as degraded after the gap closed. ONE documented exception (chainlink #86): generic_callees_type_universal_or_creusot_owned is the CG3 condition no artifact here can settle either way, so a record naming it beside a `true` declaration is the tracking record plan.md §3 requires of the gap, not a stale excuse -- gate-g14 requires such a record whenever the closure's own records cannot verify the condition and rejects it as stale once they can."
     },
     "affected_edges": {
       "type": "array",

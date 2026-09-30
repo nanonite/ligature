@@ -26,7 +26,13 @@ response as a hard failure to retry or escalate, never as an empty guarantee.
   commands, constraints).
 - `{{callee_spec}}` — the callee's concept-to-code spec JSON.
 - `{{reliance_policy}}` — this project's `docs/reliance-policy.md` (copied
-  from `docs/reliance-policy.template.md`), resolution rule included.
+  from `docs/reliance-policy.template.md`), resolution rule included. This
+  document is **standing governance, not a one-time artifact**: it is
+  user-owned, and its on-disk content is drift-checked against the reviewed
+  hash the ownership manifest records — if it was edited without review,
+  `check` reports a `policy-drift` finding and the installation reads as
+  drifted. Never edit it as a side effect of drafting; a governance change
+  goes through `ligature accept-policy --reviewer <name>` (chainlink #78).
 - Re-entry only (plan.md §6 diagram: change requests/drift findings route
   back to Stage 0/3): `{{prior_artifact}}` (the last drafted boundary
   contract, if any) and `{{finding}}` (the specific gate failure or drift
@@ -83,3 +89,14 @@ Omit the `review` field entirely. Your output is a draft
 (`scripts/review_checkpoint.py stage_draft` takes it as-is); `review` is
 added only by `approve`, from an explicit human-supplied reviewer. Do not
 guess a reviewer name or date, and do not claim a review happened.
+
+## Write set
+
+The boundary contract lands in the crate's `specs/_boundaries/` directory —
+a `protected_roots` path. That directory is written only through this
+draft → `approve` path, never by hand and never by writing the file
+directly: the project descriptor's `write_set` declares the spec trees
+off-limits to free-form writes, and `ligature write-set-check` reports any
+file that appears outside `allowed_roots` (the crate `src/` and `tests/`
+trees) without a declaration accounting for it. If a finding implies
+writing anywhere else, surface it instead of writing.

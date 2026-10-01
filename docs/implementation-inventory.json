@@ -444,6 +444,12 @@
       "summary": "Bridge harness generation: compile a promoted bridge's typed logic to a verifier-dispatched check."
     },
     {
+      "path": "scripts/degradation_review.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "Shared degradation-record review-provenance and human-ruling checks (chainlink #96)."
+    },
+    {
       "path": "scripts/exit_codes.py",
       "role": "helper",
       "disposition": "runtime-required",
@@ -969,6 +975,11 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_degradation_review.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_exit_code_contract.py",
       "kind": "unit",
       "disposition": "test-only"
@@ -1369,12 +1380,12 @@
       "documentation": 14,
       "excluded": 1,
       "installed-template": 4,
-      "runtime-required": 85,
-      "test-only": 69,
+      "runtime-required": 86,
+      "test-only": 70,
       "vendored-runtime": 1
     },
-    "total_entries": 174,
-    "test_count": 56,
+    "total_entries": 176,
+    "test_count": 57,
     "registered_cli_command_count": 44
   },
   "documentation_and_templates": [

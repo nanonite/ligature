@@ -33,7 +33,34 @@ LIST, and a list is the conjunction -- so `&&` inside one premise is not
 needed and is not accepted. Anything outside the fragment is a compile
 error naming the offending text, never a pass-through: a string this
 module cannot represent is a string the harness cannot be trusted to
-mean.
+mean. `bindings` keys (top-level and nested) are snake_case, because a
+binding becomes a harness PARAMETER name.
+
+The fragment is enforced BEFORE approval, not only here
+--------------------------------------------------------
+For a long time these two rules were enforced only by G9, and only for
+bridges that reached it: the swisstable-verus pilot (chainlink #112)
+drafted, approved and promoted six bridges whose premises were
+comparisons (`self.capacity() >= GROUP_WIDTH`) and whose bindings were
+`GROUP_WIDTH`, and every command up to and including `validate-bridge`
+exited 0 on them. The failure surfaced only against an artifact a human
+had already signed off. That is a template that suggested the rejected
+shape as much as a missing gate -- prompts/stage-3-bridge-drafting.md
+documented `premises` only as "premise expression" and said nothing at
+all about `bindings` being snake_case -- but guidance is not
+enforcement, so the rule now lives in compile_bridge_logic(), which is
+verifier-independent and therefore runnable without a verifier.
+scripts/validate_bridge.py calls it as a G1b check at draft and approve
+time; `draft` refuses the artifact instead of staging it and `approve`
+refuses it instead of writing a human's review block onto it. G9 still
+compiles -- recompiling a promoted bridge is its actual job -- but it is
+no longer the first place these rules are met.
+
+compile_bridge_logic() is the SINGLE implementation of the fragment.
+Adding a weaker copy of it as a JSON Schema `pattern` would be free to
+drift from this one, and a drifted copy is precisely how a bridge that
+G9 will certainly reject gets approved. The schema
+(docs/bridge-schema.json) documents both rules in prose instead.
 
 **Across verifier systems the answer is still no** (CG1: cross-verifier
 composition has no soundness theorem). This module compiles per verifier
@@ -370,14 +397,32 @@ def harness_name(bridge_id: str) -> str:
     return "bridge_" + re.sub(r"[^a-z0-9]+", "_", bridge_id.lower()).strip("_")
 
 
-def compile_bridge(bridge: dict, verifier: str) -> Harness:
-    """The whole compiler: parse, scope-check, render. Deterministic --
-    the same promoted bridge and verifier always produce byte-identical
-    source, which is what makes the harness hash a property OF THE
-    BRIDGE rather than of whoever last edited a file."""
-    if verifier not in VERIFIERS:
-        raise CompileError(f"unknown verifier {verifier!r} (known: {sorted(VERIFIERS)})")
+@dataclass(frozen=True)
+class BridgeLogic:
+    """The verifier-INDEPENDENT half of a compilation: what a bridge's
+    bridge_logic means, before any particular verifier's syntax is
+    chosen. Separated from rendering so the same parse/scope/resolve
+    checks that decide whether a bridge compiles AT ALL can run without
+    a verifier -- which is what lets scripts/validate_bridge.py enforce
+    the fragment at draft and approve time (chainlink #112) rather than
+    leaving it to be discovered by G9 after a human has approved."""
+    scope: Scope
+    premises: tuple[str, ...]
+    conclusion_id: str
 
+
+def compile_bridge_logic(bridge: dict) -> BridgeLogic:
+    """Parse, scope-check and render (to the fragment's own vocabulary)
+    a bridge's typed bridge_logic. Verifier-independent by construction:
+    nothing here picks a harness syntax, so the answer -- and the reason
+    a bridge is refused -- is the same whichever verifier will own it.
+
+    This is the single implementation of the compilable fragment. G9
+    reaches it through compile_bridge(); the pre-approval gate reaches it
+    directly. One implementation is the point: a second, weaker copy of
+    the rules in a schema `pattern` would be free to drift from this one,
+    and the pilot's bridges (chainlink #112) are exactly what a drifted
+    copy lets through."""
     logic = bridge["bridge_logic"]
     scope = build_scope(logic["bindings"])
     available = {fact["obligation_id"] for fact in bridge.get("available_contract_facts", [])}
@@ -389,11 +434,29 @@ def compile_bridge(bridge: dict, verifier: str) -> Harness:
         check_expression(node, scope, available, local_facts, f"premise[{index}]")
         premises.append(render(node, scope))
 
-    conclusion_id = logic["conclusion"]["obligation_id"]
-    concept, code = conclusion_id.split(".")
+    return BridgeLogic(
+        scope=scope,
+        premises=tuple(premises),
+        conclusion_id=logic["conclusion"]["obligation_id"],
+    )
+
+
+def compile_bridge(bridge: dict, verifier: str) -> Harness:
+    """The whole compiler: parse, scope-check, render. Deterministic --
+    the same promoted bridge and verifier always produce byte-identical
+    source, which is what makes the harness hash a property OF THE
+    BRIDGE rather than of whoever last edited a file."""
+    if verifier not in VERIFIERS:
+        raise CompileError(f"unknown verifier {verifier!r} (known: {sorted(VERIFIERS)})")
+
+    logic = compile_bridge_logic(bridge)
+    scope = logic.scope
+    concept, code = logic.conclusion_id.split(".")
     conclusion = f"{concept}::{code}({', '.join(scope.names)})"
 
-    source = _RENDERERS[verifier](bridge, scope, premises, conclusion, conclusion_id)
+    source = _RENDERERS[verifier](
+        bridge, scope, list(logic.premises), conclusion, logic.conclusion_id
+    )
     return Harness(
         bridge_id=bridge["bridge_id"],
         verifier=verifier,

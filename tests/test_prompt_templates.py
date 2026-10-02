@@ -46,6 +46,43 @@ class PromptTemplateScaffoldingTest(unittest.TestCase):
         self.assertIn("docs/bridge-schema.json", text)
         self.assertIn("caller-postcondition", text.lower())
 
+    def test_bridge_template_states_the_compilable_fragment_rules(self):
+        """chainlink #112: the template that produces bridge_logic has to
+        state the rules the tool enforces on it. It documented
+        `premises` only as "premise expression" and never mentioned that
+        `bindings` must be snake_case, so a model following it exactly
+        produced artifacts G9 refused."""
+        text = (PROMPTS / "stage-3-bridge-drafting.md").read_text()
+        # rule 1: predicate applications only
+        self.assertIn("predicate applications only", text)
+        self.assertIn("No operators", text)
+        self.assertIn("quantifiers", text)
+        self.assertIn("negation", text)
+        # the list is the conjunction, so && inside one entry is wrong
+        self.assertIn("list *is* the conjunction", text)
+        self.assertIn("&&", text)
+        # rule 2: snake_case bindings, named with the pilot's own counterexample
+        self.assertIn("keys are snake_case", text)
+        self.assertIn("GROUP_WIDTH", text)
+        # both said to be ENFORCED, and before approval rather than at G9
+        self.assertIn("before the artifact is staged", text)
+        self.assertIn("approve", text)
+
+    def test_bridge_template_documents_the_fragment_the_compiler_accepts(self):
+        """The rules restated as the grammar the compiler actually
+        accepts, so the model is not left to infer it from prose."""
+        text = (PROMPTS / "stage-3-bridge-drafting.md").read_text()
+        for line in (
+            "expression  := obligation | call | path",
+            "obligation  := Concept '.' Code '(' [args] ')'",
+            "call        := path '(' [args] ')'",
+            "path        := ident ('.' ident)*",
+            "args        := expression (',' expression)*",
+        ):
+            with self.subTest(line=line):
+                self.assertIn(line, text)
+
+
     def test_stage_3_witness_template_has_required_scaffolding(self):
         text = (PROMPTS / "stage-3-witness-drafting.md").read_text()
         self.assertIn("Output **only** the JSON object", text)
@@ -251,6 +288,36 @@ class SimulatedBridgeOutputTest(unittest.TestCase):
         errors = [f for f in findings if f.severity == "error"]
         self.assertEqual(errors, [], [str(f) for f in errors])
 
+    def test_a_model_that_misses_the_fragment_rules_is_refused_at_draft(self):
+        """The defect chainlink #112 reported, reproduced against the
+        gate: the shape the template's field-by-field text used to
+        invite. It passed draft-time G1a/G1b before this fix (neither
+        rule was documented), so `draft` printed its OK line and
+        `approve` wrote a human's review block onto it -- and only G9,
+        reached afterwards, refused it."""
+        simulated_bad_output = {
+            "schema_version": "1.0",
+            "bridge_id": "BR-SCHED-TQ-001",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "callee_requirement": "TaskQueue.C003",
+            "available_contract_facts": [
+                {"obligation_id": "Scheduler.C010", "role": "caller-precondition"},
+            ],
+            "target_expression": "TaskQueue.pop_ready(args, callee_state)",
+            "protocol_class": "pairwise",
+            "bridge_logic": {
+                "bindings": {"GROUP_WIDTH": "usize"},
+                "premises": ["self.capacity() >= GROUP_WIDTH"],
+                "conclusion": {"obligation_id": "TaskQueue.C003"},
+            },
+        }
+
+        from validate_bridge import load_draft_validator, validate_draft_data
+
+        findings = validate_draft_data(self.target, simulated_bad_output, load_draft_validator())
+        errors = [str(f) for f in findings if f.severity == "error"]
+        self.assertTrue(errors, "the bad bridge must not pass draft-time feedback")
+        self.assertTrue(any("outside the compilable fragment" in e for e in errors), errors)
 
 class SimulatedWitnessOutputTest(unittest.TestCase):
     """A hand-written stand-in for 'what a model following

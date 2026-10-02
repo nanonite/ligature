@@ -102,11 +102,12 @@
               }
             ]
           },
-          "description": "Name -> type. A binding's value is either a bare type name (e.g. caller_self: Scheduler) or a nested named group of typed sub-bindings (e.g. args: {now: Time}), matching plan.md §8.3's own worked example exactly."
+          "description": "Name -> type. A binding's value is either a bare type name (e.g. caller_self: Scheduler) or a nested named group of typed sub-bindings (e.g. args: {now: Time}), matching plan.md §8.3's own worked example exactly. Every key must be snake_case: a binding becomes a harness PARAMETER name (chainlink #112). Enforced by scripts/validate_bridge.py as a G1b check at draft and approve time rather than by a pattern here -- deliberately, so this schema and scripts/bridge_harness.py cannot end up holding two answers to the same question."
         },
         "premises": {
           "type": "array",
           "minItems": 1,
+          "description": "At least one PREDICATE APPLICATION: an obligation application (Concept.I001(arg)), a call on a declared binding (caller_self.ready(args.now)), or a path over declared bindings (args.now). No operators (==, <, >=, +, &&), no literals, no quantifiers, no negation. The list IS the conjunction, so two assumptions are two entries, never one entry joined by && (chainlink #112). Enforced by scripts/validate_bridge.py as a G1b check at draft and approve time, by calling the same verifier-independent compiler G9 compiles from (scripts/bridge_harness.compile_bridge_logic) -- one implementation, reached from both ends, rather than a pattern here that could drift from it.",
           "items": { "type": "string", "minLength": 1 }
         },
         "conclusion": {

@@ -146,11 +146,17 @@ Implemented now, against schemas that actually exist:
             silently diverge) plus G2: boundary_id must resolve to a
             real, promoted boundary contract in the same crate, and
             callee_requirement must be one of that boundary's own
-            callee_guarantees. This is the schema+validator half of #22
-            only -- generating a verifier harness from bridge_logic is
-            explicitly out of scope here (plan.md §15's own open items
-            list harness-generation semantics as unresolved design
-            territory), deferred to a follow-up chainlink issue.
+            callee_guarantees, plus the compilable fragment
+            bridge_logic must lie inside (chainlink #112: premises
+            are predicate applications only, bindings are
+            snake_case). That last one used to be reachable only
+            through G9's compile, so the swisstable-verus pilot
+            drafted, approved and promoted six bridges G9 then
+            refused; it is enforced here at draft and approve time
+            instead, by the same verifier-independent compiler G9
+            uses. Refusing an artifact is all this gate does with the
+            fragment: RENDERING the harness, dispatching it and
+            recording the verdict remain G9's.
   extract-c-static  Stage 8A's coarse C_static extractor (plan.md §9,
             chainlink #24): one report per descriptor crate into
             ci/results/c_static/<crate>.json -- a generated observation,
@@ -1022,7 +1028,7 @@ def cmd_validate_bridge(args: argparse.Namespace) -> int:
     if not findings_total:
         print(pass_line(
             discovered, "bridges",
-            "G1a/G1b (incl. conclusion consistency) and G2 boundary cross-reference",
+            "G1a/G1b (incl. conclusion consistency, the compilable fragment) and G2 boundary cross-reference",
             args.workspace,
         ))
         return 0

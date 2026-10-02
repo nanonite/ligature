@@ -441,7 +441,7 @@
       "path": "scripts/bridge_harness.py",
       "role": "generator",
       "disposition": "runtime-required",
-      "summary": "Bridge harness generation: compile a promoted bridge's typed logic to a verifier-dispatched check."
+      "summary": "Bridge harness generation: compile a promoted bridge's typed logic to a verifier-dispatched check. Owns the compilable expression fragment; its verifier-independent front half (compile_bridge_logic) is also what validate_bridge.py enforces at draft/approve time (#112), so the fragment has one implementation."
     },
     {
       "path": "scripts/degradation_review.py",
@@ -585,7 +585,7 @@
       "path": "scripts/validate_bridge.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Bridge specification validation: G1a, G1b, G2."
+      "summary": "Bridge specification validation: G1a (schema), G1b (naming, conclusion consistency, and the compilable bridge_logic fragment -- predicate-application premises and snake_case bindings, #112), G2 (boundary cross-reference)."
     },
     {
       "path": "scripts/validate_callsites.py",

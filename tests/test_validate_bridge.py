@@ -7,13 +7,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from bridge_harness import CompileError  # noqa: E402
+from bridge_harness import VERIFIERS  # noqa: E402
+from bridge_harness import compile_bridge  # noqa: E402
 from validate_bridge import (  # noqa: E402
     find_bridge_files,
+    load_draft_validator,
     load_validator,
     main,
     validate,
     validate_crate,
     validate_data,
+    validate_draft_data,
 )
 
 BRIDGE_PATH = Path("crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json")
@@ -178,6 +183,107 @@ class BoundaryCrossReferenceTest(unittest.TestCase):
     def test_matching_boundary_is_accepted(self):
         findings = run(load_valid(), boundaries_by_id=default_boundaries_by_id())
         self.assertEqual(findings, [], [str(f) for f in findings])
+
+
+class CompilableFragmentTest(unittest.TestCase):
+    """G1b, chainlink #112: bridge_logic must lie inside the fragment
+    scripts/bridge_harness.py compiles, so an artifact G9 will certainly
+    reject can never be staged and approved.
+
+    Each case below is one the swisstable-verus pilot actually promoted:
+    six bridges whose premises were comparisons and whose bindings were
+    named GROUP_WIDTH, every command up to and including validate-bridge
+    at exit 0, failing only at G9 against an already-signed review."""
+
+    def assertRefused(self, data: dict, *expected: str):
+        findings = run(data)
+        errors = [str(f) for f in findings if f.severity == "error"]
+        self.assertTrue(errors, "expected a finding, got none")
+        self.assertTrue(all(f.gate == "G1b" for f in findings), errors)
+        for fragment in expected:
+            self.assertTrue(any(fragment in e for e in errors), errors)
+
+    def test_equality_operator_in_a_premise_is_refused(self):
+        data = load_valid()
+        data["bridge_logic"]["premises"] = ["self.ctrl(self.capacity()) == SENTINEL"]
+        self.assertRefused(data, "outside the compilable fragment", "predicate application only")
+
+    def test_ordering_operator_in_a_premise_is_refused(self):
+        data = load_valid()
+        data["bridge_logic"]["premises"] = ["slot < self.capacity()"]
+        self.assertRefused(data, "predicate application only")
+
+    def test_arithmetic_in_a_premise_is_refused(self):
+        data = load_valid()
+        data["bridge_logic"]["premises"] = ["caller_self.mask + 1"]
+        self.assertRefused(data, "predicate application only")
+
+    def test_a_conjunction_inside_one_premise_is_refused(self):
+        """premises is a LIST and the list is the conjunction, so `&&`
+        inside one entry is neither needed nor accepted -- the pilot's
+        mistake most likely to look harmless."""
+        data = load_valid()
+        data["bridge_logic"]["premises"] = ["caller_self.ready(args.now) && Scheduler.I001(caller_self)"]
+        self.assertRefused(data, "predicate application only")
+
+    def test_a_non_snake_case_binding_name_is_refused(self):
+        data = load_valid()
+        data["bridge_logic"]["bindings"] = {"GROUP_WIDTH": "usize"}
+        self.assertRefused(data, "outside the compilable fragment", "is not snake_case")
+
+    def test_a_non_snake_case_nested_binding_name_is_refused(self):
+        data = load_valid()
+        data["bridge_logic"]["bindings"] = {"args": {"NOW": "Time"}}
+        self.assertRefused(data, "is not snake_case")
+
+    def test_a_premise_rooted_in_an_undeclared_binding_is_refused(self):
+        """The same compiler, same gate: a premise the harness could not
+        be handed a value for is a premise G9 will refuse."""
+        data = load_valid()
+        data["bridge_logic"]["premises"] = ["callee_state.ready()"]
+        self.assertRefused(data, "bindings")
+
+    def test_a_premise_applying_an_unavailable_obligation_is_refused(self):
+        data = load_valid()
+        data["bridge_logic"]["premises"] = ["Scheduler.I099(caller_self)"]
+        self.assertRefused(data, "available_contract_facts")
+
+    def test_a_bridge_inside_the_fragment_still_passes(self):
+        findings = run(load_valid())
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_the_draft_validator_applies_the_same_rule(self):
+        """The draft path is where a model first emits this field, so a
+        " gate that only ran at approve would still stage the artifact
+        and print the pass line `draft` reports."""
+        data = load_valid()
+        del data["review"]
+        data["bridge_logic"]["premises"] = ["caller_self.capacity() >= 8"]
+        findings = validate_draft_data(BRIDGE_PATH, data, load_draft_validator())
+        errors = [str(f) for f in findings if f.severity == "error"]
+        self.assertTrue(any("outside the compilable fragment" in e for e in errors), errors)
+
+    def test_the_control_bridge_compiles_for_every_verifier_alike(self):
+        """Why the rule is reachable at this gate at all: what it checks is
+        verifier-INDEPENDENT, so the artifact either clears the fragment
+        for creusot, kani and verus together or for none of them. There is
+        no per-verifier verdict to wait for, which is what makes refusing
+        before approval possible rather than merely early."""
+        data = load_valid()
+        self.assertEqual(run(data), [])
+        for verifier in VERIFIERS:
+            with self.subTest(verifier=verifier):
+                harness = compile_bridge(data, verifier)
+                self.assertIn(data['callee_requirement'].replace('.', '::'), harness.source)
+
+    def test_an_operator_premise_is_refused_for_every_verifier_alike(self):
+        data = load_valid()
+        data['bridge_logic']['premises'] = ['caller_self.ready(args.now) && Scheduler.I001(caller_self)']
+        for verifier in VERIFIERS:
+            with self.subTest(verifier=verifier):
+                with self.assertRaises(CompileError):
+                    compile_bridge(data, verifier)
+        self.assertRefused(data, 'predicate application only')
 
 
 class FindBridgeFilesTest(unittest.TestCase):

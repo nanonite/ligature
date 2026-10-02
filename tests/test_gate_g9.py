@@ -35,6 +35,8 @@ from gate_g9 import (  # noqa: E402
     resolve_verifier,
 )
 from test_gate_g14 import Workspace, bridge_spec  # noqa: E402
+from validate_bridge import load_validator as load_bridge_validator  # noqa: E402
+from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
 
 FAKE_VERIFIER = ROOT / "tests" / "fixtures" / "bridges" / "verifier" / "fake_verifier.py"
 BRIDGE_ID = "BR-SCHED-TQ-001"
@@ -241,12 +243,70 @@ class GateTest(G9TestCase):
         findings, _ = self.gate()
         self.assertTrue(any("leftover result" in e for e in self.errors(findings)))
 
-    def test_an_uncompilable_bridge_blocks(self):
+class UncompilableBridgeIsRefusedBeforePromotionTest(G9TestCase):
+    """chainlink #112: an uncompilable bridge is no longer something only
+    G9 finds.
+
+    The swisstable-verus pilot drafted, approved and promoted six bridges
+    whose premises carried operators and whose bindings were `GROUP_WIDTH`,
+    with every command up to and including `validate-bridge` exiting 0, and
+    then failed G9 -- against a review block a human had already signed.
+    `validate_bridge.check_bridge_logic_fragments` now runs the same
+    verifier-independent compile the G9 path runs, so such a bridge is
+    refused before it is ever staged.
+
+    The consequence for THIS gate is deliberate and worth stating, because
+    it is what moved: a bridge whose bridge_logic is outside the fragment
+    is not a valid bridge specification, so gate_g14.load_bridges -- whose
+    contract is "every FULLY valid bridge, not just present" -- excludes
+    it, and G9 has nothing left to check it for. That is the same
+    treatment every other pre-approval rule already gets here (a
+    conclusion-mismatched bridge has never reached this gate either), and
+    the gate still fails closed: report_findings refuses a run that
+    discovered no promoted bridge rather than passing over zero. What is
+    asserted here is therefore the PAIR, not either half alone -- the two
+    commands fail together and the reason survives in the pre-approval
+    gate, which is where an author can still act on it."""
+
+    def bridge_findings(self) -> list:
+        path = self.root / "crates" / "scheduler" / "specs" / "_bridges" / (BRIDGE_ID + ".json")
+        return validate_bridge_data(path, json.loads(path.read_text()), load_bridge_validator(), None)
+
+    def uncompilable(self) -> None:
         spec = bridge_spec()
         spec["bridge_logic"]["premises"] = ["queue_len <= 8"]
         self.ws.write("crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json", spec)
-        findings, _ = self.gate()
-        self.assertTrue(any("does not compile" in e for e in self.errors(findings)))
+
+    def test_it_is_not_a_promoted_bridge_so_g9_has_nothing_to_check(self):
+        self.uncompilable()
+        findings, discovered = self.gate()
+        self.assertEqual(discovered, 0)
+        self.assertEqual(self.errors(findings), [])
+
+    def test_g9_still_fails_closed_rather_than_passing_over_zero_bridges(self):
+        self.uncompilable()
+        findings, discovered = self.gate()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = report_findings(findings, discovered, self.root)
+        self.assertEqual(rc, EXIT_BLOCKED)
+        self.assertIn("no promoted bridge discovered", stdout.getvalue())
+
+    def test_the_pre_approval_gate_names_the_reason(self):
+        self.uncompilable()
+        findings = self.bridge_findings()
+        errors = [str(f) for f in findings if f.severity == "error"]
+        self.assertTrue(errors, findings)
+        self.assertTrue(any("outside the compilable fragment" in e for e in errors), errors)
+        self.assertTrue(any("predicate application only" in e for e in errors), errors)
+
+    def test_the_two_commands_never_disagree_about_such_a_bridge(self):
+        """The invariant the layering exists to keep: an artifact one of
+        them refuses is never promoted, and never passes the other."""
+        self.uncompilable()
+        self.assertTrue(self.errors(self.bridge_findings()))
+        self.assertEqual(self.gate()[1], 0)
+
 
 
 class AssuranceReportCrossCheckTest(G9TestCase):

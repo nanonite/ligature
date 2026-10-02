@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bridge specification validation: G1a (schema), G1b (naming + internal
-consistency), G2 (boundary cross-reference).
+consistency + the compilable fragment), G2 (boundary cross-reference).
 
 plan.md §8.2/§8.3, chainlink #22. Three phases, run in order -- G1b/G2 on
 a schema-invalid document isn't meaningful.
@@ -11,11 +11,16 @@ a schema-invalid document isn't meaningful.
          prose bridge_logic.
   G1b -- repo-semantic checks: filename/layout (flat inside a
          _bridges/ directory, bridge_id == filename stem, same
-         discipline as boundary_id/interaction_id), plus internal
-         consistency: callee_requirement must equal
+         discipline as boundary_id/interaction_id); internal
+         consistency (callee_requirement must equal
          bridge_logic.conclusion.obligation_id exactly -- the
          human-readable summary field and the machine-checkable
-         conclusion can never silently diverge.
+         conclusion can never silently diverge); and the compilable
+         FRAGMENT (chainlink #112): premises are predicate
+         applications only, bindings are snake_case. That last one was
+         enforced only by G9 until the swisstable-verus pilot drafted,
+         approved and promoted six bridges G9 then refused -- see
+         check_bridge_logic_fragments().
   G2  -- reference integrity: boundary_id must resolve to a real,
          valid, promoted boundary contract in the same crate
          (scripts/validate_boundary_contracts.py's own
@@ -25,16 +30,16 @@ a schema-invalid document isn't meaningful.
          that boundary's own callee_guarantees -- a bridge cannot
          discharge an obligation the boundary contract never declared.
 
-Deliberately out of scope here (chainlink #22's own follow-up, not yet
-filed as a schema concern): generating a verifier harness from
-bridge_logic. plan.md §15's own open items list this as unresolved
-design territory ("does the typed bridge expression language need a
-formal semantics document, or is 'compiles to a harness the owning
-verifier checks' sufficient") -- this module only fixes the
-representation harness generation would eventually compile from, the
-same boundary #45 drew between the promotion-receipt *schema* (#15) and
-its *generator* (built separately, later, once the representation was
-settled).
+Still out of scope here: GENERATING a verifier harness from
+bridge_logic. plan.md §15's own open items list harness-generation
+semantics as unresolved design territory, and chainlink #22 drew the
+same boundary #45 drew between the promotion-receipt *schema* and its
+*generator*. What #112 added is not a second implementation of that
+generator: it calls scripts/bridge_harness.py's own verifier-independent
+front half (compile_bridge_logic), so the fragment this gate enforces
+is the same one G9 compiles -- one implementation, reached from both
+ends, rather than a schema-shaped paraphrase of it free to drift.
+Rendering a harness, dispatching it and recording the verdict stay G9's.
 """
 from __future__ import annotations
 
@@ -48,6 +53,8 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from bridge_harness import CompileError  # noqa: E402
+from bridge_harness import compile_bridge_logic  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
@@ -175,6 +182,51 @@ def check_boundary_cross_reference(
     return []
 
 
+def check_bridge_logic_fragments(path: Path, data: dict) -> list[Finding]:
+    """G1b: bridge_logic must lie inside the compilable fragment, and this gate
+    is where that is FIRST enforced rather than only at G9.
+
+    Two rules, both enforced by scripts/bridge_harness.py and both, until
+    chainlink #112, reachable only through G9's compile step:
+
+      1. every `premises` entry is a PREDICATE APPLICATION -- no operators,
+         literals, quantifiers or negation. `premises` is a list and the list
+         is the conjunction, so `a && b` written inside one entry is neither
+         needed nor accepted.
+      2. every `bindings` key, top-level or nested, is snake_case -- a binding
+         becomes a harness PARAMETER name.
+
+    The swisstable-verus pilot met both through the tool's own template: six
+    bridges whose premises carried ==, <, + and >= and whose bindings were
+    named GROUP_WIDTH drafted, approved and promoted here without a single
+    finding, then failed G9 -- against a review block a human had already
+    signed. A rule a pre-approval gate does not check is not a drafting slip;
+    it is a rule the artifact was allowed to be wrong about.
+
+    Both are verifier-INDEPENDENT facts about the document, which is why
+    they can be checked here at all: compile_bridge_logic() is the same code
+    G9 reaches through compile_bridge(), minus the choice of harness syntax,
+    and it is the SINGLE implementation of the fragment. Re-deriving these
+    rules here -- a schema `pattern` on bindings, a hand-rolled premise
+    scanner -- would be a second copy free to drift, and a drifted copy is
+    exactly how an artifact G9 will certainly reject gets approved. The
+    compiler's own reason is carried verbatim into the finding, so the author
+    sees which character or which name was refused and why."""
+    try:
+        compile_bridge_logic(data)
+    except CompileError as e:
+        return [
+            Finding(
+                "G1b", path,
+                f"bridge_logic is outside the compilable fragment: {e} "
+                "-- a bridge whose typed logic cannot be compiled is not a bridge "
+                "specification, so it is refused here at draft/approve time rather "
+                "than promoted and then failed by check-bridges/gate-g9",
+            )
+        ]
+    return []
+
+
 def check_no_draft_review(path: Path, data: dict) -> list[Finding]:
     """A Stage 0/3 draft must never carry its own `review` block --
     review_checkpoint.approve() is the only path that attaches one, after
@@ -212,6 +264,7 @@ def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator)
     findings: list[Finding] = []
     findings.extend(check_naming(path, data))
     findings.extend(check_conclusion_consistency(path, data))
+    findings.extend(check_bridge_logic_fragments(path, data))
     return findings
 
 
@@ -224,6 +277,7 @@ def validate_data(
     findings: list[Finding] = []
     findings.extend(check_naming(path, data))
     findings.extend(check_conclusion_consistency(path, data))
+    findings.extend(check_bridge_logic_fragments(path, data))
     findings.extend(check_boundary_cross_reference(path, data, boundaries_by_id))
     return findings
 

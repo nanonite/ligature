@@ -36,8 +36,8 @@ an empty proof.
   "target_expression": "<the concrete call being discharged>",
   "protocol_class": "pairwise | non-pairwise",
   "bridge_logic": {
-    "bindings": {"<name>": "<type>"},
-    "premises": ["<premise expression>"],
+    "bindings": {"<snake_case name>": "<type>"},
+    "premises": ["<predicate application>"],
     "conclusion": {"obligation_id": "<CalleeConcept>.<constraint id>"}
   }
 }
@@ -106,12 +106,60 @@ impossible to write; do not try to work around it.
 
 ### 3. `bridge_logic` — the typed proof obligation (plan.md §8.3)
 
-- `bindings` — name → type. Each binding's value is either a bare type name
-  (e.g. `caller_self: Scheduler`) or a nested named group of typed
-  sub-bindings (e.g. `args: {now: Time}`).
-- `premises` — at least one premise expression. These are the logical
-  premises that, together with the available contract facts, imply the
-  conclusion.
+`bridge_logic` is compiled to a verifier harness by
+`scripts/bridge_harness.py`, over a deliberately tiny expression
+fragment. Two rules constrain what you may write here, and **both are
+checked before the artifact is staged** (`validate_bridge` G1b, at
+`draft` and again at `approve`) — an artifact that breaks either is
+refused with the compiler's own reason rather than promoted and failed
+later by `check-bridges`/`gate-g9`:
+
+1. **`premises` entries are predicate applications only.** No operators
+   (`==`, `<`, `>=`, `+`, `&&`, …), no literals, no quantifiers, no
+   negation. Each entry is one application, written as
+   `concept_obligation(args…)` or `some_binding.method(args…)`.
+2. **`bindings` keys are snake_case** — top-level and nested alike
+   (`caller_self: Scheduler`, never `callerSelf` or `GROUP_WIDTH`). A
+   binding becomes a harness *parameter name*, so its name is the name
+   the verifier will see.
+
+The fragment, exactly as the compiler accepts it:
+
+```
+expression  := obligation | call | path
+obligation  := Concept '.' Code '(' [args] ')'      e.g. Scheduler.I001(caller_self)
+call        := path '(' [args] ')'                  e.g. caller_self.ready(args.now)
+path        := ident ('.' ident)*                   e.g. args.now
+args        := expression (',' expression)*
+```
+
+There is a temptation worth naming: `premises` is a **list**, and the
+list *is* the conjunction. So two assumptions means two entries —
+
+```json
+"premises": ["caller_self.ready(args.now)", "Scheduler.I001(caller_self)"]
+```
+
+— not one entry containing `&&`. `&&` inside an entry is neither
+needed nor accepted, and is the single most common way a bridge that
+reads correctly fails to compile.
+
+Two further consequences of the same compiler, worth knowing before
+you draft rather than after you are refused: every name a premise
+mentions must be declared in `bindings` (or be a
+`required_local_facts[].fact_id`), and an obligation applied in a
+premise must appear in `available_contract_facts` — a premise citing a
+fact the bridge never declared as available is plan.md §8.2's central
+error (the caller-postcondition case), and it is refused too.
+
+Field by field:
+
+- `bindings` — name → type. Each binding's value is either a bare type
+  name (e.g. `caller_self: Scheduler`) or a nested named group of typed
+  sub-bindings (e.g. `args: {now: Time}`). Every name is snake_case.
+- `premises` — at least one predicate application (see the fragment
+  above). These are the logical premises that, together with the
+  available contract facts, imply the conclusion.
 - `conclusion.obligation_id` — must equal `callee_requirement` exactly.
 
 ### 4. `protocol_class`

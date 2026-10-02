@@ -273,6 +273,48 @@ present but invalid: …" so the two states stay distinguishable. The same
 diagnostic is in the `ProjectDescriptorError` message every
 `load_project_descriptor` caller already prints.
 
+### A mistyped key says which key it looks like (chainlink #106)
+
+Naming the offender and the permitted set was still not enough on its
+own. The permitted set is flat and alphabetical, so a key the schema has
+never had and a key someone *meant* to write produced one
+undifferentiated `unexpected property '<key>'` line: `zzz_not_a_real_field`
+and `defualt` — the pilot's own misspelling of `verifier_policy.default` —
+were the same message, and recovering the intended key meant eyeballing
+all fourteen top-level names. Three cases now read three ways:
+
+| what you wrote | what the diagnostic says |
+| --- | --- |
+| a key the schema never had | `unexpected property 'zzz_not_a_real_field'; permitted: …` — no suggestion |
+| a mistyped permitted key | `unexpected property 'closure_kinds'; permitted: …; did you mean 'closure_kind'?` |
+| a real key in the wrong object | `unexpected property 'defualt'; permitted: …; did you mean '$.verifier_policy.default' (a property of $.verifier_policy, not of $)?` |
+
+The third row is the probe matrix's own shape: `default` is not permitted
+at the top level, so the permitted list alone would send the reader after
+a *sibling* (`crates`) and confidently nowhere useful. The suggestion
+therefore names the object the key actually belongs to.
+
+A near miss is measured with Damerau-Levenshtein distance, not plain
+Levenshtein — `defualt` is one adjacent transposition from `default`, which
+plain Levenshtein scores as two edits, indistinguishable from an unrelated
+key. Case is folded and `_` is ignored where that helps (`Mode`,
+`oraclebuildcommand`), and a proper prefix counts as one edit however long
+the omitted tail (`closure` → `closure_kind`, the pilot's own probe
+shape). The budget is two edits — one for keys of four characters or
+fewer — because a suggestion the user cannot act on costs them the very
+thing this diagnostic exists to give back. **A key with no near miss gets
+no suggestion at all**, so the `port_source.commit` line quoted above is
+byte-identical to what it always was: that message is part of this
+document, and a caller may already match on it.
+
+Where the candidates come from is read off
+`schemas/project-descriptor.schema.json` itself, not from a hand-kept list
+of key names, so a suggestion cannot outlive a key the schema has dropped.
+`verifier_policy` deliberately stays an **open** object — gate g9 resolves
+a per-cluster override, `policy.get(cluster, policy["default"])`, and
+closing it would break that. #106 adds a diagnostic for a closed object;
+it does not close one.
+
 ### `verifier_policy`: the open object, the undisclosed enum, the unexpressible second verifier (chainlink #76)
 
 `verifier_policy` was the only object in the descriptor that permitted

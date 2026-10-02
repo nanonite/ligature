@@ -149,6 +149,34 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
         self.assertIsNotNone(document["next_action"])
         self.assertEqual(document["next_action"]["kind"], "human-decision")
 
+    def test_descriptor_typo_gets_a_did_you_mean_from_the_artifact_alone(self):
+        """chainlink #106 end-to-end through the packaged binary: a
+        near-miss key and a key the schema never had produced a
+        byte-identical `unexpected property '<key>'` reason, so
+        recovering the intended key meant eyeballing the whole permitted
+        list. The packaged binary must now say which key the typo looks
+        like -- and must still not guess at the key with no near miss."""
+        self.assertEqual(self.init_port().returncode, 0)
+        path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(path.read_text())
+
+        descriptor["closure_kinds"] = ["deductive"]
+        path.write_text(json.dumps(descriptor))
+        check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertEqual(check.returncode, 5, check.stdout + check.stderr)
+        reason = json.loads(check.stdout)["findings"][0]["reason"]
+        self.assertIn("unexpected property 'closure_kinds'", reason)
+        self.assertIn("did you mean 'closure_kind'?", reason)
+
+        del descriptor["closure_kinds"]
+        descriptor["zzz_not_a_real_field"] = "x"
+        path.write_text(json.dumps(descriptor))
+        check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertEqual(check.returncode, 5, check.stdout + check.stderr)
+        reason = json.loads(check.stdout)["findings"][0]["reason"]
+        self.assertIn("unexpected property 'zzz_not_a_real_field'", reason)
+        self.assertNotIn("did you mean", reason)
+
     def test_declared_closure_kind_validates_from_the_artifact_alone(self):
         """chainlink #73 gap 1 end-to-end: the descriptor schema the
         packaged binary enforces accepts a declared closure_kind, and

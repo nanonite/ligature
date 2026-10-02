@@ -909,6 +909,40 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
         self.assertIn("commit", doc["next_action"]["description"])
         self.assertIn("project-descriptor.json", doc["next_action"]["description"])
 
+    def test_a_typo_is_distinguishable_from_an_unknown_key(self):
+        """chainlink #106: `zzz_not_a_real_field` (a key the schema never
+        had) and `closure_kinds` (a near miss of one it does have)
+        produced a byte-identical `unexpected property '<key>'` reason,
+        so the user had to eyeball the whole permitted list to recover
+        the intended key. `check` must carry the did-you-mean on the
+        finding and in the next_action that names the edit to make."""
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d.__setitem__("closure_kinds", ["deductive"]),
+        )
+        code, doc = self.check()
+        self.assertEqual(code, 5)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        reason = next(f["reason"] for f in doc["findings"] if f["gate_id"] == "P0")
+        self.assertIn("unexpected property 'closure_kinds'", reason)
+        self.assertIn("did you mean 'closure_kind'?", reason)
+        self.assertIn("did you mean 'closure_kind'?", doc["next_action"]["description"])
+
+    def test_an_unknown_key_still_gets_no_guess(self):
+        """The other half: a key with no near miss in the schema keeps
+        chainlink #73's message exactly, so a caller matching on it sees
+        no change in the case that never had a better answer to give."""
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d.__setitem__("zzz_not_a_real_field", "x"),
+        )
+        code, doc = self.check()
+        self.assertEqual(code, 5)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        reason = next(f["reason"] for f in doc["findings"] if f["gate_id"] == "P0")
+        self.assertIn("unexpected property 'zzz_not_a_real_field'", reason)
+        self.assertNotIn("did you mean", reason)
+
     def test_status_gate_integrity_reports_present_but_invalid(self):
         """gate integrity claimed "no project descriptor present" while
         `descriptor.path` named the file that existed (chainlink #73)."""

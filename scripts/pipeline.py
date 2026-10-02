@@ -2294,7 +2294,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"  - {stage}: {ref}")
     print("Installation:")
     try:
-        report = inspect_installation(args.workspace)
+        report = inspect_installation(
+            args.workspace,
+            # chainlink #109: `--descriptor` is a global flag every other
+            # command honours, and doctor was the one that accepted it and
+            # ignored it -- it resolved the descriptor from the installation
+            # manifest instead, so `--descriptor <invalid>.json doctor`
+            # printed `schema: valid` about a file it never opened while
+            # `status`/`check`/`write-set-check` all failed closed on that
+            # same file. Forward the flag only when it was actually
+            # supplied; main()'s filled-in default is not an operator's
+            # choice, and passing that would make a never-initialized
+            # workspace fail closed on a descriptor file it never had.
+            descriptor=args.descriptor if args.descriptor_supplied else None,
+        )
     except InstallError as e:
         print(f"  error: {e}")
         return 1
@@ -2313,8 +2326,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # invalid-input code, so a workspace the pipeline cannot check is never
     # reported as a healthy, current installation. Checked first per
     # docs/exit-code-contract.md's precedence: invalid input outranks every
-    # other condition.
-    if report.descriptor_schema is not None and report.descriptor_schema.state in (
+    # other condition. The descriptor is `report.descriptor_gate` -- the one
+    # `--descriptor` named when it overrides the installed descriptor
+    # (#109), else the installed descriptor -- so the gate is never
+    # evaluated against a file the operator did not ask about.
+    gate = report.descriptor_gate
+    if gate is not None and gate.state in (
         "invalid",
         "absent",
         "unreadable",
@@ -2923,6 +2940,15 @@ def registered_commands(parser: argparse.ArgumentParser | None = None) -> dict[s
 def main(argv: list[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Chainlink #109: record whether `--descriptor` was actually supplied
+    # before the default is filled in. A command cannot tell the two apart
+    # afterwards, and a global flag that is accepted and then ignored is
+    # worse than one that is rejected -- `doctor` uses this to decide
+    # whether the descriptor in force is the installed one or the one the
+    # operator named. Read as a plain attribute below so a caller that
+    # forgets to fill it in fails loudly rather than silently dropping the
+    # flag.
+    args.descriptor_supplied = args.descriptor is not None
     if args.descriptor is None:
         args.descriptor = args.workspace / "project-descriptor.json"
 

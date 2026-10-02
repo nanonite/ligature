@@ -33,6 +33,13 @@ Design rules, from the issue and this codebase's own disciplines:
   (base, on-disk, freshly rendered expected): `current`, `upgrade`,
   `conflict`, `missing`, or `obsolete`.
 
+`inspect()` takes the global `--descriptor` flag as an optional keyword.
+When the operator supplies one, it is the descriptor whose schema state
+gates `doctor` -- not the one `ci/manifest/installation.json` recorded
+(chainlink #109) -- and the inventory still reports what `init`
+installed. `None` means the flag was not supplied, which keeps the
+manifest's own `descriptor_path` in force for `migrate`.
+
 The module deliberately owns no CLI parsing -- `pipeline.py`'s
 `cmd_init`/`cmd_doctor`/`cmd_migrate` call into it so the argparse surface
 stays in the one place `tests/test_inventory_drift.py` already checks.
@@ -432,6 +439,19 @@ class InstallReport:
     messages: list[str] = field(default_factory=list)
     descriptor_path: str = "project-descriptor.json"
     descriptor_schema: DescriptorSchemaReport | None = None
+    descriptor_override: DescriptorInForce | None = None
+
+    @property
+    def descriptor_gate(self) -> DescriptorSchemaReport | None:
+        """The descriptor whose schema state decides whether this workspace
+        is fail-closed: the one `--descriptor` named when it overrides the
+        installed descriptor (chainlink #109), else the installed
+        descriptor's own. `doctor` reads this rather than
+        `descriptor_schema` directly so the gate can never be evaluated
+        against a file the caller did not ask about."""
+        if self.descriptor_override is not None:
+            return self.descriptor_override.schema
+        return self.descriptor_schema
 
     @property
     def conflicts(self) -> list[FilePlan]:
@@ -791,14 +811,14 @@ def _recorded_install_versions(manifest: dict) -> tuple[str, dict]:
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class DescriptorSchemaReport:
-    """The workspace's user-owned project descriptor validated against the
-    product's own `schemas/project-descriptor.schema.json` -- the same schema
-    and validator `check`/`status` read (chainlink #74).
+    """A project descriptor validated against the product's own
+    `schemas/project-descriptor.schema.json` -- the same schema and
+    validator `check`/`status` read (chainlink #74).
 
     States: `valid` (parses as a JSON object and satisfies the schema),
     `invalid` (parses but violates it -- `diagnostics` carries one
     actionable line per violation, or the file is not valid JSON / not a
-    JSON object), `absent` (no file at the manifest's descriptor path),
+    JSON object), `absent` (no file at the resolved descriptor path),
     `unreadable` (the file exists but cannot be read). `check` reports
     `invalid_input` for every state except `valid`, so those are exactly
     the states `doctor` fails closed on."""
@@ -807,15 +827,39 @@ class DescriptorSchemaReport:
     diagnostics: list[str] = field(default_factory=list)
 
 
-def descriptor_schema_report(workspace: Path, descriptor_rel: str) -> DescriptorSchemaReport:
-    """Read-only schema check of the user-owned descriptor. Never repairs
-    and never writes: the descriptor is user-owned, `migrate --force`
-    refuses it, and `check` remains the detail surface for the offending
-    property -- this only decides whether the workspace is fail-closed."""
-    try:
-        target = safe_target(workspace, descriptor_rel)
-    except InstallError as exc:
-        return DescriptorSchemaReport("unreadable", [str(exc)])
+@dataclass(frozen=True)
+class DescriptorInForce:
+    """The descriptor the global `--descriptor` flag names, when it is not
+    the descriptor the installation manifest recorded (chainlink #109).
+
+    `doctor` resolved its descriptor from `ci/manifest/installation.json`
+    and ignored the flag, so `--descriptor <invalid>.json doctor` printed
+    `schema: valid` about a file it never opened -- a clean verdict from
+    the command an operator is most likely to reach for as a pre-flight
+    gate, while `status`, `check` and `write-set-check` all failed closed
+    on that same file. The four commands could not be made to agree about
+    which descriptor was in force.
+
+    `installed` is the descriptor the manifest recorded and the inventory
+    still lists, or `None` on a workspace that was never initialized --
+    `--descriptor` selects the descriptor doctor *validates*, never the one
+    `init` installed, so neither report is silently substituted for the
+    other."""
+
+    path: str
+    schema: DescriptorSchemaReport
+    installed: str | None = None
+
+
+def descriptor_schema_report_at(target: Path) -> DescriptorSchemaReport:
+    """The read-only schema check against an already-resolved path.
+
+    Deliberately not `safe_target`: that resolution exists to keep a
+    *write* inside the workspace and off a symlink, while this check only
+    reads. `--descriptor` names the file every other command reads
+    wherever it lives -- `status`/`check` accept one outside the workspace
+    -- so doctor has to validate that same file (chainlink #109) rather
+    than a workspace-relative stand-in for it."""
     if not target.is_file():
         return DescriptorSchemaReport("absent")
     try:
@@ -834,6 +878,66 @@ def descriptor_schema_report(workspace: Path, descriptor_rel: str) -> Descriptor
     return DescriptorSchemaReport("valid")
 
 
+def descriptor_schema_report(workspace: Path, descriptor_rel: str) -> DescriptorSchemaReport:
+    """Read-only schema check of the user-owned descriptor the manifest
+    recorded. Never repairs and never writes: the descriptor is
+    user-owned, `migrate --force` refuses it, and `check` remains the
+    detail surface for the offending property -- this only decides
+    whether the workspace is fail-closed."""
+    try:
+        target = safe_target(workspace, descriptor_rel)
+    except InstallError as exc:
+        return DescriptorSchemaReport("unreadable", [str(exc)])
+    return descriptor_schema_report_at(target)
+
+
+def _display_descriptor(workspace: Path, descriptor: Path) -> str:
+    """How `--descriptor` is echoed in a report: workspace-relative when it
+    lives inside the workspace, verbatim otherwise -- the same shape
+    `status` and `write-set-check` report it in."""
+    if not descriptor.is_absolute():
+        return descriptor.as_posix()
+    try:
+        return descriptor.resolve().relative_to(Path(workspace).resolve()).as_posix()
+    except (ValueError, OSError):
+        return descriptor.as_posix()
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    """Whether two paths name one file. Resolved (not compared
+    lexically) so the workspace-relative path the manifest records and
+    the absolute path `--descriptor` carries are recognized as the same
+    file rather than as two descriptors."""
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def descriptor_in_force(
+    workspace: Path,
+    descriptor: Path | None,
+    installed_rel: str | None,
+) -> DescriptorInForce | None:
+    """The `--descriptor` override, or `None` when there is nothing to
+    override.
+
+    `None` descriptor: the flag was not supplied, so the descriptor the
+    manifest recorded stays in force. A descriptor that resolves to the
+    installed one is the same file under a different spelling -- not an
+    override -- which keeps `ligature --descriptor project-descriptor.json
+    doctor` byte-identical to plain `doctor`."""
+    if descriptor is None:
+        return None
+    if installed_rel is not None and _same_file(Path(workspace) / installed_rel, descriptor):
+        return None
+    return DescriptorInForce(
+        path=_display_descriptor(workspace, descriptor),
+        schema=descriptor_schema_report_at(descriptor),
+        installed=installed_rel,
+    )
+
+
 def _require_compatible(manifest: dict) -> None:
     version = manifest.get("manifest_schema_version")
     if version != MANIFEST_SCHEMA_VERSION:
@@ -843,10 +947,21 @@ def _require_compatible(manifest: dict) -> None:
         )
 
 
-def inspect(workspace: Path) -> InstallReport:
+def inspect(workspace: Path, *, descriptor: Path | None = None) -> InstallReport:
+    """Classify the installed files and validate the descriptor in force.
+
+    `descriptor` is the global `--descriptor` flag, already resolved by the
+    caller to the default when it was not supplied (`None` means "not
+    supplied", so doctor never mistakes the filled-in default for an
+    operator's choice -- chainlink #109). Pass it to make the descriptor
+    gate follow the flag; `None` keeps the manifest's own
+    `descriptor_path`, which is what `migrate` wants: it recovers what
+    `init` installed, not what a caller is currently trialling."""
     manifest = load_manifest(workspace)
     if manifest is None:
-        return InstallReport(mode="", product_name="", status="not-initialized")
+        report = InstallReport(mode="", product_name="", status="not-initialized")
+        report.descriptor_override = descriptor_in_force(workspace, descriptor, None)
+        return report
     if manifest.get("manifest_schema_version") != MANIFEST_SCHEMA_VERSION:
         report = InstallReport(
             mode=str(manifest.get("mode", "")),
@@ -855,6 +970,9 @@ def inspect(workspace: Path) -> InstallReport:
         )
         report.messages.append(
             f"manifest schema {manifest.get('manifest_schema_version')!r} != {MANIFEST_SCHEMA_VERSION}"
+        )
+        report.descriptor_override = descriptor_in_force(
+            workspace, descriptor, _manifest_descriptor_rel(manifest)
         )
         return report
     mode = str(manifest.get("mode", ""))
@@ -889,6 +1007,7 @@ def inspect(workspace: Path) -> InstallReport:
             report.obsolete.append(path)
     report.authority_state = _authority_verdict(workspace, manifest, _skill_plan(report))
     report.descriptor_schema = descriptor_schema_report(workspace, descriptor_rel)
+    report.descriptor_override = descriptor_in_force(workspace, descriptor, descriptor_rel)
     report.status = _overall_status(report)
     return report
 
@@ -1216,8 +1335,8 @@ _OUTCOME_GLYPH = {
 
 
 def _descriptor_schema_note(schema: DescriptorSchemaReport) -> str:
-    """The schema-state annotation on the descriptor's inventory line
-    (chainlink #74). `doctor` inventories `project-descriptor.json` as
+    """The schema-state annotation on a descriptor line (chainlink #74).
+    `doctor` inventories the installed `project-descriptor.json` as
     user-owned, so its schema state belongs on that line: a workspace
     `check` treats as fail-closed `invalid_input` must never be reported as
     a healthy, current installation. `check` stays the detail surface -- the
@@ -1236,6 +1355,20 @@ def render_report_text(report: InstallReport) -> str:
     lines = [f"installation: {report.status}"]
     if report.mode:
         lines.append(f"mode: {report.mode}  project: {report.product_name}")
+    override = report.descriptor_override
+    if override is not None:
+        # chainlink #109: the descriptor the operator named with
+        # `--descriptor`, stated as its own line above the inventory so the
+        # verdict is never read as being about the installed descriptor --
+        # and, on an initialized workspace, an explicit note that the
+        # inventory below still lists what `init` installed, so neither
+        # report is silently substituted for the other.
+        lines.append(f"descriptor in force: {override.path}{_descriptor_schema_note(override.schema)}")
+        if override.installed is not None:
+            lines.append(
+                f"  note: the descriptor gate follows --descriptor; {override.installed} "
+                "is the descriptor ci/manifest/installation.json records, still inventoried below"
+            )
     if report.authority_state is not None:
         lines.append(f"skill authority hash: {report.authority_state}")
     for plan in sorted(report.files, key=lambda p: p.path):

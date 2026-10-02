@@ -402,7 +402,7 @@
     {
       "name": "doctor",
       "func": "cmd_doctor",
-      "stable_mapping": "stable capability manifest; owns the text `status` used to print (docs/cli-contract.md \u00a78)"
+      "stable_mapping": "stable capability manifest; owns the text `status` used to print (docs/cli-contract.md \u00a78); its descriptor gate follows the global `--descriptor` flag (chainlink #109)"
     },
     {
       "name": "init",
@@ -701,7 +701,7 @@
       "path": "scripts/ligature_install.py",
       "role": "helper",
       "disposition": "runtime-required",
-      "summary": "chainlink #58: safe/idempotent init/upgrade + versioned ownership manifest + three-way managed-file classification behind init/doctor/migrate."
+      "summary": "chainlink #58: safe/idempotent init/upgrade + versioned ownership manifest + three-way managed-file classification behind init/doctor/migrate. `inspect()` takes the global `--descriptor` flag so doctor's descriptor gate follows it rather than the manifest's own `descriptor_path` (chainlink #109)."
     },
     {
       "path": "scripts/assumption_registry.py",

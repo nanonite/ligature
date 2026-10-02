@@ -679,6 +679,210 @@ class DoctorDescriptorSchemaTest(InstallFixture):
         self.assertEqual(report.state, "unreadable")
 
 
+class DoctorDescriptorFlagTest(InstallFixture):
+    """Chainlink #109: `doctor` honours the global `--descriptor` flag.
+
+    `doctor` resolved its descriptor from
+    `ci/manifest/installation.json`'s own `descriptor_path` and ignored the
+    flag entirely, so `ligature --descriptor <invalid>.json doctor` printed
+    `schema: valid` and exited 0 -- a clean verdict about a file it never
+    opened, from the command an operator is most likely to reach for as a
+    pre-flight gate, while `status`, `check` and `write-set-check` all
+    failed closed on that same file. Four commands disagreed about which
+    descriptor was in force, and the disagreement was a false pass.
+
+    What these tests pin: the descriptor gate follows `--descriptor`;
+    the inventory keeps reporting what `init` installed, so neither report
+    is silently substituted for the other; naming the installed descriptor
+    is not an override; and a flag that was never supplied stays absent
+    rather than becoming a gate over a descriptor the workspace never had.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # A candidate descriptor outside the workspace, which every
+        # command but doctor accepted: `status`/`check`/`write-set-check`
+        # read it wherever it lives, and confining doctor to the workspace
+        # would have made it disagree with them again.
+        outer = tempfile.TemporaryDirectory()
+        self.addCleanup(outer.cleanup)
+        self.outside = Path(outer.name).resolve()
+
+    def candidate(self, name: str, mutate=None) -> Path:
+        """A copy of the installed descriptor at `name`, optionally
+        invalid -- the probe the pilot filed #109 with."""
+        data = json.loads(self.read("project-descriptor.json"))
+        if mutate is not None:
+            mutate(data)
+        target = self.outside / name
+        target.write_text(json.dumps(data, indent=2) + "\n")
+        return target
+
+    @staticmethod
+    def invalid_enum(data: dict) -> None:
+        data["closure_kind"] = "full"
+
+    def test_doctor_fails_closed_on_an_invalid_descriptor_named_by_the_flag(self):
+        self.init("greenfield", name="myproj")
+        probe = self.candidate("probe-closure-kind.json", self.invalid_enum)
+        code, out, _ = self.run_cli("--descriptor", str(probe), "doctor")
+        self.assertEqual(code, 2)
+        self.assertIn(f"descriptor in force: {probe.as_posix()}  schema: invalid (see check for detail)", out)
+
+    def test_doctor_still_inventories_the_descriptor_init_installed(self):
+        """`--descriptor` selects the descriptor doctor *validates*, never
+        the one `init` installed: the inventory below the gate line keeps
+        reporting the installed descriptor, named as such."""
+        self.init("greenfield", name="myproj")
+        probe = self.candidate("probe-closure-kind.json", self.invalid_enum)
+        _, out, _ = self.run_cli("--descriptor", str(probe), "doctor")
+        self.assertIn("  user-owned  project-descriptor.json  schema: valid", out)
+        self.assertIn(
+            "  note: the descriptor gate follows --descriptor; project-descriptor.json",
+            out,
+        )
+
+    def test_doctor_agrees_with_status_check_and_write_set_check_on_the_descriptor(self):
+        """The invariant #109 was filed against: one `--descriptor`, one
+        verdict. All four commands fail closed on the same file."""
+        self.init("greenfield", name="myproj")
+        probe = self.candidate("probe-closure-kind.json", self.invalid_enum)
+        flag = ("--descriptor", str(probe))
+
+        doctor_code, _, _ = self.run_cli(*flag, "doctor")
+        status_code, status_out, _ = self.run_cli(*flag, "status")
+        check_code, check_out, _ = self.run_cli(*flag, "check", "--json")
+        write_set_code, write_set_out, _ = self.run_cli(*flag, "write-set-check", "--json")
+
+        self.assertEqual(doctor_code, 2)
+        # `status` reports the descriptor's state as data and stays 0;
+        # `check` exits 5 because an invalid descriptor also makes the
+        # gate pins unverifiable (chainlink #75), which ranks above the
+        # invalid-input code; `write-set-check` cannot evaluate a write set
+        # with no valid descriptor, so it uses the invalid-input code.
+        self.assertEqual(status_code, 0)
+        self.assertIn("descriptor: present-invalid", status_out)
+        self.assertEqual(check_code, 5)
+        self.assertIn("invalid_input", json.loads(check_out)["result"]["conditions"])
+        self.assertEqual(write_set_code, 2)
+        self.assertEqual(json.loads(write_set_out)["descriptor"]["state"], "present-invalid")
+
+    def test_the_installed_descriptor_alone_is_still_reported_valid(self):
+        """The pre-#109 behaviour is right for the descriptor it was
+        actually about: an invalid candidate elsewhere must not make the
+        installed descriptor look broken."""
+        self.init("greenfield", name="myproj")
+        self.candidate("probe-closure-kind.json", self.invalid_enum)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertNotIn("descriptor in force", out)
+        self.assertIn("  user-owned  project-descriptor.json  schema: valid", out)
+
+    def test_a_valid_descriptor_named_by_the_flag_keeps_doctor_clean(self):
+        self.init("greenfield", name="myproj")
+        probe = self.candidate("candidate.json")
+        code, out, _ = self.run_cli("--descriptor", str(probe), "doctor")
+        self.assertEqual(code, 0)
+        self.assertIn(f"descriptor in force: {probe.as_posix()}  schema: valid", out)
+
+    def test_a_descriptor_absent_from_disk_fails_closed(self):
+        self.init("greenfield", name="myproj")
+        missing = self.outside / "never-written.json"
+        code, out, _ = self.run_cli("--descriptor", str(missing), "doctor")
+        self.assertEqual(code, 2)
+        self.assertIn(f"descriptor in force: {missing.as_posix()}  schema: absent", out)
+
+    def test_a_non_json_descriptor_fails_closed(self):
+        self.init("greenfield", name="myproj")
+        broken = self.outside / "broken.json"
+        broken.write_text("{not json")
+        code, out, _ = self.run_cli("--descriptor", str(broken), "doctor")
+        self.assertEqual(code, 2)
+        self.assertIn(f"descriptor in force: {broken.as_posix()}  schema: invalid", out)
+
+    def test_a_workspace_relative_candidate_is_reported_relative(self):
+        """An override inside the workspace is echoed workspace-relative,
+        the same shape `status` and `write-set-check` report it in, so the
+        same workspace reads the same wherever it lives."""
+        self.init("greenfield", name="myproj")
+        data = json.loads(self.read("project-descriptor.json"))
+        self.invalid_enum(data)
+        (self.workspace / "candidate.json").write_text(json.dumps(data, indent=2) + "\n")
+        code, out, _ = self.run_cli("--descriptor", str(self.workspace / "candidate.json"), "doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("descriptor in force: candidate.json  schema: invalid (see check for detail)", out)
+
+    def test_naming_the_installed_descriptor_is_not_an_override(self):
+        """One file under a different spelling is still one file: without
+        the resolved-path comparison, `--descriptor <ws>/project-descriptor.json`
+        would report a second descriptor and exit 2 on a clean workspace.
+        The `docs/..` spelling exercises resolution, not string equality."""
+        self.init("greenfield", name="myproj")
+        plain_code, plain_out, _ = self.run_cli("doctor")
+        spelled = self.workspace / "docs" / ".." / "project-descriptor.json"
+        code, out, _ = self.run_cli("--descriptor", str(spelled), "doctor")
+        self.assertEqual(plain_code, 0)
+        self.assertEqual(code, 0)
+        self.assertNotIn("descriptor in force", out)
+        self.assertEqual(out, plain_out)
+
+    def test_an_unflagged_uninitialized_workspace_gates_on_nothing(self):
+        """`main()` fills `--descriptor` in with the workspace default, so
+        `doctor` needs to know the flag was never supplied -- otherwise a
+        never-initialized workspace fails closed on a descriptor file it
+        never had."""
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("installation: not-initialized", out)
+        self.assertNotIn("descriptor in force", out)
+
+    def test_an_uninitialized_workspace_still_gates_on_a_flagged_descriptor(self):
+        probe = self.outside / "candidate.json"
+        probe.write_text('{"mode": "greenfield"}\n')
+        code, out, _ = self.run_cli("--descriptor", str(probe), "doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("installation: not-initialized", out)
+        self.assertIn(f"descriptor in force: {probe.as_posix()}  schema: invalid", out)
+        # Nothing was installed, so there is no installed descriptor to
+        # name and no inventory to contradict the gate line.
+        self.assertNotIn("note: the descriptor gate follows --descriptor", out)
+
+    def test_migrate_keeps_recovering_the_installed_descriptor(self):
+        """`migrate` recovers what `init` installed rather than what a
+        caller is trialling, so it is never handed the flag."""
+        self.init("greenfield", name="myproj")
+        probe = self.candidate("probe-closure-kind.json", self.invalid_enum)
+        code, out, _ = self.run_cli("--descriptor", str(probe), "migrate")
+        self.assertEqual(code, 0)
+        self.assertNotIn("descriptor in force", out)
+        self.assertIn("  user-owned  project-descriptor.json  schema: valid", out)
+
+    def test_the_descriptor_gate_writes_nothing(self):
+        self.init("greenfield", name="myproj")
+        probe = self.candidate("probe-closure-kind.json", self.invalid_enum)
+        before = self.snapshot()
+        probe_before = probe.read_bytes()
+        code, _, _ = self.run_cli("--descriptor", str(probe), "doctor")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(probe.read_bytes(), probe_before)
+
+    def test_descriptor_in_force_is_none_when_the_flag_was_not_supplied(self):
+        self.init("greenfield", name="myproj")
+        report = ligature_install.inspect(self.workspace)
+        self.assertIsNone(report.descriptor_override)
+        self.assertEqual(report.descriptor_gate.state, "valid")
+
+    def test_descriptor_in_force_matches_the_manifest_path_by_resolution(self):
+        self.init("greenfield", name="myproj")
+        report = ligature_install.inspect(
+            self.workspace,
+            descriptor=self.workspace / "docs" / ".." / "project-descriptor.json",
+        )
+        self.assertIsNone(report.descriptor_override)
+        self.assertEqual(report.descriptor_gate.state, "valid")
+
+
 class NormativePolicyDriftTest(InstallFixture):
     """chainlink #78: a user-owned normative document (the reliance policy)
     cannot be drift-checked, and the ownership manifest records hashes for

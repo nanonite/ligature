@@ -404,6 +404,38 @@ as the default for both accept commands, with a disagreeing explicit
 adopts the on-disk content once, so a pre-#78 workspace becomes
 drift-checkable rather than permanently unverifiable.
 
+### The descriptor `doctor` never looked at (chainlink #109)
+
+`--descriptor` is the global flag the same descriptor in every command
+takes, and `doctor` was the one command that accepted it and ignored it:
+it resolved the descriptor from `ci/manifest/installation.json`'s own
+`descriptor_path`. Pointed at a candidate descriptor — the natural way to
+ask "is my descriptor OK?" — it read the workspace's own file, printed
+`schema: valid`, and exited 0. On a `swisstable-verus` probe carrying an
+out-of-enum `closure_kind`, `status` reported `descriptor:
+present-invalid`, `check --json` exited 5, `write-set-check` exited 2 with
+`write_set.state: unknown`, and `doctor` exited 0: a false pass from the
+pre-flight gate, on the one question a CI job is most likely to ask before
+doing work the descriptor does not authorise.
+
+`doctor` now validates the descriptor the flag names, resolved as the other
+commands resolve it (as given, absolute or cwd-relative, and not required
+to be inside the workspace), and reports it as its own `descriptor in
+force:` line above the inventory; an invalid, absent, or unreadable one
+exits 2, the same invalid-input code #74's own gate already used. The
+inventory is unchanged on purpose: `--descriptor` picks what doctor
+*validates*, not what `init` installed, so a `user-owned` line for the
+installed descriptor and a gate line for a candidate stay two statements
+about two files rather than one silently standing in for the other.
+Naming the installed descriptor is not an override (both paths are
+compared after `resolve()`, so plain `doctor` is unchanged), and a flag
+never supplied is not one either — `main()` records `--descriptor` as
+supplied before filling in the workspace default, so an uninitialized
+workspace still reports `not-initialized` and exits 0 instead of failing
+closed on a descriptor file it never had. `migrate` keeps recovering the
+descriptor the manifest recorded: it recovers what `init` installed, not
+what a caller is trialling.
+
 ## 5. The adjudicator trust-pin sub-state-machine
 
 Orthogonal to §2 — this tracks *which binary is trusted*, not *how far the

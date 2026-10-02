@@ -61,7 +61,10 @@ per-report-id truth, not a category label that doesn't hold for three of
 the four report-ids.
 
 `--workspace` and `--descriptor` remain global flags on every subcommand,
-unchanged from today's `build_parser()`.
+unchanged from today's `build_parser()`. A subcommand that accepts a
+global flag must act on it: a flag accepted and then ignored is worse
+than one rejected, because the operator reads the verdict as being about
+the file they named (#109).
 
 `record-assurance` (#87) is a top-level verb rather than a flag on
 `gate g14` because the two are the two halves of one artifact with three
@@ -349,6 +352,35 @@ as a healthy, current installation. `check` remains the detail surface
 for the offending property; `doctor` never repairs the descriptor (it is
 user-owned, and `migrate --force` refuses it).
 
+**Implemented by #109.** That descriptor gate follows the global
+`--descriptor` flag, which `doctor` had been accepting and ignoring: it
+resolved the descriptor from `ci/manifest/installation.json`'s own
+`descriptor_path`, so `--descriptor <invalid>.json doctor` printed
+`schema: valid` and exited **0** -- a clean verdict about a file it never
+opened -- while `status`, `check` and `write-set-check` all failed closed
+on that same file. Four commands could not be made to agree about which
+descriptor was in force, and the disagreement was a false pass on the
+command an operator is most likely to reach for as a pre-flight gate.
+
+`doctor` now validates the descriptor `--descriptor` names, resolved
+exactly as the other commands resolve it (as given: absolute, or relative
+to the cwd, and not required to be inside the workspace), and reports it
+as its own `descriptor in force: <path>  schema: <state>` line above the
+inventory. The inventory is unchanged: `--descriptor` selects the
+descriptor doctor *validates*, never the one `init` installed, so a
+`user-owned` line for the installed descriptor and a gate line for a
+candidate are two statements about two files rather than one silently
+standing in for the other. Naming the installed descriptor is not an
+override -- the two paths are compared after resolution, so
+`--descriptor <workspace>/project-descriptor.json doctor` is byte-identical
+to plain `doctor`. A flag that was never supplied is not an override
+either: `--descriptor`'s filled-in default is the workspace default, and
+treating it as an operator's choice would make a never-initialized
+workspace fail closed on a descriptor file it never had.
+`migrate` deliberately keeps recovering the descriptor the manifest
+recorded -- it recovers what `init` installed, not what a caller is
+trialling -- so it is never handed the flag.
+
 **Implemented by #75.** `check` also fails closed on installation
 integrity: when the descriptor's `gate_integrity` pins are drifted,
 missing, or unverifiable against the ownership manifest's recorded hashes
@@ -485,7 +517,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `render-witness` | internal operation `check` may recommend, never runs (§7) |
 | `status` | stable project-state query (#56, §8) — reserved unconditionally, not covered by §9's floor |
 | `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
-| `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print, verifies the skill authority hash (§8, #58), and reports/verifies the executable's own build attestation (#57) |
+| `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print, verifies the skill authority hash (§8, #58), reports/verifies the executable's own build attestation (#57), and fails closed on the descriptor `--descriptor` names (§8, #74/#109) |
 | `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation, and both report the build's source provenance (`source_commit`, and `source_dirty`/`working_tree_diff_hash` for a dirty tree) (§1, §8, #57, #64) |
 | `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3 (#57 grammar v1.0) |
 | `report` | stable; nested reporting verb, `report <report-id>` dispatches the four report generators in §6 (#57 grammar v1.0) |

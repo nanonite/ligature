@@ -2605,6 +2605,130 @@ class LoadProjectDescriptorTest(unittest.TestCase):
             path.unlink()
 
 
+class UninitializedWorkspaceTest(unittest.TestCase):
+    """chainlink #108, reported from the swisstable-verus pilot
+    (`swisstable-verus-mcp-007`): `extract-c-static --target ...` and
+    `validate` in a root that was never `init`-ialised died with a raw
+    `FileNotFoundError` traceback at exit 1 -- naming neither the file the
+    command wanted nor the command that creates it -- while `status`,
+    `check` and `doctor` reported the same condition as data and `migrate
+    --upgrade` named `ligature init`.
+
+    Every command below loads the descriptor through the same
+    `project_descriptor.load_project_descriptor`, so every one of them had
+    the identical crash (verified against the pre-#108 tree: all fifteen
+    printed a traceback). The guard now lives in the one function that reads
+    the file -- `project_descriptor.read_descriptor_text`, which
+    `load_project_descriptor` calls -- and these tests pin the whole class
+    to the one-line diagnostic so no command can reintroduce the traceback
+    behind it."""
+
+    # Each command's first act is the descriptor load, so this is just
+    # enough argv for each to reach it inside an empty workspace.
+    DESCRIPTOR_COMMANDS = (
+        ["validate"],
+        ["extract-c-static", "--target", "x86_64-unknown-linux-gnu"],
+        ["check-bridges"],
+        ["gate-g9"],
+        ["gate-g14"],
+        ["gate-g18"],
+        ["gate-g19"],
+        ["gate-g20"],
+        ["generate-feature-ledger"],
+        ["generate-contact-sheet"],
+        ["measure-gold-set"],
+        ["select-pilot-cluster"],
+        ["draft", "0", "concept-spec", "crates/a/specs/thing.json"],
+        ["approve", "crates/a/specs/thing.json", "--reviewer", "r"],
+        ["promote-evidence", "crates/a/specs/thing.json"],
+    )
+
+    def _run(self, workspace, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = pipeline.main(["--workspace", workspace, *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_every_descriptor_using_command_reports_it_as_one_line(self):
+        """The pilot's expectation: one line on stderr, nothing on stdout,
+        no traceback anywhere, and a non-zero exit. The message is
+        asserted in full rather than by substring -- a second wording for
+        the same condition is exactly the drift the one shared guard
+        exists to prevent."""
+        with tempfile.TemporaryDirectory() as workspace:
+            expected = str(Path(workspace) / "project-descriptor.json")
+            for argv in self.DESCRIPTOR_COMMANDS:
+                with self.subTest(command=" ".join(argv)):
+                    rc, out, err = self._run(workspace, *argv)
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(out, "")
+                    (line,) = err.strip().splitlines()
+                    self.assertEqual(
+                        line,
+                        f"error: cannot read project descriptor {expected}: no such file -- "
+                        "run `ligature init --mode <mode>` to create one, or pass "
+                        "--descriptor <path> to name a descriptor that exists",
+                    )
+
+    def test_it_names_the_same_command_migrate_does(self):
+        """`migrate --upgrade` in the same root already said `workspace is
+        not initialized; run ligature init ...`. Both conditions are now
+        one line naming the command that fixes them, which is what makes
+        the pilot's comparison -- `extract-c-static` should behave like
+        `migrate`, not like a traceback -- hold."""
+        with tempfile.TemporaryDirectory() as workspace:
+            for argv in (
+                ["migrate", "--upgrade"],
+                ["extract-c-static", "--target", "x86_64-unknown-linux-gnu"],
+            ):
+                with self.subTest(command=argv[0]):
+                    rc, _, err = self._run(workspace, *argv)
+                    self.assertNotEqual(rc, 0)
+                    (line,) = err.strip().splitlines()
+                    self.assertIn("ligature init", line)
+
+    def test_the_commands_that_never_crashed_are_untouched(self):
+        """`status` reports the absent descriptor as data at exit 0 and
+        `check` reports it as `invalid_input` at exit 5. Those are the
+        surfaces the pilot used to show the crash was a defect; a guard
+        that turned them into errors would have traded one inconsistency
+        for another."""
+        with tempfile.TemporaryDirectory() as workspace:
+            rc, out, _ = self._run(workspace, "status")
+            self.assertEqual(rc, 0)
+            self.assertIn("descriptor: absent (project-descriptor.json)", out)
+            rc, out, _ = self._run(workspace, "check")
+            self.assertEqual(rc, 5)
+            self.assertIn("no project descriptor present", out)
+            rc, _, _ = self._run(workspace, "doctor")
+            self.assertEqual(rc, 0)
+
+    def test_a_descriptor_named_by_the_flag_is_reported_as_itself(self):
+        """--descriptor selects which file the command is asking for, so a
+        bad one is reported as itself and never as the workspace default
+        the command would otherwise have used."""
+        with tempfile.TemporaryDirectory() as workspace:
+            other = Path(workspace) / "elsewhere" / "other-descriptor.json"
+            rc, _, err = self._run(
+                workspace, "--descriptor", str(other),
+                "extract-c-static", "--target", "x86_64-unknown-linux-gnu",
+            )
+            self.assertEqual(rc, 1)
+            self.assertIn(str(other), err)
+            self.assertNotIn("project-descriptor.json", err)
+
+    def test_a_descriptor_that_is_a_directory_is_not_reported_as_missing(self):
+        """A different condition, so a different line: telling someone to
+        run `init` because their `--descriptor` names a directory would
+        send them to fix the wrong thing."""
+        with tempfile.TemporaryDirectory() as workspace:
+            (Path(workspace) / "project-descriptor.json").mkdir()
+            rc, _, err = self._run(workspace, "extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+            self.assertEqual(rc, 1)
+            self.assertIn("is a directory, expected a file", err)
+            self.assertNotIn("ligature init", err)
+
+
 VALID_DESCRIPTOR = {
     "schema_version": "1.0",
     "project": {"name": "repro", "crate_naming_convention": "^repro-[a-z]+"},

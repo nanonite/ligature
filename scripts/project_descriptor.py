@@ -6,6 +6,12 @@ load a project descriptor and derive each crate's canonical boundary
 directory without importing from each other -- pipeline.py already
 imports from validate_work_package.py (its draft/validate commands), so
 the reverse direction would be a circular import.
+
+`read_descriptor_text` is the single point where a descriptor reaches the
+filesystem: every command that needs one goes through
+`load_project_descriptor`, so an absent or unreadable descriptor becomes
+one actionable line there rather than a `FileNotFoundError` traceback out
+of each command that happens to call it (chainlink #108).
 """
 from __future__ import annotations
 
@@ -21,12 +27,17 @@ DESCRIPTOR_SCHEMA_PATH = resources.resource_path("schemas", "project-descriptor.
 
 
 class ProjectDescriptorError(Exception):
-    """The project descriptor failed to load: either it is not valid JSON
-    or it does not satisfy schemas/project-descriptor.schema.json.
+    """The project descriptor failed to load: it is not readable as a file,
+    it is not valid JSON, or it does not satisfy
+    schemas/project-descriptor.schema.json.
 
     `diagnostics` carries one actionable line per problem (see
     schema_diagnostics), so a caller can name the offending property
-    instead of only saying the descriptor is invalid (chainlink #73)."""
+    instead of only saying the descriptor is invalid (chainlink #73).
+
+    The message is always self-contained and user-facing: every CLI
+    boundary that catches this exception prints `error: {e}` and exits,
+    so the message has to name the file itself (chainlink #108)."""
 
     def __init__(self, message: str, diagnostics: list[str] | None = None):
         super().__init__(message)
@@ -92,12 +103,63 @@ def schema_diagnostics(data: dict) -> list[str]:
     return lines
 
 
+def read_descriptor_text(path: Path) -> str:
+    """Read `path` as text, or raise `ProjectDescriptorError` naming it.
+
+    The one place a descriptor reaches the filesystem (chainlink #108).
+    Every command that needs a descriptor goes through
+    `load_project_descriptor`, so guarding here is what stops an
+    uninitialized workspace from reaching the user as a raw
+    `FileNotFoundError` traceback through `extract-c-static`, `validate`,
+    or any of the other commands that call the same loader -- a single
+    guard, rather than a per-command `try`/`except` that two commands
+    could word differently.
+
+    The message stays inside the family the rest of the surface already
+    uses for this exact failure (`error: cannot read project descriptor
+    <path>: ...`, chainlink #83), so the surfaces that wrap a call site
+    with their own prefix and the ones that print `error: {e}` say the
+    same thing. The missing-file case additionally names the command that
+    creates the file, because in the overwhelmingly common case the path
+    that is missing *is* the workspace default an uninitialized workspace
+    never had -- `ligature migrate --upgrade` already reports the same
+    condition as `workspace is not initialized; run ligature init ...`.
+    """
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        raise ProjectDescriptorError(
+            f"cannot read project descriptor {path}: no such file -- run `ligature init --mode <mode>` "
+            "to create one, or pass --descriptor <path> to name a descriptor that exists",
+            diagnostics=[f"does not exist: {path}"],
+        ) from None
+    except IsADirectoryError:
+        raise ProjectDescriptorError(
+            f"cannot read project descriptor {path}: it is a directory, expected a file",
+            diagnostics=[f"is a directory, expected a file: {path}"],
+        ) from None
+    except UnicodeDecodeError as exc:
+        raise ProjectDescriptorError(
+            f"cannot read project descriptor {path}: not valid UTF-8 text: {exc}",
+            diagnostics=[f"not valid UTF-8 text: {exc}"],
+        ) from None
+    except OSError as exc:
+        # Belt and braces for what the three handlers above cannot see: a
+        # permission denial, a path replaced between the caller's existence
+        # check and this read.
+        raise ProjectDescriptorError(
+            f"cannot read project descriptor {path}: {exc}",
+            diagnostics=[f"cannot read: {exc}"],
+        ) from None
+
+
 def load_project_descriptor(path: Path) -> dict:
     schema = json.loads(DESCRIPTOR_SCHEMA_PATH.read_text())
     validator = make_validator(schema)
 
+    text = read_descriptor_text(path)
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ProjectDescriptorError(
             f"project descriptor {path} is not valid JSON: {exc}",

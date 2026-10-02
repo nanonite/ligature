@@ -720,7 +720,13 @@ def main(argv: list[str]) -> int:
     if args.descriptor is not None or descriptor_path.is_file():
         try:
             descriptor = load_project_descriptor(descriptor_path)
-        except (ProjectDescriptorError, OSError, json.JSONDecodeError) as e:
+        except ProjectDescriptorError as e:
+            # chainlink #108: self-contained -- it names the descriptor and,
+            # when the file is absent, the command that creates it. The
+            # prefix below would print both the path and the phrase twice.
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        except (OSError, json.JSONDecodeError) as e:
             print(f"error: cannot read project descriptor {descriptor_path}: {e}", file=sys.stderr)
             return 2
 

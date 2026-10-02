@@ -380,6 +380,48 @@ workspace fail closed on a descriptor file it never had.
 `migrate` deliberately keeps recovering the descriptor the manifest
 recorded -- it recovers what `init` installed, not what a caller is
 trialling -- so it is never handed the flag.
+**Implemented by #108.** Every command that loads the project descriptor
+loads it through one shared guard, so a workspace with no
+`project-descriptor.json` is reported the same way everywhere instead of
+only where some caller happened to pre-check the file.
+`extract-c-static` and `validate` used to reach the user as a raw
+`FileNotFoundError` traceback at exit 1 -- so did `check-bridges`,
+`gate-g9`, `gate-g14`/`g18`/`g19`/`g20`, `generate-feature-ledger`,
+`generate-contact-sheet`, `measure-gold-set`, `select-pilot-cluster`,
+`draft`, `approve` and `promote-evidence`, which left a worker with a
+traceback as the only signal that a pilot root was not initialized yet
+(the swisstable-verus pilot's `swisstable-verus-mcp-007`). The condition
+is now one line on stderr and nothing on stdout --
+
+```
+error: cannot read project descriptor <path>: no such file -- run `ligature init --mode <mode>` to create one, or pass --descriptor <path> to name a descriptor that exists
+```
+
+-- naming both the file the command wanted and the command that creates
+it, which is the message `migrate --upgrade` already gave for the same
+root ("workspace is not initialized; run `ligature init --mode <mode>`
+first"). Exit is **1** through the pipeline's documented `PipelineError`
+fold (#83) and **2** from the standalone CLIs, which already did
+(`measure-gold-set`, `select-pilot-cluster`, `validate-work-package`,
+`validate-promotion-receipt`); the exit-code contract's invalid-input code
+2 is the target for every surface, and `pipeline.py`'s dispatch does not
+reach it yet for the reason `docs/exit-code-contract.md` records as known
+drift (#56/#57/#58). Because the guard's message names the file itself,
+the two standalone call sites that used to wrap it in their own
+`cannot read project descriptor` prefix -- which printed the path and the
+phrase twice for one missing file -- now print the guard's line
+unchanged. A missing file, a directory and undecodable bytes are three
+distinct conditions with three distinct lines, so a `--descriptor` naming
+a directory is never answered with advice to run `init`. The commands that
+report an absent descriptor as data -- `status` (`descriptor: absent`,
+exit 0), `check` (`invalid_input`, exit 5) and `write-set-check`
+(`descriptor: absent`, exit 2) -- are unchanged: they never needed the
+file, so they never had the crash. Related but not fixed here: #106 is the
+same crash *shape* on a different input (a missing `<target>.draft`
+sibling for `approve` / `approve-pair` / `approve-exemption-pair`), and
+that pre-flight belongs to those commands rather than to the descriptor
+loader.
+
 
 **Implemented by #75.** `check` also fails closed on installation
 integrity: when the descriptor's `gate_integrity` pins are drifted,

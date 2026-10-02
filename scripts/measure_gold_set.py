@@ -514,7 +514,15 @@ def main(argv: list[str]) -> int:
     try:
         descriptor = load_project_descriptor(args.descriptor or (args.workspace / "project-descriptor.json"))
     except Exception as e:  # noqa: BLE001 -- ProjectDescriptorError or OSError
-        print(f"error: cannot read project descriptor: {e}", file=sys.stderr)
+        # chainlink #108: `load_project_descriptor` raises
+        # ProjectDescriptorError for an absent, unreadable or invalid
+        # descriptor, and that message already names the file it wanted
+        # (including the command that creates it), so it is printed as-is.
+        # Prefixing it again printed the path twice and the phrase
+        # `cannot read project descriptor` twice for the same failure. An
+        # OSError here can only be a read that raced the loader's own
+        # guard, and str(OSError) names its own filename.
+        print(f"error: {e}", file=sys.stderr)
         return EXIT_INPUT_ERROR
 
     measurements, findings = measure_workspace(args.workspace, descriptor, write=not args.no_write)

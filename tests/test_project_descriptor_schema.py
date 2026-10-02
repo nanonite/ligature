@@ -6,11 +6,15 @@ additionalProperties: false unless actually checked.
 """
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+from project_descriptor import ProjectDescriptorError  # noqa: E402
+from project_descriptor import load_project_descriptor  # noqa: E402
+from project_descriptor import read_descriptor_text  # noqa: E402
 from project_descriptor import schema_diagnostics  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
@@ -324,6 +328,92 @@ class SchemaDiagnosticsTest(unittest.TestCase):
         (line,) = schema_diagnostics(data)
         self.assertIn("unexpected property 'zzz'", line)
         self.assertIn("permitted:", line)
+
+
+class MissingDescriptorTest(unittest.TestCase):
+    """chainlink #108: the loader read `project-descriptor.json` without
+    checking that it exists, so an uninitialized workspace reached the
+    user as a raw `FileNotFoundError` traceback out of `extract-c-static`
+    and `validate` (the swisstable-verus pilot, `swisstable-verus-mcp-007`)
+    instead of the one-line diagnostic the rest of the surface already
+    gave. Fifteen of the commands that call this loader crashed that way;
+    `status`, `check` and `doctor` never did, which is what made it a
+    defect rather than a design choice. The guard therefore lives here, in
+    the one function every one of them calls."""
+
+    def test_a_missing_descriptor_names_the_file_and_the_command_that_creates_it(self):
+        """The pilot's expectation, verbatim: name the missing file, name
+        `ligature init` (the same command `migrate --upgrade` tells an
+        uninitialized workspace to run), one line."""
+        missing = Path("/tmp/nonexistent-workspace/project-descriptor.json")
+        with self.assertRaises(ProjectDescriptorError) as ctx:
+            read_descriptor_text(missing)
+        message = str(ctx.exception)
+        self.assertIn(str(missing), message)
+        self.assertIn("ligature init", message)
+        self.assertEqual(len(message.splitlines()), 1, message)
+
+    def test_the_missing_file_is_not_reported_as_a_bare_file_not_found(self):
+        """A bare `FileNotFoundError` is the defect (#108). The guard's
+        exception must not be one, or every caller catching OSError keeps
+        printing a raw errno string and the caller that translates this
+        error type (pipeline's wrapper) never sees it at all."""
+        with self.assertRaises(ProjectDescriptorError) as ctx:
+            load_project_descriptor(Path("/tmp/nonexistent-workspace/project-descriptor.json"))
+        self.assertNotIsInstance(ctx.exception, OSError)
+        self.assertNotIsInstance(ctx.exception, ValueError)
+        self.assertNotIn("Errno", str(ctx.exception))
+        self.assertNotIn("Traceback", str(ctx.exception))
+
+    def test_the_message_carries_no_error_prefix_the_cli_adds_itself(self):
+        """Every CLI surface prints `error: {e}`; a guard that prefixed
+        its own message would print `error: error: ...`."""
+        with self.assertRaises(ProjectDescriptorError) as ctx:
+            read_descriptor_text(Path("/tmp/nonexistent-workspace/project-descriptor.json"))
+        self.assertFalse(str(ctx.exception).startswith("error:"), str(ctx.exception))
+
+    def test_the_diagnostics_name_the_missing_file_too(self):
+        """`diagnostics` is what `status`/`check` render for a
+        present-but-invalid descriptor. An absent one has no property to
+        blame, but it still owes the caller a one-line statement rather
+        than an empty list it cannot tell apart from 'no problem'."""
+        with self.assertRaises(ProjectDescriptorError) as ctx:
+            load_project_descriptor(Path("/tmp/nonexistent-workspace/project-descriptor.json"))
+        (line,) = ctx.exception.diagnostics
+        self.assertIn("project-descriptor.json", line)
+
+    def test_a_directory_is_reported_as_a_directory_not_as_a_missing_file(self):
+        """Same guard, different condition: `--descriptor <dir>` used to
+        raise `IsADirectoryError` out of pathlib with no idea which file
+        was wanted. `manifest_input.ensure_manifest_path` (chainlink #83)
+        makes the same distinction, so the two guards cannot be read as
+        disagreeing about what is wrong."""
+        with self.assertRaises(ProjectDescriptorError) as ctx:
+            read_descriptor_text(Path(tempfile.gettempdir()))
+        message = str(ctx.exception)
+        self.assertIn("is a directory", message)
+        self.assertNotIn("no such file", message)
+        self.assertNotIn("ligature init", message)
+
+    def test_an_undecodable_descriptor_is_not_a_traceback_either(self):
+        """The remaining way `read_text()` can fail loudly: bytes that are
+        not text. Same class of defect (an unhandled exception where a
+        one-line diagnostic belongs), same guard."""
+        with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as handle:
+            handle.write(b"\xff\xfe not utf-8")
+            path = Path(handle.name)
+        try:
+            with self.assertRaises(ProjectDescriptorError) as ctx:
+                load_project_descriptor(path)
+            self.assertIn("not valid UTF-8", str(ctx.exception))
+        finally:
+            path.unlink()
+
+    def test_a_valid_descriptor_still_loads_through_the_guard(self):
+        """The guard is a pre-flight, not a replacement: the happy path
+        and the schema diagnostics are untouched by it."""
+        data = load_project_descriptor(EXAMPLES_DIR / "project-descriptor.greenfield.example.json")
+        self.assertEqual(data["mode"], "greenfield")
 
 
 if __name__ == "__main__":

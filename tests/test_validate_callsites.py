@@ -8,12 +8,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from extract_c_static import extract_crate  # noqa: E402
 from validate_callsites import (  # noqa: E402
     callsite_report_dir_for,
     find_report_files,
     load_reports,
     load_validator,
     main,
+    shape_index_resolver,
     validate,
     validate_data,
     validate_workspace,
@@ -235,6 +237,168 @@ class NamingTest(unittest.TestCase):
         report["report_id"] = "crates_scheduler.json"
         findings = findings_for(report, Path("ci/results/c_static/crates_scheduler.json.bak"))
         self.assertTrue(any("must be a .json file" in f for f in findings))
+
+
+class CalleeShapeRecomputationTest(unittest.TestCase):
+    """chainlink #107. The recorded `callee_shape` is the only thing that
+    stops R1 blocking a cross-concept call absent from I, so it is
+    re-derived from the crate's own sources rather than trusted -- the same
+    discipline `callsite_coverage` gets, and rejected in both directions."""
+
+    SOURCE = """\
+pub struct Year(pub i16);
+
+impl Year {
+    pub fn ok(&self) -> bool {
+        self.0 != i16::MIN
+    }
+    pub fn advance(&self) -> i16 {
+        let mut y = self.0;
+        y += 1;
+        y
+    }
+}
+
+pub struct Ymd {
+    probe: fn() -> bool,
+}
+
+impl Ymd {
+    pub fn check(&self) -> bool {
+        Year::ok(&Year(2026)) && Year::advance(&Year(2026)) > 0
+    }
+    pub fn run(&self) -> bool {
+        let probe = self.probe;
+        probe() && Year::ok(&Year(2026))
+    }
+}
+"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        crate_root = self.workspace / "crates" / "dates"
+        (crate_root / "src").mkdir(parents=True)
+        (crate_root / "src" / "lib.rs").write_text(self.SOURCE)
+        self.report = extract_crate(
+            crate_root,
+            self.workspace,
+            "crates_dates",
+            "crates/dates",
+            {"target": "x86_64-unknown-linux-gnu", "features": [], "cfg": []},
+            None,
+        )
+        self.resolve = shape_index_resolver(self.workspace)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def site(self, method: str) -> dict:
+        for record in self.report["callsites"]:
+            if record.get("callee", {}).get("method") == method:
+                return record
+        raise AssertionError(f"no resolved call into {method!r}")
+
+    def findings(self, report: dict | None = None) -> list[str]:
+        path = Path("ci/results/c_static") / f"{self.report['report_id']}.json"
+        return [
+            str(f)
+            for f in validate_data(
+                path,
+                self.report if report is None else report,
+                load_validator(),
+                self.resolve,
+            )
+        ]
+
+    def test_the_extracted_claim_is_re_derived_not_disputed(self):
+        self.assertEqual(self.findings(), [])
+
+    def test_a_predicate_callee_is_claimed_and_pinned(self):
+        site = self.site("ok")
+        self.assertEqual(site["callee_shape"], "value-domain-inquiry")
+        self.assertRegex(site["callee_shape_evidence"]["syntax_hash"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_a_callee_that_computes_something_is_claimed_general(self):
+        site = self.site("advance")
+        self.assertEqual(site["callee_shape"], "general")
+        self.assertNotIn("callee_shape_evidence", site)
+
+    def test_claiming_a_relaxation_the_source_does_not_support_is_rejected(self):
+        site = self.site("advance")
+        site["callee_shape"] = "value-domain-inquiry"
+        site["callee_shape_evidence"] = {"syntax_hash": "sha256:" + "a" * 64}
+        self.assertTrue(any("disagrees with the 'general' recomputed" in f for f in self.findings()))
+
+    def test_understating_a_relaxation_is_rejected_too(self):
+        # Symmetry with computed eligibility: a shape downgraded to
+        # `general` invents a blocker the source does not justify.
+        site = self.site("ok")
+        site["callee_shape"] = "general"
+        del site["callee_shape_evidence"]
+        self.assertTrue(
+            any("disagrees with the 'value-domain-inquiry' recomputed" in f for f in self.findings())
+        )
+
+    def test_a_claim_pinned_to_a_body_that_has_since_changed_is_rejected(self):
+        self.site("ok")["callee_shape_evidence"]["syntax_hash"] = "sha256:" + "b" * 64
+        self.assertTrue(any("but that method's own source now hashes to" in f for f in self.findings()))
+
+    def test_a_relaxation_must_arrive_pinned(self):
+        del self.site("ok")["callee_shape_evidence"]
+        self.assertTrue(self.findings())
+
+    def test_a_general_claim_may_not_carry_a_pin(self):
+        self.site("advance")["callee_shape_evidence"] = {"syntax_hash": "sha256:" + "c" * 64}
+        self.assertTrue(self.findings())
+
+    def test_a_shape_on_an_unresolved_call_is_rejected(self):
+        for record in self.report["callsites"]:
+            if record["call_class"] != "definite-direct-call":
+                record["callee_shape"] = "general"
+        self.assertTrue(self.findings())
+
+    def test_a_claim_about_a_method_the_crate_does_not_define_is_rejected(self):
+        site = self.site("ok")
+        site["callee"]["method"] = "invented"
+        self.assertTrue(any("not defined anywhere in the sources" in f for f in self.findings()))
+
+    def test_a_claim_that_cannot_be_re_derived_at_all_is_rejected(self):
+        # No sources to check it against is not the same as nothing to
+        # complain about: an unverifiable claim is not a computed one.
+        report = copy.deepcopy(self.report)
+        report["crate_dir"] = "crates/not-on-disk"
+        report["callsite_coverage"] = {"discovered": 2, "resolved": 2, "unresolved": 0}
+        self.assertTrue(any("could not be read" in f for f in self.findings(report)))
+
+    def test_a_report_with_no_recorded_shape_is_left_alone(self):
+        # A report extracted before the classification existed is not a
+        # finding: R1 reads the absence as `general`, which is the safe
+        # direction, and invalidating an honest observation would only
+        # force a re-extraction that changes nothing about it.
+        report = copy.deepcopy(self.report)
+        for record in report["callsites"]:
+            record.pop("callee_shape", None)
+            record.pop("callee_shape_evidence", None)
+        self.assertEqual(self.findings(report), [])
+
+    def test_a_fabricated_claim_never_reaches_the_gate(self):
+        site = self.site("advance")
+        site["callee_shape"] = "value-domain-inquiry"
+        site["callee_shape_evidence"] = {"syntax_hash": "sha256:" + "d" * 64}
+        self.write_report(self.report)
+        self.assertEqual(load_reports(self.workspace), [])
+
+    def test_a_re_derived_claim_does_reach_the_gate(self):
+        self.write_report(self.report)
+        self.assertEqual(
+            [r["report_id"] for _, r in load_reports(self.workspace)], ["crates_dates"]
+        )
+
+    def write_report(self, report: dict) -> None:
+        canonical = callsite_report_dir_for(self.workspace)
+        canonical.mkdir(parents=True, exist_ok=True)
+        (canonical / f"{report['report_id']}.json").write_text(json.dumps(report))
 
 
 class WorkspaceScanTest(unittest.TestCase):

@@ -34,6 +34,20 @@ gets before anything is allowed to consume it.
            report's own declared local_concepts universe -- a resolved
            callee the report says it does not scope is a contradiction,
            not a resolution.
+         * RECOMPUTED callee_shape (chainlink #107) -- the classification
+           of a resolved call's callee is computed by the extractor from
+           the callee's own source and pinned to that body's token hash,
+           and G1b re-derives both from the crate's sources rather than
+           trusting either. This is what lets gate_r1_g16 read the claim at
+           all: a hand-edited `callee_shape: value-domain-inquiry` would be
+           the one way to ask R1 not to block a cross-concept call without
+           declaring the interaction, so the claim has to be checkable
+           rather than assertable. Re-deriving needs the workspace root, so
+           it runs wherever a caller has one (`validate_workspace`, and
+           `load_reports` -- the latter being exactly what the gate
+           consumes); a caller validating one report with no workspace in
+           hand skips the check rather than reporting a disagreement it
+           could not compute.
 
 Reconciling any of this against I (R1) and applying the unresolved risk
 policy (G16) is scripts/gate_r1_g16.py's job, not this module's -- the
@@ -46,16 +60,27 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from extract_c_static import GENERAL_CALL  # noqa: E402
+from extract_c_static import VALUE_DOMAIN_INQUIRY  # noqa: E402
+from extract_c_static import CalleeShape  # noqa: E402
+from extract_c_static import ExtractionError  # noqa: E402
+from extract_c_static import callee_shape_index  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 
 SCHEMA_PATH = resources.resource_path("docs", "callsite-schema.json")
 CANONICAL_DIR_NAME = "c_static"
+
+# crate_dir -> (concept, method) -> CalleeShape, or None where the crate's
+# sources cannot be read at all. Callable rather than a mapping so one
+# workspace scan parses each crate once however many reports name it.
+ShapeIndexFor = Callable[[str], "dict[tuple[str, str], CalleeShape] | None"]
 
 
 @dataclass
@@ -135,6 +160,102 @@ def check_computed_coverage(path: Path, data: dict) -> list[Finding]:
     ]
 
 
+def shape_index_resolver(workspace: Path) -> ShapeIndexFor:
+    """crate_dir -> the callee-shape index re-derived from that crate's
+    sources, or None where they cannot be read. Memoised per crate_dir so a
+    workspace holding several reports for one crate parses that crate once.
+    Reading the crate is the whole cost of this check, and it is spent only
+    on reports that actually claim a shape: the resolver is lazy."""
+    cache: dict[str, dict[tuple[str, str], CalleeShape] | None] = {}
+
+    def resolve(crate_dir: str) -> dict[tuple[str, str], CalleeShape] | None:
+        if crate_dir not in cache:
+            try:
+                cache[crate_dir] = callee_shape_index(workspace / crate_dir)
+            except (ExtractionError, OSError):
+                cache[crate_dir] = None
+        return cache[crate_dir]
+
+    return resolve
+
+
+def check_computed_callee_shape(path: Path, data: dict, resolve: ShapeIndexFor) -> list[Finding]:
+    """Re-derive every recorded callee_shape from the crate's sources
+    (chainlink #107). The classification is what lets R1 report a
+    cross-concept call absent from I without blocking on it, so a claim that
+    cannot be re-derived is a claim that was never computed -- and one that
+    disagrees is a report describing a call site the source does not have.
+
+    Rejected in BOTH directions, for the same reason computed coverage is:
+    a shape understated as `general` invents a blocker the source does not
+    justify, exactly as an overstated `unresolved` does.
+
+    A record with NO recorded shape is not a finding. That is a report
+    extracted before the classification existed, and reading it as
+    `general` is what keeps it safe (docs/callsite-schema.json's
+    `callee_shape` note) without invalidating an observation whose counts
+    were honest."""
+    crate_dir = data["crate_dir"]
+    findings: list[Finding] = []
+
+    for record in data["callsites"]:
+        recorded = record.get("callee_shape")
+        if recorded is None:
+            continue
+        callsite_id = record["callsite_id"]
+        callee = record["callee"]
+        shapes = resolve(crate_dir)
+
+        if shapes is None:
+            findings.append(
+                Finding(
+                    "G1b", path,
+                    f"{callsite_id}: callee_shape {recorded!r} is recorded for "
+                    f"{callee['concept']}::{callee['method']} but the sources of crate "
+                    f"{crate_dir!r} could not be read, so the claim cannot be re-derived -- "
+                    "a computed claim that cannot be re-derived was not computed",
+                )
+            )
+            continue
+
+        derived = shapes.get((callee["concept"], callee["method"]))
+        if derived is None:
+            if recorded != GENERAL_CALL:
+                findings.append(
+                    Finding(
+                        "G1b", path,
+                        f"{callsite_id}: callee_shape {recorded!r} is recorded for "
+                        f"{callee['concept']}::{callee['method']}, which is not defined "
+                        f"anywhere in the sources of crate {crate_dir!r}",
+                    )
+                )
+            continue
+        if derived.shape != recorded:
+            findings.append(
+                Finding(
+                    "G1b", path,
+                    f"{callsite_id}: callee_shape {recorded!r} for "
+                    f"{callee['concept']}::{callee['method']} disagrees with the "
+                    f"{derived.shape!r} recomputed from that method's own source -- a "
+                    "callee shape is computed, never stored-and-trusted",
+                )
+            )
+            continue
+        if recorded == VALUE_DOMAIN_INQUIRY:
+            pinned = (record.get("callee_shape_evidence") or {}).get("syntax_hash")
+            if pinned != derived.syntax_hash:
+                findings.append(
+                    Finding(
+                        "G1b", path,
+                        f"{callsite_id}: the value-domain-inquiry claim for "
+                        f"{callee['concept']}::{callee['method']} is pinned to {pinned!r}, "
+                        f"but that method's own source now hashes to {derived.syntax_hash!r}",
+                    )
+                )
+
+    return findings
+
+
 def _expected_id_prefix(caller: dict) -> str:
     return f"CS-{caller['concept'].upper()}-{caller['method'].upper().replace('_', '-')}-"
 
@@ -189,7 +310,12 @@ def check_callsite_identity(path: Path, data: dict) -> list[Finding]:
     return findings
 
 
-def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+def validate_data(
+    path: Path,
+    data: dict,
+    validator: Draft202012Validator,
+    resolve_shapes: ShapeIndexFor | None = None,
+) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
         return g1a
@@ -197,10 +323,19 @@ def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> li
     findings.extend(check_naming(path, data))
     findings.extend(check_computed_coverage(path, data))
     findings.extend(check_callsite_identity(path, data))
+    if resolve_shapes is not None:
+        # Only a caller holding the workspace root can re-derive a callee
+        # shape (see check_computed_callee_shape); a caller without one skips
+        # the check rather than reporting a disagreement it cannot compute.
+        findings.extend(check_computed_callee_shape(path, data, resolve_shapes))
     return findings
 
 
-def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
+def validate_file(
+    path: Path,
+    validator: Draft202012Validator,
+    resolve_shapes: ShapeIndexFor | None = None,
+) -> list[Finding]:
     try:
         text = path.read_text()
     except UnicodeDecodeError as e:
@@ -211,7 +346,7 @@ def validate_file(path: Path, validator: Draft202012Validator) -> list[Finding]:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
     if not isinstance(data, dict):
         return [Finding("G1a", path, "top-level value is not a JSON object")]
-    return validate_data(path, data, validator)
+    return validate_data(path, data, validator, resolve_shapes)
 
 
 def find_report_files(root: Path) -> list[Path]:
@@ -231,6 +366,7 @@ def validate_workspace(root: Path, canonical_dir: Path) -> list[Finding]:
     trusted, but also stops it from ever being looked at."""
     canonical_resolved = canonical_dir.resolve()
     validator = load_validator()
+    resolve_shapes = shape_index_resolver(root)
     findings: list[Finding] = []
     for path in sorted(find_report_files(root)):
         if path.resolve().parent != canonical_resolved:
@@ -242,7 +378,7 @@ def validate_workspace(root: Path, canonical_dir: Path) -> list[Finding]:
                 )
             )
             continue
-        findings.extend(validate_file(path, validator))
+        findings.extend(validate_file(path, validator, resolve_shapes))
     return findings
 
 
@@ -276,9 +412,10 @@ def load_reports(workspace: Path) -> list[tuple[Path, dict]]:
     if not canonical.is_dir():
         return []
     validator = load_validator()
+    resolve_shapes = shape_index_resolver(workspace)
     reports: list[tuple[Path, dict]] = []
     for path in sorted(p for p in canonical.iterdir() if p.is_file()):
-        findings = validate_file(path, validator)
+        findings = validate_file(path, validator, resolve_shapes)
         if any(f.severity == "error" for f in findings):
             continue
         reports.append((path, json.loads(path.read_text())))
@@ -315,7 +452,9 @@ def main(argv: list[str]) -> int:
 
     if not errors:
         print(pass_line(
-            discovered, "C_static reports", "G1a/G1b (incl. recomputed callsite coverage)", args.root
+            discovered, "C_static reports",
+            "G1a/G1b (incl. recomputed callsite coverage and callee shapes)",
+            args.root,
         ))
         return 0
 

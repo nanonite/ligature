@@ -147,6 +147,15 @@ call that exercises them.
 | `g19` | `gate-g19` |
 | `g20` | `gate-g20` |
 
+`gate r1-g16` is three-valued (0 / 1 / 3) and since chainlink #107 also
+prints one severity that is reported **without** blocking: an undeclared
+cross-concept `definite-direct-call` whose callee is a computed
+`value-domain-inquiry` (§9.1's second table row, and the `WARN:` section of
+its output) exits 0 while being carried by `check --json` as a non-blocking
+`medium` finding. It is not counted as `checked`, and it is not a claim that
+the workspace has nothing to look at — see `docs/exit-code-contract.md`'s
+code 0.
+
 ## 4. `draft <artifact-kind>`
 
 Already effectively nested: `draft <stage> <template_name> <target>` keeps

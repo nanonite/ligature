@@ -29,7 +29,7 @@ current behavior, which is called out below as a known, open drift.
 
 | code | meaning | today's precedent |
 |---|---|---|
-| **0** | Clean / success. Ran to completion, nothing to report. | universal today |
+| **0** | Clean / success. Ran to completion, nothing *blocking* to report. A finding that is reported without blocking is still a report: `gate-r1-g16`'s `warn` (chainlink #107 — an undeclared cross-concept call whose callee is a computed value-domain inquiry) prints in its own `WARN:` section before the pass line, is carried by `check --json` as a non-blocking `medium` finding, and is not counted as checked against I. A pass line with warnings above it never means "there was nothing to report". | universal today |
 | **1** | Blocking findings. The input was valid and checkable; the check ran and found a deterministic, unambiguous problem (schema violation, G1b naming mismatch, unresolved-critical R1/G16, etc). | every `validate-*`/`gate-*`'s own findings path |
 | **2** | Invalid input or product/install state. The requested operation could not even be attempted: missing workspace/descriptor, malformed CLI arguments, a missing prerequisite artifact directory ("no C_static reports, run extract-c-static first"), an incompatible installed product/schema version (#57/#58). | every standalone script's own `main()` |
 | **3** | Human decision required. The check ran to completion and found nothing that can be resolved mechanically — only a disposition only a human can make (`gate-r1-g16`'s medium risk tier: neither clearly safe nor definitely blocking). | `cmd_gate_r1_g16` today |

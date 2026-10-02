@@ -53,6 +53,17 @@ and emitting `low` would silently accept a limitation nobody looked at.
 Moving a tier is a human decision carrying its own review block; `--previous`
 carries such human tiers across a re-extraction by callsite_id, which is
 deterministic for unchanged source.
+
+Callee shape (chainlink #107): a `definite-direct-call` also records what
+its CALLEE's own body is, because R1's disposition for a cross-concept
+call absent from I turns on exactly that (a callee that cannot carry a
+boundary is drift worth reporting but not a blocker; one that can is a
+block). The shape is computed here from the callee's source and pinned to
+that body's token hash, then RE-DERIVED by scripts/validate_callsites.py
+G1b against the same source -- computed, never stored-and-trusted, the same
+discipline `callsite_coverage` already gets. See classify_callee_shape()
+for the grammar and its stated residual; anything the grammar does not
+positively prove is `general`, which is the blocking half.
 """
 from __future__ import annotations
 
@@ -65,7 +76,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 EXTRACTOR_NAME = "coarse-syntactic-callgraph"
-EXTRACTOR_VERSION = "0.1.0"
+EXTRACTOR_VERSION = "0.2.0"
 EXTRACTOR_BACKING = "syntactic"
 COMPLETENESS_CLAIM = "discovered-lower-bound"
 
@@ -381,6 +392,251 @@ def _find_body(tokens: list[Token], start: int, end: int) -> int:
 
 
 # --------------------------------------------------------------------------
+# Callee shape (chainlink #107)
+# --------------------------------------------------------------------------
+VALUE_DOMAIN_INQUIRY = "value-domain-inquiry"
+GENERAL_CALL = "general"
+
+# Signature tokens that disqualify a value-domain inquiry whatever the body
+# says: `unsafe` can do anything at all, `async` can await, and `extern` is
+# a foreign ABI whose body is not this source's to read.
+SHAPE_BLOCKING_SIGNS = {"unsafe", "async", "extern"}
+
+# The body's keyword vocabulary. Everything else an identifier can be is
+# rejected, so a keyword nobody thought of cannot slip in through silence --
+# the same closed-grammar discipline scripts/bridge_harness.py takes.
+# `if` and `return` are the two that may be followed by `(` without being a
+# call; `while`/`for`/`match`/`loop` are absent on purpose, since a loop or
+# a match arm is not this shape.
+SHAPE_BODY_KEYWORDS = {
+    "as", "else", "false", "if", "let", "mut", "return", "self", "Self", "true",
+}
+
+# Punctuation a closed boolean expression may contain. Note what is NOT here
+# and why: `[`/`]` (indexing can panic), `?` (early return), `->`/`=>`
+# (closure/match syntax, whose arms are a different shape), and every
+# assignment operator (see _body_is_closed_expression for how `=` is
+# distinguished from `==`).
+SHAPE_BODY_PUNCT = {
+    "{", "}", "(", ")", ",", ";", ".", "::",
+    "&", "|", "!", "<", ">", "+", "-", "*", "/", "%", "^",
+}
+
+# A cast's target type is an identifier too, and `as` is the one keyword
+# that introduces one, so the closed primitive vocabulary is listed rather
+# than the (open) set of type names a cast may name.
+PRIMITIVE_TYPES = {
+    "bool", "char", "str", "f32", "f64",
+    "i8", "i16", "i32", "i64", "i128", "isize",
+    "u8", "u16", "u32", "u64", "u128", "usize",
+}
+
+
+def method_syntax_hash(tokens: list[Token], span: MethodSpan) -> str:
+    """The stable anchor for one method body: a sha256 over its
+    comment- and literal-stripped token text, so a reformatting does not
+    invalidate it but a change to the body does. The SAME function hashes
+    the caller (`source.syntax_hash`) and the callee
+    (`callee_shape_evidence.syntax_hash`), which is what lets G1b re-derive
+    a recorded classification and check it was computed from this body and
+    not some other one."""
+    joined = " ".join(t.text for t in tokens[span.start:span.end + 1])
+    return "sha256:" + hashlib.sha256(joined.encode()).hexdigest()
+
+
+def _returns_bool(tokens: list[Token], span: MethodSpan) -> bool:
+    """The declared return type is literally `bool`, and the modifiers in
+    front of the `fn` keyword are not `unsafe`/`async`/`extern`. Both are
+    found in the signature region: the return type at paren depth 0 between
+    the `fn` keyword and the body's `{` (so a `->` inside a parameter type
+    -- a closure argument, `Fn() -> bool` -- is not mistaken for it), and
+    the modifiers by walking back over the contiguous identifiers the
+    `fn` keyword sits behind (`pub unsafe const async extern fn`)."""
+    paren = 0
+    j = span.sig_start - 1
+    while j >= 0 and tokens[j].kind == "ident":
+        if tokens[j].text in SHAPE_BLOCKING_SIGNS:
+            return False
+        j -= 1
+    for k in range(span.sig_start, span.start):
+        text = tokens[k].text
+        if text == "(":
+            paren += 1
+        elif text == ")":
+            paren -= 1
+        elif text == "->" and paren == 0:
+            nxt = tokens[k + 1] if k + 1 < span.start else None
+            return nxt is not None and nxt.text == "bool"
+    return False
+
+
+def _is_macro_bang(body: list[Token], i: int) -> bool:
+    """`name! (..)`, `name! [..]`, `name! {..}`. A macro is the one way this
+    grammar could be handed a body it never saw: its expansion is not in
+    the token stream. `matches!`, `debug_assert!` and `unreachable!` are
+    therefore disqualifying, exactly as a call is."""
+    if i + 1 >= len(body) or body[i + 1].kind != "ident":
+        return False
+    return i + 2 < len(body) and body[i + 2].text in {"(", "[", "{"}
+
+
+def _let_bound_indices(body: list[Token]) -> set[int]:
+    """Token indices of the names a `let` (or `let mut`) introduces. Both
+    halves matter: the name is readable anywhere in the body afterwards, and
+    the `=` immediately after it is a BINDING rather than an assignment."""
+    indices: set[int] = set()
+    for i, token in enumerate(body):
+        if token.kind != "ident" or token.text != "let":
+            continue
+        j = i + 1
+        if j < len(body) and body[j].text == "mut":
+            j += 1
+        if j < len(body) and body[j].kind == "ident":
+            indices.add(j)
+    return indices
+
+
+def _is_assignment(body: list[Token], i: int) -> bool:
+    """A lone `=` is an assignment; `==`, `!=`, `<=` and `>=` are two tokens
+    each (`=`,`=` / `!`,`=` / `<`,`=` / `>`,`=`), so this is the only
+    place in the grammar where an assignment can hide."""
+    nxt = body[i + 1].text if i + 1 < len(body) else ""
+    if nxt == "=":
+        return False
+    prev = body[i - 1].text if i else ""
+    return prev not in {"=", "!", "<", ">"}
+
+
+def _body_is_closed_expression(tokens: list[Token], span: MethodSpan) -> bool:
+    """Every token in this body is one this grammar can account for, and
+    nothing in it can call, mutate, panic-by-index, or expand into calls
+    the token stream does not contain.
+
+    The names a body may read are exactly the values it was given -- its
+    parameters and its `let` bindings (`_local_bindings`, the same helper
+    the call classifier uses) -- plus its own fields and constants. A bare
+    identifier that is none of those is disqualifying, since no name
+    resolution can say what it would have been."""
+    body = tokens[span.start + 1:span.end]
+    let_bound = _let_bound_indices(body)
+    bindings = {body[i].text for i in let_bound} | _local_bindings(tokens, span)
+    for i, token in enumerate(body):
+        text = token.text
+        prev = body[i - 1].text if i else ""
+        nxt = body[i + 1].text if i + 1 < len(body) else ""
+        if token.kind == "num":
+            continue
+        if token.kind == "ident":
+            if text in SHAPE_BODY_KEYWORDS:
+                continue
+            if nxt == "(" and text not in {"if", "return"}:
+                return False  # a CALL, however it was spelled
+            if prev in {".", "::"} or nxt in {".", "::"}:
+                continue  # a field or associated name, or a path prefix
+            if text.isupper() and any(c.isalpha() for c in text):
+                continue  # a CONSTANT: the callee's own data, not code
+            if prev == "as" and text in PRIMITIVE_TYPES:
+                continue
+            if text in bindings:
+                continue
+            return False  # an unknown identifier is not proof of anything
+        if text == "=":
+            if i - 1 not in let_bound and _is_assignment(body, i):
+                return False
+            continue
+        if text == "!" and _is_macro_bang(body, i):
+            return False
+        if text not in SHAPE_BODY_PUNCT:
+            return False
+    return True
+
+
+def classify_callee_shape(tokens: list[Token], span: MethodSpan) -> str:
+    """`value-domain-inquiry` or `general` -- the one question R1's new
+    severity rung turns on, so the reasoning is written out rather than
+    left in a helper.
+
+    A `value-domain-inquiry` is a method whose ANSWER is a fact about the
+    value it was handed: it returns `bool`, and its body is a closed
+    expression over its own fields and constants under the grammar above
+    -- no call, no macro invocation, no assignment, no indexing, no loop,
+    no `unsafe`/`async`/`extern`. Nothing in such a body can observe or
+    change anything the caller did not already hold, so an edge into it
+    cannot carry a boundary: there is no state to protect, no assurance to
+    rely on, and nothing for an interaction's `edge_class` to say. That is
+    the whole claim, and it is a syntactic one.
+
+    The stated residual, because the extractor is syntactic and this is not
+    a soundness claim: arithmetic in such a body can still panic the way
+    any arithmetic can (overflow in a debug build, a divide by zero), and a
+    `static` read is indistinguishable from a `const` read without name
+    resolution. Both are properties of the VALUE's domain, which is what a
+    domain predicate is about; neither is a boundary on the edge.
+
+    Everything else is `general` -- including a callee whose body this
+    extractor never located. The grammar is closed on purpose: a shape
+    nobody thought of is `general`, which is the blocking half."""
+    if not _returns_bool(tokens, span):
+        return GENERAL_CALL
+    if not _body_is_closed_expression(tokens, span):
+        return GENERAL_CALL
+    return VALUE_DOMAIN_INQUIRY
+
+
+@dataclass(frozen=True)
+class CalleeShape:
+    """A classification and the body it was computed from. The pair is the
+    unit of comparison: a shape without its pin cannot be re-derived, and a
+    pin without its shape proves nothing."""
+    shape: str
+    syntax_hash: str
+
+
+def callee_shape_index_from_parsed(
+    parsed: list[tuple[Path, list[Token], list[MethodSpan]]],
+) -> dict[tuple[str, str], CalleeShape]:
+    """(concept, method) -> CalleeShape over already-parsed sources. A key
+    with more than one definition (an inherent method and a trait method of
+    the same name, say) is `general`: which body the call reaches is not
+    this extractor's to decide, so it declines to. The pin covers all of a
+    key's bodies, so it changes if any of them does."""
+    grouped: dict[tuple[str, str], list[tuple[list[Token], MethodSpan]]] = {}
+    for _path, tokens, spans in parsed:
+        for span in spans:
+            grouped.setdefault((span.concept, span.method), []).append((tokens, span))
+
+    index: dict[tuple[str, str], CalleeShape] = {}
+    for key, found in grouped.items():
+        shapes = [classify_callee_shape(tokens, span) for tokens, span in found]
+        bodies = " ".join(
+            " ".join(t.text for t in tokens[span.start:span.end + 1]) for tokens, span in found
+        )
+        index[key] = CalleeShape(
+            VALUE_DOMAIN_INQUIRY if all(s == VALUE_DOMAIN_INQUIRY for s in shapes) else GENERAL_CALL,
+            "sha256:" + hashlib.sha256(bodies.encode()).hexdigest(),
+        )
+    return index
+
+
+def callee_shape_index(crate_root: Path) -> dict[tuple[str, str], CalleeShape]:
+    """The same index built from a crate directory, for a consumer that
+    holds only paths (validate_callsites re-deriving a recorded shape
+    against the source it was computed from). Raises ExtractionError when
+    the crate cannot be read, which is what lets a caller treat an
+    unreadable crate as "no claim can be verified" rather than "no claim
+    exists"."""
+    parsed: list[tuple[Path, list[Token], list[MethodSpan]]] = []
+    for path in rust_sources(crate_root):
+        try:
+            text = path.read_text()
+        except UnicodeDecodeError as e:
+            raise ExtractionError(f"{path} is not readable as UTF-8 text: {e}")
+        tokens = tokenize(strip_noncode(text))
+        parsed.append((path, tokens, find_method_spans(tokens)))
+    return callee_shape_index_from_parsed(parsed)
+
+
+# --------------------------------------------------------------------------
 # Call classification
 # --------------------------------------------------------------------------
 
@@ -537,9 +793,7 @@ def classify_span(
     counters: Counters,
     attributes: list[tuple[int, int]] | None = None,
 ) -> list[RawCallsite]:
-    syntax_hash = "sha256:" + hashlib.sha256(
-        " ".join(t.text for t in tokens[span.start:span.end + 1]).encode()
-    ).hexdigest()
+    syntax_hash = method_syntax_hash(tokens, span)
     results: list[RawCallsite] = []
     own_methods = facts.methods_by_concept.get(span.concept, set())
     bindings = _local_bindings(tokens, span)
@@ -676,7 +930,7 @@ def extract_crate(
         for span in spans:
             raw.extend(classify_span(tokens, span, facts, rel, counters, attributes))
 
-    callsites = _to_records(raw, previous)
+    callsites = _to_records(raw, previous, callee_shape_index_from_parsed(parsed))
     return {
         "schema_version": "1.0",
         "report_id": report_id,
@@ -750,7 +1004,11 @@ def _count_unattributed_calls(
     return count
 
 
-def _to_records(raw: list[RawCallsite], previous: dict | None) -> list[dict]:
+def _to_records(
+    raw: list[RawCallsite],
+    previous: dict | None,
+    shapes: dict[tuple[str, str], CalleeShape],
+) -> list[dict]:
     human_tiers = _human_tiers(previous)
     seen: dict[tuple[str, str], int] = {}
     records: list[dict] = []
@@ -772,6 +1030,15 @@ def _to_records(raw: list[RawCallsite], previous: dict | None) -> list[dict]:
         if item.call_class == "definite-direct-call":
             record["callee"] = {"concept": item.callee_concept, "method": item.callee_method}
             record["risk_tier_source"] = "not-applicable"
+            # What the callee's own body is, computed here and re-derived by
+            # validate-callsites G1b. A callee this extractor located but
+            # could not place in its own index is recorded as `general` --
+            # and carries no pin, because there is no body to pin: the claim
+            # to be re-derived is the default one.
+            shape = shapes.get((item.callee_concept, item.callee_method))
+            record["callee_shape"] = shape.shape if shape else GENERAL_CALL
+            if shape is not None and shape.shape == VALUE_DOMAIN_INQUIRY:
+                record["callee_shape_evidence"] = {"syntax_hash": shape.syntax_hash}
         else:
             if item.call_class == "possible-dispatch":
                 record["callee_method"] = item.callee_method

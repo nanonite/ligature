@@ -10,11 +10,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from extract_c_static import VALUE_DOMAIN_INQUIRY  # noqa: E402
 from gate_r1_g16 import (  # noqa: E402
     EXIT_BLOCKED,
     EXIT_DECISION_REQUIRED,
     EXIT_OK,
     HONEST_COVERAGE_STATEMENT,
+    Finding,
     coverage_statement,
     gate_workspace,
     main,
@@ -122,6 +124,137 @@ class R1DriftTest(unittest.TestCase):
         findings, _ = gate(report, interactions(interaction()))
         self.assertEqual(texts(findings, severity="error"), [])
         self.assertTrue(any("intent without realization" in t for t in texts(findings, "R1", "info")))
+
+
+class UndeclaredCrossConceptRungTest(unittest.TestCase):
+    """chainlink #107: there is a severity between `error` and the
+    intra-concept `info`. Making a possible-dispatch call site resolvable
+    turns it into a definite-direct-call, so before this rung the only way
+    out of a medium-risk unresolved call site was to make the gate strictly
+    less satisfied -- and the only way out of THAT was a normative
+    interaction an agent may not author. A callee whose own body cannot
+    carry a boundary is the case where the trap does not apply."""
+
+    PIN = "sha256:" + "e" * 64
+
+    def resolved_report(self, callee_shape: str | None, pin: bool = True) -> dict:
+        report = only_resolved(valid_report())
+        site = report["callsites"][0]
+        if callee_shape is not None:
+            site["callee_shape"] = callee_shape
+        if callee_shape == VALUE_DOMAIN_INQUIRY and pin:
+            site["callee_shape_evidence"] = {"syntax_hash": self.PIN}
+        return report
+
+    def run_gate(self, report: dict, known: dict | None = None) -> tuple[int, str]:
+        findings, counts = gate(report, interactions() if known is None else known)
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = report_findings(findings, counts)
+        return code, buffer.getvalue()
+
+    def test_a_value_domain_inquiry_is_reported_not_blocked(self):
+        code, printed = self.run_gate(self.resolved_report(VALUE_DOMAIN_INQUIRY))
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("WARN: 1 undeclared finding(s) -- reported, not blocking", printed)
+        self.assertIn("[R1/warn]", printed)
+
+    def test_a_general_callee_still_blocks(self):
+        code, printed = self.run_gate(self.resolved_report("general"))
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertIn("must be a declared interaction", printed)
+        self.assertNotIn("[R1/warn]", printed)
+
+    def test_an_unclassified_report_still_blocks_and_names_the_remedy(self):
+        code, printed = self.run_gate(self.resolved_report(None))
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertIn("this report records no callee_shape", printed)
+        self.assertIn("re-run `ligature extract-c-static`", printed)
+
+    def test_a_relaxation_without_its_pin_does_not_relax(self):
+        # load_reports would already have refused this report, but a gate
+        # whose severity turns on one field must not depend on a single
+        # caller having checked it.
+        code, _ = self.run_gate(self.resolved_report(VALUE_DOMAIN_INQUIRY, pin=False))
+        self.assertEqual(code, EXIT_BLOCKED)
+
+    def test_a_warn_is_never_counted_as_reconciled(self):
+        findings, counts = gate(self.resolved_report(VALUE_DOMAIN_INQUIRY), interactions())
+        self.assertEqual(counts.checked, 0)
+        (reason,) = texts(findings, "R1", "warn")
+        self.assertIn("is absent from I", reason)
+        self.assertIn("not counted as checked against I", reason)
+
+    def test_declaring_the_interaction_clears_the_finding(self):
+        report = self.resolved_report(VALUE_DOMAIN_INQUIRY)
+        report["callsites"][0]["callee"] = {"concept": "TaskQueue", "method": "pop_ready"}
+        findings, counts = gate(report, interactions(interaction()))
+        self.assertEqual(texts(findings, severity="error"), [])
+        self.assertEqual(texts(findings, severity="warn"), [])
+        self.assertEqual(counts.checked, 1)
+
+    def test_the_coverage_statement_never_counts_a_warned_edge(self):
+        code, printed = self.run_gate(self.resolved_report(VALUE_DOMAIN_INQUIRY))
+        self.assertIn("0 checked against I", printed)
+
+    def test_an_intra_concept_call_is_still_only_info(self):
+        report = only_resolved(valid_report())
+        report["callsites"][0]["callee"] = {"concept": "Scheduler", "method": "validate"}
+        report["callsites"][0]["callee_shape"] = "general"
+        findings, counts = gate(report, interactions())
+        self.assertEqual(texts(findings, severity="warn"), [])
+        self.assertTrue(any("internal helper" in t for t in texts(findings, "R1", "info")))
+        self.assertEqual(counts.checked, 1)
+
+    def test_a_general_edge_alongside_a_relaxed_one_blocks_only_the_general_one(self):
+        report = only_resolved(valid_report())
+        other = copy.deepcopy(report["callsites"][0])
+        other["callsite_id"] = "CS-SCHEDULER-DISPATCH-002"
+        other["callee"] = {"concept": "TaskQueue", "method": "push_back"}
+        other["callee_shape"] = "general"
+        report["callsites"][0]["callee_shape"] = VALUE_DOMAIN_INQUIRY
+        report["callsites"][0]["callee_shape_evidence"] = {"syntax_hash": self.PIN}
+        report["callsites"].append(other)
+        report["callsite_coverage"] = {"discovered": 2, "resolved": 2, "unresolved": 0}
+        findings, _ = gate(report, interactions())
+        self.assertEqual(len(texts(findings, "R1", "warn")), 1)
+        self.assertEqual(len(texts(findings, "R1", "error")), 1)
+        code, printed = self.run_gate(report)
+        self.assertEqual(code, EXIT_BLOCKED)
+        self.assertIn("push_back", printed)
+
+    def test_the_pass_line_names_the_warnings(self):
+        code, printed = self.run_gate(self.resolved_report(VALUE_DOMAIN_INQUIRY))
+        self.assertIn("OK: R1 and G16 pass with 1 warning(s)", printed)
+
+
+class ConsolidatedVisibilityTest(unittest.TestCase):
+    """A warn that only existed in this gate's stdout would be invisible to
+    `check --json`, which is where a workspace's findings are actually
+    consumed. project_state's severity map already knows `warn` (gate_g20
+    reports degeneracy at it); what matters here is that it lands on the
+    non-blocking side of `blocking_findings`, which keys off critical/high."""
+
+    def normalized(self, severity: str):
+        from project_state import _normalize_finding
+
+        return _normalize_finding(
+            Finding("R1", REPORT_PATH, "reason", severity), "r1-g16", "scripts/gate_r1_g16.py:reconcile"
+        )
+
+    def test_a_warn_reaches_the_consolidated_report_as_a_medium_finding(self):
+        normalized = self.normalized("warn")
+        self.assertEqual(normalized.severity, "medium")
+        self.assertNotIn(normalized.severity, ("critical", "high"))
+
+    def test_a_warn_is_not_a_pending_human_decision(self):
+        # `human-decision-pending` is what adds the `human_decision_required`
+        # condition and exit 3; a warn is already decided -- by a computed
+        # classification, with the interaction still worth authoring.
+        self.assertEqual(self.normalized("warn").authority, "mechanized-gate")
+
+    def test_the_blocking_edge_still_normalizes_to_high(self):
+        self.assertEqual(self.normalized("error").severity, "high")
 
 
 class ConfigurationCompatibilityTest(unittest.TestCase):

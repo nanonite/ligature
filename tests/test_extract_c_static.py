@@ -11,16 +11,21 @@ from extract_c_static import (  # noqa: E402
     COMPLETENESS_CLAIM,
     DEFAULT_RISK_TIER,
     EXTRACTOR_BACKING,
+    GENERAL_CALL,
+    VALUE_DOMAIN_INQUIRY,
     ExtractionError,
+    callee_shape_index,
+    classify_callee_shape,
     count_macro_invocations,
     attribute_ranges,
     extract_crate,
     find_method_spans,
     main,
+    method_syntax_hash,
     strip_noncode,
     tokenize,
 )
-from validate_callsites import load_validator, validate_data  # noqa: E402
+from validate_callsites import load_validator, shape_index_resolver, validate_data  # noqa: E402
 
 FIXTURE = ROOT / "tests" / "fixtures" / "callsites" / "crate_scheduler" / "src" / "lib.rs"
 
@@ -259,12 +264,171 @@ class DeterminismTest(unittest.TestCase):
             self.assertTrue(site["callsite_id"].startswith(prefix))
 
 
+def shape_of(body: str, returns: str = "bool", signature: str = "&self", before_fn: str = "") -> str:
+    """Classify one method of a one-concept crate, exactly as the extractor
+    would while writing a report about it."""
+    source = f"pub struct Y;\nimpl Y {{ {before_fn}pub fn probe({signature}) -> {returns} {{ {body} }} }}\n"
+    tokens = tokenize(strip_noncode(source))
+    for span in find_method_spans(tokens):
+        if span.method == "probe":
+            return classify_callee_shape(tokens, span)
+    raise AssertionError(f"no probe method in {source!r}")
+
+
+class CalleeShapeTest(unittest.TestCase):
+    """chainlink #107's rung: a cross-concept call into a callee that cannot
+    carry a boundary is reported by R1 rather than blocking on it. What
+    makes that safe is a CLOSED grammar over the callee's own body -- the
+    cases it proves, and (the more interesting half) the constructs that
+    stop it."""
+
+    def test_a_field_comparison_is_a_value_domain_inquiry(self):
+        self.assertEqual(shape_of("self.0 != 0"), VALUE_DOMAIN_INQUIRY)
+
+    def test_a_constant_on_the_other_side_is_a_value_domain_inquiry(self):
+        # The pilot's own Year::ok, whose sentinel is a path to a constant.
+        self.assertEqual(shape_of("self.0 != i16::MIN"), VALUE_DOMAIN_INQUIRY)
+
+    def test_a_range_check_is_a_value_domain_inquiry(self):
+        # Month::ok.
+        self.assertEqual(shape_of("1 <= self.0 && self.0 <= 12"), VALUE_DOMAIN_INQUIRY)
+
+    def test_the_three_way_leap_rule_is_a_value_domain_inquiry(self):
+        # Year::is_leap.
+        self.assertEqual(
+            shape_of("(self.0 % 4 == 0 && self.0 % 100 != 0) || self.0 % 400 == 0"),
+            VALUE_DOMAIN_INQUIRY,
+        )
+
+    def test_a_parameter_is_a_value_the_caller_already_held(self):
+        self.assertEqual(shape_of("n > 3", signature="&self, n: u8"), VALUE_DOMAIN_INQUIRY)
+
+    def test_a_cast_is_still_the_callees_own_data(self):
+        self.assertEqual(shape_of("n as u32 > 3", signature="&self, n: u8"), VALUE_DOMAIN_INQUIRY)
+
+    def test_a_let_binding_computed_from_own_fields_is_still_one(self):
+        self.assertEqual(shape_of("let n = self.0; n <= 31"), VALUE_DOMAIN_INQUIRY)
+
+    def test_a_comparison_is_not_mistaken_for_an_assignment(self):
+        # `>=`, `<=`, `==` and `!=` are two tokens each, so the assignment
+        # rule has to look at both neighbours or every comparison would be
+        # disqualifying.
+        self.assertEqual(shape_of("self.0 >= 4 && self.1 == 0 && self.2 != 1"), VALUE_DOMAIN_INQUIRY)
+
+    def test_a_callee_that_calls_something_is_general(self):
+        self.assertEqual(shape_of("self.check()"), GENERAL_CALL)
+
+    def test_a_macro_is_general_because_its_expansion_is_not_in_the_token_stream(self):
+        self.assertEqual(shape_of("matches!(self.0, 1..=12)"), GENERAL_CALL)
+
+    def test_an_associated_constant_is_not_a_macro(self):
+        self.assertEqual(shape_of("Self::MIN_DAYS > self.0"), VALUE_DOMAIN_INQUIRY)
+
+    def test_a_callee_that_mutates_is_general(self):
+        self.assertEqual(shape_of("let n = 0; n += 1; n > 0"), GENERAL_CALL)
+
+    def test_a_field_assignment_is_general(self):
+        self.assertEqual(shape_of("self.0 = 1; true"), GENERAL_CALL)
+
+    def test_indexing_is_general_because_it_can_panic(self):
+        self.assertEqual(shape_of("self.days[0] > 0"), GENERAL_CALL)
+
+    def test_a_loop_is_general(self):
+        self.assertEqual(shape_of("while self.0 < 3 { } false"), GENERAL_CALL)
+
+    def test_an_unknown_free_identifier_is_general_because_nothing_resolves_it(self):
+        self.assertEqual(shape_of("threshold < self.0"), GENERAL_CALL)
+
+    def test_a_non_bool_return_is_general(self):
+        self.assertEqual(shape_of("self.0", returns="u8"), GENERAL_CALL)
+
+    def test_an_unsafe_callee_is_general(self):
+        self.assertEqual(shape_of("true", before_fn="unsafe "), GENERAL_CALL)
+
+    def test_an_async_callee_is_general(self):
+        self.assertEqual(shape_of("true", before_fn="async "), GENERAL_CALL)
+
+    def test_a_closure_is_general(self):
+        self.assertEqual(shape_of("(|n: u8| n > 0)(self.0)"), GENERAL_CALL)
+
+    def test_the_checked_in_fixture_classifies_its_own_callees(self):
+        index = callee_shape_index(FIXTURE.parent.parent)
+        # pop_ready is `self.items.pop().unwrap_or(now)` -- a call, so general.
+        self.assertEqual(index[("TaskQueue", "pop_ready")].shape, GENERAL_CALL)
+        # validate is `now > 0` -- a predicate over what the caller passed.
+        self.assertEqual(index[("Scheduler", "validate")].shape, VALUE_DOMAIN_INQUIRY)
+
+    def test_the_pin_is_the_callee_body_hash(self):
+        index = callee_shape_index(FIXTURE.parent.parent)
+        tokens = tokenize(strip_noncode(FIXTURE.read_text()))
+        span = next(
+            s for s in find_method_spans(tokens) if (s.concept, s.method) == ("Scheduler", "validate")
+        )
+        self.assertEqual(index[("Scheduler", "validate")].syntax_hash, method_syntax_hash(tokens, span))
+
+    def test_an_unreadable_crate_raises_rather_than_reporting_no_callees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ExtractionError):
+                callee_shape_index(Path(tmp) / "no-such-crate")
+
+
+
+class ShapeInReportTest(unittest.TestCase):
+    def setUp(self):
+        self.report = extract_fixture()
+        self.sites = by_id(self.report)
+
+    def test_every_resolved_call_records_its_callees_shape(self):
+        for site in self.report["callsites"]:
+            if site["call_class"] != "definite-direct-call":
+                continue
+            self.assertIn(site["callee_shape"], {VALUE_DOMAIN_INQUIRY, GENERAL_CALL})
+
+    def test_only_a_value_domain_inquiry_carries_a_pin(self):
+        by_callee = {
+            (s.get("callee") or {}).get("concept"): s
+            for s in self.report["callsites"] if s["call_class"] == "definite-direct-call"
+        }
+        pop_ready = [s for s in self.sites.values() if s.get("callee", {}).get("method") == "pop_ready"][0]
+        self.assertEqual(pop_ready["callee_shape"], GENERAL_CALL)
+        self.assertNotIn("callee_shape_evidence", pop_ready)
+        validate = [s for s in self.sites.values() if s.get("callee", {}).get("method") == "validate"][0]
+        self.assertEqual(validate["callee_shape"], VALUE_DOMAIN_INQUIRY)
+        self.assertIn("callee_shape_evidence", validate)
+        self.assertTrue(by_callee)
+
+    def test_an_unresolved_call_carries_no_shape(self):
+        for site in self.report["callsites"]:
+            if site["call_class"] == "definite-direct-call":
+                continue
+            self.assertNotIn("callee_shape", site)
+
+
 class SchemaConformanceTest(unittest.TestCase):
     def test_generated_report_passes_g1a_g1b(self):
         report = extract_fixture()
         path = Path("ci/results/c_static/crates_scheduler.json")
         findings = validate_data(path, report, load_validator())
         self.assertEqual([str(f) for f in findings], [])
+
+    def test_generated_report_passes_the_re_derived_callee_shapes(self):
+        # The full round trip: extract from a workspace that is still there,
+        # then re-derive every recorded shape from those same sources.
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            crate_root = workspace / "crates" / "scheduler"
+            (crate_root / "src").mkdir(parents=True)
+            (crate_root / "src" / "lib.rs").write_text(FIXTURE.read_text())
+            report = extract_crate(
+                crate_root, workspace, "crates_scheduler", "crates/scheduler", CONFIG_SCOPE, None
+            )
+            findings = validate_data(
+                Path("ci/results/c_static/crates_scheduler.json"),
+                report,
+                load_validator(),
+                shape_index_resolver(workspace),
+            )
+            self.assertEqual([str(f) for f in findings], [])
 
 
 class HelperTest(unittest.TestCase):

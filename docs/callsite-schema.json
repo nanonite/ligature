@@ -180,6 +180,20 @@
         },
         "caller": { "$ref": "#/$defs/role" },
         "callee": { "$ref": "#/$defs/role" },
+        "callee_shape": {
+          "type": "string",
+          "enum": ["value-domain-inquiry", "general"],
+          "description": "COMPUTED by scripts/extract_c_static.py from the CALLEE's own source and RE-DERIVED by scripts/validate_callsites.py G1b against that same source (disagreement rejected in both directions) -- computed, never stored-and-trusted, exactly like callsite_coverage. `value-domain-inquiry`: the callee is a `-> bool` method whose body is a closed expression over its own fields and constants -- no call, no macro invocation, no assignment, no index, no loop, no `unsafe`/`async`/`extern` -- so the answer it gives is a fact about the value it was handed and the edge into it cannot carry a boundary. `general`: everything else, including a callee this extractor never located. Both halves matter: `general` is what keeps an unproven claim on the blocking side, and ABSENCE of this field (a report extracted before the classification existed) is read exactly as `general`, because an unclaimed relaxation may not relax. The classification is a syntactic one; the residual it cannot see -- arithmetic that can panic the way any arithmetic can, and a `static` read that no name resolution distinguishes from a `const` read -- is a property of the value's domain rather than of the edge, and is stated in the extractor's own classify_callee_shape() docstring."
+        },
+        "callee_shape_evidence": {
+          "type": "object",
+          "required": ["syntax_hash"],
+          "additionalProperties": false,
+          "description": "The pin that makes a `value-domain-inquiry` claim checkable rather than assertable: the CALLEE method's own token-text hash, computed the same way `source.syntax_hash` is. G1b re-derives it from the crate's sources, so a classification recorded against a body that has since changed is rejected instead of trusted. Required on a `value-domain-inquiry` claim and forbidden otherwise -- a `general` claim is the default and has nothing to pin.",
+          "properties": {
+            "syntax_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        },
         "callee_method": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9_]*$",
@@ -243,6 +257,28 @@
             "required": ["call_class"]
           },
           "then": { "not": { "required": ["callee_method"] } }
+        },
+        {
+          "description": "A value-domain-inquiry CLAIM must arrive pinned to the callee body it was computed from. Without the pin there is nothing for G1b to re-derive, and an unpinned claim would be the one way to ask for the relaxation without proving it. Conversely a `general` claim is the default and carries no pin -- there is nothing to pin when the classifier declined.",
+          "if": {
+            "properties": { "callee_shape": { "const": "value-domain-inquiry" } },
+            "required": ["callee_shape"]
+          },
+          "then": { "required": ["callee_shape_evidence"] },
+          "else": { "not": { "required": ["callee_shape_evidence"] } }
+        },
+        {
+          "description": "callee_shape describes a CALLEE, so it belongs to a resolved call only. On the two unresolved classes the receiving concept is not even known (this schema's own callee_method note), and a classification recorded against an unnamed concept would be a claim about nothing.",
+          "if": {
+            "properties": { "call_class": { "const": "definite-direct-call" } },
+            "required": ["call_class"]
+          },
+          "else": {
+            "allOf": [
+              { "not": { "required": ["callee_shape"] } },
+              { "not": { "required": ["callee_shape_evidence"] } }
+            ]
+          }
         },
         {
           "description": "A human-set tier carries its own review block; an extractor default must not carry one, since no human signed off on it.",

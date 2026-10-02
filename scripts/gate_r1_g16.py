@@ -20,6 +20,26 @@ plan.md §9/§9.1 and the gate table in §12, chainlink #24. Stage 8A.
       Cross-concept is never treated this way -- that is exactly the
       edge R1 exists to catch.
 
+      There is one rung between `error` and the intra-concept `info`
+      (chainlink #107), and it is deliberately narrow. A cross-concept
+      definite-direct-call absent from I blocks -- its eligibility cannot
+      even be computed while it has no `edge_class` -- UNLESS the callee
+      is a computed `value-domain-inquiry` (extract_c_static's own
+      classification of the callee's body: a `-> bool` method with no call,
+      no macro, no assignment, no index and no `unsafe`, so nothing about
+      the edge can carry a boundary). Such a call is reported at `warn`:
+      the drift is still real and still named, it simply is not a blocker
+      an operator cannot leave. What it may NOT be is a silent pass or a
+      claim of reconciliation: a warned edge is not counted toward
+      `checked`, the finding is printed on its own line every run, and
+      declaring the interaction is what makes it go away.
+
+      The classification is computed by the extractor from the callee's own
+      source and re-derived by validate-callsites G1b before any report
+      reaches this gate, so the rung cannot be reached by asserting it --
+      and a report that never recorded a shape reads as the blocking
+      `general`, which is the direction a missing fact has to fail.
+
       R1 also covers plan.md §12's "realized calls matching within
       compatible configurations": a matched edge whose interaction was
       analyzed under a different target than this observation was taken
@@ -62,6 +82,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from extract_c_static import VALUE_DOMAIN_INQUIRY  # noqa: E402
 from validate_callsites import callsite_report_dir_for  # noqa: E402
 from validate_callsites import load_reports  # noqa: E402
 from validate_interaction import load_interactions_by_id  # noqa: E402
@@ -76,6 +97,14 @@ DISPOSITION_BY_TIER = {
 }
 SEVERITY_BY_DISPOSITION = {"block": "error", "decide": "decision", "accept": "info"}
 
+# Chainlink #107. `warn` sits between `error` and the intra-concept `info`:
+# a finding that must be printed on every run and must never be counted as
+# reconciled, but that does not stop the gate. It is the same vocabulary
+# gate_g20.py already reports degeneracy at, and project_state._SEVERITY_MAP
+# already normalizes it to a non-blocking `medium` -- so a warned edge still
+# reaches `check --json` as a finding rather than disappearing.
+SEVERITY_WARN = "warn"
+
 EXIT_OK = 0
 EXIT_BLOCKED = 1
 EXIT_DECISION_REQUIRED = 3
@@ -86,7 +115,7 @@ class Finding:
     gate: str
     path: Path
     reason: str
-    severity: str = "error"  # "error" | "decision" | "info"
+    severity: str = "error"  # "error" | "decision" | "warn" | "info"
 
     def __str__(self) -> str:
         return f"[{self.gate}/{self.severity}] {self.path}: {self.reason}"
@@ -139,6 +168,71 @@ def _tier_finding(gate: str, path: Path, record: dict, reason: str) -> Finding:
         f"({source}) -> {disposition}",
         SEVERITY_BY_DISPOSITION[disposition],
     )
+
+
+def _is_value_domain_inquiry(record: dict) -> bool:
+    """The one condition under which an undeclared cross-concept call is
+    reported rather than blocking -- and it is read, never inferred.
+
+    Both halves must be present: the recorded classification AND its pin.
+    The pin is redundant with what validate_callsites already re-derived
+    before this report was loaded (`load_reports` returns only reports with
+    zero error-severity findings), and it is checked anyway: a gate whose
+    severity turns on a field should not depend on one caller's discipline
+    to have verified it. Absence of either reads as NOT a value-domain
+    inquiry, which is the blocking direction."""
+    if record.get("callee_shape") != VALUE_DOMAIN_INQUIRY:
+        return False
+    return bool((record.get("callee_shape_evidence") or {}).get("syntax_hash"))
+
+
+def _undeclared_cross_concept_finding(path: Path, record: dict, caller: dict, callee: dict) -> Finding:
+    """R1 on a `definite-direct-call` that crosses concepts and that I does
+    not declare.
+
+    plan.md §9.1 blocks this outright, and it still does by default. The
+    `warn` rung (chainlink #107) exists because the alternative was worse
+    than a blocked gate: making the call resolvable at all turns a
+    possible-dispatch into a definite-direct-call, so the only way to clear
+    a medium-risk unresolved call site was to make the gate strictly less
+    satisfied, and the only way out of there was a normative interaction an
+    agent may not author. A callee whose own body cannot carry a boundary is
+    the case where that trap does not apply, and the finding keeps saying
+    so: it is printed, it is not `checked`, and declaring the interaction
+    is the remedy that clears it.
+
+    A `general` or absent callee_shape keeps the original blocking text
+    verbatim. An absent one gets the re-extraction hint, because that is the
+    whole remedy for a report written before the classification existed."""
+    edge = (
+        f"{record['callsite_id']}: realized call "
+        f"{caller['concept']}.{caller['method']} -> {callee['concept']}.{callee['method']} "
+        "is absent from I"
+    )
+    if _is_value_domain_inquiry(record):
+        return Finding(
+            "R1", path,
+            f"{edge} -- reported, not blocking: {callee['concept']}.{callee['method']} is a "
+            "computed value-domain inquiry (a `-> bool` method whose own body holds no call, "
+            "macro, assignment, index or unsafe operation, pinned at "
+            f"{record['callee_shape_evidence']['syntax_hash']}), so this edge cannot carry a "
+            "boundary and there is no eligibility for an interaction to state. It is still "
+            "drift: it is not counted as checked against I, and declaring the interaction is "
+            "what clears the finding",
+            SEVERITY_WARN,
+        )
+
+    reason = (
+        f"{edge} -- a definite direct call across concepts must be a declared "
+        "interaction (its eligibility cannot even be computed while it has no edge_class)"
+    )
+    if record.get("callee_shape") is None:
+        reason += (
+            "; this report records no callee_shape, so the callee is unclassified and blocks "
+            "-- re-run `ligature extract-c-static` to classify it (a value-domain inquiry "
+            "would be reported rather than blocking)"
+        )
+    return Finding("R1", path, reason)
 
 
 def _check_config_compatibility(path: Path, record: dict, interaction: dict, config_scope: dict) -> list[Finding]:
@@ -206,13 +300,7 @@ def reconcile(path: Path, report: dict, interactions: dict) -> tuple[list[Findin
                 )
                 continue
             findings.append(
-                Finding(
-                    "R1", path,
-                    f"{record['callsite_id']}: realized call "
-                    f"{caller['concept']}.{caller['method']} -> {callee['concept']}.{callee['method']} "
-                    "is absent from I -- a definite direct call across concepts must be a declared "
-                    "interaction (its eligibility cannot even be computed while it has no edge_class)",
-                )
+                _undeclared_cross_concept_finding(path, record, caller, callee)
             )
             continue
 
@@ -343,11 +431,21 @@ def gate_workspace(workspace: Path, interaction_dir_by_crate: dict[str, Path]) -
 def report_findings(findings: list[Finding], counts: Reconciliation) -> int:
     errors = [f for f in findings if f.severity == "error"]
     decisions = [f for f in findings if f.severity == "decision"]
+    warns = [f for f in findings if f.severity == SEVERITY_WARN]
     infos = [f for f in findings if f.severity == "info"]
 
     if infos:
         print(f"INFO: {len(infos)} non-blocking finding(s)")
         for f in infos:
+            print(f"  - {f}")
+
+    if warns:
+        # Printed before the coverage statement, and in its own section with
+        # its own count, because a warn is the one outcome that exits 0 while
+        # carrying real drift: a reader who saw only the verdict line would
+        # read "pass" as "nothing to look at".
+        print(f"WARN: {len(warns)} undeclared finding(s) -- reported, not blocking")
+        for f in warns:
             print(f"  - {f}")
 
     print(coverage_statement(counts))
@@ -372,7 +470,11 @@ def report_findings(findings: list[Finding], counts: Reconciliation) -> int:
         )
         return EXIT_DECISION_REQUIRED
 
-    print("OK: R1 and G16 pass")
+    if warns:
+        print(f"OK: R1 and G16 pass with {len(warns)} warning(s) -- undeclared cross-concept "
+              "calls reported above, not counted as checked against I")
+    else:
+        print("OK: R1 and G16 pass")
     return EXIT_OK
 
 

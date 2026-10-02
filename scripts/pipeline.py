@@ -1098,7 +1098,7 @@ def cmd_validate_callsites(args: argparse.Namespace) -> int:
     if not findings:
         print(pass_line(
             _count_callsite_reports(workspace_root), "C_static reports",
-            "G1a/G1b (incl. recomputed callsite coverage)", workspace_root,
+            "G1a/G1b (incl. recomputed callsite coverage and callee shapes)", workspace_root,
         ))
         return 0
 

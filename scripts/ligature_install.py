@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adjudicator  # noqa: E402
 import resources  # noqa: E402
 from atomic_write import write_atomically  # noqa: E402
+import draft_templates  # noqa: E402
 from project_descriptor import schema_diagnostics  # noqa: E402
 from project_state import KNOWN_SCHEMA_VERSIONS  # noqa: E402
 from project_state import PRODUCT_VERSION  # noqa: E402
@@ -111,17 +112,18 @@ _GATE_PINNED_PATHS = (
 ADJUDICATOR_PIN_TOKEN = adjudicator.ADJUDICATOR_PIN_TOKEN
 UNATTESTED = adjudicator.UNATTESTED
 
-_PROMPTS = (
-    "stage-0-evidence-intake.md",
-    "stage-3-boundary-drafting.md",
-    "stage-3-interaction-drafting.md",
-    "stage-3-bridge-drafting.md",
-    "stage-3-witness-drafting.md",
-    "stage-3-exemption-drafting.md",
-    "stage-3-protocol-debt-drafting.md",
-    "stage-3-conflict-resolution-drafting.md",
-    "stage-3-concept-to-code.md",
-)
+# chainlink #105: derived from the one draft-template registry
+# (`draft_templates.DRAFT_TEMPLATES`) rather than hand-listed here. This
+# tuple was the third copy of "which templates exist" -- `draft --help`
+# named two of them (chainlink #79's fix shipped nine and listed two) and
+# this list had already stopped tracking `prompts/`: #98's
+# stage-3-closure-profile-drafting.md and stage-3-degradation-drafting.md
+# shipped without being copied into an initialized workspace's
+# `.ligature/prompts/`, while `draft` on a packaged binary still used
+# them. One registry, three surfaces (`draft --help`, `draft`'s
+# unrecognized-name refusal, and this install registry), none of which
+# can now name a template the others do not.
+_PROMPTS = draft_templates.prompt_filenames()
 
 
 class InstallError(Exception):

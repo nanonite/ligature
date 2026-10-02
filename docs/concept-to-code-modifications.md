@@ -200,8 +200,10 @@ bare vendored schema, whose `additionalProperties: false` rejects both —
 so no single concept spec could satisfy all three tools. Resolved
 (chainlink #69's investigation) by having `select_pilot_cluster.py`
 validate against a copy of the live vendored schema extended in memory
-with both fields (`load_extended_concept_spec_schema()`), pulling each
-field's shape from its own proposed-patch artifact above so the local
+with both fields (`load_extended_concept_spec_schema()`, now owned by
+`scripts/validate_concept_spec.py` — chainlink #105 moved it next to the
+draft/approve validators that consume the same extended schema), pulling
+each field's shape from its own proposed-patch artifact above so the local
 copy can't drift from what's actually proposed. `constraint.id` is
 deliberately accepted as **optional** there, diverging from this file's
 own "required" decision — requiring it today would make the rubric reject
@@ -210,3 +212,62 @@ is a regression, not the fix F3 asked for. A project may start assigning
 `id`s now to get G2+'s concrete guarantee resolution instead of its
 `no_ids_in_spec` fallback; nothing requires it yet. `vendor/concept-to-code`
 itself remains untouched either way.
+
+### 7. `review` block on the concept spec — decided: extend the schema, keep the human checkpoint
+
+Found by the swisstable-verus pilot (chainlink #105): the pipeline could
+`draft` a concept spec and could do nothing else with it. `draft 3
+concept-to-code` staged `<crate>/specs/<snake>.json.draft`, and `approve`
+refused with `no validator recognizes target` — there was no concept-spec
+branch in its dispatcher and no other verb covered one. A `.draft` suffix
+matches no consumer's `*.json` glob, so the spec was invisible to
+everything that reads concept specs, and the failure modes that follow are
+quiet rather than loud:
+
+- G2+ could not resolve any `callee_guarantees` entry, so every
+  `applies_to` check was skipped and reported `applies_to unverifiable` at
+  **info** severity — the pilot measured four boundary contracts whose
+  `callee_guarantee.applies_to` did not cover their own callee method
+  passing G1a/G1b at draft time and **approving at exit 0**, silently,
+  because the check that would have rejected them had nothing to resolve
+  against;
+- witness `approve` failed closed on `no concept spec under the search
+  root declares concept ...`, so no witness could be promoted and G18,
+  G19, G20, `generate-feature-ledger` and `generate-contact-sheet` had no
+  reachable input;
+- `select-pilot-cluster` saw no concepts at all.
+
+The pilot's own diagnosis was that the gate's *absence* was the cost, not
+the missing verb: a lost check is quiet, and it is quietest at the exact
+moment a human signs off on something that depends on it.
+
+**Decided: accept an optional top-level `review` object on the spec,
+exactly as every other artifact schema in this pipeline defines it**
+(`{reviewer: string, reviewed_at: date}`, `additionalProperties: false`,
+both required, and required at the spec's top level in its **approved**
+form). Two properties of that choice are deliberate:
+
+1. **The extension, not a mechanical promotion path.** Evidence records
+   are promoted without a reviewer (`promote-evidence`, #79) because they
+   are non-normative. A concept spec is the vocabulary every later gate
+   resolves against, so promoting one mechanically would let an
+   unreviewed spec decide which `applies_to` checks run. `review` keeps
+   the human checkpoint the skill's authority region already states for
+   every normative artifact.
+2. **`emit_stubs.py` needs no change.** It reads `spec` with `.get()`
+   throughout (`emit_stubs.py:192-215` re-read: query/command/constraint
+   handling reads only `english`, `rust_sig`, `pure`, `logic`, `kind`,
+   `source`, `applies_to`), so an unrecognized top-level key is inert to
+   it — the same finding gap #5's implementation status recorded.
+
+Tracked as chainlink issue #105. **Implementation status:** not applied
+upstream; `vendor/concept-to-code` remains an unmodified read-only pin.
+`scripts/validate_concept_spec.py` extends the in-memory schema copy the
+same way gaps #5/#6 are handled, and reads the block's own shape from
+`docs/boundary-contract-schema.json`'s `$defs.review` rather than copying
+it a third time — a review block that is one shape in one schema and a
+different shape in another would leave `accept-promotion`'s provenance
+check (#82) answering a question about a shape the artifact does not
+carry. Because there is no upstream `$def` for a top-level property to
+drift from, the drift guard here is that read: a change to this
+pipeline's review-block shape reaches the concept spec too, or not at all.

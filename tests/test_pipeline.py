@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import pipeline  # noqa: E402
+import draft_templates  # noqa: E402
+from draft_templates import find as draft_template_find  # noqa: E402
 from generate_promotion_receipt import record_ruling  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "boundary_contracts"
@@ -323,6 +326,98 @@ class CmdDraftEndToEndTest(unittest.TestCase):
         self.assertTrue(draft_path.exists(), "invalid draft must still be retained for correction")
         data = json.loads(draft_path.read_text())
         self.assertNotIn("origin", data)
+
+
+class DraftTemplateRegistryTest(unittest.TestCase):
+    """chainlink #105, second half: the set of draftable templates was
+    discoverable only by exhausting names.
+
+    `draft --help` named two of the eleven templates it accepts
+    (`e.g. evidence-intake, boundary-drafting`), and an unrecognized name
+    was answered with `error: no template at
+    /tmp/ligature-data-XXXX/prompts/stage-3-bridge-drafting.md` -- a path
+    the caller never typed, in a directory that did not exist when they ran
+    the command, listing no alternative. The pilot that reported this had
+    to enumerate thirty-one candidate names by hand to learn which
+    templates ship.
+
+    scripts/draft_templates.py is now the one registry behind `--help`,
+    behind `draft`'s refusal, and behind the prompts `init` copies. These
+    tests pin the three properties that make it a registry rather than a
+    fourth copy: nothing ships unregistered, nothing is registered without
+    shipping, and `--help` names all of it."""
+
+    def test_every_prompt_file_is_registered(self):
+        on_disk = {path.name for path in (PROMPTS).glob("stage-*.md")}
+        registered = {template.filename for template in draft_templates.DRAFT_TEMPLATES}
+        self.assertEqual(
+            on_disk - registered, set(),
+            "these prompts ship but no registry entry names them, so `draft` refuses them and "
+            f"`draft --help` never mentions them: {sorted(on_disk - registered)}",
+        )
+        self.assertEqual(
+            registered - on_disk, set(),
+            f"the registry names prompt files that do not exist: {sorted(registered - on_disk)}",
+        )
+
+    def test_every_registered_name_is_unique_per_stage(self):
+        seen = set()
+        for template in draft_templates.DRAFT_TEMPLATES:
+            self.assertIn(template.stage, draft_templates.STAGES, template.name)
+            key = (template.stage, template.name)
+            self.assertNotIn(key, seen, f"duplicate registry entry: {key}")
+            seen.add(key)
+            # The filename is DERIVED, so a registry entry can never claim a
+            # file whose name disagrees with the stage it is registered at.
+            self.assertEqual(template.filename, f"stage-{template.stage}-{template.name}.md")
+
+    def test_draft_help_lists_every_template(self):
+        # Assert on what argparse actually prints, not on the epilog
+        # function's return value, so what is pinned is what a user sees.
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            with self.assertRaises(SystemExit):
+                pipeline.build_parser().parse_args(["draft", "--help"])
+        printed = buffer.getvalue()
+        for template in draft_templates.DRAFT_TEMPLATES:
+            with self.subTest(template=template.name):
+                self.assertIn(template.name, printed)
+                self.assertIn(template.target, printed)
+                self.assertIn(template.promoted_by.split(" (")[0], printed)
+
+    def test_the_help_text_no_longer_offers_a_two_template_illustration(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            with self.assertRaises(SystemExit):
+                pipeline.build_parser().parse_args(["draft", "--help"])
+        printed = buffer.getvalue()
+        self.assertNotIn("e.g. evidence-intake", printed)
+
+    def test_an_unregistered_name_is_refused_with_the_whole_list(self):
+        message = draft_templates.unknown_template_error("3", "bridge-spec")
+        for template in draft_templates.DRAFT_TEMPLATES:
+            if template.stage == "3":
+                self.assertIn(template.name, message)
+        self.assertIn("stage 0 templates: evidence-intake", message)
+        self.assertNotIn("no template at", message)
+
+    def test_a_stage_mismatch_says_which_stage_the_name_belongs_to(self):
+        message = draft_templates.unknown_template_error("0", "boundary-drafting")
+        self.assertIn("is a stage-3 template, not a stage-0 one", message)
+        self.assertEqual(draft_templates.find("0", "boundary-drafting"), None)
+        self.assertIsNotNone(draft_templates.find("3", "boundary-drafting"))
+
+    def test_a_known_name_is_found_for_its_own_stage(self):
+        for template in draft_templates.DRAFT_TEMPLATES:
+            with self.subTest(template=template.name):
+                self.assertEqual(draft_template_find(template.stage, template.name), template)
+
+    def test_prompt_filenames_is_the_registry_not_a_second_list(self):
+        self.assertEqual(
+            set(draft_templates.prompt_filenames()),
+            {template.filename for template in draft_templates.DRAFT_TEMPLATES},
+        )
+        self.assertEqual(len(draft_templates.prompt_filenames()), len(draft_templates.DRAFT_TEMPLATES))
 
 
 class EvidenceTemplateSchemaContractTest(unittest.TestCase):
@@ -950,6 +1045,57 @@ class SelectDraftValidateFnTest(unittest.TestCase):
         }
         findings = self._findings(target, data)
         self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_concept_spec_draft_named_wrong_is_refused(self):
+        """chainlink #105: `<snake_case(concept)>.json` is the name
+        concept-to-code itself resolves a concept at (the vendored schema's
+        own `implements[].crate` description says so), and the template had
+        documented it while nothing enforced it. The approve-time G1b is
+        the one that matters -- a promoted spec under the wrong name is a
+        spec `spec_workspace.py` will not find -- but draft-time feedback
+        is where the author can still act on it."""
+        target = self.workspace / "crate_a" / "specs" / "not_the_concept.json"
+        data = {
+            "schema_version": "1.0",
+            "concept": "TaskQueue",
+            "cluster": "data-model",
+            "english_description": "A priority queue of tasks ordered by deadline",
+            "verifier": "creusot",
+            "queries": [
+                {"english": "Returns the number of tasks", "rust_sig": "fn len(&self) -> usize", "pure": True},
+            ],
+            "commands": [
+                {"english": "Adds a task to the queue", "rust_sig": "fn push(&mut self, task: Task)"},
+            ],
+            "constraints": [
+                {"english": "The queue is never empty", "logic": "self.len() > 0", "kind": "postcondition"},
+            ],
+            "adversary_table": [
+                {"scenario": "A deadline in the past", "violates": "ordering", "resolution": "reject"},
+            ],
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(
+            any("does not match this spec's own concept" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_a_target_outside_the_declared_search_root_is_refused_not_a_traceback(self):
+        """chainlink #105: the concept-spec branch asked
+        `is_underscore_artifact_path(target, specs_search_root)`, which
+        resolves containment with `Path.relative_to` and therefore raised
+        an unhandled ValueError for a target under the crate but NOT under
+        the declared search root -- a descriptor may declare one that does
+        not contain its crate, and the answer has to be the dispatcher's
+        refusal naming what it does validate, never a traceback (chainlink
+        #83's rule, on a new input)."""
+        descriptor = json.loads(json.dumps(VALID_DESCRIPTOR))
+        descriptor["crates"][0]["specs_search_root"] = "elsewhere"
+        target = self.workspace / "crate_a" / "specs" / "task_queue.json"
+        with self.assertRaises(pipeline.PipelineError) as ctx:
+            pipeline._select_draft_validate_fn(target, self.workspace, descriptor)
+        self.assertIn("no draft validator recognizes target", str(ctx.exception))
+        self.assertIn("concept specs at", str(ctx.exception))
 
 
 class CmdDraftBoundaryEndToEndTest(unittest.TestCase):
@@ -1743,6 +1889,93 @@ class CmdAcceptPromotionIntegrationTest(unittest.TestCase):
             ["--workspace", str(self.workspace), "validate-promotion", str(receipt_path)]
         )
         self.assertEqual(validate_rc, 0)
+
+    def test_an_approved_concept_spec_can_be_accepted_into_a_promotion(self):
+        """chainlink #105: a concept spec carries this pipeline's `review`
+        block now, so it is inside chainlink #82's provenance check rather
+        than outside it -- and inside it means an unreviewed one is refused
+        (second half of this test). plan.md §7.1 already lists concept
+        specs among what the manifest covers, so the promotion path is the
+        other end of the promotion #105's approve branch made reachable."""
+        spec_rel = "crates/scheduler/specs/task_queue.json"
+        spec_path = self.workspace / spec_rel
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
+        # Approved through the real command, so its review block is
+        # provenanced by construction -- the point of the whole #105 route.
+        draft = {
+            "schema_version": "1.0",
+            "concept": "TaskQueue",
+            "cluster": "data-model",
+            "english_description": "A priority queue of tasks ordered by deadline",
+            "verifier": "creusot",
+            "queries": [
+                {
+                    "english": "Returns the number of tasks in the queue",
+                    "rust_sig": "fn len(&self) -> usize",
+                    "pure": True,
+                },
+            ],
+            "commands": [],
+            "constraints": [
+                {
+                    "english": "pop_ready yields a task whenever the queue is non-empty",
+                    "logic": "self.len() > 0",
+                    "kind": "postcondition",
+                    "source": "hand",
+                    "id": "C001",
+                },
+            ],
+            "adversary_table": [
+                {
+                    "scenario": "Pushing a task with a deadline in the past",
+                    "violates": "deadline ordering",
+                    "resolution": "reject",
+                },
+            ],
+        }
+        spec_path.with_suffix(".json.draft").write_text(json.dumps(draft))
+        approve_rc = pipeline.main([
+            "--workspace", str(self.workspace),
+            "approve", str(spec_path), "--reviewer", "alice", "--reviewed-at", "2026-08-30",
+        ])
+        self.assertEqual(approve_rc, 0)
+
+        # The boundary this class ships references TaskQueue.C003, which
+        # the promoted spec does not declare -- so with the spec present,
+        # G2+ resolves it and `accept-promotion` refuses the boundary
+        # (verified: it did, with `does not match any constraint id in
+        # TaskQueue's resolved spec (dangling reference)`). Re-cut to C001,
+        # which the spec does declare. That this refusal needed no separate
+        # fix is the other half of what #105 restored, so it is recorded
+        # here rather than quietly worked around.
+        boundary_path = self.workspace / self.boundary_artifact
+        boundary = json.loads(boundary_path.read_text())
+        boundary["callee_guarantees"] = ["TaskQueue.C001"]
+        boundary_path.write_text(json.dumps(boundary))
+
+        artifacts = self.artifacts + [spec_rel]
+        record_ruling(
+            self.workspace, artifacts, reviewer="alice", verdict="ratified",
+            descriptor_path=self.workspace / "project-descriptor.json",
+        )
+        argv = [
+            "scheduling", "--reviewer", "alice",
+            "--policy-path", "docs/reliance-policy.md",
+        ]
+        for artifact in artifacts:
+            argv += ["--artifact", artifact]
+        self.assertEqual(self._run(*argv), 0)
+        receipt = json.loads((self.workspace / "specs" / "_promotions" / "scheduling.json").read_text())
+        self.assertIn(spec_rel, [entry["path"] for entry in receipt["artifact_manifest"]])
+
+        # ...and the same spec with a review block nothing approved is
+        # refused, which it would NOT have been before #105 (a concept spec
+        # had no review block to check).
+        spec_path.write_text(json.dumps({**draft, "review": {
+            "reviewer": "alice", "reviewed_at": "hand-written",
+        }}))
+        self.assertEqual(self._run(*argv), 1)
+        self.assertFalse((self.workspace / "specs" / "_promotions" / "scheduling-rejected.json").exists())
 
     def test_audit_log_is_written_inside_the_workspace_not_this_repository(self):
         """External review, medium severity: the CLI used to rely on
@@ -2624,7 +2857,11 @@ class UninitializedWorkspaceTest(unittest.TestCase):
     behind it."""
 
     # Each command's first act is the descriptor load, so this is just
-    # enough argv for each to reach it inside an empty workspace.
+    # enough argv for each to reach it inside an empty workspace. The
+    # `draft` argv names a REAL registered template (chainlink #105 moved
+    # template resolution ahead of the descriptor load, so an unregistered
+    # name is refused on its own terms before the descriptor is ever read --
+    # which is correct, and is why this list cannot be a throwaway name).
     DESCRIPTOR_COMMANDS = (
         ["validate"],
         ["extract-c-static", "--target", "x86_64-unknown-linux-gnu"],
@@ -2638,7 +2875,7 @@ class UninitializedWorkspaceTest(unittest.TestCase):
         ["generate-contact-sheet"],
         ["measure-gold-set"],
         ["select-pilot-cluster"],
-        ["draft", "0", "concept-spec", "crates/a/specs/thing.json"],
+        ["draft", "0", "evidence-intake", "evidence/E-1.json"],
         ["approve", "crates/a/specs/thing.json", "--reviewer", "r"],
         ["promote-evidence", "crates/a/specs/thing.json"],
     )
@@ -2727,6 +2964,238 @@ class UninitializedWorkspaceTest(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("is a directory, expected a file", err)
             self.assertNotIn("ligature init", err)
+
+
+class CmdApproveConceptSpecIntegrationTest(unittest.TestCase):
+    """chainlink #105: a concept spec was draftable and not approvable.
+
+    `draft 3 concept-to-code <crate>/specs/<snake>.json` staged
+    `<target>.json.draft` and `approve` refused the target verbatim with
+    `no validator recognizes target ... -- this pipeline only validates
+    boundary contracts at ...`; no `promote-*` verb covered one either. A
+    `.draft` suffix matches no consumer's `*.json` glob, so the staged spec
+    was invisible to G2+ (`applies_to` unverifiable, info), to witness G2
+    (which fails closed: `no concept spec under the search root declares
+    concept ...`), and to G18/G19/G20. The only route left was hand-writing
+    a file into a `protected_root`, which the installed skill's authority
+    boundary 5 forbids.
+
+    These tests run the real `draft` -> `approve` path over the CLI, and
+    then measure the consequence the pilot reported: with a promoted spec
+    present, a boundary contract whose `callee_guarantee.applies_to` does
+    not cover its callee method is REFUSED at exit 1; without one the same
+    contract approves at exit 0 and reports the guarantee as merely
+    unverifiable. That second case is the defect itself, kept here so the
+    first cannot be made to pass by weakening the check."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+        self.spec_target = self.workspace / "crate_a" / "specs" / "task_queue.json"
+        self.boundary_target = (
+            self.workspace / "crate_a" / "specs" / "_boundaries"
+            / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args) -> int:
+        # stdout/stderr are swallowed rather than asserted: the exit code
+        # and the files on disk are what these tests are about, and a
+        # failing case should not bury them under a rendered prompt.
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return pipeline.main([
+                "--workspace", str(self.workspace),
+                "--descriptor", str(self.descriptor_path),
+                *args,
+            ])
+
+    def _concept_spec(self, **overrides) -> dict:
+        data = {
+            "schema_version": "1.0",
+            "concept": "TaskQueue",
+            "cluster": "data-model",
+            "english_description": "A priority queue of tasks ordered by deadline",
+            "verifier": "creusot",
+            "queries": [
+                {
+                    "english": "Returns the number of tasks in the queue",
+                    "rust_sig": "fn len(&self) -> usize",
+                    "pure": True,
+                    "witness_required": True,
+                },
+            ],
+            "commands": [
+                {
+                    "english": "Removes and returns the task with the earliest deadline",
+                    "rust_sig": "fn pop_ready(&mut self) -> Option<Task>",
+                },
+            ],
+            "constraints": [
+                {
+                    "english": "pop_ready yields a task whenever the queue is non-empty",
+                    "logic": "self.len() > 0",
+                    "kind": "postcondition",
+                    "source": "hand",
+                    "applies_to": ["pop_ready"],
+                    "id": "C001",
+                },
+            ],
+            "adversary_table": [
+                {
+                    "scenario": "Pushing a task with a deadline in the past",
+                    "violates": "deadline ordering",
+                    "resolution": "reject",
+                },
+            ],
+        }
+        data.update(overrides)
+        return data
+
+    def _boundary_draft(self) -> None:
+        self._write_draft(self.boundary_target, {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C001"],
+        })
+
+    def _write_draft(self, target: Path, data: dict) -> None:
+        target.with_suffix(target.suffix + ".draft").write_text(json.dumps(data))
+
+    def _draft_via_cli(self, target: Path, data: dict) -> int:
+        """The real `draft 3 concept-to-code` command with the model backend
+        stubbed by handing the JSON on stdin (llm_backend.kind: manual), so
+        this exercises cmd_draft's template resolution, parse_llm_json_
+        output, stage_draft and immediate G1a/G1b rather than a
+        hand-written .draft."""
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as stream:
+            json.dump(data, stream)
+            model_output = Path(stream.name)
+        self.addCleanup(model_output.unlink)
+        with model_output.open() as stdin:
+            with mock.patch.object(sys, "stdin", stdin):
+                return self._run(
+                    "draft", "3", "concept-to-code", str(target),
+                    "--var", "concept=TaskQueue",
+                    "--var", "cluster=data-model",
+                    "--var", "verifier=creusot",
+                    "--var", "source_material=a C++ priority queue",
+                    "--var", "prior_artifact=",
+                    "--var", "finding=",
+                )
+
+    def test_a_drafted_concept_spec_is_approved_and_carries_the_review_block(self):
+        """The issue's repro, both halves: `draft` stages, then `approve`
+        promotes -- where before this fix the second command answered
+        `no validator recognizes target`."""
+        rc = self._draft_via_cli(self.spec_target, self._concept_spec())
+        self.assertEqual(rc, 0)
+        draft_path = self.spec_target.with_suffix(".json.draft")
+        self.assertTrue(draft_path.is_file())
+
+        rc = self._run("approve", str(self.spec_target), "--reviewer", "alice", "--reviewed-at", "2026-10-02")
+        self.assertEqual(rc, 0)
+        self.assertFalse(draft_path.exists())
+        promoted = json.loads(self.spec_target.read_text())
+        self.assertEqual(promoted["review"], {"reviewer": "alice", "reviewed_at": "2026-10-02"})
+        # And the approval is in the audit trail #82 reads back, so a
+        # promotion that includes this spec can prove it was reviewed.
+        log = json.loads(
+            (self.workspace / "ci" / "results" / "review_log.jsonl").read_text().splitlines()[0]
+        )
+        self.assertEqual(log["target_path"], str(self.spec_target))
+        self.assertEqual(log["reviewer"], "alice")
+
+    def test_the_approve_dispatcher_recognizes_a_concept_spec(self):
+        """Pinned against the dispatcher's own refusal, since that message
+        is what the pilot quoted verbatim."""
+        validate_fn = pipeline._select_validate_fn(self.spec_target, self.workspace, VALID_DESCRIPTOR)
+        data = self._concept_spec(review={"reviewer": "alice", "reviewed_at": "2026-10-02"})
+        self.assertEqual(validate_fn(self.spec_target, data), [])
+
+    def test_a_concept_spec_named_wrong_is_refused_at_approval(self):
+        wrong = self.workspace / "crate_a" / "specs" / "queues.json"
+        self._write_draft(wrong, self._concept_spec())
+        rc = self._run("approve", str(wrong), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(wrong.exists())
+
+    def test_a_schema_invalid_concept_spec_is_refused_at_approval(self):
+        broken = self._concept_spec()
+        del broken["adversary_table"]
+        self._write_draft(self.spec_target, broken)
+        rc = self._run("approve", str(self.spec_target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.spec_target.exists())
+
+    def test_a_promoted_spec_makes_a_boundary_guarantee_resolvable_at_approve_time(self):
+        """The promotion path working in the direction it has to work in:
+        with the spec promoted, `TaskQueue.C001` resolves and its
+        `applies_to` covers the callee method `pop_ready`, so the boundary
+        contract promotes -- which could not happen at all before #105."""
+        self._write_draft(self.spec_target, self._concept_spec())
+        self.assertEqual(self._run("approve", str(self.spec_target), "--reviewer", "alice"), 0)
+        self._boundary_draft()
+        self.assertEqual(self._run("approve", str(self.boundary_target), "--reviewer", "alice"), 0)
+
+    def test_a_guarantee_whose_applies_to_misses_the_callee_is_now_refused(self):
+        """The gate the missing promotion path was hiding. With the spec
+        promoted, G2+ resolves `TaskQueue.C001`, finds its `applies_to` is
+        `['len']`, and this boundary's callee method is `pop_ready` -- so
+        `approve` refuses. The pilot measured four such contracts approving
+        at exit 0 while the check was unreachable."""
+        spec = self._concept_spec()
+        spec["constraints"][0]["applies_to"] = ["len"]
+        self._write_draft(self.spec_target, spec)
+        self.assertEqual(self._run("approve", str(self.spec_target), "--reviewer", "alice"), 0)
+        self._boundary_draft()
+        rc = self._run("approve", str(self.boundary_target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.boundary_target.exists())
+
+    def test_without_a_promoted_spec_the_same_boundary_approves_silently(self):
+        """The condition #105 was reported for, kept so the test above
+        cannot pass by weakening G2+ instead of making it reachable: with
+        no promoted concept spec there is nothing to resolve `applies_to`
+        against, so the check is skipped and reported `unverifiable` at
+        info -- and `approve` exits 0."""
+        self._boundary_draft()
+        rc = self._run("approve", str(self.boundary_target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.boundary_target.is_file())
+
+    def test_a_staged_draft_declares_no_feature_until_it_is_approved(self):
+        """A `.draft` matches no consumer's `*.json` glob, which is exactly
+        why a spec that could not be promoted was invisible rather than
+        wrong: it neither resolved a query nor declared a feature -- and
+        G18's declared feature set comes from `queries[].witness_required`,
+        so an unpromotable spec left G18/G19/G20 measuring nothing. So the
+        tests above are about PROMOTION, not about the file existing."""
+        from gate_g18 import discover_declared_features
+        from select_pilot_cluster import discover_concepts
+
+        self._write_draft(self.spec_target, self._concept_spec())
+        resolved, findings = discover_concepts(VALID_DESCRIPTOR, self.workspace)
+        self.assertEqual((resolved, findings), ({}, []))
+        self.assertEqual(discover_declared_features(self.workspace / "crate_a" / "specs"), [])
+
+        self.assertEqual(self._run("approve", str(self.spec_target), "--reviewer", "alice"), 0)
+        resolved, findings = discover_concepts(VALID_DESCRIPTOR, self.workspace)
+        self.assertEqual([f.reason for f in findings], [])
+        self.assertEqual(sorted(resolved), ["TaskQueue"])
+        self.assertEqual(
+            [(concept, query) for concept, query, _ in discover_declared_features(
+                self.workspace / "crate_a" / "specs"
+            )],
+            [("TaskQueue", "len")],
+            "a promoted concept spec is where G18's declared witness_required set comes from",
+        )
 
 
 VALID_DESCRIPTOR = {

@@ -69,7 +69,7 @@ report at its manifest's own `report.emit` path (see §5).
 | operation | writes | authority |
 |---|---|---|
 | `draft <kind>` | a new draft artifact | none required — Stage 0/3, LLM-proposed, explicitly non-normative until reviewed |
-| `approve <op>` | promotes a draft (attaches `review`) | `--reviewer` (required, human identity) |
+| `approve <op>` | promotes a draft (attaches `review`) | `--reviewer` (required, human identity). Every normative artifact type goes through it, concept specs included since #105 -- a concept spec's `constraints[].id` is what a boundary contract's `callee_guarantees` is verified against (G2+), its `queries[]` what a witness spec's G2 resolves against, and its `queries[].witness_required` the declared set G18 measures, so promoting one without a human would mean an unreviewed vocabulary decides which checks run |
 | `init` (#58) | installs owned files into a target repo | operator running the command; must not silently overwrite user-owned content |
 | `migrate` (#59) | rewrites legacy references to registry form | operator running the command, staged (phase A-D per #59), never rewrites a reviewed artifact without its own human checkpoint |
 | `report feature-ledger` (#88) | `ci/results/feature_ledger.json` | none required — a generated projection, safe to regenerate over a previous ledger; refuses (exit 1, file untouched) to overwrite a schema-valid assurance report already at the destination — run `record-assurance` after `report feature-ledger`, or point the manifest's `report.emit` at a free `ci/results/*.json` path; see the `record-assurance` row for the mirror rule |

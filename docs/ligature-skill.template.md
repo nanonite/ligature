@@ -56,7 +56,13 @@ progress.
    `promote-evidence`, a mechanical promotion for Stage 0 evidence (which
    carries no `review` block and is non-normative, so it is not a human
    checkpoint) -- it never attaches a `review` block and never substitutes
-   for a human decision.
+   for a human decision. Concept specs are not that exception: a concept
+   spec's constraint ids and queries are what `validate`'s G2+/witness
+   cross-references resolve against, so promoting one is a human
+   checkpoint like any other (#105). A `draft` you staged and never got
+   promoted is invisible to every one of those checks, and the silence is
+   quiet: `validate` reports the affected `applies_to` as merely
+   "unverifiable" rather than rejecting it.
 3. **Witnesses and differential tests can falsify, never prove.** An
    agreeing witness run or oracle comparison is evidence the expectation
    was not falsified in that instance, not a proof of universal
@@ -114,8 +120,8 @@ progress.
 | `ligature write-set-check [--json]` | read-only write-set conformance: files outside `allowed_roots` / inside `protected_roots` relative to the project descriptor |
 | `ligature validate <kind> <target>` | deterministic per-artifact check (G1a/G1b/G2+) |
 | `ligature gate <gate-id> [args...]` | deterministic cross-artifact gate |
-| `ligature draft <kind> <target>` | Stage 0/3 one-shot LLM draft (advisory; human review required) |
-| `ligature approve <op> <target...>` | human checkpoint (requires `--reviewer`) |
+| `ligature draft <stage> <template> <target>` | Stage 0/3 one-shot LLM draft (advisory; human review required). Run `ligature draft --help` for the complete template list — every shipped template, what it drafts, and which command promotes it — rather than guessing a name |
+| `ligature approve <op> <target...>` | human checkpoint (requires `--reviewer`); every normative artifact, including a concept spec (#105) |
 | `ligature accept-policy --reviewer <name>` | record a reviewed change to the normative reliance-policy document (`docs/reliance-policy.md`) as the manifest's reviewed base — the explicit accept path for governance drift, analogous to `accept-promotion` |
 | `ligature promote-evidence <target>` | mechanically promote a staged evidence draft (`evidence/<id>.json.draft`) to its target and record the move — the Stage 0 promotion path (evidence carries no `review` block, so `approve` cannot promote it; no `--reviewer` needed) |
 | `ligature record-ruling --reviewer <name> --verdict ratified/rejected --artifact <path>…` | record a human ruling over an exact artifact set — the human-ruling gate `accept-promotion` enforces before it will mint a receipt (#82). A human checkpoint: never run it yourself |

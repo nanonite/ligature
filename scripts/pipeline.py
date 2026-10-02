@@ -422,7 +422,14 @@ from project_descriptor import conflict_dir_for as _conflict_dir_for  # noqa: E4
 from project_descriptor import evidence_dir_for as _evidence_dir_for  # noqa: E402
 from project_descriptor import exemption_dir_for as _exemption_dir_for  # noqa: E402
 from project_descriptor import interaction_dir_for as _interaction_dir_for  # noqa: E402
-from project_descriptor import is_underscore_artifact_path  # noqa: E402
+from validate_concept_spec import load_draft_validator as load_concept_spec_draft_validator  # noqa: E402
+from validate_concept_spec import load_validator as load_concept_spec_validator  # noqa: E402
+from validate_concept_spec import validate_data as validate_concept_spec_data  # noqa: E402
+from validate_concept_spec import validate_draft_data as validate_concept_spec_draft_data  # noqa: E402
+from draft_templates import STAGES as draft_template_stages  # noqa: E402
+from draft_templates import find as draft_template_find  # noqa: E402
+from draft_templates import format_registry_help as draft_template_registry_help  # noqa: E402
+from draft_templates import unknown_template_error  # noqa: E402
 from project_descriptor import load_project_descriptor as _load_project_descriptor  # noqa: E402
 from project_descriptor import protocol_debt_dir_for as _protocol_debt_dir_for  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
@@ -506,7 +513,6 @@ from validate_work_package import load_validator as load_work_package_validator 
 from validate_work_package import validate_file as validate_work_package_file  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from select_pilot_cluster import exit_code_for as _pilot_exit_code_for  # noqa: E402
-from select_pilot_cluster import load_concept_spec_validator  # noqa: E402
 from select_pilot_cluster import render_report as _render_pilot_report  # noqa: E402
 from select_pilot_cluster import select_pilot  # noqa: E402
 from project_state import build_consolidated_check  # noqa: E402
@@ -1465,9 +1471,28 @@ def cmd_draft(args: argparse.Namespace) -> int:
     _require_target_in_workspace(args.target, args.workspace, descriptor)
     backend = descriptor.get("llm_backend", {"kind": "manual"})
 
-    template_path = PROMPTS / f"stage-{args.stage}-{args.template_name}.md"
+    # chainlink #105: the template name is resolved through
+    # draft_templates' registry, not by building a path and reporting the
+    # file it failed to find. A bare `no template at
+    # <extracted-tmpdir>/prompts/stage-3-bridge-drafting.md` names a path
+    # the caller never typed, in a directory that did not exist when they
+    # ran the command, and offers no way forward -- a pilot's only
+    # alternative to guessing names was to guess them. The registry is the
+    # same list `draft --help` prints and `init` copies, so the three
+    # cannot drift (draft_templates.py's own docstring).
+    template = draft_template_find(args.stage, args.template_name)
+    if template is None:
+        raise PipelineError(unknown_template_error(args.stage, args.template_name))
+    template_path = PROMPTS / template.filename
     if not template_path.exists():
-        raise PipelineError(f"no template at {template_path}")
+        # A registered template whose prompt file is not in the bundle: a
+        # packaging defect, not a user error, so it says so rather than
+        # reading as "that template does not exist".
+        raise PipelineError(
+            f"registered stage-{template.stage} template {template.name!r} has no prompt at "
+            f"{template_path} -- this is a packaging defect in the installed binary, not a "
+            "bad template name; the registry entry is scripts/draft_templates.py's own"
+        )
 
     variables = dict(pair.split("=", 1) for pair in args.var)
     prompt = render_prompt(template_path, variables)
@@ -1680,6 +1705,29 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
             return lambda path, data: validate_witness_for_approval(
                 path, data, validator, specs_search_root, workspace, descriptor
             )
+        # An EIGHTH addition (chainlink #105): concept specs at
+        # <crate_dir>/specs/<snake_case(concept)>.json. `draft 3
+        # concept-to-code` could stage one and NOTHING could promote it:
+        # `approve` refused with `no validator recognizes target`, and no
+        # other verb covered it either. A staged `.draft` matches no
+        # consumer's `*.json` glob, so the spec stayed invisible to every
+        # gate that resolves ids or queries against it -- G2+ skipped each
+        # `applies_to` it should have verified (reporting them
+        # `unverifiable` at info severity instead), witness `approve` failed
+        # closed on `no concept spec under the search root declares
+        # concept ...`, and G18/G19/G20 had no reachable input. Same
+        # ordering constraint as the draft dispatcher's own mirror of this
+        # branch: this comes AFTER every underscore-prefixed directory
+        # check above, so it cannot shadow one of them. The validator is
+        # validate_concept_spec's, and the extended concept-spec schema now
+        # carries this pipeline's own `review` block (docs/concept-to-
+        # code-modifications.md gap #7) -- a human checkpoint, not a
+        # mechanical rename, because a concept spec is the vocabulary every
+        # later gate resolves against.
+        specs_search_root = _specs_search_root_for(target, workspace, descriptor)
+        if _is_concept_spec_location(target, specs_search_root):
+            validator = load_concept_spec_validator()
+            return lambda path, data: validate_concept_spec_data(path, data, validator)
     raise PipelineError(
         f"no validator recognizes target {target} -- this pipeline only "
         "validates boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
@@ -1687,43 +1735,40 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         "at <crate_dir>/specs/_exemptions/*.json, protocol-debt records at "
         "<crate_dir>/specs/_protocol_debt/*.json, bridges at "
         "<crate_dir>/specs/_bridges/*.json, witnesses at "
-        "<crate_dir>/specs/_witnesses/*.json, and conflict-resolution records "
-        "at specs/_conflicts/*.json (workspace-level) today. Evidence records at "
-        "evidence/*.json (workspace-level) are a valid draft target but are never "
-        "approved -- they carry no review block, so approve() cannot promote them. "
-        "Refusing to draft/approve an artifact type or location it cannot "
-        "mechanically gate, rather than silently skipping validation for it."
+        "<crate_dir>/specs/_witnesses/*.json, concept specs at "
+        "<crate_dir>/specs/<snake_case(concept)>.json, and conflict-resolution "
+        "records at specs/_conflicts/*.json "
+        "(workspace-level) today. Evidence records at evidence/*.json "
+        "(workspace-level) are a valid draft "
+        "target but are never approved -- they carry no review block, so approve() "
+        "cannot promote them; `ligature promote-evidence` is their promotion path. "
+        "Refusing to draft/approve an artifact type or "
+        "location it cannot mechanically gate, rather than silently skipping "
+        "validation for it."
     )
 
 
-def _validate_concept_spec_draft_data(path: Path, data: dict, validator) -> list:
-    """Stage 0/3 immediate feedback for a concept spec draft. Concept specs
-    are validated against the extended concept spec schema (vendor/concept-
-    to-code/schemas/spec.schema.json + this pipeline's own witness_required/
-    id extensions, chainlink #33/#40). No `review` block -- concept specs
-    are not routed through this pipeline's approve (concept-to-code's own
-    tooling consumes them directly), and the schema's additionalProperties:
-    false rejects one outright."""
+def _is_concept_spec_location(target: Path, specs_search_root: Path | None) -> bool:
+    """True when `target` sits where a concept spec may live: a `.json`
+    file under the owning crate's declared `specs_search_root`, with no
+    underscore-prefixed path component relative to it (chainlink #105).
 
-    class _Finding:
-        def __init__(self, gate: str, path: Path, reason: str, severity: str = "error"):
-            self.gate = gate
-            self.path = path
-            self.reason = reason
-            self.severity = severity
-
-        def __str__(self) -> str:
-            return f"[{self.gate}/{self.severity}] {self.path}: {self.reason}"
-
-    if "review" in data:
-        return [
-            _Finding(
-                "G1b", path,
-                "draft must not include its own `review` block -- concept specs are not "
-                "routed through approve(); review is never attached to them",
-            )
-        ]
-    return [_Finding("G1a", path, e.message) for e in validator.iter_errors(data)]
+    The same predicate both dispatchers use -- `draft` and `approve` must
+    never disagree about which paths are concept specs, or a draft would
+    be accepted at one path and refused at another. It is a function rather
+    than an inline `is_underscore_artifact_path(target, root)` call because
+    that helper resolves containment by `Path.relative_to`, which raises
+    `ValueError` for a target that is under the crate but NOT under the
+    declared search root -- a descriptor is free to declare a search root
+    that does not contain its crate, and the draft path reached that
+    combination as an unhandled traceback rather than the refusal below."""
+    if specs_search_root is None:
+        return False
+    try:
+        relative = target.resolve().relative_to(specs_search_root.resolve())
+    except ValueError:
+        return False
+    return not any(part.startswith("_") for part in relative.parts)
 
 
 def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
@@ -1759,12 +1804,29 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
     logic (which directory belongs to which artifact type) intentionally
     mirrors _select_validate_fn's -- the two must never silently diverge
     on that -- but calls the draft-time validator, not the approve-time
-    one."""
+    one.
+
+    Chainlink #105 reworked the concept-spec branch this dispatcher
+    already had. It used to call a local one-off closure over
+    `validator.iter_errors` whose only logic was a hard-coded "concept
+    specs are not routed through approve()", because they were not. They
+    are now: `approve` recognizes <crate_dir>/specs/<snake_case(concept)>.json
+    and validates the approved form (required `review`, #105's gap #7), so
+    the draft form and the approved form are two schemas in ONE module
+    (`validate_concept_spec`) rather than one inline lambda here and an
+    inline lambda in _select_validate_fn that could disagree about it.
+    That branch also gained the G1b naming rule nothing enforced before --
+    `<snake_case(concept)>.json`, the name concept-to-code itself resolves
+    a concept at -- and it now shares _is_concept_spec_location() with the
+    approve-time dispatcher instead of calling `is_underscore_artifact_path`
+    inline, which is what turned a search root that does not contain its
+    crate into a ValueError traceback."""
     if target.suffix != ".json":
         raise PipelineError(
             f"target {target} is not a .json file -- this pipeline only "
             "recognizes .json artifacts for boundary contracts, interactions, "
-            "exemptions, protocol-debt records, bridges, evidence, and conflict-resolution records"
+            "exemptions, protocol-debt records, bridges, evidence, concept specs, "
+            "conflict-resolution records, closure profiles, and degradation records"
         )
     if target.resolve().parent == _evidence_dir_for(workspace):
         validator = load_evidence_validator()
@@ -1796,13 +1858,19 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
         # Concept specs live at <crate_dir>/specs/<snake_case(concept)>.json --
         # directly under specs/, NOT in a _-prefixed subdirectory. This branch
         # must come AFTER every underscore-prefixed directory check above so it
-        # doesn't shadow them. Validated against the extended concept spec schema
-        # (vendor/concept-to-code/schemas/spec.schema.json + this pipeline's own
-        # witness_required/id extensions, chainlink #33/#40).
+        # doesn't shadow them, and it shares _is_concept_spec_location() with
+        # _select_validate_fn so the two dispatchers can never disagree about
+        # which paths are concept specs. Validated against the extended concept
+        # spec schema (vendor/concept-to-code/schemas/spec.schema.json + this
+        # pipeline's own witness_required/id/review extensions, chainlink
+        # #33/#40/#105) through validate_concept_spec.validate_draft_data(),
+        # which is the same module the approve-time dispatcher validates
+        # through -- a draft and its promoted form can no longer be judged by
+        # two different implementations of "a valid concept spec".
         specs_search_root = _specs_search_root_for(target, workspace, descriptor)
-        if specs_search_root is not None and not is_underscore_artifact_path(target, specs_search_root):
-            validator = load_concept_spec_validator()
-            return lambda path, data: _validate_concept_spec_draft_data(path, data, validator)
+        if _is_concept_spec_location(target, specs_search_root):
+            validator = load_concept_spec_draft_validator()
+            return lambda path, data: validate_concept_spec_draft_data(path, data, validator)
     raise PipelineError(
         f"no draft validator recognizes target {target} -- this pipeline only "
         "validates drafts for boundary contracts at <crate_dir>/specs/_boundaries/*.json, "
@@ -1811,9 +1879,10 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
         "<crate_dir>/specs/_protocol_debt/*.json, bridges at "
         "<crate_dir>/specs/_bridges/*.json, witnesses at "
         "<crate_dir>/specs/_witnesses/*.json, concept specs at "
-        "<crate_dir>/specs/<snake_case(concept)>.json, evidence at evidence/*.json "
-        "(workspace-level), and conflict-resolution records at specs/_conflicts/*.json "
-        "(workspace-level) today."
+        "<crate_dir>/specs/<snake_case(concept)>.json under the owning crate's own "
+        "crates[].specs_search_root, evidence at evidence/*.json "
+        "(workspace-level), and conflict-resolution records at "
+        "specs/_conflicts/*.json (workspace-level) today."
     )
 
 
@@ -2682,9 +2751,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     accept_policy_p.set_defaults(func=cmd_accept_policy)
 
-    draft_p = sub.add_parser("draft", help="Stage 0/3: one-shot LLM draft")
-    draft_p.add_argument("stage", choices=["0", "3"])
-    draft_p.add_argument("template_name", help="e.g. evidence-intake, boundary-drafting")
+    draft_p = sub.add_parser(
+        "draft",
+        help="Stage 0/3: one-shot LLM draft",
+        epilog=draft_template_registry_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    draft_p.add_argument("stage", choices=list(draft_template_stages))
+    draft_p.add_argument(
+        "template_name",
+        metavar="template",
+        help=(
+            "which template to draft with -- every shipped template is listed below and by "
+            "`draft --help`; an unknown name is refused with that list, not a bare 'no template at ...'"
+        ),
+    )
     draft_p.add_argument("target", type=Path, help="Target artifact path the draft will eventually promote to")
     draft_p.add_argument("--var", action="append", default=[], help="key=value, repeatable")
     draft_p.set_defaults(func=cmd_draft)

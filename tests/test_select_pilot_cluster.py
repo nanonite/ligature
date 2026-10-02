@@ -708,5 +708,80 @@ class ExtendedSchemaAcceptsDecidedExtensionsTest(TmpWorkspaceTest):
         self.assertTrue(findings, "an unrelated additional property should still be rejected")
 
 
+class ApprovedConceptSpecReviewBlockTest(TmpWorkspaceTest):
+    """chainlink #105, third extension: the `review` block.
+
+    A concept spec is promoted by `approve` (#105 gave it a dispatcher
+    branch; before that it was draftable and unapprovable), and `approve`
+    attaches a `review` block. If this rubric then stopped recognizing the
+    spec it just made promotable, the fix would have broken the very
+    surface it was for: `select-pilot-cluster` would report no concepts at
+    all in a workspace whose specs had all been approved. So the
+    discovery-time validator must accept `review` -- while the APPROVED
+    form requires it, and its shape is this pipeline's own single
+    definition rather than a third hand-copy."""
+
+    def _eligible_workspace(self) -> None:
+        self.ws.write_interaction("I-SCHED-001", "TaskQueue", "TaskQueue")
+        self.ws.write_closure_profile("sched-core", generic=True)
+
+    def test_an_approved_spec_still_declares_its_concept_to_this_rubric(self):
+        spec = concept_spec("TaskQueue", "sched-core")
+        spec["review"] = dict(REVIEW)
+        self.ws.write_raw("task_queue.json", spec)
+        self._eligible_workspace()
+
+        candidates, _ranked, findings = self.ws.select()
+
+        self.assertEqual([f.reason for f in findings], [])
+        self.assertEqual(self.candidate(candidates, "sched-core").eligible, True)
+
+    def test_a_review_block_of_the_wrong_shape_is_still_rejected(self):
+        # Accepting the field is not accepting anything in it: a bare
+        # string, a missing reviewer, a non-date, and an extra key are all
+        # refused -- the same discipline the other two extensions are held
+        # to.
+        for broken in (
+            "alice",
+            {"reviewed_at": "2026-09-09"},
+            {"reviewer": "alice", "reviewed_at": "not-a-date"},
+            {"reviewer": "alice", "reviewed_at": "2026-09-09", "approved_by": "someone else"},
+        ):
+            with self.subTest(review=broken):
+                spec = concept_spec("TaskQueue", "sched-core")
+                spec["review"] = broken
+                self.ws.write_raw("task_queue.json", spec)
+                _candidates, _ranked, findings = self.ws.select()
+                self.assertTrue(
+                    findings, f"a review block of shape {broken!r} should be schema-invalid"
+                )
+
+    def test_the_approved_form_requires_the_review_block(self):
+        """The approve-time validator and the draft-time one are two
+        schemas in one module, so the difference between them is a single
+        `required` entry and not two independent implementations."""
+        from validate_concept_spec import load_draft_validator, load_validator
+
+        approved_schema = load_validator().schema
+        self.assertIn("review", approved_schema["required"])
+        self.assertNotIn("review", load_draft_validator().schema["required"])
+
+    def test_the_review_shape_is_read_from_this_pipelines_own_definition(self):
+        """One review block, one definition. It is read from
+        docs/boundary-contract-schema.json's `$defs.review` at call time, so
+        a change to this pipeline's review-block shape reaches the concept
+        spec too; a third hand-copied definition could have drifted and left
+        #82's provenance check answering about a shape the artifact does not
+        carry."""
+        from validate_concept_spec import load_approved_concept_spec_schema, review_definition
+
+        boundary = json.loads((ROOT / "docs" / "boundary-contract-schema.json").read_text())
+        self.assertEqual(review_definition(), boundary["$defs"]["review"])
+        self.assertEqual(
+            load_approved_concept_spec_schema()["$defs"]["review"], boundary["$defs"]["review"]
+        )
+        self.assertIn("review", load_approved_concept_spec_schema()["required"])
+
+
 if __name__ == "__main__":
     unittest.main()

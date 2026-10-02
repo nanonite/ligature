@@ -563,11 +563,21 @@ def collect_review_blocks(workspace_root: Path, artifact_paths: list[str]) -> di
 
     Artifacts that carry no `review` block are simply absent, never
     "assumed proven": the reliance policy document (a normative markdown
-    file), evidence records (docs/evidence-schema.json has no `review`
-    property at all), and concept specs (the vendored concept-to-code
-    schema declares none either, under `additionalProperties: false`)
-    have nothing to prove, while boundary/interaction/exemption/
-    protocol-debt/bridge/witness/conflict-resolution artifacts all do.
+    file) and evidence records (docs/evidence-schema.json has no `review`
+    property at all) have nothing to prove, while
+    boundary/interaction/exemption/protocol-debt/bridge/witness/
+    conflict-resolution artifacts all do.
+
+    Concept specs moved from the first list to the second in chainlink
+    #105, which gave `approve` a concept-spec branch: they now carry the
+    same `review` block every other normative artifact does, so a spec in
+    an accepted manifest is provenanced rather than silently exempt. That
+    is the intended consequence -- an unreviewed concept spec is an
+    unreviewed vocabulary for every obligation id in the promotion. The
+    one place that matters for the block's shape is
+    scripts/validate_concept_spec.py, which READS it from
+    docs/boundary-contract-schema.json's own `$defs/review` rather than
+    defining a second one.
 
     Path strings are returned exactly as the caller supplied them, so
     review_provenance_gaps() compares them against the audit entries'
@@ -700,9 +710,11 @@ def accept_promotion(
     `--reviewer` argument was enough to mint a Stage 4.5 receipt over
     artifacts nobody approved through `approve`, including ones whose
     review blocks a human has ruled unauthorized. Artifacts with no
-    `review` block (the policy document, evidence records, concept
-    specs) have nothing to prove. Refuses (PromotionReceiptError) with
-    the offending artifacts named, and writes nothing.
+    `review` block (the policy document, evidence records) have nothing to
+    prove; concept specs joined the provenanced side in chainlink #105,
+    when `approve` gained a concept-spec branch. Refuses
+    (PromotionReceiptError) with the offending artifacts named, and writes
+    nothing.
 
     Then -- chainlink #82's second remedy, the human-ruling gate -- every
     artifact in the manifest must be covered by a recorded human ruling

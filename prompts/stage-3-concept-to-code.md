@@ -75,9 +75,8 @@ an empty spec.
 optional — omit them when not applicable. `queries`, `commands`,
 `constraints`, and `adversary_table` are required for `kind: struct` (the
 default) and `kind: trait`; `kind: enum` requires `trait_ref` and
-`variants` instead. Do **not** emit a `review` field: concept specs are
-not routed through this pipeline's `approve` (they carry no review block;
-concept-to-code's own tooling consumes them directly).
+`variants` instead. Do **not** emit a `review` field: `ligature approve`
+attaches it, after a human reviewer signs off.
 
 ## Inputs
 
@@ -168,11 +167,13 @@ Each entry names the depended-on concept's crate and concept, plus a
 exactly. `additionalProperties`: false throughout (including nested
 objects); do not add fields it doesn't declare, however useful they seem.
 
-The `witness_required` field on queries and the `id` field on constraints
-are this pipeline's own extensions (chainlink #33 and #40), recorded as
-proposals at `docs/concept-to-code-witness-required-schema.json` and
-`docs/concept-to-code-constraint-id-schema.json`. They are accepted as
-optional by this pipeline's tooling; the vendored schema itself does not
+The `witness_required` field on queries, the `id` field on constraints, and
+the `review` block are this pipeline's own extensions (chainlink #33, #40
+and #105), recorded at `docs/concept-to-code-witness-required-schema.json`,
+`docs/concept-to-code-constraint-id-schema.json` and
+`docs/concept-to-code-modifications.md` gap #7. They are accepted as
+optional by this pipeline's drafting and discovery tooling (`review` is
+required only in the approved form); the vendored schema itself does not
 yet include them.
 
 ## Filename
@@ -183,14 +184,30 @@ concept specs live directly under `specs/`, unlike boundary/interaction/
 bridge/witness artifacts). The snake_case conversion uses concept-to-code's
 OWN rule (vendor/concept-to-code/emit_stubs.py:snake_case), copied rather
 than re-derived — plan.md §2 records what re-deriving it cost last time
-(HTTPClient -> h_t_t_p_client).
+(HTTPClient -> h_t_t_p_client). This is enforced, not just documented: G1b
+at draft and at approve time refuses a spec whose filename disagrees with
+its own `concept` (chainlink #105), because that name is how every
+consumer of this spec resolves it.
 
 ## review block
 
-Concept specs do not carry a `review` block — they are not routed through
-this pipeline's `approve` (concept-to-code's own tooling consumes them
-directly). Do not emit a `review` field; the schema's
-`additionalProperties: false` rejects one.
+A concept spec is promoted by `ligature approve --reviewer <human>
+<target>`, which attaches the `review` block after a human signs off —
+never by this template. Do not emit a `review` field: the draft validator
+refuses one outright, because a model that writes its own `review` is
+asserting a sign-off that never happened, and for a concept spec that
+sign-off is load-bearing (it is what lets `accept-promotion` prove the
+spec a promotion was built over was reviewed).
+
+This is not ceremony. Every gate downstream resolves ids and queries
+against the promoted spec: a boundary contract's `callee_guarantees:
+[TaskQueue.C003]` is checked against this spec's `constraints`, a witness
+spec's `query` against this spec's `queries`, and G18's coverage against
+`queries[].witness_required`. A spec that never gets promoted is a spec
+none of them can see — and the resulting silence is quiet: `approve` on a
+boundary contract passes at exit 0 with `applies_to` reported merely
+"unverifiable" rather than rejected, because there was no spec to check it
+against.
 
 ## Write set
 

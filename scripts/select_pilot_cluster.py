@@ -84,10 +84,19 @@ syntax).
 Reuses rather than re-derives
 ------------------------------
 Concept specs are validated against the real, vendored
-`vendor/concept-to-code/schemas/spec.schema.json` (this module is the
-first in this codebase to actually run that schema against a concept
-spec document -- everywhere else reads fields directly, since nothing
-else needs `cluster`/`verifier` to be schema-guaranteed present).
+`vendor/concept-to-code/schemas/spec.schema.json`, through
+`validate_concept_spec.load_draft_validator()` -- the one module that owns
+that schema and the decided extensions applied to it (chainlink #69's
+investigation into F3 put `load_extended_concept_spec_schema()` here;
+chainlink #105 moved it next to the draft/approve validators that consume
+the same extended schema, so the rubric, `draft` and `approve` cannot
+disagree about what a genuinely valid concept spec is). Everywhere else
+reads fields directly, since nothing else needs `cluster`/`verifier` to be
+schema-guaranteed present. `draft_validator`, not `load_validator()`: a
+spec on disk must keep being judged on its own content however it got
+there, and `review` is not required to HAVE been approved for this rubric
+to reason about a concept -- it is required by `approve`, which is the
+promotion path, not by discovery.
 Interactions are discovered with `validate_interaction.find_interaction_files`
 and validated with its own `validate_data` (coverage args left at their
 default `None`, which downgrades G15/R2 to non-blocking info notes --
@@ -111,15 +120,12 @@ from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import interaction_dir_for  # noqa: E402
 from project_descriptor import is_underscore_artifact_path  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
-import resources  # noqa: E402
-from schema_utils import make_validator  # noqa: E402
+from validate_concept_spec import CONCEPT_SPEC_SCHEMA_PATH  # noqa: E402
+from validate_concept_spec import load_draft_validator as load_concept_spec_validator  # noqa: E402
 from validate_closure import load_cluster_artifacts_with_invalid  # noqa: E402
 from validate_interaction import find_interaction_files  # noqa: E402
 from validate_interaction import load_validator as load_interaction_validator  # noqa: E402
 from validate_interaction import validate_data as validate_interaction_data  # noqa: E402
-from vendored_resources import vendored_resource_path  # noqa: E402
-
-CONCEPT_SPEC_SCHEMA_PATH = vendored_resource_path("concept_to_code_spec_schema")
 
 # concept-to-code's own `verifier` enum is exactly {kani, creusot, verus}.
 # kani is bounded model checking; creusot/verus are deductive. This is a
@@ -173,63 +179,6 @@ class ClusterCandidate:
     deductive_closure_value: int
     eligible: bool
     reasons: tuple[str, ...] = field(default_factory=tuple)
-
-
-WITNESS_REQUIRED_PROPOSAL_PATH = resources.resource_path("docs", "concept-to-code-witness-required-schema.json")
-CONSTRAINT_ID_PROPOSAL_PATH = resources.resource_path("docs", "concept-to-code-constraint-id-schema.json")
-
-
-def load_concept_spec_schema() -> dict:
-    """The real, live vendored schema, read fresh every call
-    (`vendor/concept-to-code` is a read-only submodule pin -- this reads
-    it, never edits it, and never caches a copy that could go stale
-    against it). Unextended: see `load_extended_concept_spec_schema()`
-    for the version this rubric actually validates against."""
-    return json.loads(CONCEPT_SPEC_SCHEMA_PATH.read_text())
-
-
-def load_extended_concept_spec_schema() -> dict:
-    """`load_concept_spec_schema()`'s result, patched so a concept spec
-    MAY declare `queries[].witness_required` and `constraints[].id`
-    without being rejected (chainlink #69's investigation into
-    docs/limitations.md finding F3: G2+ and gate g18 already read these
-    two fields when present, but this rubric validated against the bare
-    vendored schema, whose `additionalProperties: false` rejects both --
-    so no single concept spec could satisfy all three tools at once).
-
-    `witness_required` is added exactly as chainlink #33 decided it
-    upstream: optional, default `false`. `constraint.id` is added as
-    OPTIONAL here, even though chainlink #40 decided it should be
-    REQUIRED once actually applied upstream (docs/concept-to-code-
-    constraint-id-schema.json is the faithful record of that decision).
-    That's a deliberate divergence, not an oversight: #40's own text
-    warns a required `id` needs "a backfill... onto every existing
-    constraint in any project already using concept-to-code" before it
-    can be required without breaking every spec written before the
-    backfill. Requiring it here, today, would make this rubric reject
-    every concept spec that hasn't done that backfill -- a compatibility
-    regression, not the fix F3 asks for. A project MAY start assigning
-    `id`s now (and should, to get G2+'s concrete guarantee resolution
-    instead of its `no_ids_in_spec` non-blocking fallback); nothing here
-    requires it yet."""
-    schema = load_concept_spec_schema()
-    schema = json.loads(json.dumps(schema))  # deep copy; never mutate the cached vendored read
-
-    witness_required_proposal = json.loads(WITNESS_REQUIRED_PROPOSAL_PATH.read_text())
-    schema["$defs"]["query"]["properties"]["witness_required"] = witness_required_proposal[
-        "properties"
-    ]["witness_required"]
-
-    constraint_id_proposal = json.loads(CONSTRAINT_ID_PROPOSAL_PATH.read_text())
-    schema["$defs"]["constraint"]["properties"]["id"] = constraint_id_proposal["properties"]["id"]
-    # Deliberately NOT added to $defs["constraint"]["required"] -- see the
-    # docstring above.
-
-    return schema
-
-
-def load_concept_spec_validator():
-    return make_validator(load_extended_concept_spec_schema())
 
 
 def discover_concepts(descriptor: dict, workspace: Path) -> tuple[dict[str, ConceptInfo], list[Finding]]:

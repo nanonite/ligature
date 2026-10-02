@@ -25,6 +25,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import adjudicator  # noqa: E402
+import draft_templates  # noqa: E402
 import ligature_install  # noqa: E402
 import pipeline  # noqa: E402
 import validate_work_package  # noqa: E402
@@ -107,6 +108,29 @@ class FreshInitTest(InstallFixture):
         self.assertEqual(paths[SKILL_REL]["ownership"], "managed")
         self.assertEqual(paths["project-descriptor.json"]["ownership"], "user")
         self.assertIsNotNone(paths[SKILL_REL]["authority_hash"])
+
+    def test_init_installs_every_registered_draft_template(self):
+        """chainlink #105: the prompt list `init` copies was a hand-kept
+        tuple here, a second answer to "which templates exist", and it had
+        already fallen behind `prompts/` -- #98's closure-profile and
+        degradation templates shipped without being installed into a
+        workspace's `.ligature/prompts/`, while `draft` on a packaged
+        binary still used them. The list is now derived from
+        draft_templates' registry, and this asserts it end to end through a
+        real `init`."""
+        code, _, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 0)
+        installed = {path.name for path in (self.workspace / ".ligature" / "prompts").glob("*.md")}
+        self.assertEqual(installed, set(draft_templates.prompt_filenames()))
+        manifest_paths = {f["path"] for f in self.manifest()["files"]}
+        for filename in draft_templates.prompt_filenames():
+            with self.subTest(prompt=filename):
+                self.assertIn(f".ligature/prompts/{filename}", manifest_paths)
+                self.assertEqual(
+                    (self.workspace / ".ligature" / "prompts" / filename).read_text(),
+                    (ROOT / "prompts" / filename).read_text(),
+                    "the installed copy must be the shipped prompt, not a stale one",
+                )
 
     def test_initialized_files_get_the_umask_derived_mode(self):
         """Chainlink #63, end to end through the CLI: every file init writes

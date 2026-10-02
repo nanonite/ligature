@@ -14,7 +14,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import pipeline  # noqa: E402
 from review_checkpoint import SKIP_VALIDATION, approve, stage_draft  # noqa: E402
 from validate_boundary_contracts import validate_file, validate_data, load_validator  # noqa: E402
 
@@ -122,6 +121,34 @@ class PromptTemplateScaffoldingTest(unittest.TestCase):
         self.assertIn("{{prior_artifact}}", text)
         self.assertIn("spec.schema.json", text)
         self.assertIn("constraint", text)
+
+    def test_the_concept_template_says_approve_promotes_it_and_never_the_model(self):
+        """chainlink #105: until this fix the template told the model the
+        opposite -- "concept specs are not routed through this pipeline's
+        `approve` ... they carry no review block; concept-to-code's own
+        tooling consumes them directly" -- which was true of the binary and
+        was the defect: `draft 3 concept-to-code` staged a file that no
+        command could promote, and nothing said so. The template and the
+        promotion path have to agree."""
+        text = (PROMPTS / "stage-3-concept-to-code.md").read_text()
+        self.assertIn("ligature approve --reviewer", text)
+        self.assertNotIn("not routed through this pipeline's `approve`", text)
+        # still an explicit prohibition on the model authoring the block
+        self.assertIn("Do not emit a `review` field", text)
+        # and the naming rule it documents is now enforced, so the template
+        # may say so
+        self.assertIn("snake_case(concept)", text)
+
+    def test_the_concept_template_names_the_gate_the_promotion_path_unblocks(self):
+        """The template a model reads is also the operator's. It has to say
+        what a spec that is never promoted costs, because that cost is
+        silent everywhere else: G2+ reports `applies_to` as unverifiable
+        rather than rejecting it, and witness approve fails closed much
+        later, naming a concept nobody has ever heard of."""
+        text = (PROMPTS / "stage-3-concept-to-code.md").read_text()
+        for expected in ("callee_guarantees", "witness_required", "G18", "applies_to", "unverifiable"):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, text)
 
 
 class WriteSetDeclarationTest(unittest.TestCase):
@@ -556,12 +583,15 @@ class SimulatedConceptSpecOutputTest(unittest.TestCase):
         }
         self.assertNotIn("review", simulated_llm_output)
 
-        from select_pilot_cluster import load_concept_spec_validator
+        # chainlink #105: the draft-time validator moved out of pipeline.py
+        # into validate_concept_spec, next to the approve-time one -- so a
+        # draft and the artifact `approve` later promotes are judged by the
+        # same module, not by two implementations of "a valid concept spec"
+        # that could disagree about the schema.
+        from validate_concept_spec import load_draft_validator
+        from validate_concept_spec import validate_draft_data
 
-        validator = load_concept_spec_validator()
-        findings = pipeline._validate_concept_spec_draft_data(
-            self.target, simulated_llm_output, validator
-        )
+        findings = validate_draft_data(self.target, simulated_llm_output, load_draft_validator())
         errors = [f for f in findings if f.severity == "error"]
         self.assertEqual(errors, [], [str(f) for f in errors])
 

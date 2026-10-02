@@ -159,12 +159,37 @@ code 0.
 ## 4. `draft <artifact-kind>`
 
 Already effectively nested: `draft <stage> <template_name> <target>` keeps
-its shape unchanged, `template_name` filling the `<artifact-kind>` slot
-(`evidence-intake`, `boundary-drafting`, `interaction-drafting`,
-`bridge-drafting`, `witness-drafting`, `exemption-drafting`,
-`protocol-debt-drafting`, `conflict-resolution-drafting`, `concept-to-code`
-— one per `prompts/*.md`). No legacy flat commands to reconcile — `draft`
-was never flat.
+its shape unchanged, `template_name` filling the `<artifact-kind>` slot.
+No legacy flat commands to reconcile — `draft` was never flat.
+
+`template_name` is resolved through the one registry in
+`scripts/draft_templates.py` (chainlink #105), which is also what
+`draft --help` prints and what `init` copies into `.ligature/prompts/`;
+`ligature draft --help` lists **every** shipped template, what it drafts,
+where the artifact belongs, and which command promotes it:
+
+| stage | template | drafts | target | promoted by |
+|---|---|---|---|---|
+| 0 | `evidence-intake` | evidence record | `evidence/<id>.json` | `promote-evidence` (mechanical) |
+| 3 | `concept-to-code` | concept spec | `<crate_dir>/specs/<snake_case(concept)>.json` | `approve` |
+| 3 | `boundary-drafting` | boundary contract | `<crate_dir>/specs/_boundaries/<boundary_id>.json` | `approve` |
+| 3 | `interaction-drafting` | interaction spec | `<crate_dir>/specs/_interactions/<interaction_id>.json` | `approve <interaction> <protocol-debt>` (pair) |
+| 3 | `bridge-drafting` | bridge specification | `<crate_dir>/specs/_bridges/<bridge_id>.json` | `approve` |
+| 3 | `witness-drafting` | witness specification | `<crate_dir>/specs/_witnesses/<snake_case(concept)>.<query>.json` | `approve` |
+| 3 | `exemption-drafting` | exemption record | `<crate_dir>/specs/_exemptions/<interaction_id>.json` | `approve-exemption-pair` |
+| 3 | `protocol-debt-drafting` | protocol-debt record | `<crate_dir>/specs/_protocol_debt/<interaction_id>.json` | `approve` (pair) |
+| 3 | `conflict-resolution-drafting` | conflict-resolution record | `specs/_conflicts/<id>.json` (workspace-level) | `approve` |
+| 3 | `closure-profile-drafting` | closure profile | `specs/_closure/<cluster>.json` (workspace-level) | `approve` |
+| 3 | `degradation-drafting` | degradation record | `specs/_closure/<cluster>.degradation.json` (workspace-level) | `approve` |
+
+A name not in the registry is refused with the complete list for the stage
+asked for (and, when the name belongs to the other stage, which stage it
+belongs to) — one line at exit 1. It used to be
+`error: no template at /tmp/ligature-data-XXXX/prompts/stage-3-<name>.md`:
+a path the caller never typed, in a directory that did not exist when they
+ran the command, naming no alternative, after `--help` had listed two of
+the eleven. Every `prompts/*.md` is in the registry, enforced by a test, so
+a template cannot ship undiscoverable and cannot be discoverable unshipped.
 
 ## 5. `approve <operation>`
 
@@ -174,6 +199,26 @@ was never flat.
 | `pair` | `approve-pair` | `--reviewer`, interaction + protocol-debt, atomic |
 | `exemption-pair` | `approve-exemption-pair` | `--reviewer`, interaction + exemption, atomic (R2 bootstrap) |
 | `promotion` | `accept-promotion` | `--reviewer` + `--policy-path` + repeatable `--artifact`; Stage 4.5's own deterministic, no-LLM generator |
+
+`draft` promotes every template in §4's table except evidence, whose
+promotion path is `promote-evidence` (§10). Concept specs joined that set
+in #105: until then `draft 3 concept-to-code` staged a file nothing could
+promote, and `approve` refused a concept spec verbatim with
+`no validator recognizes target ...`. A concept spec is normative — plan.md
+§7.2's own human-sign-off list names "new concepts" first, its
+`constraints[].id` is what a boundary contract's `callee_guarantees`
+resolves against (G2+), its `queries[]` what a witness spec's G2
+cross-reference resolves against, and its `queries[].witness_required` the
+declared feature set G18 measures coverage over — so it is promoted by
+`approve` with a human `--reviewer`, like every other normative artifact,
+and its schema carries this pipeline's own `review` block
+(`docs/concept-to-code-modifications.md` gap #7) rather than getting a
+mechanical promotion path like evidence. The consequence is the point of
+the fix: with a promoted spec present, `approve` on a boundary contract now
+resolves `applies_to` and refuses one whose guarantee does not cover the
+callee method. Without one it approves at exit 0 and reports `applies_to`
+merely "unverifiable" — a missing gate that is silent, and silent exactly
+where a human is signing off.
 
 `promotion` is the one operation whose inputs must already carry both
 requirements of #82 before anything is written:
@@ -185,8 +230,8 @@ requirements of #82 before anything is written:
   names *who is accepting the promotion*, never who approved the
   artifacts being promoted, and a `review` block that was merely typed
   into a file cannot pass. Artifacts with no `review` block (the reliance
-  policy document, evidence records, concept specs) have nothing to
-  prove *here*, which is exactly the hole the second requirement fills;
+  policy document, evidence records) have nothing to prove *here*, which
+  is exactly the hole the second requirement fills;
 - **a human ruling** — every artifact in the manifest must also carry a
   `ratified` verdict over its current content in
   `ci/results/human_rulings.jsonl`, recorded by `record-ruling --reviewer

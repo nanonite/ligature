@@ -450,6 +450,12 @@
       "summary": "Shared degradation-record review-provenance and human-ruling checks (chainlink #96)."
     },
     {
+      "path": "scripts/draft_templates.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "The Stage 0/3 draft-template registry (chainlink #105): one list feeding `draft --help`, `draft`'s unrecognized-name refusal, and `init`'s copy of every prompt into .ligature/prompts/, so a template cannot ship without being discoverable or be discoverable without shipping."
+    },
+    {
       "path": "scripts/exit_codes.py",
       "role": "helper",
       "disposition": "runtime-required",
@@ -592,6 +598,12 @@
       "role": "validator",
       "disposition": "runtime-required",
       "summary": "C_static report validation: G1a, G1b."
+    },
+    {
+      "path": "scripts/validate_concept_spec.py",
+      "role": "validator",
+      "disposition": "runtime-required",
+      "summary": "Concept-spec validation at draft time and at approve time (chainlink #105), against the vendored concept-to-code schema extended in memory with the decided `witness_required`, `id` and `review` fields (docs/concept-to-code-modifications.md gaps #5/#6/#7). Owns the G1b <snake_case(concept)>.json naming rule and the extended schema select_pilot_cluster's rubric also validates against, so `draft`, `approve` and the rubric cannot disagree about what a genuinely valid concept spec is."
     },
     {
       "path": "scripts/validate_closure.py",
@@ -941,6 +953,16 @@
       "path": "prompts/stage-3-concept-to-code.md",
       "disposition": "runtime-required",
       "summary": "Stage 0/3 one-shot LLM draft template, dispatched by `draft` via render_prompt()."
+    },
+    {
+      "path": "prompts/stage-3-closure-profile-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template for a Stage 8C closure profile, dispatched by `draft` via render_prompt() (chainlink #98)."
+    },
+    {
+      "path": "prompts/stage-3-degradation-drafting.md",
+      "disposition": "runtime-required",
+      "summary": "Stage 0/3 one-shot LLM draft template for a Stage 8C degradation record, dispatched by `draft` via render_prompt() (chainlink #94/#98)."
     }
   ],
   "tests": [
@@ -1380,11 +1402,11 @@
       "documentation": 14,
       "excluded": 1,
       "installed-template": 4,
-      "runtime-required": 86,
+      "runtime-required": 90,
       "test-only": 70,
       "vendored-runtime": 1
     },
-    "total_entries": 176,
+    "total_entries": 180,
     "test_count": 57,
     "registered_cli_command_count": 44
   },
@@ -1392,7 +1414,7 @@
     {
       "path": "docs/concept-to-code-modifications.md",
       "disposition": "documentation",
-      "summary": "Tracks required/decided modifications to the vendored concept-to-code submodule -- the report artifact the project's own boundary rule requires instead of editing the submodule directly."
+      "summary": "Tracks required/decided modifications to the vendored concept-to-code submodule -- the report artifact the project's own boundary rule requires instead of editing the submodule directly. Gap #7 (chainlink #105) is the concept spec's own `review` block: what makes an `approve`-promoted concept spec possible, and why it is an extension rather than a mechanical promotion path."
     },
     {
       "path": "docs/reliance-policy.template.md",

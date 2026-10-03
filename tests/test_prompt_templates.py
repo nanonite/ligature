@@ -191,6 +191,43 @@ class WriteSetDeclarationTest(unittest.TestCase):
                 self.assertIn("allowed_roots", text)
                 self.assertIn("protected_roots", text)
 
+    def test_every_prompt_says_a_hand_written_protected_file_is_reported(self):
+        """chainlink #103: every prompt that says "written only through this
+        draft -> approve path" also told the agent that write-set-check only
+        reports files *outside* `allowed_roots` -- which is the half that
+        was never the defect. The protected half it now enforces is the one
+        these prompts are actually about, and the agent following them is
+        the one the boundary protects. A prompt that said only the out-of-set
+        half was telling the model the protected write it was told to avoid
+        would not be reported."""
+        for name in (
+            "stage-3-boundary-drafting.md",
+            "stage-3-interaction-drafting.md",
+            "stage-3-bridge-drafting.md",
+            "stage-3-witness-drafting.md",
+            "stage-3-exemption-drafting.md",
+            "stage-3-protocol-debt-drafting.md",
+            "stage-3-conflict-resolution-drafting.md",
+            "stage-3-concept-to-code.md",
+            "stage-3-closure-profile-drafting.md",
+            "stage-3-degradation-drafting.md",
+        ):
+            with self.subTest(prompt=name):
+                text = (PROMPTS / name).read_text()
+                self.assertIn("protected-write", text)
+                # ...and the out-of-set class is still named, so the two
+                # halves stay distinguishable to the reader
+                self.assertIn("out-of-set", text)
+
+    def test_the_skill_names_the_audit_only_residual(self):
+        """The half write-set-check cannot decide must be declared to the
+        agent that is told to obey the boundary, or a `clean` verdict reads
+        as a verified one (#103)."""
+        text = (ROOT / "docs" / "ligature-skill.template.md").read_text()
+        self.assertIn("protected-write", text)
+        self.assertIn("out-of-set", text)
+        self.assertIn("audit only", text)
+
 
 class SimulatedCompliantOutputTest(unittest.TestCase):
     """A hand-written stand-in for 'what a model following

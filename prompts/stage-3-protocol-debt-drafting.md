@@ -116,6 +116,8 @@ directory — a `protected_roots` path. That directory is written only
 through this draft → `approve`/`approve-pair` path, never by hand and never
 by writing the file directly: the project descriptor's `write_set` declares
 the spec trees off-limits to free-form writes, and `ligature
-write-set-check` reports any file that appears outside `allowed_roots` (the
-crate `src/` and `tests/` trees) without a declaration accounting for it.
+write-set-check` reports a file hand-written into this directory as a
+blocking `protected-write` violation, exactly as it reports a file
+outside `allowed_roots` (the crate `src/` and `tests/` trees) as
+`out-of-set`.
 If a finding implies writing anywhere else, surface it instead of writing.

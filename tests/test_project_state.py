@@ -37,6 +37,28 @@ CONSOLIDATED_CHECK_SCHEMA = json.loads(
 )
 
 
+# artifact-kind -> a body the artifact discovery recognizes as that kind.
+# Discovery keys on directory and extension; the identity field is what
+# scripts/write_set.py's own recognition additionally requires, so
+# ArtifactDirectoryConsistencyTest plants a body that satisfies both rather
+# than a file that is merely in the right directory.
+ARTIFACT_BODIES = {
+    "boundary": {"boundary_id": "b"},
+    "interaction": {"interaction_id": "i"},
+    "exemption": {"interaction_id": "i"},
+    "protocol-debt": {"interaction_id": "i"},
+    "bridge": {"bridge_id": "br"},
+    "witness": {"witness_id": "w"},
+    "closure": {"cluster": "c"},
+    "degradation-record": {"cluster": "c"},
+    "gold-set": {"cluster": "c"},
+    "evidence": {"id": "e"},
+    "conflict-resolution": {"conflict_id": "c"},
+    "promotion": {"promotion_id": "PROM-C-001"},
+    "callsites": {"report_id": "r"},
+    "work-package": {"work_package": "WP-1"},
+}
+
 def _sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1405,6 +1427,111 @@ class BoundaryG2PlusSearchRootTest(WorkspaceFixture):
         self.assertEqual(g2_findings[0]["severity"], "info")
         self.assertIn("no --specs-search-root given", g2_findings[0]["summary"])
 
+
+
+class ArtifactDirectoryConsistencyTest(WorkspaceFixture):
+    """`project_state.artifact_dirs()` names the locations the pipeline
+    writes its own artifacts into, and scripts/write_set.py's protected-root
+    enforcement (chainlink #103) is defined by it: a protected file the
+    pipeline does not own is an audit line, and a protected file in a
+    location it does own that the artifact system does not recognize is a
+    violation. That only holds while the registry and
+    `_discover_artifact_files` -- the discovery that decides what an
+    artifact IS -- agree in both directions.
+
+    The registry cannot drive the discovery (the discovery keeps
+    per-location rules: the `*.degradation.json` split in `specs/_closure`,
+    the work-package discriminator in `ci/manifest`), so the agreement is
+    asserted rather than refactored into. Drift in either direction is the
+    hole chainlink #103 reports, reopened: a kind the registry forgot
+    becomes silently un-audited, and a kind it invents becomes a violation
+    for content the pipeline legitimately writes.
+    """
+
+    def descriptor(self) -> dict:
+        return json.loads(self.descriptor_path.read_text())
+
+    def write(self, relative: str, data: str = "{}") -> Path:
+        path = self.workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data)
+        return path
+
+    def discovered(self) -> dict[str, str]:
+        """relative path -> artifact kind, for every artifact on disk."""
+        return {
+            path.relative_to(self.workspace).as_posix(): kind
+            for kind, path in project_state._discover_artifact_files(
+                self.workspace, self.descriptor()
+            )
+        }
+
+    def planted(self) -> list[tuple[str, str]]:
+        """Every (relative path, artifact kind) the registry implies, with
+        `specs/_closure` planted under both filenames because it is the one
+        location whose kind depends on the filename."""
+        planted: list[tuple[str, str]] = []
+        for rel_dir, kind in project_state.artifact_dirs(self.workspace, self.descriptor()):
+            if kind == "closure":
+                planted.append((f"{rel_dir}/x.json", "closure"))
+                planted.append((f"{rel_dir}/cluster.degradation.json", "degradation-record"))
+            else:
+                planted.append((f"{rel_dir}/x.json", kind))
+        return planted
+
+    def test_every_registered_artifact_directory_is_one_discovery_visits(self):
+        self.write_descriptor(crates=("crates/a",))
+        for rel_path, kind in self.planted():
+            with self.subTest(directory=rel_path.rsplit("/", 1)[0]):
+                self.write(rel_path, json.dumps(ARTIFACT_BODIES[kind]))
+                self.assertEqual(self.discovered().get(rel_path), kind)
+
+    def test_every_directory_discovery_visits_is_registered(self):
+        self.write_descriptor(crates=("crates/a",))
+        registered = {
+            rel_dir
+            for rel_dir, _kind in project_state.artifact_dirs(self.workspace, self.descriptor())
+        }
+        for rel_path, kind in self.planted():
+            self.write(rel_path, json.dumps(ARTIFACT_BODIES[kind]))
+        visited = {rel.rsplit("/", 1)[0] for rel in self.discovered()}
+        self.assertTrue(visited)
+        self.assertEqual(visited - registered, set())
+
+    def test_a_declared_crates_kind_dirs_follow_its_crate_dir(self):
+        """The per-crate half is derived from _CRATE_ARTIFACT_DIRS and the
+        descriptor's own crate_dir -- the two inputs that can disagree."""
+        self.write_descriptor(crates=("crates/a", "crates/b"))
+        registered = {
+            rel_dir
+            for rel_dir, _kind in project_state.artifact_dirs(self.workspace, self.descriptor())
+        }
+        self.assertIn("crates/a/specs/_boundaries", registered)
+        self.assertIn("crates/b/specs/_witnesses", registered)
+        self.assertNotIn("crates/c/specs/_boundaries", registered)
+        for crate_dir in ("crates/a", "crates/b"):
+            self.write(
+                f"{crate_dir}/specs/_boundaries/x.json", json.dumps(ARTIFACT_BODIES["boundary"])
+            )
+        self.assertIn("crates/a/specs/_boundaries/x.json", self.discovered())
+        self.assertIn("crates/b/specs/_boundaries/x.json", self.discovered())
+
+    def test_an_empty_artifact_directory_is_still_the_pipelines_own(self):
+        """`ci/manifest/` holding only the ownership manifest is still the
+        directory the pipeline writes work packages into -- which is exactly
+        why a hand-placed `ci/manifest/PROBE.json` is a decidable
+        protected write rather than unattributable (chainlink #103)."""
+        self.write_descriptor(crates=("crates/a",))
+        registered = {
+            rel_dir
+            for rel_dir, _kind in project_state.artifact_dirs(self.workspace, self.descriptor())
+        }
+        self.assertIn("ci/manifest", registered)
+        self.assertEqual(self.discovered(), {})
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 if __name__ == "__main__":
     unittest.main()

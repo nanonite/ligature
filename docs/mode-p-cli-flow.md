@@ -461,6 +461,119 @@ traversal) is refused rather than hashed against someone else's file. The
 installed skill's authority region gains a binding write-set rule and the
 command table gains the verb; all three prompts gain a write-set note.
 
+### `protected_roots` was accounted for, not enforced (chainlink #103)
+
+#77 made the write set machine-checked, but it checked only one half of
+it. `protected_roots` was an *accounted-for* category — a file inside one
+needed no declaration, because the pattern matching it was the
+declaration — and two location carve-outs made that almost total for the
+places the pipeline actually writes: any file under `ci/` (a canonical
+pipeline location) and any file under a declared crate's `specs/` tree
+passed for free. The date-creusot pilot planted three files inside its own
+`protected_roots` — `ci/manifest/PROBE.json` and two spec-tree probes —
+and `write-set-check` reported `write set: clean`, `violations: []`, exit
+0, output byte-identical to the no-probe baseline, in three consecutive
+releases (1.1.0, 1.2.0, 1.2.1). So an agent, or a human, treating that
+command as evidence of the skill's authority boundary 5 got a false
+all-clear: the check could not distinguish "stayed inside the write set"
+from "wrote a new normative interaction spec into the protected specs
+tree", which is precisely the boundary the authority region declares
+binding.
+
+A file inside a `protected_roots` pattern is now a violation unless a
+declaration vouches for **that file**: product-managed in the ownership
+manifest, a declared user-owned document, the ownership manifest itself
+(which records the managed set, so it cannot vouch for its own path out of
+it), or a pipeline artifact the pipeline's own artifact system recognizes
+— by the same discriminators `status` uses, so the protected surface is
+judged by the artifact system the pilot actually runs rather than by a
+second hand-kept list that could drift from it. Both carve-outs are
+removed. The classes are reported separately and each is labelled,
+because only one is a boundary-5 breach:
+
+- `out-of-set` — written where no root permits at all.
+- `protected-write` — written inside a protected root the pipeline owns,
+  in a file the artifact system does not recognize.
+- `declaration` — a write-set shape that enforces nothing.
+
+`check --json` carries one high-severity `write-set` finding per
+`protected-write`, so the gate a run is judged on fails on it, not just
+the dedicated command.
+
+**The half that stays non-blocking, named rather than hidden.** A protected
+file in a location the pipeline writes *nothing* into — a project's own
+`Cargo.toml`, `.github/`, `scripts/`, `rust-toolchain.toml` — cannot be
+attributed: nothing in the workspace separates the project's file from an
+agent's, and failing closed on it would leave every mature workspace
+permanently red, which is how a check gets ignored. Those stay in
+`protected_unvouched` and in a per-pattern `protected_surface` report,
+but the audit is now complete (no carve-out hides any of it) and `details`
+says in words that the verdict does not cover them, so `clean` can no
+longer be read as "boundary 5 holds everywhere". The same report asks that
+`clean` be distinguishable from "found nothing to check", which
+`protected_surface` answers per pattern: every declared protected pattern
+is reported with how many files it covered, and one matching no file at
+all is named as protecting nothing on disk rather than checked-and-clean.
+Recognition of a pipeline artifact comes from
+`project_state._discover_artifact_files`, its kind → identity-field table,
+and a new `project_state.artifact_dirs()` -- never a second hand-kept list
+of "which paths the pipeline writes", which could drift from the artifact
+system and re-open the hole the moment a kind was added.
+`ArtifactDirectoryConsistencyTest` asserts that registry and that
+discovery name the same directories in both directions. `<target>.json.draft`
+inside an artifact directory is accounted for as well:
+`review_checkpoint.stage_draft`, reached through `ligature draft`, is the
+pipeline's own command writing inside a protected tree, and a staged draft
+is inert until `approve` promotes it.
+
+A file *nested below* an artifact directory lands in that same audit
+rather than the blocking class, for the same reason: the discriminators
+disagree about depth, so its provenance is not decidable here.
+
+Closing the remaining half needs what closed #105's and #113's: an explicit
+human-checkpointed command that writes the protected artifact, never an
+agent's hand edit.
+
+### The normative user-owned document that nothing drift-checked (chainlink #78)
+
+`docs/reliance-policy.md` is user-owned — `init` installs the template and
+never overwrites it — but it is also a **normative input**: the standing
+governance document Stage 3 boundary drafting applies its resolution rule
+from, and whose `Policy version: <name>@<major>.<minor>` line
+`accept-promotion` reads to compute a promotion receipt's
+`policy_version`. The ownership manifest recorded `base_hash` and
+`expected_hash` for it, implying a guarantee nothing made: neither value
+was ever compared, so the document could be rewritten — including to
+contradict its own fixed resolution table — while `doctor`, `check` and
+`status` all reported healthy. The only detectable state was a deleted
+file, and only `doctor` noticed that, as one `MISSING` line. The
+descriptor's `compatibility_policy.reliance_policy_path` pointer was
+equally inert: read by nothing, so a workspace could declare a nonexistent
+policy document (or one outside the project root) and still validate as
+`present-valid` with `check` exit 0, and nothing checked that
+`accept-promotion --policy-path` named the file the descriptor declares.
+
+The fix compares what the manifest already records. A normative
+user-owned document's on-disk content is checked against the manifest's
+reviewed `base_hash`: a mismatch (or a missing file) makes `doctor`
+report `DRIFTED`/`MISSING` and exit 1, makes `check` emit a high-severity
+`policy-drift` finding and exit 1, and drops `status --json`'s
+`installation_manifest.state` from `current` to `drifted` with the drift
+carried as an open finding. The recorded base moves only through the
+explicit accept path `ligature accept-policy --reviewer <name>` —
+`init`/`migrate` never re-base a normative user-owned file to whatever is
+on disk, so a reviewed edit is recorded rather than silent — and the
+document must carry exactly one `Policy version:` marker line, the same
+convention `accept-promotion` reads, so the recorded hash always
+corresponds to a policy that can yield a policy_version. The descriptor's
+`reliance_policy_path` is now validated (`check` fails closed when it
+names a nonexistent file or a path outside the project root) and consumed
+as the default for both accept commands, with a disagreeing explicit
+`--policy-path` refused. A legacy manifest that records no `base_hash`
+adopts the on-disk content once, so a pre-#78 workspace becomes
+drift-checkable rather than permanently unverifiable.
+
+
 ### The normative user-owned document that nothing drift-checked (chainlink #78)
 
 `docs/reliance-policy.md` is user-owned — `init` installs the template and

@@ -79,8 +79,19 @@ progress.
    docs, Cargo/build files, harnesses, toolchain pins). Write only under
    `allowed_roots`; never write into `protected_roots`. The pinned
    upstream checkout (`port_source.repository`) is a read-only input, not
-   a write target. `ligature write-set-check` reports files outside the
-   write set; `status --json` carries the verdict as `write_set.state`.
+   a write target. `ligature write-set-check` reports a file written
+   outside the write set as `out-of-set` and a file written into a
+   protected root as `protected-write` — both blocking, both a high-severity
+   `write-set` finding in `check --json`; `status --json` carries the
+   verdict as `write_set.state`. Files that legitimately belong in a
+   protected root get there through a pipeline command (`draft` stages a
+   `.draft` sibling; `approve`, `accept-promotion` and `accept-policy` are
+   human checkpoints you may not run), never by being written by hand. A
+   protected file in a location the pipeline writes nothing into — your
+   project's own `Cargo.toml`, `.github/`, `scripts/` — is listed as
+   `protected (not vouched by any declaration, audit only)` and does not
+   block: leave it alone, and do not read a `clean` verdict as covering
+   it.
 6. **There is no supervisory start.** The agent drives the loop; the
    binary stays a passive oracle. `check` is read-only and never runs a
    writing operation on its own — it only recommends one through
@@ -117,7 +128,7 @@ progress.
 |---|---|
 | `ligature status [--json]` | current project state (artifact lifecycles, obligations, clusters, findings, gate integrity, write-set conformance) |
 | `ligature check [--json] [next]` | read-only consolidated gate run + exactly one recommended next action |
-| `ligature write-set-check [--json]` | read-only write-set conformance: files outside `allowed_roots` / inside `protected_roots` relative to the project descriptor |
+| `ligature write-set-check [--json]` | read-only write-set conformance: files outside `allowed_roots` (`out-of-set`) and files written into `protected_roots` that no declaration vouches for (`protected-write`), both blocking; the protected surface reported per declared pattern |
 | `ligature validate <kind> <target>` | deterministic per-artifact check (G1a/G1b/G2+) |
 | `ligature gate <gate-id> [args...]` | deterministic cross-artifact gate |
 | `ligature draft <stage> <template> <target>` | Stage 0/3 one-shot LLM draft (advisory; human review required). Run `ligature draft --help` for the complete template list — every shipped template, what it drafts, and which command promotes it — rather than guessing a name |

@@ -110,6 +110,28 @@ _CRATE_ARTIFACT_DIRS = (
     ("_witnesses", "witness"),
 )
 
+# (workspace-relative dir, artifact-kind) for the WORKSPACE-level artifact
+# locations. The per-crate ones are _CRATE_ARTIFACT_DIRS under each declared
+# crate's crate_dir; `artifact_dirs()` below is the one place both are
+# enumerated, because two callers need them and must not disagree:
+# `_discover_artifact_files` walks them, and scripts/write_set.py asks them
+# where the pipeline writes its own output so a protected root that covers
+# such a directory can be enforced (chainlink #103). The list is not
+# sufficient on its own -- discovery keeps per-location rules (the
+# `*.degradation.json` split in specs/_closure, the work-package
+# discriminator in ci/manifest) -- so ArtifactDirectoryConsistencyTest asserts
+# that this registry and `_discover_artifact_files` name the same
+# directories in both directions.
+_WORKSPACE_ARTIFACT_DIRS = (
+    ("specs/_closure", "closure"),
+    ("specs/_conflicts", "conflict-resolution"),
+    ("specs/_gold_sets", "gold-set"),
+    ("specs/_promotions", "promotion"),
+    ("evidence", "evidence"),
+    ("ci/results/c_static", "callsites"),
+    ("ci/manifest", "work-package"),
+)
+
 _SEVERITY_MAP = {
     "critical": "critical",
     "error": "high",
@@ -534,6 +556,33 @@ def _looks_like_work_package_manifest(data) -> bool:
     import gate_g14
 
     return gate_g14.looks_like_work_package_manifest(data)
+
+
+def artifact_dirs(workspace: Path, descriptor: dict | None) -> list[tuple[str, str]]:
+    """Every (workspace-relative directory, artifact-kind) the pipeline
+    writes its own artifacts into, whether or not any artifact is in it
+    yet.
+
+    A directory is the pipeline's own even when it is empty -- `ci/manifest/`
+    holding only the ownership manifest is still the directory the pipeline
+    puts work-package manifests in, which is exactly what scripts/write_set.py
+    needs to tell a hand-placed `ci/manifest/PROBE.json` from pipeline
+    output (chainlink #103). Returns relative posix paths, so a caller
+    comparing against a workspace-relative file path never has to resolve.
+    """
+    dirs: list[tuple[str, str]] = []
+    if descriptor is not None:
+        for crate in descriptor.get("crates", []):
+            if not isinstance(crate, dict):
+                continue
+            crate_dir = crate.get("crate_dir")
+            if not isinstance(crate_dir, str) or not crate_dir:
+                continue
+            base = f"{crate_dir.rstrip('/')}/specs"
+            for dirname, kind in _CRATE_ARTIFACT_DIRS:
+                dirs.append((f"{base}/{dirname}", kind))
+    dirs.extend(_WORKSPACE_ARTIFACT_DIRS)
+    return dirs
 
 
 def _discover_artifact_files(workspace: Path, descriptor: dict | None) -> list[tuple[str, Path]]:

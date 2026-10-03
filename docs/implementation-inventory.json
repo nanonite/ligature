@@ -397,7 +397,7 @@
     {
       "name": "write-set-check",
       "func": "cmd_write_set_check",
-      "stable_mapping": "stable read-only write-set conformance report -- files outside allowed_roots / inside protected_roots relative to the project descriptor (chainlink #77, docs/cli-contract.md \u00a78)"
+      "stable_mapping": "stable read-only write-set conformance report -- files outside allowed_roots (class out-of-set) and files written into protected_roots that no declaration vouches for (class protected-write) relative to the project descriptor, with the protected surface reported per declared pattern (chainlink #77, #103, docs/cli-contract.md \u00a78)"
     },
     {
       "name": "doctor",
@@ -701,7 +701,7 @@
       "path": "scripts/write_set.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "chainlink #77: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state."
+      "summary": "chainlink #77, #103: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state. A protected root is ENFORCED rather than accounted for (#103): a file inside one is a violation unless a declaration vouches for that file, and the two location carve-outs #77 shipped (the `ci/` canonical prefix, and any file under a declared crate's specs/ tree) are replaced by recognizing a pipeline artifact through project_state's own discovery, so the protected surface is judged by the artifact system the pipeline actually runs."
     },
     {
       "path": "scripts/promote_evidence.py",

@@ -67,6 +67,37 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
     def init_port(self) -> subprocess.CompletedProcess:
         return self.run_artifact("--workspace", str(self.workspace), "init", "--mode", "port", "--name", "myport")
 
+    def test_write_set_check_rejects_a_probe_inside_a_protected_root(self):
+        """chainlink #103, end to end through the packaged artifact and
+        `python3 -I` with no source tree: a file planted inside
+        `ci/manifest/**` -- a protected_roots path that 1.1.0 through
+        1.2.1 reported as `write set: clean` with `violations: []` -- is a
+        blocking `protected-write` violation naming the matched pattern."""
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor = self.workspace / "project-descriptor.json"
+        declared = json.loads(descriptor.read_text())
+        # The pilot's own protected_roots: ci/manifest/** among them.
+        declared["write_set"] = {
+            "allowed_roots": ["rust/*/src/", "rust/*/tests/"],
+            "protected_roots": ["rust/*/specs/**", "ci/manifest/**"],
+        }
+        descriptor.write_text(json.dumps(declared, indent=2) + "\n")
+        probe = self.workspace / "ci" / "manifest" / "PROBE.json"
+        probe.write_text("{}")
+        proc = self.run_artifact("--workspace", str(self.workspace), "write-set-check")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("write set: violations", proc.stdout)
+        self.assertIn("protected-write", proc.stdout)
+        self.assertIn("ci/manifest/PROBE.json", proc.stdout)
+        self.assertIn("ci/manifest/**", proc.stdout)
+        json_proc = self.run_artifact("--workspace", str(self.workspace), "write-set-check", "--json")
+        document = json.loads(json_proc.stdout)["write_set"]
+        self.assertEqual(document["state"], "violations")
+        self.assertEqual(
+            [(v["path"], v["kind"]) for v in document["violations"]],
+            [("ci/manifest/PROBE.json", "protected-write")],
+        )
+
     def test_version_verify_runs_without_the_source_tree(self):
         proc = self.run_artifact("version", "--verify")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)

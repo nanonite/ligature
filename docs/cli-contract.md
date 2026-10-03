@@ -26,7 +26,7 @@ ligature doctor                              # #57/#58
 ligature version [--verify]                  # #57
 ligature status [--json]                     # #56 -- project-state query
 ligature check [--json] [next]               # #56 -- consolidated gate run + next action
-ligature write-set-check [--json]            # #77 -- read-only write-set conformance
+ligature write-set-check [--json]            # #77, #103 -- read-only write-set conformanceligature write-set-check [--json]            # #77 -- read-only write-set conformance
 ligature accept-policy --reviewer <name>     # #78 -- record a reviewed governance change
 ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
 ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
@@ -520,6 +520,88 @@ refused rather than hashed against someone else's file -- the discipline
 `validate_work_package.check_gate_integrity` already applies to
 work-package manifests.
 
+**`protected_roots` is enforced (#103).** #77 shipped the protected half
+as an *accounted-for* category, and two location carve-outs made it
+invisible rather than merely soft: any file under `ci/` (a canonical
+pipeline location) and any file under a declared crate's `specs/` tree
+passed for free. The date-creusot pilot planted three files inside its own
+`protected_roots` -- `ci/manifest/PROBE.json` and two spec-tree probes --
+and `write-set-check` reported `write set: clean`, `violations: []`, exit
+0, output byte-identical to the no-probe baseline, in three consecutive
+releases (1.1.0 through 1.2.1). A file inside a `protected_roots` pattern
+is now a **violation** unless a declaration vouches for that specific
+file: product-managed in the ownership manifest, a declared user-owned
+document, the ownership manifest itself (which records the managed set and
+so cannot vouch for its own path out of it), or a **pipeline artifact** --
+a file the pipeline's own artifact system recognizes, by the same
+discriminators `status` uses (the kind's identity field; the
+`work_package` / `definition_of_done` keys for a work-package manifest).
+Both carve-outs are gone. The two violation classes are reported
+separately, each labelled, because only the second is a breach of the
+installed skill's authority boundary 5:
+
+as an *accounted-for* category, and two location carve-outs made it
+invisible rather than merely soft: any file under `ci/` (a canonical
+pipeline location) and any file under a declared crate's `specs/` tree
+passed for free. The date-creusot pilot planted three files inside its own
+`protected_roots` -- `ci/manifest/PROBE.json` and two spec-tree probes --
+and `write-set-check` reported `write set: clean`, `violations: []`, exit
+0, output byte-identical to the no-probe baseline, in three consecutive
+releases (1.1.0 through 1.2.1). A file inside a `protected_roots` pattern
+is now a **violation** unless a declaration vouches for that specific
+file: product-managed in the ownership manifest, a declared user-owned
+document, the ownership manifest itself (which records the managed set and
+so cannot vouch for its own path out of it), or a **pipeline artifact** --
+a file the pipeline's own artifact system recognizes, by the same
+discriminators `status` uses (the kind's identity field; the
+`work_package` / `definition_of_done` keys for a work-package manifest).
+Both carve-outs are gone. The two violation classes are reported
+separately, each labelled, because only the second is a breach of the
+installed skill's authority boundary 5:
+
+| class | meaning | blocking |
+|---|---|---|
+| `out-of-set` | written where no root permits at all | yes (exit 1) |
+| `protected-write` | written inside a protected root the pipeline owns, in a file the artifact system does not recognize | yes (exit 1) |
+| `declaration` | a write-set shape that enforces nothing (`allowed_roots: ["**"]`, `protected_roots: []`) | yes (exit 1) |
+| *(audit)* | a protected file in a location the pipeline writes nothing into (a project's own `Cargo.toml`, `.github/`, `scripts/`) | **no** -- see below |
+
+**What stays non-blocking, and why.** A protected file in a location the
+pipeline writes nothing into is reported in `protected_unvouched` and in
+a per-pattern `protected_surface`, but does not fail the check: nothing in
+a workspace distinguishes the project's own `Cargo.toml` from one an agent
+wrote, so failing closed on it would leave every mature workspace
+permanently red and teach the operator to ignore the command. The audit is
+now *complete* (no carve-out hides any of it) and `details` states in
+words that the verdict does not cover those files, so a `clean` verdict can
+no longer be read as "boundary 5 holds everywhere". The report also asks
+that `clean` be distinguishable from "found nothing to check", which
+`protected_surface` answers per pattern: every declared `protected_roots`
+pattern is reported with how many files it covered, how many are
+violations, and how many are unattributed; and a pattern matching no file
+at all is named as such (`protected_root (matched no file): ...`), because a
+protected root nothing matches protects nothing on disk and is not a
+surface that was checked. Recognition of a pipeline artifact is not a
+second hand-kept list of "which paths the pipeline writes": it comes from
+`project_state._discover_artifact_files`, its kind -> identity-field table,
+and a new `project_state.artifact_dirs()`, so the protected surface is
+judged by the artifact system the pipeline actually runs and cannot drift
+from it (asserted in both directions by
+`ArtifactDirectoryConsistencyTest`). `<target>.json.draft` inside an
+artifact directory is accounted for too -- `review_checkpoint.stage_draft`,
+reached through `ligature draft`, is the pipeline's own command writing
+inside a protected tree, and a staged draft is inert until `approve`
+promotes it. A file *nested below* an artifact directory is audited rather
+than called a violation, because the artifact discriminators disagree
+about depth (`_discover_artifact_files` reads one level deep;
+`validate_interaction.find_interaction_files` walks any depth deliberately,
+so a nested placement surfaces as its own G1b violation) and its
+provenance is not decidable in one place. The unclosed half of the
+boundary is labelled rather than silent; what closes it is the same
+discipline #105 and #113 applied to their own dead ends (an explicit
+human-checkpointed command that writes the protected artifact, never an
+agent's hand edit).
+
 **Implemented by #78.** A user-owned normative document (`docs/reliance-policy.md`)
 could not be drift-checked, and the ownership manifest recorded
 `base_hash`/`expected_hash` for it that were never compared -- the
@@ -575,7 +657,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 
 | legacy command | disposition |
 |---|---|
-| `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` / inside `protected_roots` relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json` (#77, §8) |
+| `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` (`out-of-set`) and files inside `protected_roots` that no declaration vouches for (`protected-write`), relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json`. The protected surface is reported per declared pattern, including patterns matching no file (#77, #103, §8) |
 | `validate` | alias → `validate boundary` |
 | `validate-interaction` | alias → `validate interaction` |
 | `validate-exemption` | alias → `validate exemption` |

@@ -152,6 +152,8 @@ directory — a canonical pipeline location the project descriptor's
 `write_set` accounts for (workspace-level `specs/_<kind>/`), never a
 free-form write. `write_set` (`allowed_roots` / `protected_roots`) is what
 declares where this workspace may be written at all, and
-`ligature write-set-check` reports any file outside `allowed_roots` that no
-declaration accounts for. Write only through this draft → `approve` path;
+`ligature write-set-check` reports any file outside `allowed_roots` as
+`out-of-set`, and any file hand-written into this directory -- which is a
+protected location the pipeline owns -- as a blocking `protected-write`
+violation. Write only through this draft → `approve` path;
 if a finding implies writing anywhere else, surface it instead of writing.

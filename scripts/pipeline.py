@@ -2508,13 +2508,15 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
     """`ligature write-set-check [--json]` (docs/cli-contract.md §8, §10):
     the descriptor's write_set evaluated against the workspace's actual
     files (chainlink #77) -- the enforcement boundary made machine-checked
-    rather than merely declared. Read-only: walks the workspace and reads
-    the ownership manifest, writes nothing.
+    rather than merely declared, with `protected_roots` enforced as the
+    violation class it always was meant to be (chainlink #103). Read-only:
+    walks the workspace and reads the ownership manifest, writes nothing.
 
     Exit codes follow docs/exit-code-contract.md: 0 clean, 1 violations
-    (out-of-set files or a vacuous declaration -- the same blocking-
-    findings code `check` reports them under), 2 no valid project
-    descriptor (the write set cannot be evaluated)."""
+    (out-of-set files, writes into a protected root, or a vacuous
+    declaration -- the same blocking-findings code `check` reports them
+    under), 2 no valid project descriptor (the write set cannot be
+    evaluated)."""
     descriptor_path = args.descriptor or (args.workspace / "project-descriptor.json")
     descriptor: dict | None = None
     descriptor_state = "absent"
@@ -2547,10 +2549,19 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
                 "state": report.state,
                 "details": report.details,
                 "violations": [
-                    {"path": violation.path, "reason": violation.reason}
+                    {"path": violation.path, "reason": violation.reason, "kind": violation.kind}
                     for violation in report.violations
                 ],
                 "protected_unvouched": list(report.protected_unvouched),
+                "protected_surface": [
+                    {
+                        "pattern": entry.pattern,
+                        "files": entry.files,
+                        "violations": entry.violations,
+                        "unattributed": entry.unattributed,
+                    }
+                    for entry in report.protected_surface
+                ],
             },
         }
         if descriptor is not None:
@@ -2570,10 +2581,22 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
                 print(f"allowed_roots: {', '.join(allowed) if allowed else '(none)'}")
                 print(f"protected_roots: {', '.join(protected) if protected else '(none)'}")
         print(f"details: {report.details}")
+        # Each class on its own line, labelled: an out-of-set file and a
+        # write into a protected root are different breaches of the
+        # installed skill's authority boundary 5 and a reader must not have
+        # to tell them apart from the reason text (chainlink #103).
         for violation in report.violations:
-            print(f"  violation: {violation.path}: {violation.reason}")
+            print(f"  violation [{violation.kind}]: {violation.path}: {violation.reason}")
+        for entry in report.protected_surface:
+            if entry.files == 0:
+                print(f"  protected_root (matched no file): {entry.pattern}")
+            else:
+                print(
+                    f"  protected_root: {entry.pattern} -- {entry.files} file(s), "
+                    f"{entry.violations} violation(s), {entry.unattributed} unattributed"
+                )
         for rel in report.protected_unvouched:
-            print(f"  protected (not product-managed): {rel}")
+            print(f"  protected (not vouched by any declaration, audit only): {rel}")
 
     if report.state == "violations":
         return 1

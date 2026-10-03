@@ -18,6 +18,17 @@ the pending/approved signal instead of inventing separate state:
     review.reviewer/review.reviewed_at, remove their drafts, and append audit
     entries to ci/results/review_log.jsonl -- append-only, so a human's
     approval is traceable even if an artifact changes again later.
+  - All three promotion paths (approve(), approve_pair(),
+    auto_promote_if_mechanical()) open with the same fail-closed preflight,
+    require_staged_drafts() (chainlink #102). Every promotion reads
+    `<target>.draft`, and reading it unconditionally meant a missing draft
+    -- a typo'd target, a target whose draft the promotion that created it
+    already consumed, or a record hand-written to its target path -- came
+    out as a raw FileNotFoundError traceback at exit 1, naming a file the
+    caller was never told about. One shared guard, one wording, and no
+    per-command copy to drift: the same shape `promote_evidence` already
+    answered and chainlink #83 established for manifests, receipts and
+    descriptors.
   - review_provenance_gaps() is this module's READER for that log. A
     `review` block is pure data -- a hand-written one is byte-identical
     to one approve() wrote -- so a gate that trusts the block trusts
@@ -98,6 +109,96 @@ class ApprovalRefused(Exception):
     finding against the draft -- nothing was written."""
 
 
+class DraftNotStaged(Exception):
+    """Raised when a promotion is asked to promote a `<target>.draft` that
+    is not there -- nothing was written (chainlink #102).
+
+    Deliberately NOT an ApprovalRefused subclass, and not a
+    FileNotFoundError: those two both mean "there was a draft and it was
+    wrong", while this means "there was never a draft to judge". The three
+    conditions an operator actually hits this by are all the same from
+    here -- they named the TARGET where a DRAFT belongs, they re-ran an
+    approval whose draft the first approval consumed, or the artifact was
+    hand-written to its target path (the remediation gate g14 prints,
+    chainlink #94/#97) -- so all three get one line that names the draft
+    and the command that stages one, instead of a ~15-frame traceback
+    pointing at a file the caller was never told about."""
+
+
+def draft_path_for(target_path: Path) -> Path:
+    """Where a target's staged draft lives: `<target>.draft`.
+
+    The one spelling of that name, shared by stage_draft() (which writes
+    it), every promotion verb (which reads it) and pipeline.py's own
+    commands -- it used to be open-coded in five places across the two
+    files, which is how #102's preflight ended up on one promotion verb
+    and not the other two."""
+    return target_path.with_suffix(target_path.suffix + ".draft")
+
+
+def no_staged_drafts_message(pairs: list[tuple[Path, Path]], promoted: int) -> str:
+    """The one operator-facing message for every promotion verb that finds
+    no staged draft (chainlink #102).
+
+    `pairs` is every (draft_path, target_path) whose draft is missing, so
+    the paired verbs -- which promote all-or-none -- name every draft that
+    is absent in one line instead of stopping at the first, and name only
+    those: a pair whose other draft IS staged has one thing to fix, and
+    listing the present one would send the operator to restage it.
+    `promoted` is how many drafts the command promotes in total (1 for
+    `approve`, 2 for the paired verbs), so the sentence stays true when
+    only some of them are absent.
+
+    One wording for the whole class, deliberately: `promote-evidence` already
+    answered the identical condition with the same `no staged draft at
+    <path>` opening, and a second phrasing for the same mistake is the
+    drift this message exists to remove."""
+    drafts = ", ".join(str(draft_path) for draft_path, _ in pairs)
+    if promoted == 1:
+        draft_path, target_path = pairs[0]
+        remedy = (
+            f"stage one with `ligature draft <stage> <template> {target_path}` "
+            f"(`ligature draft --help` lists every template), or copy the target "
+            f"itself to {draft_path}"
+        )
+        shape = "this command promotes an already-staged draft and never writes content itself"
+    else:
+        remedy = (
+            "stage the missing one with `ligature draft <stage> <template> <target>` "
+            "(`ligature draft --help` lists every template)"
+        )
+        shape = (
+            f"this command promotes all {promoted} drafts as one transaction and "
+            "never writes content itself"
+        )
+    return f"nothing was promoted: no staged draft at {drafts} -- {shape}: {remedy}"
+
+
+def require_staged_drafts(draft_paths: tuple[Path, ...], target_paths: tuple[Path, ...]) -> None:
+    """Fail closed unless every draft the promotion is about to read is
+    staged (chainlink #102).
+
+    Called at the top of all three promotion paths -- approve(),
+    approve_pair() and auto_promote_if_mechanical() -- so no caller of this
+    module can reach a promotion through a raw FileNotFoundError, which is
+    what `approve`, `approve-pair` and `approve-exemption-pair` all did in
+    1.2.0/1.2.1. A draft that is absent because a prior promotion consumed
+    it is not an error to recover from: the target is already approved, and
+    the sanctioned way to change it again is a fresh `draft`.
+
+    `strict=True` on the pairing is deliberate: a caller that passed fewer
+    target paths than draft paths would otherwise have the surplus drafts
+    silently skipped, which is a preflight that passes because it did not
+    look -- the same shape as a validation default that means 'skip'."""
+    missing = [
+        (draft_path, target_path)
+        for draft_path, target_path in zip(draft_paths, target_paths, strict=True)
+        if not draft_path.is_file()
+    ]
+    if missing:
+        raise DraftNotStaged(no_staged_drafts_message(missing, len(draft_paths)))
+
+
 def _error_findings(findings: list) -> list:
     return [finding for finding in findings if getattr(finding, "severity", "error") == "error"]
 
@@ -156,7 +257,7 @@ def _load(path: Path) -> dict | None:
 def stage_draft(draft_data: dict, target_path: Path) -> Path:
     """Write a candidate artifact to its draft path, never the target
     path directly -- the target path is only ever written by approve()."""
-    draft_path = target_path.with_suffix(target_path.suffix + ".draft")
+    draft_path = draft_path_for(target_path)
     draft_path.parent.mkdir(parents=True, exist_ok=True)
     draft_path.write_text(json.dumps(draft_data, indent=2) + "\n")
     return draft_path
@@ -178,6 +279,8 @@ def approve(
             "review_checkpoint.SKIP_VALIDATION to explicitly skip it. "
             "There is no default that silently skips validation."
         )
+
+    require_staged_drafts((draft_path,), (target_path,))
 
     draft_data = json.loads(draft_path.read_text())
     old_data = _load(target_path)
@@ -267,6 +370,8 @@ def approve_pair(
         or len(set(draft_paths)) != 2
     ):
         raise ValueError("approve_pair() requires two distinct draft and target paths")
+
+    require_staged_drafts(draft_paths, target_paths)
 
     draft_data_by_target: dict[Path, dict] = {}
     old_data_by_target: dict[Path, dict | None] = {}
@@ -411,6 +516,8 @@ def auto_promote_if_mechanical(
             "real validator, or review_checkpoint.SKIP_VALIDATION to "
             "explicitly skip it."
         )
+
+    require_staged_drafts((draft_path,), (target_path,))
 
     draft_data = json.loads(draft_path.read_text())
     old_data = _load(target_path)

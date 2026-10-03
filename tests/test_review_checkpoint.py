@@ -11,10 +11,12 @@ import review_checkpoint  # noqa: E402
 from review_checkpoint import (  # noqa: E402
     SKIP_VALIDATION,
     ApprovalRefused,
+    DraftNotStaged,
     approve,
     approve_pair,
     auto_promote_if_mechanical,
     classify,
+    draft_path_for,
     requires_human_checkpoint,
     stage_draft,
 )
@@ -204,6 +206,125 @@ class ReviewCheckpointTest(unittest.TestCase):
         self.assertFalse(target_b.exists())
         self.assertTrue(draft_a.exists())
         self.assertTrue(draft_b.exists())
+
+
+class MissingStagedDraftPreflightTest(unittest.TestCase):
+    """chainlink #102: every promotion path reads `<target>.draft`, and all
+    three read it unconditionally -- so a missing draft reached the operator
+    as a raw FileNotFoundError traceback at exit 1, through
+    `ligature approve`, `approve-pair` and `approve-exemption-pair` alike.
+
+    These are the library-level tests: the preflight is in this module
+    rather than in one CLI command, so no caller can reintroduce the
+    traceback behind it (pipeline.py's own exact-line assertions are
+    `MissingStagedDraftTest` in tests/test_pipeline.py)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.target_a = self.root / "specs" / "_interactions" / "I-A.json"
+        self.target_b = self.root / "specs" / "_protocol_debt" / "I-A.json"
+        self.log = self.root / "review_log.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_draft_path_for_is_the_spelling_stage_draft_writes(self):
+        for target in (self.target_a, self.root / "evidence" / "E-1.json"):
+            self.assertEqual(draft_path_for(target), stage_draft({}, target))
+
+    def test_approve_refuses_a_missing_draft_with_a_named_remedy(self):
+        with self.assertRaises(DraftNotStaged) as ctx:
+            approve(
+                draft_path_for(self.target_a), self.target_a,
+                reviewer="alice", review_log=self.log, validate_fn=SKIP_VALIDATION,
+            )
+        message = str(ctx.exception)
+        self.assertIn(f"no staged draft at {draft_path_for(self.target_a)}", message)
+        self.assertIn("ligature draft", message)
+        self.assertFalse(self.target_a.exists())
+        self.assertFalse(self.log.exists())
+
+    def test_approve_refuses_a_draft_a_prior_promotion_already_consumed(self):
+        """The idempotency case: approve(), then approve() again on the same
+        target. The first promotion deleted the draft, so the second has
+        nothing to read -- and the answer is a sentence, not a traceback."""
+        draft = stage_draft({"boundary_id": "a__to__b"}, self.target_a)
+        approve(draft, self.target_a, reviewer="alice", review_log=self.log, validate_fn=SKIP_VALIDATION)
+        self.assertFalse(draft.exists())
+
+        with self.assertRaises(DraftNotStaged):
+            approve(draft, self.target_a, reviewer="alice", review_log=self.log, validate_fn=SKIP_VALIDATION)
+        # The already-promoted target is untouched, and the refused re-run
+        # appended no second audit entry.
+        self.assertEqual(len(self.log.read_text().strip().splitlines()), 1)
+
+    def test_approve_pair_names_every_missing_draft_and_writes_neither(self):
+        with self.assertRaises(DraftNotStaged) as ctx:
+            approve_pair(
+                (draft_path_for(self.target_a), draft_path_for(self.target_b)),
+                (self.target_a, self.target_b),
+                reviewer="alice",
+                review_log=self.log,
+                validate_fn=lambda candidates: {self.target_a: [], self.target_b: []},
+            )
+        message = str(ctx.exception)
+        self.assertIn(str(draft_path_for(self.target_a)), message)
+        self.assertIn(str(draft_path_for(self.target_b)), message)
+        self.assertFalse(self.target_a.exists())
+        self.assertFalse(self.target_b.exists())
+        self.assertFalse(self.log.exists())
+
+    def test_approve_pair_with_one_draft_staged_names_only_the_missing_one(self):
+        """The paired verbs promote all-or-none, so the refusal has to point
+        at the one draft to fix and leave the staged one alone -- both to
+        keep it correct, and because naming a present draft reads as "restage
+        this", which is not what the operator needs to do."""
+        draft_a = stage_draft({"interaction_id": "I-A"}, self.target_a)
+        with self.assertRaises(DraftNotStaged) as ctx:
+            approve_pair(
+                (draft_a, draft_path_for(self.target_b)),
+                (self.target_a, self.target_b),
+                reviewer="alice",
+                review_log=self.log,
+                validate_fn=lambda candidates: {self.target_a: [], self.target_b: []},
+            )
+        message = str(ctx.exception)
+        self.assertNotIn(str(draft_a), message)
+        self.assertIn(str(draft_path_for(self.target_b)), message)
+        self.assertTrue(draft_a.exists(), "the staged draft is left intact for a retry")
+
+    def test_auto_promote_refuses_a_missing_draft_too(self):
+        """Not reachable from a CLI verb today, but it promotes a draft the
+        same way and used to read it the same unguarded."""
+        with self.assertRaises(DraftNotStaged):
+            auto_promote_if_mechanical(
+                draft_path_for(self.target_a), self.target_a,
+                review_log=self.log, validate_fn=SKIP_VALIDATION,
+            )
+
+    def test_the_preflight_does_not_shadow_a_real_refusal(self):
+        """A staged draft that FAILS validation is still ApprovalRefused, not
+        DraftNotStaged: one condition is 'there was a draft and it was
+        wrong', the other is 'there was never a draft'. Collapsing them
+        would tell an author with a broken artifact to go stage one."""
+        target = self.root / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        draft = stage_draft({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.A006"],  # adversary case -- G2+ must reject
+        }, target)
+        validator = load_validator()
+
+        with self.assertRaises(ApprovalRefused) as ctx:
+            approve(
+                draft, target, reviewer="alice", review_log=self.log,
+                validate_fn=lambda p, d: validate_data(p, d, validator, specs_search_root=None),
+            )
+        self.assertNotIsInstance(ctx.exception, DraftNotStaged)
+        self.assertIn("adversary case", str(ctx.exception))
 
 
 class StandaloneCliCannotPromoteTest(unittest.TestCase):

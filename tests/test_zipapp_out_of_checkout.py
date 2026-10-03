@@ -296,6 +296,62 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
         reason = json.loads(check.stdout)["findings"][0]["reason"]
         self.assertIn("$.verifier_policy.clusters.Crypto_Mixed", reason)
 
+    def test_a_missing_staged_draft_is_one_line_through_the_packaged_binary(self):
+        """chainlink #102 end-to-end through the packaged binary, which is
+        where the date-creusot pilot met it (`date-ligature-101`, mirrored
+        from full-ligature-port chainlink #106): `approve`,
+        `approve-pair` and `approve-exemption-pair` read `<target>.draft`
+        without checking it was there, so a typo'd target or a re-run of an
+        approval whose draft the first one consumed came out as a
+        ~15-frame `FileNotFoundError` traceback naming a file the caller was
+        never told about. Absolute target paths are required here: a target
+        resolves against the process cwd, and this class deliberately runs
+        from outside the checkout."""
+        self.assertEqual(self.init_port().returncode, 0)
+        specs = self.workspace / "crates" / "myport-core" / "specs"
+        boundary = specs / "_boundaries" / "does-not-exist.json"
+        interaction = specs / "_interactions" / "I-probe.json"
+        debt = specs / "_protocol_debt" / "I-probe.json"
+        exemption = specs / "_exemptions" / "I-probe.json"
+        for directory in (boundary.parent, interaction.parent, debt.parent, exemption.parent):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        cases = (
+            ("approve", (boundary,), 1),
+            ("approve-pair", (interaction, debt), 2),
+            ("approve-exemption-pair", (interaction, exemption), 2),
+        )
+        for verb, targets, promoted in cases:
+            with self.subTest(command=verb):
+                proc = self.run_artifact(
+                    "--workspace", str(self.workspace), verb,
+                    *(str(target) for target in targets), "--reviewer", "x",
+                )
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertEqual(proc.stdout, "")
+                (line,) = proc.stderr.strip().splitlines()
+                self.assertTrue(line.startswith("error: nothing was promoted: no staged draft at "), line)
+                self.assertNotIn("Traceback", proc.stderr)
+                # Every draft the command would have read is named, so the
+                # paired verbs cannot report half the reason.
+                for target in targets:
+                    self.assertIn(f"{target}.draft", line)
+                self.assertIn(f"promotes all {promoted} drafts" if promoted > 1 else
+                              "promotes an already-staged draft", line)
+                for target in targets:
+                    self.assertFalse(target.exists())
+
+        # The pilot's own control, in the same release and the same tree:
+        # `promote-evidence` already refused this same condition, which is
+        # what made the three promote verbs' silence a defect rather than a
+        # design choice.
+        evidence = self.workspace / "evidence" / "E-99.json"
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        proc = self.run_artifact("--workspace", str(self.workspace), "promote-evidence", str(evidence))
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("no staged draft at", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
     def test_init_records_the_artifact_as_the_pinned_adjudicator(self):
         self.assertEqual(self.init_port().returncode, 0)
         manifest = json.loads((self.workspace / "ci" / "manifest" / "installation.json").read_text())

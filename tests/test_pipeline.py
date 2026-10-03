@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import pipeline  # noqa: E402
 import draft_templates  # noqa: E402
+import review_checkpoint  # noqa: E402
 from draft_templates import find as draft_template_find  # noqa: E402
 from generate_promotion_receipt import record_ruling  # noqa: E402
 
@@ -4005,6 +4006,270 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 1)
         self.assertFalse(target.exists(), "a non-.json target was approved and written through")
+
+class MissingStagedDraftTest(unittest.TestCase):
+    """chainlink #102 (the date-creusot pilot's `date-ligature-101`,
+    mirrored from full-ligature-port chainlink #106): every promotion verb
+    reads `<target>.draft`, and `approve`, `approve-pair` and
+    `approve-exemption-pair` all read it without checking that it was
+    there. Each miss came out as a ~15-frame `FileNotFoundError` traceback
+    at exit 1 -- nothing on stdout, and a message naming a file the caller
+    was never told about, so a typo'd target, a re-run of an approval whose
+    draft the first approval consumed, and a record hand-written straight to
+    its target path all read as a corrupt installation.
+
+    The refusal is `promote_evidence`'s (chainlink #79) and #83's, one
+    wording for the whole class: the pilot's own control was
+    `promote-evidence evidence/E-99.json`, which already answered this exact
+    condition with `error: no staged draft at <path>.draft -- run ... first`.
+    The preflight itself lives in
+    `review_checkpoint.require_staged_drafts()`, the one function all three
+    promotion paths open with, so these tests pin the verbs to the exact
+    line rather than to a substring -- a second wording for one mistake is
+    the drift the shared guard exists to prevent."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        for relative in ("_boundaries", "_interactions", "_exemptions", "_protocol_debt"):
+            (self.workspace / "crate_a" / "specs" / relative).mkdir(parents=True)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = pipeline.main(
+                [
+                    "--workspace", str(self.workspace),
+                    "--descriptor", str(self.descriptor_path),
+                    *args,
+                ]
+            )
+        return rc, out.getvalue(), err.getvalue()
+
+    @property
+    def _review_log(self) -> Path:
+        return self.workspace / "ci" / "results" / "review_log.jsonl"
+
+    def _write_promoted_boundary(self) -> Path:
+        """A real promoted (not .draft) boundary contract -- the
+        already-promoted case: approving it again is the ordinary
+        idempotency question, and its draft was consumed by the promotion
+        that created it."""
+        target = (
+            self.workspace / "crate_a" / "specs" / "_boundaries"
+            / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        )
+        target.write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+            "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
+        }))
+        return target
+
+    # A protocol-debt record and an exemption record are both named after the
+    # interaction they exist for (the pairing convention the pair verbs exist
+    # to bootstrap), so all three targets share one interaction id here.
+    _PROBE_INTERACTION_ID = "I-PROBE-001"
+
+    def _interaction_target(self) -> Path:
+        return (
+            self.workspace / "crate_a" / "specs" / "_interactions"
+            / f"{self._PROBE_INTERACTION_ID}.json"
+        )
+
+    def _debt_target(self) -> Path:
+        return (
+            self.workspace / "crate_a" / "specs" / "_protocol_debt"
+            / f"{self._PROBE_INTERACTION_ID}.json"
+        )
+
+    def _exemption_target(self) -> Path:
+        return (
+            self.workspace / "crate_a" / "specs" / "_exemptions"
+            / f"{self._PROBE_INTERACTION_ID}.json"
+        )
+
+    def _single_expected_line(self, target: Path) -> str:
+        draft = review_checkpoint.draft_path_for(target)
+        return (
+            f"error: nothing was promoted: no staged draft at {draft} -- this command "
+            "promotes an already-staged draft and never writes content itself: stage one "
+            f"with `ligature draft <stage> <template> {target}` (`ligature draft --help` "
+            f"lists every template), or copy the target itself to {draft}"
+        )
+
+    def _paired_expected_line(self, *missing: Path) -> str:
+        """The pair verbs' line, naming exactly the drafts that are absent
+        (the command promotes two either way, which the sentence says)."""
+        drafts = [review_checkpoint.draft_path_for(target) for target in missing]
+        return (
+            f"error: nothing was promoted: no staged draft at {', '.join(str(d) for d in drafts)}"
+            " -- this command promotes all 2 drafts as one transaction and never "
+            "writes content itself: stage the missing one with `ligature draft "
+            "<stage> <template> <target>` (`ligature draft --help` lists every template)"
+        )
+
+    def test_approving_an_already_promoted_artifact_is_one_line_not_a_traceback(self):
+        """The pilot's first row: re-running an `approve` whose draft the
+        first promotion consumed."""
+        target = self._write_promoted_boundary()
+        rc, out, err = self._run(
+            "approve", str(target), "--reviewer", "alice", "--reviewed-at", "2026-10-01"
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        (line,) = err.strip().splitlines()
+        self.assertEqual(line, self._single_expected_line(target))
+        self.assertNotIn("Traceback", err)
+
+    def test_approving_a_typo_target_is_one_line_not_a_traceback(self):
+        """The pilot's second row: a boundary path that does not exist at
+        all. The `.draft` sibling of a file that was never written is the
+        thing the traceback used to name."""
+        target = (
+            self.workspace / "crate_a" / "specs" / "_boundaries" / "does-not-exist.json"
+        )
+        rc, out, err = self._run(
+            "approve", str(target), "--reviewer", "alice", "--reviewed-at", "2026-10-01"
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        (line,) = err.strip().splitlines()
+        self.assertEqual(line, self._single_expected_line(target))
+        self.assertFalse(target.exists())
+
+    def test_a_record_hand_written_to_its_target_path_says_so_in_its_own_terms(self):
+        """The remediation gate g14 prints (chainlink #94/#97) sends an
+        operator to `approve` after a record was written straight to its
+        target path, which is where there is no draft to promote. That is
+        the same missing draft, so it gets the same line -- and the line's
+        own remedy (copy the target to `<target>.draft`) is the way out of
+        exactly that state."""
+        target = self._write_promoted_boundary()
+        rc, _, err = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertIn(f"or copy the target itself to {review_checkpoint.draft_path_for(target)}", err)
+
+    def test_approve_pair_refuses_and_names_every_missing_draft(self):
+        """The pilot's fourth row: two nonexistent targets. The pair verbs
+        promote all-or-none, so the refusal has to name BOTH absent drafts
+        -- stopping at the first would send the operator off to stage one
+        artifact, run it again, and be told about the other."""
+        interaction, debt = self._interaction_target(), self._debt_target()
+        rc, out, err = self._run(
+            "approve-pair", str(interaction), str(debt), "--reviewer", "alice",
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        (line,) = err.strip().splitlines()
+        self.assertEqual(line, self._paired_expected_line(interaction, debt))
+        self.assertFalse(interaction.exists())
+        self.assertFalse(debt.exists())
+        self.assertFalse(self._review_log.exists())
+
+    def test_approve_exemption_pair_refuses_and_names_every_missing_draft(self):
+        """The R2 bootstrap path is the last verb that should be opaque, so
+        it is pinned identically -- same wording, both drafts named."""
+        interaction, exemption = self._interaction_target(), self._exemption_target()
+        rc, out, err = self._run(
+            "approve-exemption-pair", str(interaction), str(exemption), "--reviewer", "alice",
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
+        (line,) = err.strip().splitlines()
+        self.assertEqual(line, self._paired_expected_line(interaction, exemption))
+        self.assertFalse(interaction.exists())
+        self.assertFalse(exemption.exists())
+
+    def test_a_pair_with_one_staged_draft_promotes_neither_and_keeps_the_staged_one(self):
+        """The all-or-none half. One draft present is not a half-promotion
+        waiting to happen: the missing one names itself, the staged one is
+        left exactly where it was for a retry, and neither target is
+        written."""
+        interaction, debt = self._interaction_target(), self._debt_target()
+        staged = interaction.with_suffix(".json.draft")
+        staged.write_text("{}\n")
+        rc, _, err = self._run(
+            "approve-pair", str(interaction), str(debt), "--reviewer", "alice",
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(staged.read_text(), "{}\n")
+        self.assertFalse(interaction.exists())
+        self.assertFalse(debt.exists())
+        self.assertFalse(self._review_log.exists())
+        # Only the absent draft is named: the present one is not the problem.
+        (line,) = err.strip().splitlines()
+        self.assertEqual(line, self._paired_expected_line(debt))
+
+    def test_no_promotion_verb_answers_a_missing_draft_with_a_traceback(self):
+        """The whole class at once, including the sibling verb the pilot
+        used as its control: `promote-evidence` already refused this exact
+        condition in the same release, so all four must share the opening.
+        `FileNotFoundError` here is the regression -- it is what the pilot
+        saw and what the shared preflight removes."""
+        cases = (
+            ("approve", (self._write_promoted_boundary(),)),
+            ("approve-pair", (self._interaction_target(), self._debt_target())),
+            (
+                "approve-exemption-pair",
+                (self._interaction_target(), self._exemption_target()),
+            ),
+        )
+        for verb, targets in cases:
+            with self.subTest(command=verb):
+                rc, out, err = self._run(verb, *(str(t) for t in targets), "--reviewer", "alice")
+                self.assertEqual(rc, 1)
+                self.assertEqual(out, "")
+                self.assertIn("error: nothing was promoted: no staged draft at ", err)
+                self.assertNotIn("Traceback", err)
+                self.assertNotIn("FileNotFoundError", err)
+
+        evidence_dir = self.workspace / "evidence"
+        evidence_dir.mkdir()
+        evidence = evidence_dir / "E-99.json"
+        rc, _, err = self._run("promote-evidence", str(evidence))
+        self.assertEqual(rc, 1)
+        self.assertIn("no staged draft at", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_a_refused_promotion_appends_no_audit_entry(self):
+        """The audit trail records review EVENTS. A promotion that never
+        happened must not leave one behind, or #82's provenance check would
+        later read a review block as provenanced when nothing reviewed it."""
+        target = self._write_promoted_boundary()
+        self._run("approve", str(target), "--reviewer", "alice")
+        self.assertFalse(self._review_log.exists())
+
+    def test_the_remedy_the_message_names_actually_works(self):
+        """The control that keeps the diagnostic honest: the advice is not
+        decoration. Stage the draft the message asks for and the same
+        command promotes it at exit 0."""
+        target = self._write_promoted_boundary()
+        rc, _, _ = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+
+        staged = review_checkpoint.draft_path_for(target)
+        staged.write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C004"],
+        }))
+        rc, out, err = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("approved:", out)
+        self.assertEqual(json.loads(target.read_text())["callee_guarantees"], ["TaskQueue.C004"])
+        self.assertFalse(staged.exists())
+
 
 
 class TargetContainmentTest(unittest.TestCase):

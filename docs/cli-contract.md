@@ -220,6 +220,35 @@ callee method. Without one it approves at exit 0 and reports `applies_to`
 merely "unverifiable" — a missing gate that is silent, and silent exactly
 where a human is signing off.
 
+**Implemented by #102.** Every operation promotes an *already-staged*
+draft: `approve <operation>` reads `<target>.draft` and never writes
+content itself. The pilot (date-creusot `date-ligature-101`, mirrored from
+full-ligature-port chainlink #106) met the resulting gap as a ~15-frame
+`FileNotFoundError` traceback at exit 1 — nothing on stdout, and a message
+naming `<target>.json.draft`, a file the caller was never told about, so a
+typo'd target and a re-run of an approval read as a corrupt installation.
+Three states reach it and all three now read as one line:
+
+```
+error: nothing was promoted: no staged draft at <target>.draft -- this command promotes an already-staged draft and never writes content itself: stage one with `ligature draft <stage> <template> <target>` (`ligature draft --help` lists every template), or copy the target itself to <target>.draft
+```
+
+— a target nobody drafted; a target whose draft the promotion that created
+it already consumed (the ordinary idempotency question, since every
+pipeline step that is safe to retry asks it); and a record hand-written
+straight to its target path, which is the state the `gate-g14` remediation
+sends an operator to fix. The paired verbs promote all-or-none, so they say
+so — `promotes all 2 drafts as one transaction` — and name every draft that
+is *absent* in the same line, leaving a staged sibling exactly where it was
+for the retry. The preflight lives in
+`review_checkpoint.require_staged_drafts()`, the one function all three
+promotion paths open with, so the three verbs cannot word the same refusal
+differently; the `no staged draft at` opening is deliberately the one
+`promote-evidence` already answered this identical condition with (§10). No
+refusal writes anything, and none appends to
+`ci/results/review_log.jsonl`: that trail records review events, and no
+review happened. Exit is **1** through the same `PipelineError` fold (#83).
+
 `promotion` is the one operation whose inputs must already carry both
 requirements of #82 before anything is written:
 
@@ -470,12 +499,11 @@ a directory is never answered with advice to run `init`. The commands that
 report an absent descriptor as data -- `status` (`descriptor: absent`,
 exit 0), `check` (`invalid_input`, exit 5) and `write-set-check`
 (`descriptor: absent`, exit 2) -- are unchanged: they never needed the
-file, so they never had the crash. Related but not fixed here: #106 is the
-same crash *shape* on a different input (a missing `<target>.draft`
-sibling for `approve` / `approve-pair` / `approve-exemption-pair`), and
-that pre-flight belongs to those commands rather than to the descriptor
-loader.
-
+file, so they never had the crash. Related but fixed elsewhere: the same
+crash *shape* on a different input -- a missing `<target>.draft` sibling
+for `approve` / `approve-pair` / `approve-exemption-pair` -- is
+chainlink #102's, and that pre-flight belongs to those commands rather
+than to the descriptor loader (§5).
 
 **Implemented by #75.** `check` also fails closed on installation
 integrity: when the descriptor's `gate_integrity` pins are drifted,

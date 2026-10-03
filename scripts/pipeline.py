@@ -432,9 +432,12 @@ from draft_templates import format_registry_help as draft_template_registry_help
 from draft_templates import unknown_template_error  # noqa: E402
 from project_descriptor import load_project_descriptor as _load_project_descriptor  # noqa: E402
 from project_descriptor import protocol_debt_dir_for as _protocol_debt_dir_for  # noqa: E402
+import review_checkpoint  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
+from review_checkpoint import DraftNotStaged  # noqa: E402
 from review_checkpoint import approve as checkpoint_approve  # noqa: E402
 from review_checkpoint import approve_pair as checkpoint_approve_pair  # noqa: E402
+from review_checkpoint import draft_path_for  # noqa: E402
 from review_checkpoint import stage_draft  # noqa: E402
 from validate_boundary_contracts import check_assumption_identity_collisions  # noqa: E402
 from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
@@ -2138,7 +2141,16 @@ def cmd_approve(args: argparse.Namespace) -> int:
     _require_target_in_workspace(args.target, args.workspace, descriptor)
     validate_fn = _select_validate_fn(args.target, args.workspace, descriptor)
 
-    draft_path = args.target.with_suffix(args.target.suffix + ".draft")
+    draft_path = draft_path_for(args.target)
+    # Chainlink #102: promotion reads `<target>.draft`, so a missing draft
+    # used to reach the operator as a raw FileNotFoundError traceback --
+    # whether the draft was never staged, was consumed by the promotion
+    # that created the target, or the record was hand-written to its target
+    # path (the remediation gate g14 prints, chainlink #94/#97). The
+    # preflight itself lives in review_checkpoint.require_staged_drafts(),
+    # the one function every promotion path opens with, so this verb and the
+    # two paired ones cannot word the same refusal differently; the fold
+    # below is #83's documented PipelineError surface.
     try:
         result = checkpoint_approve(
             draft_path,
@@ -2148,7 +2160,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
             review_log=_workspace_review_log(args.workspace),
             validate_fn=validate_fn,
         )
-    except ApprovalRefused as e:
+    except (ApprovalRefused, DraftNotStaged) as e:
         raise PipelineError(str(e))
     print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
     return 0
@@ -2163,7 +2175,7 @@ def cmd_approve_pair(args: argparse.Namespace) -> int:
     )
 
     targets = (args.interaction_target, args.protocol_debt_target)
-    drafts = tuple(target.with_suffix(target.suffix + ".draft") for target in targets)
+    drafts = tuple(draft_path_for(target) for target in targets)
     try:
         results = checkpoint_approve_pair(
             drafts,
@@ -2173,7 +2185,7 @@ def cmd_approve_pair(args: argparse.Namespace) -> int:
             review_log=_workspace_review_log(args.workspace),
             validate_fn=validate_fn,
         )
-    except ApprovalRefused as e:
+    except (ApprovalRefused, DraftNotStaged) as e:
         raise PipelineError(str(e))
     for result in results:
         print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
@@ -2189,7 +2201,7 @@ def cmd_approve_exemption_pair(args: argparse.Namespace) -> int:
     )
 
     targets = (args.interaction_target, args.exemption_target)
-    drafts = tuple(target.with_suffix(target.suffix + ".draft") for target in targets)
+    drafts = tuple(draft_path_for(target) for target in targets)
     try:
         results = checkpoint_approve_pair(
             drafts,
@@ -2199,7 +2211,7 @@ def cmd_approve_exemption_pair(args: argparse.Namespace) -> int:
             review_log=_workspace_review_log(args.workspace),
             validate_fn=validate_fn,
         )
-    except ApprovalRefused as e:
+    except (ApprovalRefused, DraftNotStaged) as e:
         raise PipelineError(str(e))
     for result in results:
         print(f"approved: {result.target_path} ({result.classification}) by {result.reviewer} at {result.reviewed_at}")
@@ -2231,7 +2243,7 @@ def cmd_promote_evidence(args: argparse.Namespace) -> int:
             f"target {args.target} is not an evidence record at evidence/*.json "
             "(workspace-level) -- promote-evidence only promotes evidence drafts"
         )
-    draft_path = args.target.with_suffix(args.target.suffix + ".draft")
+    draft_path = draft_path_for(args.target)
     try:
         target_path = promote_evidence(draft_path, args.target, args.workspace)
     except EvidencePromotionError as e:

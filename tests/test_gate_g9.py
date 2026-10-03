@@ -51,7 +51,10 @@ def descriptor_with(backends: dict | None = None, default: str = "creusot", clus
     ]
     descriptor["verifier_policy"] = {"default": default}
     if cluster_verifier:
-        descriptor["verifier_policy"]["scheduler-core"] = cluster_verifier
+        # chainlink #104: per-cluster overrides live under `clusters`
+        # rather than as arbitrary sibling keys of `default`, which is
+        # what lets `verifier_policy` be a closed object.
+        descriptor["verifier_policy"]["clusters"] = {"scheduler-core": cluster_verifier}
     if backends is not None:
         descriptor["verifier_backends"] = backends
     return descriptor
@@ -365,30 +368,51 @@ class OwningVerifierTest(G9TestCase):
         self.assertTrue((harness_dir_for(self.root) / f"{BRIDGE_ID}.verus.rs").is_file())
         self.assertEqual(self.check_record()["verifier"], "verus")
 
-    def test_a_cluster_named_supporting_does_not_crash_the_resolution(self):
-        """chainlink #76: `supporting` is now a declared verifier_policy
-        key holding a LIST. A cluster literally named "supporting" would
-        resolve to that list -- unhashable, so the ownership scan would
-        raise TypeError. The unresolvable claim is skipped and the bridge
-        falls back to verifier_policy.default."""
+    def test_a_cluster_named_supporting_resolves_normally(self):
+        """chainlink #104 removes the hazard chainlink #76 had to work
+        around. `supporting` was a declared policy key holding a LIST, so
+        a cluster literally named "supporting" used to resolve to that
+        list -- unhashable, and adding it to the verifier set raised
+        TypeError. It was worked around by skipping the unresolvable
+        claim, which silently dropped the bridge's real owner.
+
+        Overrides now live in their own `clusters` object and `supporting`
+        keeps its own meaning, so a cluster named "supporting" is just a
+        cluster name again: it resolves through the same
+        `clusters.get(cluster, default)` lookup as any other, and the
+        bridge keeps its owner instead of losing it."""
         from test_validate_closure import valid_profile  # noqa: E402
 
         descriptor = descriptor_with(fake_backend(), default="kani")
         descriptor["verifier_policy"]["supporting"] = ["kani"]
         (self.root / "project-descriptor.json").write_text(json.dumps(descriptor))
-        # Rename the workspace's cluster to "supporting" so the ownership
-        # scan hits the list-valued declared key.
+        # Rename the workspace's cluster to "supporting" -- the name that
+        # used to collide with the declared policy key.
         profile = valid_profile()
         profile["cluster"] = "supporting"
         profile["work_packages"] = ["WP-A"]
         (self.root / "specs/_closure/scheduler-core.json").unlink()
         (self.root / "specs/_closure/supporting.json").write_text(json.dumps(profile))
         owned = owning_verifier_by_bridge(self.root, descriptor)
-        # The colliding cluster's claim is dropped, so the bridge is
-        # unclaimed -- and falls back to the default rather than crashing.
-        self.assertEqual(owned, {})
+        self.assertEqual(owned, {BRIDGE_ID: "kani"})
         self.assertEqual(resolve_verifier(BRIDGE_ID, owned, descriptor), "kani")
 
+    def test_a_cluster_override_still_wins_over_the_default(self):
+        """The load-bearing property chainlink #104 had to preserve when it
+        moved the overrides: a cluster listed under `clusters` owns its
+        bridges under its own verifier, not `default`'s."""
+        descriptor = descriptor_with(fake_backend(), default="kani", cluster_verifier="verus")
+        owned = owning_verifier_by_bridge(self.root, descriptor)
+        self.assertEqual(owned, {BRIDGE_ID: "verus"})
+
+    def test_a_policy_without_clusters_still_resolves(self):
+        """`clusters` is optional -- a single-verifier project declares
+        only `default`, and a missing key must mean "no overrides" rather
+        than raise."""
+        descriptor = descriptor_with(fake_backend(), default="kani")
+        self.assertNotIn("clusters", descriptor["verifier_policy"])
+        owned = owning_verifier_by_bridge(self.root, descriptor)
+        self.assertEqual(owned, {BRIDGE_ID: "kani"})
 
 class ReportingTest(G9TestCase):
     def test_no_bridges_fails_closed(self):

@@ -192,6 +192,79 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
         self.assertEqual(document["descriptor"]["state"], "present-valid")
         self.assertEqual(document["descriptor"]["closure_kind"], "bounded")
 
+    def test_verifier_policy_typo_is_rejected_by_the_artifact_alone(self):
+        """chainlink #104 end-to-end through the packaged binary: the issue's
+        exact repro. `{"default": "creusot", "defualt": "kani"}` validated,
+        `check` exited 0 with `findings: []`, and the typo was
+        indistinguishable from a real key -- and a `fallback` key that 1.1.1
+        had rejected regressed to accepted. Both must now be refused, with
+        the diagnostic naming the permitted keys and the near miss."""
+        self.assertEqual(self.init_port().returncode, 0)
+        path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(path.read_text())
+
+        descriptor["verifier_policy"]["defualt"] = "kani"
+        path.write_text(json.dumps(descriptor))
+        check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertEqual(check.returncode, 5, check.stdout + check.stderr)
+        document = json.loads(check.stdout)
+        self.assertIn("invalid_input", document["result"]["conditions"])
+        reason = document["findings"][0]["reason"]
+        self.assertIn("unexpected property 'defualt'", reason)
+        self.assertIn("permitted: clusters, default, supporting", reason)
+        self.assertIn("did you mean 'default'?", reason)
+
+        # The key that 1.1.1 refused and 1.2.x accepted again.
+        del descriptor["verifier_policy"]["defualt"]
+        descriptor["verifier_policy"]["fallback"] = "creusot"
+        path.write_text(json.dumps(descriptor))
+        check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertEqual(check.returncode, 5, check.stdout + check.stderr)
+        document = json.loads(check.stdout)
+        self.assertIn("invalid_input", document["result"]["conditions"])
+        self.assertIn("unexpected property 'fallback'", document["findings"][0]["reason"])
+
+    def test_a_per_cluster_override_still_validates_through_the_artifact(self):
+        """The property chainlink #104 had to preserve when it closed the
+        object: a per-cluster override is still expressible, under
+        `clusters`, and `status --json` reads it back -- so closing the
+        object did not cost the P3 crypto-mixed pilot (`verus` + `kani`) the
+        only thing it was ever able to declare."""
+        self.assertEqual(self.init_port().returncode, 0)
+        path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(path.read_text())
+        descriptor["verifier_policy"] = {
+            "default": "verus",
+            "clusters": {"crypto-mixed": "kani"},
+            "supporting": ["kani"],
+        }
+        path.write_text(json.dumps(descriptor))
+        self.assertEqual(list(make_validator(DESCRIPTOR_SCHEMA).iter_errors(descriptor)), [])
+
+        status = self.run_artifact("--workspace", str(self.workspace), "status", "--json")
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        document = json.loads(status.stdout)
+        self.assertEqual(document["descriptor"]["state"], "present-valid")
+        self.assertEqual(
+            document["descriptor"]["verifier_policy"],
+            {"default": "verus", "clusters": {"crypto-mixed": "kani"}, "supporting": ["kani"]},
+        )
+
+    def test_a_cluster_key_that_is_not_a_cluster_name_is_rejected(self):
+        """The one deliberately open object left in the descriptor, and the
+        reason its keys are constrained: `Crypto_Mixed` could never name a
+        cluster in any artifact, so accepting it as an override would mean
+        accepting a declaration nothing will ever read."""
+        self.assertEqual(self.init_port().returncode, 0)
+        path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(path.read_text())
+        descriptor["verifier_policy"]["clusters"] = {"Crypto_Mixed": "kani"}
+        path.write_text(json.dumps(descriptor))
+        check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertEqual(check.returncode, 5, check.stdout + check.stderr)
+        reason = json.loads(check.stdout)["findings"][0]["reason"]
+        self.assertIn("$.verifier_policy.clusters.Crypto_Mixed", reason)
+
     def test_init_records_the_artifact_as_the_pinned_adjudicator(self):
         self.assertEqual(self.init_port().returncode, 0)
         manifest = json.loads((self.workspace / "ci" / "manifest" / "installation.json").read_text())
@@ -282,6 +355,37 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
     def init(self, build: dict) -> subprocess.CompletedProcess:
         return self.run_artifact(build["artifact"], "init", "--mode", "greenfield", "--name", "repin")
 
+    def adopt_current_descriptor_shape(self) -> None:
+        """Move the workspace's descriptor onto the current
+        `verifier_policy` shape, the way an operator upgrading an existing
+        workspace has to.
+
+        `old_build`'s `init` writes the pre-chainlink-#104 shape -- a
+        per-cluster override as a sibling key of `default` -- which the
+        current schema rejects. That is the point of #104 (an arbitrary
+        key beside `default` is indistinguishable from a typo), not a
+        defect in this test, and it is deliberately NOT papered over by
+        the product: the descriptor is user-owned, so `migrate` reports a
+        normative user-owned document as drifted rather than rewriting it
+        (chainlink #78), and the load-time diagnostic names the permitted
+        keys. These tests are about the adjudicator pin, so they bring the
+        descriptor current themselves and say so."""
+        path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(path.read_text())
+        policy = descriptor.get("verifier_policy", {})
+        overrides = {
+            key: value
+            for key, value in policy.items()
+            if key not in ("default", "clusters", "supporting")
+        }
+        if overrides:
+            policy.setdefault("clusters", {}).update(overrides)
+            for key in overrides:
+                del policy[key]
+            descriptor["verifier_policy"] = policy
+            path.write_text(json.dumps(descriptor, indent=2) + "\n")
+
+
     def pinned_hash(self) -> str | None:
         manifest = json.loads((self.workspace / "ci" / "manifest" / "installation.json").read_text())
         return manifest["adjudicator"]["content_hash"]
@@ -299,6 +403,7 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
 
     def test_rerun_with_a_different_binary_refuses_to_repin(self):
         self.assertEqual(self.init(self.old_build).returncode, 0)
+        self.adopt_current_descriptor_shape()
         proc = self.init(self.new_build)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn("adjudicator pin mismatch", proc.stdout)
@@ -311,6 +416,7 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
 
     def test_migrate_upgrade_repins_deliberately(self):
         self.assertEqual(self.init(self.old_build).returncode, 0)
+        self.adopt_current_descriptor_shape()
         self.assertEqual(self.init(self.new_build).returncode, 1)  # refused
         proc = self.run_artifact(self.new_build["artifact"], "migrate", "--upgrade")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)

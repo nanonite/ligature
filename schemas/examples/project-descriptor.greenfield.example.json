@@ -19,7 +19,9 @@
   ],
   "verifier_policy": {
     "default": "creusot",
-    "scheduling": "kani"
+    "clusters": {
+      "scheduling": "kani"
+    }
   },
   "compatibility_policy": {
     "reliance_policy_path": "docs/reliance-policy.md",

@@ -122,13 +122,25 @@
     },
     "verifier_policy": {
       "type": "object",
-      "description": "Default verifier per cluster (plan.md \u00a74). The key set is documented (chainlink #76): 'default' (required) is the verifier for every cluster not listed by name; any other key names a cluster and holds that cluster's verifier, so a cluster not listed as its own key uses 'default'; 'supporting' is the declared shape for a second or supporting verifier whose evidence backs the primary one (e.g. a deductive cluster with a model-checking fallback) -- arbitrary extra keys are per-cluster overrides, NOT a composition, and a key that matches no cluster is simply never read. Every value must be a member of the verifier enum.",
+      "description": "Which verifier system owns which cluster (plan.md \u00a74). CLOSED -- exactly three keys: 'default' (required), 'clusters', and 'supporting'. This was the descriptor's only open object until chainlink #104, where 'additionalProperties: {$ref: verifier}' made the whole rule 'any key name, as long as its value is a member of the verifier enum'. That made a misspelling ('defualt', 'fallback') indistinguishable from a real per-cluster override: {\"default\": \"creusot\", \"defualt\": \"kani\"} validated as an override for a cluster literally named 'defualt', 'check' exited 0 with no findings, and nothing would ever read it. Per-cluster overrides live under 'clusters' instead, where a key is either a cluster name or a typo of one, and 'clusters' constrains its own keys with the same ^[a-z0-9]+(?:-[a-z0-9]+)*$ pattern every cluster name in this pipeline already follows (docs/closure-profile-schema.json, schemas/project-state.schema.json) -- so a key that could not name a cluster at all is rejected at load instead of waiting forever to be read. 'supporting' is the declared shape for a second or supporting verifier whose evidence backs the primary one (e.g. a deductive cluster with a model-checking fallback); order is not significant, duplicates are permitted but meaningless. Every value is a member of the verifier enum.",
       "required": [
         "default"
       ],
+      "additionalProperties": false,
       "properties": {
         "default": {
-          "$ref": "#/$defs/verifier"
+          "$ref": "#/$defs/verifier",
+          "description": "The verifier for every cluster not listed under 'clusters'. Required: without it no cluster has an owner."
+        },
+        "clusters": {
+          "type": "object",
+          "description": "Per-cluster verifier overrides, keyed by cluster name -- the documented home for what used to be arbitrary sibling keys of 'default' (chainlink #104). A cluster not listed here uses 'default'; a key that names no cluster in the workspace is simply never read, which is why the key pattern below is enforced rather than left to convention. Optional and absent by default: a single-verifier project declares only 'default'.",
+          "additionalProperties": {
+            "$ref": "#/$defs/verifier"
+          },
+          "propertyNames": {
+            "$ref": "#/$defs/cluster_name"
+          }
         },
         "supporting": {
           "type": "array",
@@ -137,9 +149,6 @@
           },
           "description": "Additional verifiers whose evidence supports the primary one (chainlink #76) -- the real shape for multi-verifier composition, replacing the accident of an arbitrary extra key holding a second enum member (which validated while nothing ever read it). Order is not significant; duplicates are permitted but meaningless."
         }
-      },
-      "additionalProperties": {
-        "$ref": "#/$defs/verifier"
       }
     },
     "closure_kind": {
@@ -303,6 +312,11 @@
     }
   },
   "$defs": {
+    "cluster_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "description": "A cluster name, in the one form every other cluster-naming field in this pipeline already requires: docs/closure-profile-schema.json's `cluster` (which must equal the closure profile's own filename stem, G1b) and schemas/project-state.schema.json's `cluster`. Enforced here on `verifier_policy.clusters`' keys (chainlink #104) so a key that could not name a cluster in any artifact is refused at load rather than accepted as an override nothing will ever read."
+    },
     "verifier": {
       "type": "string",
       "enum": [

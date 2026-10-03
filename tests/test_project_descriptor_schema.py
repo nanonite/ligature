@@ -169,7 +169,12 @@ class VerifierPolicyTest(unittest.TestCase):
     `additionalProperties` -- undiscoverable and unreported by any command --
     and a second or supporting verifier could not be expressed at all,
     while an arbitrary extra key holding a second enum member validated
-    silently and was then discarded by every reader."""
+    silently and was then discarded by every reader.
+
+    chainlink #104 closes it. #76 documented the key set and left the
+    object open, so a misspelled key (`defualt`) still validated and
+    nothing ever read it; per-cluster overrides now live under their own
+    `clusters` key, which is what lets the object around them close."""
 
     @classmethod
     def setUpClass(cls):
@@ -224,27 +229,98 @@ class VerifierPolicyTest(unittest.TestCase):
         self.assertTrue(errors, "schema accepted a non-member in supporting")
 
     def test_per_cluster_override_is_still_accepted(self):
-        """gate_g9.py resolves `policy.get(cluster, policy["default"])`,
-        so per-cluster override keys must stay expressible -- the fix
-        documents the key set rather than closing the object (chainlink
-        #76)."""
+        """gate_g9.py resolves
+        `policy.get("clusters", {}).get(cluster, policy["default"])`,
+        so per-cluster overrides must stay expressible -- under their own
+        key now, so that the object around them can be closed
+        (chainlink #104)."""
         instance = self._port_descriptor()
-        instance["verifier_policy"] = {"default": "creusot", "crypto-mixed": "kani"}
+        instance["verifier_policy"] = {
+            "default": "creusot",
+            "clusters": {"crypto-mixed": "kani"},
+        }
         errors = list(self.validator.iter_errors(instance))
         self.assertEqual(errors, [], [e.message for e in errors])
 
-    def test_misspelled_key_is_accepted_as_a_cluster_override(self):
-        """The documented behavior for the Defect 1 hazard: an arbitrary
-        key is a per-cluster override, so `defualt: "kani"` validates as an
-        override for a cluster literally named 'defualt'. Closing the
-        object would break per-cluster overrides, so the hazard is
-        mitigated instead: the key set is documented on the schema, and
-        `status --json` echoes the policy so the typo is visible under
-        `clusters` rather than silent (chainlink #76)."""
+    def test_the_policy_object_is_closed(self):
+        """The Defect 1 hazard, closed: `verifier_policy` was the
+        descriptor's only object that accepted unknown keys, so
+        `{"default": "creusot", "defualt": "kani"}` validated as an
+        override for a cluster literally named 'defualt' and `check`
+        exited 0 with no findings. Exactly three keys are permitted now
+        (chainlink #104)."""
+        self.assertIs(self.schema["properties"]["verifier_policy"]["additionalProperties"], False)
+
+    def test_a_misspelled_key_is_rejected_not_silently_accepted(self):
+        """The issue's exact repro. Before #104 this validated; now it is
+        an unexpected property naming the permitted set, and
+        `schema_diagnostics` additionally names the key it looks like --
+        `defualt` is one adjacent transposition from `default`."""
         instance = self._port_descriptor()
         instance["verifier_policy"]["defualt"] = "kani"
         errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema still accepts a misspelled verifier_policy key")
+
+    def test_the_fallback_key_is_rejected(self):
+        """The reported regression: `fallback` was rejected in 1.1.1 and
+        became present-valid again once `additionalProperties` was opened
+        (chainlink #104). It names no cluster and is not one of the three
+        permitted keys, so it is refused."""
+        instance = self._port_descriptor()
+        instance["verifier_policy"]["fallback"] = "creusot"
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema accepted a 'fallback' key")
+
+    def test_a_flat_per_cluster_override_key_is_rejected(self):
+        """The migration case: an existing descriptor declaring
+        `"scheduling": "kani"` as a sibling of `default` is no longer
+        accepted silently -- it is named, with the permitted set that
+        says where a per-cluster override goes now."""
+        instance = self._port_descriptor()
+        instance["verifier_policy"]["scheduling"] = "kani"
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema accepted a flat per-cluster override key")
+
+    def test_a_cluster_key_that_could_not_name_a_cluster_is_rejected(self):
+        """`verifier_policy.clusters` is the one deliberately open object
+        left in the descriptor -- its keys ARE cluster names, which the
+        schema cannot enumerate. It constrains them with the same
+        `^[a-z0-9]+(?:-[a-z0-9]+)*$` pattern every other cluster-name
+        field in the pipeline requires, so a key that could not name a
+        cluster in any artifact (`Crypto_Mixed`) is refused at load
+        rather than waiting forever to be read (chainlink #104)."""
+        instance = self._port_descriptor()
+        instance["verifier_policy"]["clusters"] = {"Crypto_Mixed": "kani"}
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema accepted a clusters key no cluster could be named")
+
+    def test_a_plausible_but_unmatched_cluster_name_is_still_accepted(self):
+        """The boundary of the key pattern, stated rather than implied:
+        a key that *could* name a cluster the workspace has not declared
+        yet validates (a project may declare its clusters before it
+        drafts their profiles), because the descriptor schema has no view
+        of the workspace. What it rejects is a key that is not a legal
+        cluster name at all."""
+        instance = self._port_descriptor()
+        instance["verifier_policy"]["clusters"] = {"crypto-mixed": "kani", "not-declared-yet": "verus"}
+        errors = list(self.validator.iter_errors(instance))
         self.assertEqual(errors, [], [e.message for e in errors])
+
+    def test_a_clusters_value_outside_the_enum_is_still_rejected(self):
+        instance = self._port_descriptor()
+        instance["verifier_policy"]["clusters"] = {"crypto-mixed": "creusot-rust"}
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema accepted a non-member under clusters")
+
+    def test_default_is_still_required(self):
+        """Closing the object does not relax it: `default` is the one key
+        a policy cannot do without, and deleting it while keeping only a
+        misspelled `defualt` still fails."""
+        instance = self._port_descriptor()
+        del instance["verifier_policy"]["default"]
+        instance["verifier_policy"]["defualt"] = "kani"
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "schema accepted a policy with no default")
 
 
 class SchemaDiagnosticsTest(unittest.TestCase):
@@ -311,11 +387,25 @@ class SchemaDiagnosticsTest(unittest.TestCase):
         diagnostic text must say which happened: an unexpected property
         names the permitted alternatives; an enum violation names the
         permitted values (chainlink #73's distinction, pinned for the
-        verifier_policy field the pilot is named after)."""
+        verifier_policy field the pilot is named after).
+
+        chainlink #104 makes the first case reachable at all: while
+        verifier_policy was an open object, a key of an unrecognized name
+        was accepted outright and only its VALUE could ever fail, so this
+        distinction had exactly one live side here. Both are now real and
+        are reported differently."""
         data = json.loads(json.dumps(self.example))
         data["verifier_policy"]["zzz_not_a_real_key"] = "nope"
         (line,) = schema_diagnostics(data)
-        self.assertIn("$.verifier_policy.zzz_not_a_real_key", line)
+        self.assertIn("unexpected property 'zzz_not_a_real_key'", line)
+        self.assertIn("permitted:", line)
+        # ...and the sibling case, one level down: a key that IS accepted
+        # under `clusters` but holds a value outside the enum still fails
+        # as a VALUE, naming the three permitted verifiers.
+        data = json.loads(json.dumps(self.example))
+        data["verifier_policy"]["clusters"] = {"crypto-mixed": "nope"}
+        (line,) = schema_diagnostics(data)
+        self.assertIn("$.verifier_policy.clusters.crypto-mixed", line)
         self.assertIn("is not one of", line)
         for verifier in ("kani", "creusot", "verus"):
             self.assertIn(verifier, line)
@@ -525,13 +615,33 @@ class DidYouMeanTest(unittest.TestCase):
         )
 
     def test_an_open_object_still_accepts_a_per_cluster_override(self):
-        """chainlink #76's documented decision is unchanged by #106:
-        `verifier_policy` stays open, because gate g9 resolves a
-        per-cluster override -- the did-you-mean adds a diagnostic for a
-        CLOSED object, it does not close one."""
+        """chainlink #104: `verifier_policy` is CLOSED now, and the
+        near-miss diagnostic #106 added is now what a typo inside it gets
+        -- `defualt` is one transposition from `default`, a key the object
+        really does accept, so this is the case where naming the
+        permitted alternative actually resolves the mistake. A per-cluster
+        override is still expressible, under `clusters`."""
         data = json.loads(json.dumps(self.example))
-        data["verifier_policy"]["defualt"] = "kani"
+        data["verifier_policy"]["clusters"] = {"crypto-mixed": "kani"}
         self.assertEqual(schema_diagnostics(data), [])
+        data["verifier_policy"]["defualt"] = "kani"
+        (line,) = schema_diagnostics(data)
+        self.assertIn("unexpected property 'defualt'", line)
+        self.assertTrue(line.endswith("did you mean 'default'?"), line)
+
+    def test_a_suggestion_never_points_into_the_open_clusters_map(self):
+        """`verifier_policy.clusters` accepts any legal cluster name, so
+        a rejected key has no correct home there and must not be pointed
+        at one -- the same rule `_schema_property_paths` applies to every
+        open object, now the only one left in the descriptor."""
+        data = json.loads(json.dumps(self.example))
+        data["verifier_policy"]["clusters"] = {"Crypto_Mixed": "kani"}
+        (line,) = schema_diagnostics(data)
+        self.assertNotIn("did you mean", line)
+        # ...and the key itself is named, with its own JSON path, rather
+        # than the containing object jsonschema reports by default.
+        self.assertIn("$.verifier_policy.clusters.Crypto_Mixed", line)
+        self.assertIn("^[a-z0-9]+(?:-[a-z0-9]+)*$", line)
 
     def test_the_diagnostic_surfaces_on_the_load_error_every_command_prints(self):
         """Every CLI boundary prints `error: {e}` for a

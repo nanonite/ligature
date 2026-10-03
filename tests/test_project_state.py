@@ -1014,7 +1014,16 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
     def test_verifier_policy_closure_kind_is_rejected_with_the_verifier_enum(self):
         """The pilot's second probe shape: `verifier_policy.closure_kind`
         is not the field -- the diagnostic must say what verifier_policy
-        does permit, not just "invalid"."""
+        does permit, not just "invalid".
+
+        chainlink #104 makes this a strictly better answer than before.
+        While `verifier_policy` was open, `closure_kind` was accepted as
+        a key and failed only on its VALUE, so the line said "'deductive'
+        is not one of ['kani','creusot','verus']" -- which named neither
+        the field the pilot wanted nor the fact that the key was wrong at
+        all. It is now rejected as a key, and the line names both: the
+        permitted set, and `closure_kind`'s real home at the top level.
+        """
         self.write_example_descriptor(
             "project-descriptor.greenfield.example.json",
             lambda d: d["verifier_policy"].__setitem__("closure_kind", "deductive"),
@@ -1024,8 +1033,12 @@ class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
         # invalid_input); the diagnostic content is unchanged.
         self.assertEqual(code, 5)
         reason = doc["findings"][0]["reason"]
-        self.assertIn("$.verifier_policy.closure_kind", reason)
-        self.assertIn("kani", reason)
+        self.assertIn("unexpected property 'closure_kind'", reason)
+        self.assertIn("permitted: clusters, default, supporting", reason)
+        # The near-miss machinery points at where the key the pilot
+        # actually wanted lives, rather than at a verifier enum it never
+        # asked for.
+        self.assertIn("did you mean '$.closure_kind'", reason)
 
     def test_declared_closure_kind_is_read_back_by_status(self):
         """The declared intent is recorded in the tool's own input and
@@ -1161,9 +1174,16 @@ class VerifierPolicyEchoTest(WorkspaceFixture):
     case, so the field a pilot is named after was observable only by
     opening the descriptor file. `status --json` now reads the policy back
     in the same shape the pipeline consumes it (gate g9 resolves
-    policy.get(cluster, policy["default"])): `default`, the per-cluster
+    `clusters.get(cluster, policy["default"])`): `default`, the per-cluster
     overrides under `clusters`, and the declared multi-verifier
-    composition under `supporting`."""
+    composition under `supporting`.
+
+    chainlink #104 removed the reason this echo had to normalize: while
+    `verifier_policy` was an open object, "every key that is not `default`
+    or `supporting`" was the only available definition of a per-cluster
+    override, so the typo #76's mitigation was built to expose (`defualt`)
+    was indistinguishable here from a real cluster name. The echo now
+    reads the declared `clusters` object."""
 
     def write_example_descriptor(self, example: str, mutate) -> dict:
         descriptor = json.loads((EXAMPLES / example).read_text())
@@ -1175,8 +1195,8 @@ class VerifierPolicyEchoTest(WorkspaceFixture):
         descriptor = self.write_descriptor()
         descriptor["verifier_policy"] = {
             "default": "verus",
+            "clusters": {"crypto-mixed": "kani"},
             "supporting": ["kani"],
-            "crypto-mixed": "kani",
         }
         self.descriptor_path.write_text(json.dumps(descriptor))
         _, doc = self.status()
@@ -1196,32 +1216,52 @@ class VerifierPolicyEchoTest(WorkspaceFixture):
         _, doc = self.status()
         self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
         # The greenfield example declares one per-cluster override
-        # ("scheduling": "kani") alongside the default -- the echo carries
-        # it under `clusters`, normalized into the shape gate g9 consumes.
+        # ("clusters": {"scheduling": "kani"}) -- the echo carries it in
+        # the shape gate g9 consumes.
         self.assertEqual(
             doc["descriptor"]["verifier_policy"],
             {"default": "creusot", "clusters": {"scheduling": "kani"}, "supporting": []},
         )
 
-    def test_status_echoes_the_policy_for_a_misspelled_key(self):
-        """Defect 1's hazard was silent acceptance: the typo was
-        indistinguishable from a real key. The echo makes it visible --
-        `defualt` shows up under `clusters` as an override for a cluster
-        literally named 'defualt', not as the default the user meant
-        (chainlink #76)."""
-        descriptor = self.write_descriptor()
-        descriptor["verifier_policy"]["defualt"] = "kani"
-        self.descriptor_path.write_text(json.dumps(descriptor))
+    def test_status_echoes_an_empty_clusters_map_when_none_is_declared(self):
+        """`clusters` is optional, so a single-verifier project declares
+        only `default`. The echo reports that as an empty map rather than
+        omitting the key or, as it would have before #104, folding some
+        other key into it -- so `clusters` always means what it says."""
+        self.write_example_descriptor(
+            "project-descriptor.port.example.json",
+            lambda d: d.__setitem__("verifier_policy", {"default": "creusot"}),
+        )
         _, doc = self.status()
         self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
         self.assertEqual(doc["descriptor"]["state"], "present-valid")
-        self.assertEqual(doc["descriptor"]["verifier_policy"]["default"], "creusot")
-        # The typo sits next to the example's real "scheduling" override,
-        # visibly NOT the default the user meant.
         self.assertEqual(
-            doc["descriptor"]["verifier_policy"]["clusters"],
-            {"defualt": "kani", "scheduling": "kani"},
+            doc["descriptor"]["verifier_policy"],
+            {"default": "creusot", "clusters": {}, "supporting": []},
         )
+
+    def test_a_misspelled_key_no_longer_reaches_the_echo_as_a_cluster(self):
+        """Defect 1's hazard, closed (chainlink #104). #76's mitigation was
+        to make the typo visible under `clusters` as an override for a
+        cluster literally named 'defualt' -- but the descriptor still
+        validated, so `status` reported `present-valid` and `check` exited
+        0 on a policy whose default was not what the user wrote. The
+        descriptor is now `present-invalid`, so there is no effective
+        policy to report, and the finding names the key it looks like."""
+        self.write_example_descriptor(
+            "project-descriptor.greenfield.example.json",
+            lambda d: d["verifier_policy"].__setitem__("defualt", "kani"),
+        )
+        _, doc = self.status()
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        self.assertEqual(doc["descriptor"]["state"], "present-invalid")
+        self.assertIsNone(doc["descriptor"]["verifier_policy"])
+        summaries = [f["summary"] for f in doc["open_findings"]]
+        self.assertTrue(
+            any("unexpected property 'defualt'" in s for s in summaries),
+            summaries,
+        )
+        self.assertTrue(any("did you mean 'default'?" in s for s in summaries), summaries)
 
     def test_status_verifier_policy_is_null_for_an_invalid_descriptor(self):
         self.write_example_descriptor(

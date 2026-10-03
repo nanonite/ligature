@@ -310,10 +310,11 @@ document, and a caller may already match on it.
 Where the candidates come from is read off
 `schemas/project-descriptor.schema.json` itself, not from a hand-kept list
 of key names, so a suggestion cannot outlive a key the schema has dropped.
-`verifier_policy` deliberately stays an **open** object — gate g9 resolves
-a per-cluster override, `policy.get(cluster, policy["default"])`, and
-closing it would break that. #106 adds a diagnostic for a closed object;
-it does not close one.
+An **open** object accepts any key, so there is no correct home to point a
+rejected key at inside one and the walk stops there — which after #104 is
+`verifier_policy.clusters`, the only deliberately open object left in the
+descriptor (and its keys are cluster names, which the schema cannot
+enumerate).
 
 ### `verifier_policy`: the open object, the undisclosed enum, the unexpressible second verifier (chainlink #76)
 
@@ -337,28 +338,81 @@ three-value enum", which produced three defects in the one field a
    arbitrary extra key holding a second enum member validated and was
    then silently discarded by every reader.
 
-The fix documents rather than closes the object, because per-cluster
-overrides are load-bearing: gate g9 resolves `policy.get(cluster,
-policy["default"])`, and the shipped greenfield example itself declares
-`"verifier_policy": { "default": "creusot", "scheduling": "kani" }`. The
-schema's `verifier_policy` description now states the key set —
-`default` (required), any other key naming a cluster and holding that
-cluster's verifier, and `supporting` — and the `$defs/verifier`
-description names the three permitted values and the exact-match rule,
-so the value domain is discoverable from the schema itself rather than
-from a rejection message. `supporting` (an array of enum members) is the
-declared shape for multi-verifier composition — the P3 crypto-mixed
-pilot's `verus` + `kani` in one workspace, and the epic's "Kani
-supporting evidence" probe, get a real descriptor-level home instead of
-an accident of `additionalProperties`. The Defect-1 hazard is mitigated
-by observability: `status --json` echoes the effective policy as
-`descriptor.verifier_policy` (`default`, `clusters`, `supporting` — the
-shape gate g9 consumes), so a typo shows up under `clusters` as an
-override for a cluster literally named `defualt`, visibly not the default
-the user meant. `init` also ships `schemas/project-descriptor.schema.json`
-into the project root itself (managed, attested), not only into
-`.ligature/schemas/`, so the schema governing the user-owned descriptor
-is present on disk where a black-box probe can find it.
+#76 documented rather than closed the object, because per-cluster
+overrides are load-bearing: gate g9 resolves
+`policy.get(cluster, policy["default"])`, and the shipped greenfield
+example itself declares `"verifier_policy": { "default": "creusot",
+"scheduling": "kani" }`. The schema's `verifier_policy` description
+stated the key set and `$defs/verifier` named the three permitted values
+and the exact-match rule; `supporting` (an array of enum members) became
+the declared shape for multi-verifier composition; `status --json` began
+echoing the effective policy as `descriptor.verifier_policy`; and `init`
+started shipping `schemas/project-descriptor.schema.json` into the
+project root itself. **Defect 1 survived all of it** — see below.
+
+### `verifier_policy` is closed (chainlink #104)
+
+Documenting an open object does not constrain it. After #76 the shipped
+1.2.0 and 1.2.1 binaries still accepted `{"default": "creusot",
+"defualt": "kani"}` at `present-valid`, and a `fallback` key that 1.1.1
+had **rejected** had regressed to accepted — `additionalProperties:
+{$ref: verifier}` makes the rule "any key name, as long as the value is a
+member of the enum", so neither a misspelling nor a key naming no cluster
+could fail. `check` exited 0 with `findings: []`, and #76's own mitigation
+(the `status --json` echo, which showed the typo under `clusters` as an
+override for a cluster named `defualt`) could only make a *valid*
+descriptor legible; it could not make an invalid one fail.
+
+The object is closed now — `additionalProperties: false`, exactly three
+keys — and the per-cluster overrides it could not be closed around moved
+under `clusters`:
+
+```json
+"verifier_policy": { "default": "creusot", "clusters": { "scheduling": "kani" } }
+```
+
+`clusters` is the one open object left in the descriptor, and it is open
+because its keys *are* cluster names, which a schema cannot enumerate.
+What it does is refuse a key that could not name a cluster in any
+artifact: `propertyNames` carries the same `^[a-z0-9]+(?:-[a-z0-9]+)*$`
+pattern `docs/closure-profile-schema.json` and
+`schemas/project-state.schema.json` already require of a cluster, so
+`{"clusters": {"Crypto_Mixed": "kani"}}` is rejected at load rather than
+waiting forever to be read. A key that *could* name a cluster the
+workspace has not declared yet still validates — a project declares its
+clusters before it drafts their profiles.
+
+Every failure is now a named, actionable diagnostic rather than a silent
+pass or a probe:
+
+| what you wrote | what the diagnostic says |
+| --- | --- |
+| `defualt` (the pilot's misspelling) | `unexpected property 'defualt'; permitted: clusters, default, supporting; did you mean 'default'?` |
+| `fallback` (the reported regression) | `unexpected property 'fallback'; permitted: clusters, default, supporting` |
+| `closure_kind` (the pilot's second probe) | `unexpected property 'closure_kind'; …; did you mean '$.closure_kind' (a property of $, not of $.verifier_policy)?` |
+| `clusters: {"Crypto_Mixed": "kani"}` | `$.verifier_policy.clusters.Crypto_Mixed: 'Crypto_Mixed' is not a name this object accepts for a key; permitted: a name matching ^[a-z0-9]+(?:-[a-z0-9]+)*$` |
+
+The `closure_kind` row is strictly better than what #76 gave: while the
+object was open, that key was accepted and failed only on its *value*, so
+the line said `'deductive' is not one of ['kani','creusot','verus']` —
+naming neither the field the pilot wanted nor the fact that the key was
+wrong at all. It is now rejected as a key, and the near-miss machinery
+(#106) points at where `closure_kind` really lives. The `propertyNames`
+row needed its own branch in `_diagnostic_line`: jsonschema reports that
+failure against the *containing* object with the offending key as its
+"instance", so the raw line named `$.verifier_policy.clusters` — a path
+the user never wrote — and hid which key inside it was wrong.
+
+**The migration, and its one honest cost.** A descriptor written by
+1.1.x–1.2.x that declared a per-cluster override as a sibling of
+`default` (`"scheduling": "kani"`) no longer validates; the operator
+moves it under `clusters`. That is the whole point — that key is
+indistinguishable from a typo, and no amount of documentation separates
+them — but it is a user-owned file, so `migrate` will not rewrite it
+(chainlink #78's rule for normative user-owned documents still holds) and
+the recovery path is the load-time diagnostic above. `init` ships the new
+shape, and a workspace that never declared an override is unaffected:
+`clusters` is optional and `default` alone is the common case.
 
 ### `write_set`: the enforcement boundary that nothing enforced (chainlink #77)
 

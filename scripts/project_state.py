@@ -1528,22 +1528,23 @@ def build_project_state(workspace: Path, descriptor_path: Path) -> dict:
         # "verifier" in either the valid or the invalid case, so the value
         # domain (creusot | verus | kani) and the per-cluster overrides
         # were discoverable only by opening the descriptor file or probing
-        # the schema by trial and error. Normalized into the shape the
-        # pipeline actually consumes (gate g9 resolves
-        # policy.get(cluster, policy["default"])): `default`, the
-        # per-cluster overrides under `clusters`, and the declared
-        # multi-verifier composition under `supporting`. null when the
+        # the schema by trial and error. Reported in the shape gate g9
+        # consumes (it resolves `clusters.get(cluster, default)`),
+        # chainlink #104: `default`, the per-cluster overrides under
+        # `clusters`, and the declared multi-verifier composition under
+        # `supporting`. Before #104 this normalization was also how a
+        # typo'd key stayed invisible -- any key that was not `default` or
+        # `supporting` was echoed under `clusters` as though it named a
+        # cluster -- so it now reads the declared `clusters` object and
+        # emits `{}` for a policy that declares none, rather than
+        # re-deriving the object from "everything else". null when the
         # descriptor is present but invalid; omitted when it is absent or
         # unreadable, matching mode/schema_version/closure_kind.
         policy = descriptor.get("verifier_policy") if descriptor is not None else None
         if isinstance(policy, dict):
             descriptor_doc["verifier_policy"] = {
                 "default": policy.get("default"),
-                "clusters": {
-                    key: value
-                    for key, value in policy.items()
-                    if key not in ("default", "supporting")
-                },
+                "clusters": dict(policy.get("clusters") or {}),
                 "supporting": policy.get("supporting", []),
             }
         else:

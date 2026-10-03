@@ -135,20 +135,20 @@ def owning_verifier_by_bridge(workspace: Path, descriptor: dict) -> dict[str, st
     policy = descriptor["verifier_policy"]
     manifests, _ = load_manifests(workspace)
     clusters = load_cluster_artifacts(workspace)
+    # chainlink #104: the per-cluster overrides moved out of sibling keys
+    # of `default` and into their own object, so `verifier_policy` can be
+    # closed and a misspelled key is no longer silently accepted as an
+    # override for a cluster named after the typo. `clusters` is optional
+    # (a single-verifier project declares only `default`), hence the
+    # default-argument -- a missing `clusters` and an empty one mean the
+    # same thing here: no cluster overrides `default`.
+    overrides = policy.get("clusters") or {}
 
     verifiers_by_bridge: dict[str, set[str]] = {}
     for cluster, entry in clusters.items():
         if "profile" not in entry:
             continue
-        verifier = policy.get(cluster, policy["default"])
-        # chainlink #76: `supporting` is now a declared verifier_policy
-        # key holding a LIST, so a cluster literally named "supporting"
-        # resolves to the composition declaration rather than a verifier
-        # name. That claim is unresolvable -- skip it and let the bridge
-        # fall back to verifier_policy.default, rather than adding an
-        # unhashable list to the verifier set.
-        if not isinstance(verifier, str):
-            continue
+        verifier = overrides.get(cluster, policy["default"])
         for work_package in entry["profile"][1]["work_packages"]:
             manifest = manifests.get(work_package)
             if manifest is None:

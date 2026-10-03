@@ -173,9 +173,10 @@ def _schema_property_paths(
     naming nothing.
 
     Only `properties` contributes names: an open object (the
-    `verifier_policy` per-cluster overrides, chainlink #76) accepts any
-    key, so there is no correct home to point a rejected key at, and a
-    key array's element schema contributes no key of its own either."""
+    `verifier_policy.clusters` per-cluster overrides, chainlink #104)
+    accepts any key that is a legal cluster name, so there is no correct
+    home to point a rejected key at there, and a key array's element
+    schema contributes no key of its own either."""
     if not isinstance(schema, dict) or id(schema) in _seen:
         return []
     seen = _seen | {id(schema)}
@@ -270,11 +271,25 @@ def _diagnostic_line(error, property_paths: list[tuple[str, str]]) -> str:
     with the JSON path; the special cases below exist because the raw
     messages name neither the rejected property nor what was allowed:
     additionalProperties reports the whole object as "$" with the
-    unexpected key buried in prose, and the if/then/else guard prints the
-    entire descriptor as the "instance"."""
+    unexpected key buried in prose, propertyNames reports the containing
+    object with the offending key as its "instance", and the if/then/else
+    guard prints the entire descriptor as the "instance"."""
     path = error.json_path
     validator_name = error.validator
     schema = error.schema if isinstance(error.schema, dict) else {}
+    if "propertyNames" in error.schema_path:
+        # A `propertyNames` failure reports the CONTAINING object's path
+        # and the offending key as its "instance" -- so the raw line reads
+        # "$.verifier_policy.clusters: 'Crypto_Mixed' does not match ...",
+        # naming a path the user never wrote and hiding which key inside
+        # it is wrong (chainlink #104). Name the key, its own JSON path,
+        # and what a key there has to be.
+        key = error.instance
+        if isinstance(key, str):
+            line = f"{path}.{key}: {key!r} is not a name this object accepts for a key"
+            if "pattern" in schema:
+                line += f"; permitted: a name matching {schema['pattern']}"
+            return line
     if validator_name == "additionalProperties" and isinstance(error.instance, dict):
         properties = schema.get("properties", {})
         unexpected = [key for key in error.instance if key not in properties]

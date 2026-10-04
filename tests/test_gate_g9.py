@@ -10,6 +10,7 @@ tests/fixtures/callsites/'s never-compiled Rust source.
 """
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -246,6 +247,7 @@ class GateTest(G9TestCase):
         findings, _ = self.gate()
         self.assertTrue(any("leftover result" in e for e in self.errors(findings)))
 
+
 class UncompilableBridgeIsRefusedBeforePromotionTest(G9TestCase):
     """chainlink #112: an uncompilable bridge is no longer something only
     G9 finds.
@@ -311,7 +313,6 @@ class UncompilableBridgeIsRefusedBeforePromotionTest(G9TestCase):
         self.assertEqual(self.gate()[1], 0)
 
 
-
 class AssuranceReportCrossCheckTest(G9TestCase):
     """The relation #25's G14 was missing: it consumes bridge_records as
     evidence a bridge passed, and nothing checked that a record
@@ -319,7 +320,9 @@ class AssuranceReportCrossCheckTest(G9TestCase):
 
     def test_a_hand_written_bridge_record_is_refused(self):
         self.generate()
-        # WP-A's report as built by the #25 fixture claims harness "h"
+        # WP-A's report as built by the #25 fixture claims harness
+        # "creusot" -- not the generated bridge_br_sched_tq_001 -- so the
+        # record matches no run this workspace can show.
         findings, _ = self.gate()
         self.assertTrue(
             any("a claim, not a result" in e for e in self.errors(findings)),
@@ -413,6 +416,96 @@ class OwningVerifierTest(G9TestCase):
         self.assertNotIn("clusters", descriptor["verifier_policy"])
         owned = owning_verifier_by_bridge(self.root, descriptor)
         self.assertEqual(owned, {BRIDGE_ID: "kani"})
+
+
+class RelativeWorkspaceRootTest(G9TestCase):
+    """chainlink #89: the default `--workspace .` hands the gate an
+    UNRESOLVED root while harness_dir_for() hands back a RESOLVED
+    harness path, and `absolute.relative_to(Path('.'))` raises ValueError
+    -- which took `check-bridges` down AFTER the harness was written
+    (leaving it on disk with no check record) and `gate-g9` down at its
+    "no generated harness" finding. Both commands must behave exactly
+    the same under `.` as under an absolute root."""
+
+    def in_workspace_root(self, fn):
+        """Run fn() with cwd set to the workspace root, the way the CLI
+        runs it when invoked from the pilot root with the default
+        `--workspace .`."""
+        original = Path.cwd()
+        os.chdir(self.root)
+        try:
+            return fn()
+        finally:
+            os.chdir(original)
+
+    def test_check_bridges_reports_instead_of_crashing_under_a_relative_root(self):
+        descriptor = descriptor_with(backends=None)
+        written, findings = self.in_workspace_root(
+            lambda: check_bridges(Path("."), descriptor)
+        )
+        errors = self.errors(findings)
+        # the finding the crash used to prevent, with a relative path
+        self.assertTrue(
+            any("at ci/harness/BR-SCHED-TQ-001.creusot.rs" in e for e in errors),
+            errors,
+        )
+        self.assertTrue(
+            (harness_dir_for(self.root) / f"{BRIDGE_ID}.creusot.rs").is_file(),
+            "the harness must still be written -- the crash happened after the write",
+        )
+        self.assertEqual(len(written), 1)
+
+    def test_check_bridges_findings_are_identical_for_dot_and_an_absolute_root(self):
+        descriptor = descriptor_with(backends=None)
+        absolute_written, absolute_findings = check_bridges(self.root, descriptor)
+        relative_written, relative_findings = self.in_workspace_root(
+            lambda: check_bridges(Path("."), descriptor)
+        )
+        self.assertEqual(
+            [str(f) for f in absolute_findings],
+            [str(f) for f in relative_findings],
+        )
+        self.assertEqual(
+            [p.name for p in absolute_written],
+            [p.name for p in relative_written],
+        )
+
+    def test_gate_reports_a_missing_harness_instead_of_crashing_under_a_relative_root(self):
+        findings, discovered = self.in_workspace_root(
+            lambda: gate_workspace(Path("."), self.descriptor)
+        )
+        errors = self.errors(findings)
+        self.assertEqual(discovered, 1)
+        self.assertTrue(
+            any("no generated harness at ci/harness/BR-SCHED-TQ-001.creusot.rs" in e for e in errors),
+            errors,
+        )
+
+    def test_gate_findings_are_identical_for_dot_and_an_absolute_root(self):
+        absolute_findings, absolute_discovered = gate_workspace(self.root, self.descriptor)
+        relative_findings, relative_discovered = self.in_workspace_root(
+            lambda: gate_workspace(Path("."), self.descriptor)
+        )
+        self.assertEqual(
+            [str(f) for f in absolute_findings],
+            [str(f) for f in relative_findings],
+        )
+        self.assertEqual(absolute_discovered, relative_discovered)
+
+    def test_the_full_generate_then_gate_flow_passes_under_a_relative_root(self):
+        descriptor = descriptor_with(fake_backend())
+        self.in_workspace_root(lambda: check_bridges(Path("."), descriptor))
+        self.align_assurance_report()
+        findings, _ = self.in_workspace_root(lambda: gate_workspace(Path("."), descriptor))
+        self.assertEqual(self.errors(findings), [])
+
+    def test_report_findings_prints_the_resolved_root_under_a_relative_root(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            self.in_workspace_root(lambda: report_findings([], 0, Path(".")))
+        self.assertIn(str(self.root), buffer.getvalue())
+        self.assertNotIn("looked under .", buffer.getvalue())
+
 
 class ReportingTest(G9TestCase):
     def test_no_bridges_fails_closed(self):

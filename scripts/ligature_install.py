@@ -33,6 +33,12 @@ Design rules, from the issue and this codebase's own disciplines:
   (base, on-disk, freshly rendered expected): `current`, `upgrade`,
   `conflict`, `missing`, or `obsolete`.
 
+A normative user-owned document's own `Policy version:` marker is part of
+that inventory (chainlink #113): the reliance policy ships as a template
+whose marker line is a placeholder no promotion receipt can be computed
+from, so `init`/`doctor`/`migrate` report it on the document's own line
+and `accept-policy --version` is the sanctioned way to stamp it.
+
 `inspect()` takes the global `--descriptor` flag as an optional keyword.
 When the operator supplies one, it is the descriptor whose schema state
 gates `doctor` -- not the one `ci/manifest/installation.json` recorded
@@ -83,9 +89,32 @@ _AUTHORITY_HASH_RE = re.compile(r"LIGATURE-AUTHORITY-BEGIN sha256:([0-9a-f]{64})
 # refuses to record a hash for a document that cannot yield one), so the two
 # can never disagree about what a well-formed policy document is
 # (chainlink #78).
+#
+# The value pattern itself is factored out (chainlink #113) so the
+# `--version` accept-policy stamps cannot drift from what the marker line
+# accepts: one pattern, two consumers.
+POLICY_VERSION_VALUE_RE = re.compile(r"[a-z][a-z0-9-]*@[0-9]+(?:\.[0-9]+)*")
 POLICY_VERSION_MARKER_RE = re.compile(
-    r"^Policy version:\s*`?([a-z][a-z0-9-]*@[0-9]+(?:\.[0-9]+)*)`?\s*$", re.MULTILINE
+    rf"^Policy version:\s*`?({POLICY_VERSION_VALUE_RE.pattern})`?\s*$", re.MULTILINE
 )
+
+# The shape of a `Policy version:` marker line, whatever value it carries:
+# the words, then at most ONE value token (backticked or bare). This is the
+# line `accept-policy --version` rewrites, and the line the exactly-one
+# rule counts -- deliberately narrower than "any line starting with those
+# words", so a sentence that merely begins `Policy version: see the change
+# history` in a policy's body is neither stamped nor read as a second
+# declaration. #78's acceptance rule stays exactly as it was: the marker
+# regex above, and nothing else.
+POLICY_VERSION_CANDIDATE_RE = re.compile(
+    r"^[ \t]*Policy version:[ \t]*(?:`[^`\n]*`|[^`\s]+)?[ \t]*$", re.MULTILINE
+)
+
+# The marker states, in the vocabulary `policy_version_state` returns.
+POLICY_STAMPED = "stamped"
+POLICY_UNFILLED = "unfilled"
+POLICY_ABSENT = "absent"
+POLICY_AMBIGUOUS = "ambiguous"
 
 MANAGED = "managed"
 USER = "user"
@@ -442,6 +471,23 @@ class InstallReport:
     descriptor_path: str = "project-descriptor.json"
     descriptor_schema: DescriptorSchemaReport | None = None
     descriptor_override: DescriptorInForce | None = None
+    # chainlink #113: the normative user-owned documents whose own
+    # `Policy version:` marker is not stamped (`policy_markers`), the state
+    # `init` installs the reliance policy in. Reported on the document's own
+    # inventory line and made a blocking condition by `doctor`, because a
+    # workspace whose policy cannot yield a `policy_version` cannot mint a
+    # Stage 4.5 promotion receipt at all -- and until `accept-policy
+    # --version` existed, the only way out of it was a hand-edit of a
+    # `protected_root`. It does NOT change `status`: an unfilled template is
+    # not installation drift (nothing conflicted, nothing was modified), so
+    # `init` still exits 0 and `installation: current` still means exactly
+    # what it meant before.
+    policy_markers: list[dict] = field(default_factory=list)
+
+    def marker_record(self, path: str) -> dict | None:
+        """The unfilled-marker record for `path`, or None when the document
+        is stamped (or absent from the report)."""
+        return next((record for record in self.policy_markers if record["path"] == path), None)
 
     @property
     def descriptor_gate(self) -> DescriptorSchemaReport | None:
@@ -484,6 +530,7 @@ def plan_install(
     registry = file_registry(mode, name, descriptor_rel)
     records = _manifest_files(manifest)
     report = InstallReport(mode=mode, product_name=name, status="current", descriptor_path=descriptor_rel)
+    pending: dict[str, str] = {}
     for entry in registry:
         rendered = render_entry(entry, mode, name)
         expected = _sha256_text(rendered)
@@ -492,6 +539,13 @@ def plan_install(
         base = record.get("base_hash") if record else None
         target = safe_target(workspace, entry.path)
         disk = _sha256_file(target) if target.is_file() else None
+        if disk is None:
+            # Not on disk yet: the content this plan is about to write is
+            # what `init` will install, and the version-marker records
+            # below must report the placeholder that content carries
+            # (chainlink #113) rather than saying nothing until the next
+            # run.
+            pending[entry.path] = rendered
         if entry.ownership == USER:
             if disk is None:
                 outcome, content = "create", rendered
@@ -524,6 +578,7 @@ def plan_install(
     for path, record in records.items():
         if record.get("ownership") == MANAGED and path not in known:
             report.obsolete.append(path)
+    report.policy_markers = _unfilled_marker_records(workspace, registry, pending)
     report.authority_state = _authority_verdict(workspace, manifest, _skill_plan(report))
     report.status = _overall_status(report)
     return report
@@ -1007,6 +1062,7 @@ def inspect(workspace: Path, *, descriptor: Path | None = None) -> InstallReport
     for path, record in records.items():
         if record.get("ownership") == MANAGED and path not in known:
             report.obsolete.append(path)
+    report.policy_markers = _unfilled_marker_records(workspace, registry, {})
     report.authority_state = _authority_verdict(workspace, manifest, _skill_plan(report))
     report.descriptor_schema = descriptor_schema_report(workspace, descriptor_rel)
     report.descriptor_override = descriptor_in_force(workspace, descriptor, descriptor_rel)
@@ -1092,6 +1148,233 @@ def _manifest_descriptor_rel(manifest: dict) -> str:
 # ---------------------------------------------------------------------------
 # Normative user-owned document drift + acceptance (chainlink #78)
 # ---------------------------------------------------------------------------
+def _normative_documents(workspace: Path) -> tuple[list[RegistryEntry], dict[str, dict]] | None:
+    """The workspace's normative user-owned registry entries (today: the
+    reliance policy) paired with the ownership manifest's own per-path
+    records, or `None` when there is no usable manifest at all -- not
+    initialized, incompatible schema, unreadable, or an unknown mode.
+
+    The single lookup the drift records (#78) and the version-marker
+    records (#113) below share, so the two can never disagree about which
+    documents are normative or about where they live. Degrading to `None`
+    rather than raising is deliberate and matches `normative_drift_records`:
+    a corrupt manifest means these reports have nothing to say, not that
+    `check`/`status` crash; `doctor` remains the detail surface."""
+    try:
+        manifest = load_manifest(workspace)
+    except InstallError:
+        return None
+    if manifest is None:
+        return None
+    if manifest.get("manifest_schema_version") != MANIFEST_SCHEMA_VERSION:
+        return None
+    try:
+        mode = str(manifest.get("mode", ""))
+        name = str(manifest.get("project_name", ""))
+        descriptor_rel = _manifest_descriptor_rel(manifest)
+        registry = file_registry(mode, name, descriptor_rel)
+    except InstallError:
+        return None
+    return [entry for entry in registry if entry.normative], _manifest_files(manifest)
+
+
+def policy_version_state(text: str) -> str:
+    """Whether a policy document can yield the `policy_version` a promotion
+    receipt carries (chainlink #113), as one of:
+
+    * `stamped` -- exactly one well-formed
+      `Policy version: <name>@<major>[.<minor>]` line. The only state both
+      accept commands accept.
+    * `unfilled` -- the marker line is there but carries no well-formed
+      value: the placeholder `init` ships
+      (`<policy-name>@<major>.<minor>`), or whatever a hand-edit left.
+    * `absent` -- no `Policy version:` line at all.
+    * `ambiguous` -- more than one of them, which the exactly-one rule
+      (#78) refuses whatever they say.
+
+    "A `Policy version:` line" here means a marker line
+    (`POLICY_VERSION_CANDIDATE_RE`): the convention's own shape, carrying
+    at most one value token. Prose in a policy's body that happens to begin
+    with those words is not a declaration and is not counted, so this
+    reports on the same lines #78's rule was about.
+
+    Read from the document's own content, never from a value the caller
+    supplies, so `accept-policy`, `accept-promotion` and the reporting
+    below cannot disagree about what a well-formed policy is."""
+    candidates = POLICY_VERSION_CANDIDATE_RE.findall(text)
+    if len(candidates) > 1:
+        return POLICY_AMBIGUOUS
+    if not candidates:
+        return POLICY_ABSENT
+    return POLICY_STAMPED if POLICY_VERSION_MARKER_RE.findall(text) else POLICY_UNFILLED
+
+
+def policy_version_gap(text: str) -> str:
+    """A one-line, actionable diagnosis of why `text` cannot yield a
+    `policy_version`. Only meaningful for a non-`stamped` document; the
+    caller checks `policy_version_state` first."""
+    state = policy_version_state(text)
+    if state == POLICY_AMBIGUOUS:
+        return (
+            "the policy document declares more than one `Policy version:` line -- exactly one is "
+            "required, so reduce it to one (a duplicate is refused even when both lines agree)"
+        )
+    if state == POLICY_ABSENT:
+        return (
+            "the policy document has no `Policy version:` line at all -- add one as its own line "
+            "(`Policy version: <name>@<major>.<minor>`) before accepting it"
+        )
+    return (
+        "the policy document's `Policy version:` line carries no `<name>@<major>.<minor>` value "
+        "(the template `init` ships the placeholder `<policy-name>@<major>.<minor>`)"
+    )
+
+
+def policy_marker_advice(state: str, diagnosis: str) -> str:
+    """`diagnosis`, plus the sanctioned way out of it when `accept-policy
+    --version` can be that way. `absent`/`ambiguous` carry no remedy the
+    flag can apply -- it refuses to invent or guess a marker line -- so
+    those report the defect alone."""
+    if state != POLICY_UNFILLED:
+        return diagnosis
+    return (
+        f"{diagnosis}; stamp it with `ligature accept-policy --reviewer <name> "
+        "--version <name>@<major>.<minor>`"
+    )
+
+
+def normalize_policy_version(value: str) -> str:
+    """`value` as a bare, well-formed `<name>@<major>[.<minor>]` policy
+    version, or `InstallError`. Surrounding whitespace and the backticks an
+    operator naturally copies out of the template are stripped; nothing
+    else is. Validated against `POLICY_VERSION_VALUE_RE` -- the same
+    pattern the marker line itself accepts, so a stamped marker is always
+    one this function would have accepted (chainlink #113)."""
+    candidate = value.strip()
+    if len(candidate) > 1 and candidate.startswith("`") and candidate.endswith("`"):
+        candidate = candidate[1:-1].strip()
+    if not POLICY_VERSION_VALUE_RE.fullmatch(candidate):
+        raise InstallError(
+            f"--version {value!r} is not a policy version of the form <name>@<major>[.<minor>] "
+            "(lowercase name, e.g. reliance-policy@1.2) -- the same convention the policy "
+            "document's `Policy version:` line uses"
+        )
+    return candidate
+
+
+def stamp_policy_version(text: str, version: str) -> str:
+    """`text` with its single `Policy version:` line rewritten to
+    `version` -- the whole of what `accept-policy --version` is allowed to
+    change in a normative user-owned document (chainlink #113).
+
+    Refuses (InstallError) rather than guessing when the document has no
+    marker line to stamp (`absent`) or more than one (`ambiguous`); the
+    shipped placeholder and an already-stamped version both stamp fine,
+    which is what makes the flag both the way out of the template's
+    placeholder and the way to bump a real version on a substantive
+    change. The result is re-validated as carrying exactly one marker line
+    with the requested value, so a document this function returns can
+    never be one `accept-promotion` would later refuse."""
+    value = normalize_policy_version(version)
+    candidates = POLICY_VERSION_CANDIDATE_RE.findall(text)
+    if len(candidates) > 1:
+        raise InstallError(
+            f"refusing to stamp --version: the policy document declares {len(candidates)} "
+            "`Policy version:` lines -- exactly one may be stamped, and this command will not "
+            "guess which one a human meant"
+        )
+    if not candidates:
+        raise InstallError(
+            "refusing to stamp --version: the policy document has no `Policy version:` line to "
+            "stamp -- add the line yourself as its own line "
+            "(`Policy version: <name>@<major>.<minor>`), then re-run "
+            "`ligature accept-policy --reviewer <name> --version <name>@<major>.<minor>`"
+        )
+    stamped, replaced = POLICY_VERSION_CANDIDATE_RE.subn(
+        lambda _match: f"Policy version: `{value}`", text, count=1
+    )
+    if replaced != 1 or POLICY_VERSION_MARKER_RE.findall(stamped) != [value]:
+        raise InstallError(  # pragma: no cover -- invariant guard, not a reachable branch
+            "internal: stamping --version did not produce exactly one well-formed marker line"
+        )
+    return stamped
+
+
+def policy_marker_records(workspace: Path) -> list[dict]:
+    """One record per normative user-owned document whose own
+    `Policy version:` marker is not stamped (chainlink #113) -- the state
+    `init` writes, because the policy ships as a template whose version
+    line is a placeholder no promotion receipt can be computed from.
+
+    Each record is `{"path", "state" ("unfilled"|"absent"|"ambiguous"),
+    "reason"}`, where `reason` is `policy_marker_advice` over
+    `policy_version_gap` -- the diagnosis plus, where the flag can apply,
+    the one command that fixes it. A missing document is NOT reported
+    here: that is `normative_drift_records`' own signal (#78), and
+    reporting it twice would make one real problem look like two.
+
+    Empty when the workspace is not initialized, its manifest is
+    incompatible or unreadable, or every marker is stamped."""
+    documents = _normative_documents(workspace)
+    if documents is None:
+        return []
+    entries, _records = documents
+    records: list[dict] = []
+    for entry in entries:
+        try:
+            target = safe_target(workspace, entry.path)
+        except InstallError:
+            continue
+        if not target.is_file():
+            continue
+        try:
+            text = target.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        state = policy_version_state(text)
+        if state != POLICY_STAMPED:
+            records.append(
+                {"path": entry.path, "state": state, "reason": policy_marker_advice(state, policy_version_gap(text))}
+            )
+    return records
+
+
+def _unfilled_marker_records(
+    workspace: Path, registry: list[RegistryEntry], pending: dict[str, str]
+) -> list[dict]:
+    """The same records `policy_marker_records` builds, computed from the
+    in-memory report an inventory is already carrying instead of a second
+    manifest load, so `init`/`doctor`/`migrate`/`status` all read the
+    document they just classified.
+
+    `pending` supplies the rendered content for a normative document that
+    is not on disk yet -- the text `plan_install` is about to write. That is
+    what makes a fresh `init` report the placeholder it installs instead of
+    silence; the statement is equally true after the write."""
+    records: list[dict] = []
+    for entry in registry:
+        if not entry.normative:
+            continue
+        text = pending.get(entry.path)
+        if text is None:
+            try:
+                target = safe_target(workspace, entry.path)
+            except InstallError:
+                continue
+            if not target.is_file():
+                continue
+            try:
+                text = target.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+        state = policy_version_state(text)
+        if state != POLICY_STAMPED:
+            records.append(
+                {"path": entry.path, "state": state, "reason": policy_marker_advice(state, policy_version_gap(text))}
+            )
+    return records
+
+
 def normative_drift_records(workspace: Path) -> list[dict]:
     """Per-file drift for normative user-owned documents (chainlink #78):
     one record per normative registry entry (today: the reliance policy)
@@ -1104,26 +1387,12 @@ def normative_drift_records(workspace: Path) -> list[dict]:
     unreadable manifest yields no records rather than an exception, so
     `check`/`status` stay honest instead of crashing; `doctor` remains the
     detail surface for a corrupt manifest."""
-    try:
-        manifest = load_manifest(workspace)
-    except InstallError:
+    documents = _normative_documents(workspace)
+    if documents is None:
         return []
-    if manifest is None:
-        return []
-    if manifest.get("manifest_schema_version") != MANIFEST_SCHEMA_VERSION:
-        return []
-    try:
-        mode = str(manifest.get("mode", ""))
-        name = str(manifest.get("project_name", ""))
-        descriptor_rel = _manifest_descriptor_rel(manifest)
-        registry = file_registry(mode, name, descriptor_rel)
-    except InstallError:
-        return []
-    records = _manifest_files(manifest)
+    entries, records = documents
     drift: list[dict] = []
-    for entry in registry:
-        if not entry.normative:
-            continue
+    for entry in entries:
         record = records.get(entry.path, {})
         base = record.get("base_hash")
         try:
@@ -1171,6 +1440,7 @@ def accept_policy(
     workspace: Path,
     reviewer: str,
     policy_path: str | None = None,
+    version: str | None = None,
 ) -> dict:
     """`ligature accept-policy` (chainlink #78): the documented accept path
     for an intentional governance change, analogous to `accept-promotion`.
@@ -1191,10 +1461,26 @@ def accept_policy(
     convention `accept-promotion` reads -- so the recorded hash always
     corresponds to a policy that can yield a policy_version.
 
-    Refuses (InstallError) before touching the manifest when: the workspace
-    is not initialized; no path can be resolved; the path is not a
-    manifest-recorded, registry-normative, user-owned file; the file is
-    missing; the marker line is absent/ambiguous; or the reviewer is empty.
+    `version` (chainlink #113) is the sanctioned way to reach that state
+    from the template `init` ships. `init` installs the reliance policy
+    with its marker line still a `<policy-name>@<major>.<minor>` placeholder,
+    and both this command and `accept-promotion` refuse such a document --
+    so the one documented advance into an accepted policy was reachable
+    only by hand-editing a document every project declares a
+    `protected_root`, which no agent may write. Given `--version`, this
+    function stamps that single marker line (see `stamp_policy_version`:
+    one line, nothing else in the file, atomically, before the hash is
+    recorded) and accepts the result; without it, nothing is written
+    except the manifest and a document with no well-formed marker is still
+    refused. So a human performs the whole advance with one command, and
+    a version bump on a substantive policy change is the same command.
+
+    Refuses (InstallError) before touching the document or the manifest
+    when: the workspace is not initialized; no path can be resolved; the
+    path is not a manifest-recorded, registry-normative, user-owned file;
+    the file is missing; `--version` is not a well-formed policy version,
+    or the document has no single marker line to stamp; the marker line is
+    absent/ambiguous once stamping is settled; or the reviewer is empty.
     """
     if not reviewer:
         raise InstallError("accept-policy requires a non-empty reviewer -- no default, no LLM-supplied value")
@@ -1239,11 +1525,25 @@ def accept_policy(
         text = target.read_text()
     except (OSError, UnicodeDecodeError) as exc:
         raise InstallError(f"policy document {policy_path!r} is unreadable: {exc}") from exc
+    previous_version = next(iter(POLICY_VERSION_MARKER_RE.findall(text)), None)
+    stamped = False
+    if version is not None:
+        # Validated and rendered in full before anything is written, so a
+        # refusal here leaves the document byte-identical -- and the
+        # manifest untouched, since the write happens before the record
+        # is rebuilt and re-verified below.
+        updated = stamp_policy_version(text, version)
+        if updated != text:
+            _write(workspace, policy_path, updated)
+            stamped = True
+            text = updated
     matches = POLICY_VERSION_MARKER_RE.findall(text)
     if len(matches) != 1:
+        state = policy_version_state(text)
         raise InstallError(
             f"{policy_path!r} must have exactly one 'Policy version: <name>@<major>.<minor>' marker "
-            f"line (docs/reliance-policy.template.md's own convention) -- found {len(matches)}"
+            f"line (docs/reliance-policy.template.md's own convention) -- found {len(matches)} "
+            f"({policy_marker_advice(state, policy_version_gap(text))})"
         )
     previous = record.get("base_hash")
     accepted = _sha256_file(target)
@@ -1253,6 +1553,8 @@ def accept_policy(
         "path": policy_path,
         "reviewer": reviewer,
         "policy_version": matches[0],
+        "previous_version": previous_version,
+        "stamped": stamped,
         "previous_hash": previous,
         "accepted_hash": accepted,
     }
@@ -1379,6 +1681,16 @@ def render_report_text(report: InstallReport) -> str:
             line += _descriptor_schema_note(report.descriptor_schema)
         elif plan.outcome == "drifted":
             line += "  (unreviewed change; record it with `ligature accept-policy --reviewer <name>`)"
+        # chainlink #113: a normative document whose `Policy version:` marker
+        # is still the template's placeholder cannot yield the
+        # `policy_version` any promotion receipt carries, so both accept
+        # commands refuse it. Named on the document's own inventory line --
+        # where the file is, and the one command that fixes it -- rather than
+        # as a separate headline a reader could take for a statement about
+        # some other file.
+        marker = report.marker_record(plan.path)
+        if marker is not None:
+            line += f"  ({marker['reason']})"
         lines.append(line)
     for path in sorted(report.obsolete):
         lines.append(f"  {'obsolete':>9}  {path}")

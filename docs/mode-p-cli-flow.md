@@ -118,7 +118,8 @@ Two corrections to a natural first reading of this table:
 | `version [--verify]` | any state, including before `init` (inspects the running binary, not the workspace) | none | read-only | — |
 | `status [--json]` | any state, including before `init` — reports `descriptor.state: absent` | none | read-only | — |
 | `check [--json]` | any state, including before `init` — reports exit 2, `conditions: [invalid_input]`, `next_action: null` | none | read-only | — |
-| `write-set-check [--json]` | any state with a schema-valid descriptor (before `init`: `unknown`, exit 2) | a `project-descriptor.json` with a `write_set` | read-only | — |
+| `write-set-check [--json] [--issue N]` | any state with a schema-valid descriptor (before `init`: `unknown`, exit 2) | a `project-descriptor.json` with a `write_set`; `--issue N` additionally consumes the write grants recorded for that issue (chainlink #114) | read-only | — |
+| `authorize-write --issue N --path P --op K --issuer <name>` | any state with a schema-valid descriptor declaring the `protected_roots` pattern the path falls in | a `project-descriptor.json` with a non-empty `write_set.protected_roots`; `write_set.authorized_supervisors` for `--issuer-kind supervisor` | human checkpoint (default), or an automation identity the descriptor whitelists | one append-only entry in `ci/results/protected-writes.jsonl`; refuses (exit 2, nothing written) for a path no `protected_roots` covers, one `allowed_roots` already permits, an absolute/escaping/vacuous/directory path, an undeclared supervisor, a TTL outside `[1, 86400]`, `--one-shot` on a pattern, a replayed grant id, or a ledger inside a protected root (chainlink #114) |
 | `draft <kind>` | Stage 0/3 | a valid `<crate>/specs/` layout per the descriptor | LLM-side | writes `<target>.draft` only. Every shipped template is listed by `ligature draft --help`, and an unregistered name is refused with that list (chainlink #105) |
 | `approve draft \| pair \| exemption-pair` | Stage 3, one draft must exist (evidence excluded -- it carries no `review` block, and `promote-evidence` is its path) | a staged `.draft` file | human checkpoint | promotes a draft to its target path; with no draft beside the target it refuses in one line naming the draft and `ligature draft` instead of crashing (chainlink #102), and the paired verbs name every absent draft because they promote all-or-none |
 | `promote-evidence` | Stage 0, one evidence draft must exist | a staged `evidence/<id>.json.draft` | mechanical (no `--reviewer`; evidence is non-normative) | renames the draft to its target + an audit entry (chainlink #79) |
@@ -534,6 +535,75 @@ Closing the remaining half needs what closed #105's and #113's: an explicit
 human-checkpointed command that writes the protected artifact, never an
 agent's hand edit.
 
+### A sanctioned protected write had no route out (chainlink #114)
+
+The sentence above names a shape; #113 and #107 are what forced the issue
+open. A protected-root write that is **sanctioned** -- a recurring edit the
+work genuinely needs, to a path nobody may hand-edit -- had exactly two
+routes, and both are worse than the defect they work around: widen
+`allowed_roots` (which deletes the boundary the write is supposed to live
+inside), or have someone edit the file outside every tool (which
+`write-set-check` cannot tell apart from an intrusion, and which the audit
+trail then records as nothing at all). The swisstable-verus pilot measured
+the first one dead at Stage 4.5 for exactly this reason (#113: a normative
+user-owned document that is a `protected_root`, whose only supported fix was
+a hand-edit no agent could make).
+
+`ligature authorize-write --issue N --path P --op K --issuer <name>` is the
+third route, and it is tool-mediated by construction:
+
+```
+$ ligature authorize-write --issue 114 --path ci/manifest/WP-114.json \
+      --op write --issuer operator --one-shot
+grant: GW-c71ec0d81471
+issue: 114
+path: ci/manifest/WP-114.json (exact)
+op: write
+one_shot: yes
+issuer: operator (human)
+issued at: 2026-10-03T12:00:00+00:00
+expires at: 2026-10-03T12:15:00+00:00 (ttl 900s)
+ledger: ci/results/protected-writes.jsonl (line 1)
+
+$ ligature write-set-check --json --issue 114
+write set: clean          # ...and authorized_writes[] carries the grant id
+```
+
+The record binds the exact path (or an explicitly bounded pattern), the
+operation, the issue, `issued_at`/`expires_at`, the one-shot flag, the named
+issuer, a `grant_id` that is a hash of exactly those fields, and audit
+metadata. **Every one of those is recomputed on read**, which is what makes
+the record a capability rather than a permission: `expires_at` must equal
+`issued_at + ttl_seconds` with `ttl_seconds` inside `[1, 86400]`, the
+`grant_id` must match the binding it names, the path's own classification must
+agree with its `path_kind`, and the issuer is re-verified against the
+descriptor's `write_set.authorized_supervisors` whitelist every time a record
+is honored.
+
+So a grant cannot widen `allowed_roots` (`authorize-write` refuses a path no
+`protected_roots` pattern covers, refuses a path `allowed_roots` already
+permits, and the ledger is consulted on the protected branch only),
+cannot authorize another operation (`op` is a closed vocabulary, and only
+`write` is consumable by a file walk), cannot outlive its TTL, cannot cover
+another issue or path (it is scoped to one issue, which is why
+`status`/`check`/`write-set-check` all take `--issue N` and all honor the
+same records -- with no `--issue`, no grant is consulted and the verdict is
+the pre-#114 one), and cannot be edited in place into something else.
+Re-issuing an identical grant is refused as a replay, so a retry of the
+issuing command is idempotent instead of a way to stack grants; the
+supervisor lane is reachable only for a declared identity, so an agent
+cannot widen its own authority by naming itself; and `--note` is recorded
+audit metadata that no check ever reads back as authority.
+
+An authorized write is reported, not excused: it appears in
+`authorized_writes[]` with its grant id, issuer, issue, expiry and status
+(`spent` for a one-shot grant whose file is present), counts under its
+pattern's `protected_surface[].authorized`, and is named in `details`. The
+ledger is carried too, with every record's status and every line that
+claims to be a grant and is not usable -- so a workspace whose grants all
+expired says so instead of reporting the protected write as unauthorized and
+leaving the reader to guess.
+
 ### The normative user-owned document that nothing drift-checked (chainlink #78)
 
 `docs/reliance-policy.md` is user-owned — `init` installs the template and
@@ -573,45 +643,59 @@ as the default for both accept commands, with a disagreeing explicit
 adopts the on-disk content once, so a pre-#78 workspace becomes
 drift-checkable rather than permanently unverifiable.
 
+### The marker line that made Stage 4.5 unreachable (chainlink #113)
 
-### The normative user-owned document that nothing drift-checked (chainlink #78)
+#78's rule is that a normative policy must carry exactly one
+`Policy version: <name>@<major>.<minor>` line, because that line is what
+`accept-promotion` reads to compute a receipt's `policy_version`. But
+`init` installs the policy as a template, placeholders and all: the line
+it writes is the literal ``Policy version: `<policy-name>@<major>.<minor>`` ``,
+which yields no version. So every freshly initialized workspace shipped a
+document both accept commands refuse — `accept-promotion` with `must have
+exactly one ... marker line -- found 0`, and `accept-policy`, the command
+that exists to accept it, because the marker it demanded was the marker it
+should have set. The document is a `protected_root` in the installed
+descriptor and the hash-pinned skill forbids any agent from writing there,
+so the deadlock had no supported exit: only a human editing a file no
+automation could touch.
 
-`docs/reliance-policy.md` is user-owned — `init` installs the template and
-never overwrites it — but it is also a **normative input**: the standing
-governance document Stage 3 boundary drafting applies its resolution rule
-from, and whose `Policy version: <name>@<major>.<minor>` line
-`accept-promotion` reads to compute a promotion receipt's
-`policy_version`. The ownership manifest recorded `base_hash` and
-`expected_hash` for it, implying a guarantee nothing made: neither value
-was ever compared, so the document could be rewritten — including to
-contradict its own fixed resolution table — while `doctor`, `check` and
-`status` all reported healthy. The only detectable state was a deleted
-file, and only `doctor` noticed that, as one `MISSING` line. The
-descriptor's `compatibility_policy.reliance_policy_path` pointer was
-equally inert: read by nothing, so a workspace could declare a nonexistent
-policy document (or one outside the project root) and still validate as
-`present-valid` with `check` exit 0, and nothing checked that
-`accept-promotion --policy-path` named the file the descriptor declares.
+The swisstable-verus pilot measured the cost (chainlink #114, ligature
+1.2.1): 14 boundary contracts, 15 interactions, 6 bridges and 1 conflict
+resolution, every one of them approved at exit 0, and then
+`accept-promotion` refusing the whole 48-artifact set on the policy's
+placeholder — before the human-ruling gate, so no ruling could have helped.
 
-The fix compares what the manifest already records. A normative
-user-owned document's on-disk content is checked against the manifest's
-reviewed `base_hash`: a mismatch (or a missing file) makes `doctor`
-report `DRIFTED`/`MISSING` and exit 1, makes `check` emit a high-severity
-`policy-drift` finding and exit 1, and drops `status --json`'s
-`installation_manifest.state` from `current` to `drifted` with the drift
-carried as an open finding. The recorded base moves only through the
-explicit accept path `ligature accept-policy --reviewer <name>` —
-`init`/`migrate` never re-base a normative user-owned file to whatever is
-on disk, so a reviewed edit is recorded rather than silent — and the
-document must carry exactly one `Policy version:` marker line, the same
-convention `accept-promotion` reads, so the recorded hash always
-corresponds to a policy that can yield a policy_version. The descriptor's
-`reliance_policy_path` is now validated (`check` fails closed when it
-names a nonexistent file or a path outside the project root) and consumed
-as the default for both accept commands, with a disagreeing explicit
-`--policy-path` refused. A legacy manifest that records no `base_hash`
-adopts the on-disk content once, so a pre-#78 workspace becomes
-drift-checkable rather than permanently unverifiable.
+The advance is now one human command:
+
+```
+ligature accept-policy --reviewer <name> --version reliance-policy@1.2
+```
+
+It stamps that one marker line and records the stamped document as the
+reviewed `base_hash`, atomically, refusing a malformed version and
+refusing to invent or choose a marker line that is not there. The same
+command bumps a real version on a substantive policy change. Because
+stamping changes the document's bytes, a human ruling recorded over the
+pre-stamp version no longer covers it: `record-ruling` again, then
+promote.
+
+The condition is also reported long before Stage 4.5 — on the document's
+own line of the `init`/`doctor`/`migrate` inventory, as a non-zero
+`doctor` exit, and as a blocking high-severity `policy-version-marker`
+finding in `check --json` and `status --json`. `init` itself still exits 0
+and still reports `installation: current`, because an unfilled template is
+not installation drift: nothing conflicted, nothing was modified, and the
+one command that resolves it is named on the line itself.
+
+Deliberately out of scope: the template's *other* unfilled placeholders —
+the owner line, the schema-version line, the project-specific additions
+and the change-history row, which a human must author too and which the
+pilot report counted alongside the marker. Only the marker is detected,
+because only the marker is mechanically load-bearing (it is what the
+promotion path parses), and a generic "this document still contains
+`<...>`" check would flag legitimate prose and generics in a real policy.
+Those four remain the human's to fill in; `accept-policy --version`
+deliberately touches one line and no other.
 
 ### The descriptor `doctor` never looked at (chainlink #109)
 

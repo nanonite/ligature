@@ -28,6 +28,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
@@ -221,10 +222,27 @@ def validate_file(
 def find_exemption_files(root: Path) -> list[Path]:
     """Every file anywhere under a `_exemptions` directory, at any depth
     -- mirrors find_interaction_files/find_boundary_files so nested
-    placements surface as G1b violations instead of going unchecked."""
+    placements surface as G1b violations instead of going unchecked.
+
+    Staged drafts (`<target>.json.draft`, written by
+    `review_checkpoint.stage_draft` via `pipeline.py draft`) are excluded
+    (chainlink #110): a Stage 3 exemption draft is authored WITHOUT a
+    `review` block -- only `approve --reviewer` (or the bootstrap
+    `approve-exemption-pair`) attaches one -- so collecting it failed G1a
+    with `'review' is a required property`, sent `validate-exemption` to
+    exit 1 on the output the tool itself sanctions, and gave `check
+    --json` one medium finding plus a `human_decision_required` condition
+    per staged exemption. Excluding it HERE -- the one discovery function
+    validate(), validate_crate(), count_discovered() and
+    valid_exemption_interaction_ids_from_crate() all wrap -- also keeps a
+    pending exemption out of R2's coverage set entirely, the exact
+    convention validate_interaction.find_interaction_files() has applied
+    since chainlink #90. Deliberately narrow: an unreviewed exemption at
+    its real `<interaction_id>.json` path is still validated and
+    reported, and a wrong-extension file is still a G1b violation."""
     if not root.is_dir():
         raise FileNotFoundError(f"exemption scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob("**/_exemptions/**/*") if p.is_file()]
+    return [p for p in root.glob("**/_exemptions/**/*") if p.is_file() and not is_staged_draft(p)]
 
 
 def _standalone_interaction_lookup(root: Path) -> dict[Path, dict[str, dict]]:

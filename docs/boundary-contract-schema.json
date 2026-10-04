@@ -19,7 +19,7 @@
     "callee": { "$ref": "#/$defs/role" },
     "callee_guarantees": {
       "type": "array",
-      "description": "Callee POSTCONDITION/INVARIANT relied on (docs/reliance-policy.md resolution rule). Never a callee precondition (-> bridge spec instead) and never an adversary case (-> evidence only, G2+ rejects it here).",
+      "description": "The obligations this cross-concept call depends on (docs/reliance-policy.md resolution rule), in two roles. A callee POSTCONDITION/INVARIANT the caller relies on is a guarantee; a callee PRECONDITION the caller must establish is a caller obligation a bridge specification discharges (plan.md §8.2) and is declared here because a bridge's callee_requirement must be one of these entries (validate-bridge G2). G2+ reads each entry's own constraint `kind` and reports which role it is (scripts/validate_boundary_contracts.py), so a precondition here is not read as a callee postcondition. Never the caller's own obligations (G2+ rejects an entry naming the caller's concept) and never an adversary case (-> evidence only, G2+ rejects it here). An empty array declares that the call depends on nothing at all, so it is a claim rather than an omission.",
       "items": {
         "type": "string",
         "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$",

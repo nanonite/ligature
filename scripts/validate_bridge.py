@@ -29,6 +29,18 @@ a schema-invalid document isn't meaningful.
          this pipeline applies), and callee_requirement must be one of
          that boundary's own callee_guarantees -- a bridge cannot
          discharge an obligation the boundary contract never declared.
+         That requirement is a callee PRECONDITION in the normal case,
+         and chainlink #111 made the boundary the place it is declared:
+         prompts/stage-3-boundary-drafting.md forbade the entry and
+         prompts/stage-3-bridge-drafting.md required it, so no
+         artifact could satisfy both and every bridge that checked a
+         precondition was unapprovable. The boundary template, the
+         reliance-policy resolution table, the boundary schema and this
+         gate's own refusal now say one thing -- declare it in the
+         boundary, discharge it in the bridge, with G2+ reporting the
+         entry's role (a precondition is a caller obligation, not a
+         callee guarantee) rather than leaving the field name to imply
+         one.
 
 Still out of scope here: GENERATING a verifier harness from
 bridge_logic. plan.md §15's own open items list harness-generation
@@ -55,6 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
 from bridge_harness import CompileError  # noqa: E402
 from bridge_harness import compile_bridge_logic  # noqa: E402
+from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
@@ -147,7 +160,16 @@ def check_boundary_cross_reference(
 
     `boundaries_by_id=None` means the caller couldn't determine which
     boundaries exist -- a visible info note, not a silent pass.
-    `validate_crate` always supplies a real lookup."""
+    `validate_crate` always supplies a real lookup.
+
+    chainlink #111: the requirement is a callee PRECONDITION in the normal
+    case, and the boundary is where that precondition is declared -- G2+ on
+    the boundary reports such an entry as a caller obligation rather than a
+    callee guarantee. This gate's own refusal therefore has to name the
+    remedy, which is re-drafting the boundary, not renaming the requirement:
+    before, the boundary template told an author a precondition never went
+    in `callee_guarantees`, so the two templates left no artifact that
+    satisfied both and the refusal named only the impossibility."""
     if boundaries_by_id is None:
         return [
             Finding(
@@ -176,7 +198,12 @@ def check_boundary_cross_reference(
                 "G2", path,
                 f"callee_requirement {callee_requirement!r} is not one of boundary_id "
                 f"{boundary_id!r}'s own callee_guarantees {boundary.get('callee_guarantees')!r} -- "
-                "a bridge cannot discharge an obligation the boundary contract never declared",
+                "a bridge cannot discharge an obligation the boundary contract never declared. "
+                "The remedy is to re-draft the boundary contract, not this bridge: a callee "
+                "precondition the caller must establish is declared there too, as the obligation "
+                "a bridge discharges (prompts/stage-3-boundary-drafting.md, G2+), and "
+                "prompts/stage-3-bridge-drafting.md requires this field to name one of its own "
+                "boundary's entries",
             )
         ]
     return []
@@ -299,10 +326,30 @@ def validate_file(
 def find_bridge_files(root: Path) -> list[Path]:
     """Every file anywhere under a `_bridges` directory, at any depth --
     mirrors find_protocol_debt_files/find_exemption_files so nested
-    placements surface as G1b violations instead of going unchecked."""
+    placements surface as G1b violations instead of going unchecked.
+
+    Staged drafts (`<target>.json.draft`, written by
+    `review_checkpoint.stage_draft` via `pipeline.py draft`) are excluded
+    (chainlink #110): `stage-3-bridge-drafting.md` tells the model to
+    author without a `review` block -- only `approve` attaches one, and
+    `draft` itself prints "OK: generated draft passes G1a/G1b immediate
+    checks" -- so collecting the staged file failed it on
+    `'review' is a required property` at G1a, made `validate-bridge` exit
+    1 on the very output the tool prescribes, and gave `check --json` one
+    medium `human-decision-pending` finding plus a
+    `human_decision_required` condition per staged bridge, indistinguishable
+    from a genuine schema break. A draft is a pending artifact, not one
+    under review. Excluding it HERE -- in the one discovery function
+    validate(), validate_crate(), count_discovered() and gate_g14's own
+    load_bridges() all wrap -- makes a staged bridge inert (neither
+    reported nor compiled nor counted), the exact convention
+    validate_interaction.find_interaction_files() has applied since
+    chainlink #90. Deliberately narrow: an unreviewed bridge at its real
+    `<id>.json` path is still validated and reported, and a wrong-
+    extension file under `_bridges/` is still a G1b violation."""
     if not root.is_dir():
         raise FileNotFoundError(f"bridge scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob("**/_bridges/**/*") if p.is_file()]
+    return [p for p in root.glob("**/_bridges/**/*") if p.is_file() and not is_staged_draft(p)]
 
 
 def validate(root: Path, boundaries_by_id: dict[str, dict] | None = None) -> list[Finding]:
@@ -310,7 +357,11 @@ def validate(root: Path, boundaries_by_id: dict[str, dict] | None = None) -> lis
     found is validated -- a malformed or wrong-extension artifact under a
     real `_bridges` directory is reported, not silently skipped
     (check_naming's own suffix check catches the well-formed-JSON-but-
-    wrong-extension case).
+    wrong-extension case). The one deliberate exception is a staged
+    `<target>.json.draft`: find_bridge_files() excludes it from
+    discovery, so a pending draft is neither validated nor counted
+    (chainlink #110), while an unreviewed `<id>.json` at its real path is
+    still validated and reported here.
 
     `boundaries_by_id` defaults to None -- this single-root scan has no
     sibling `_boundaries/` directory concept, so the cross-reference

@@ -585,5 +585,110 @@ class WitnessPromotionDigestTest(unittest.TestCase):
         self.assertEqual(spec, before)
 
 
+class StagedDraftInertTest(unittest.TestCase):
+    """Chainlink #110: `draft 3 witness-drafting` stages
+    `<target>.json.draft` WITHOUT a `review` block (only `approve`
+    attaches one), and `draft` itself reports "OK: generated draft passes
+    G1a/G1b immediate checks" -- yet every witness scan collected that file
+    and failed it on `'review' is a required property` at G1a, so
+    `validate-witness` exited 1 on the output the tool prescribes and
+    `check --json` gained one medium finding plus a
+    `human_decision_required` condition per staged witness.
+    validate_interaction/validate_boundary_contracts have skipped staged
+    drafts since #90; this pins the same convention for witnesses.
+
+    A staged draft is inert (neither reported nor counted) everywhere
+    find_witness_files() is the discovery point -- the standalone
+    validate(), validate_crate() (what `validate-witness` runs) and
+    count_discovered(), and therefore gate-g18's collect_valid_witnesses()
+    and gate-g19's own walk too -- while an unreviewed witness at its REAL
+    `<concept>.<query>.json` path is still reported."""
+
+    def _crate(self, tmp: str) -> tuple[Path, Path, Path]:
+        workspace = Path(tmp)
+        crate_root = workspace / "crates" / "scheduler"
+        (crate_root / "specs").mkdir(parents=True)
+        (crate_root / "specs" / "task_queue.json").write_text(json.dumps(concept_spec()))
+        witness_dir = witness_dir_for({"crate_dir": "crates/scheduler", "specs_search_root": "crates"}, workspace)
+        witness_dir.mkdir(parents=True)
+        return workspace, crate_root, witness_dir
+
+    def _stage_draft(self, witness_dir: Path) -> None:
+        draft = witness_spec()
+        draft.pop("review")  # exactly what stage-3-witness-drafting produces
+        (witness_dir / "task_queue.load_factor.json.draft").write_text(json.dumps(draft))
+
+    def test_the_standalone_cli_exits_zero_on_a_staged_draft(self):
+        """The reported symptom: `validate-witness` exit 1 with
+        [G1a/error] "'review' is a required property" against the draft."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _, crate_root, witness_dir = self._crate(tmp)
+            self._stage_draft(witness_dir)
+            rc = main([str(crate_root), "--specs-search-root", str(crate_root.parent)])
+        self.assertEqual(rc, 0)
+
+    def test_the_recursive_scan_reports_nothing_for_a_staged_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, crate_root, witness_dir = self._crate(tmp)
+            self._stage_draft(witness_dir)
+            findings = validate(crate_root, crate_root.parent)
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_staged_draft_is_not_counted_as_discovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, crate_root, witness_dir = self._crate(tmp)
+            self._stage_draft(witness_dir)
+            self.assertEqual(count_discovered(crate_root), 0)
+
+    def test_validate_crate_reports_nothing_for_a_staged_draft(self):
+        """cmd_validate_witness's own path -- the exact command the pilot
+        report's EXIT 1 came from."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _, crate_root, witness_dir = self._crate(tmp)
+            self._stage_draft(witness_dir)
+            findings = validate_crate(crate_root, witness_dir, crate_root.parent)
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_staged_draft_in_a_mislocated_directory_is_still_inert(self):
+        """Consistency, not just the happy path: a draft under a wrong
+        directory is still a pending draft, and stage_draft only accepts
+        canonical targets, so `approve` could never promote it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _, crate_root, _ = self._crate(tmp)
+            stray = crate_root / "not_specs" / "_witnesses"
+            stray.mkdir(parents=True)
+            self._stage_draft(stray)
+            findings = validate(crate_root, crate_root.parent)
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_an_unreviewed_real_json_is_still_reported(self):
+        """The skip must be exactly `.draft`: an unreviewed artifact at
+        its real path is a draft-LIFECYCLE record (check normalizes it to
+        a pending human decision), not a staging file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _, crate_root, witness_dir = self._crate(tmp)
+            unreviewed = witness_spec()
+            unreviewed.pop("review")
+            (witness_dir / "task_queue.load_factor.json").write_text(json.dumps(unreviewed))
+            findings = validate(crate_root, crate_root.parent)
+        self.assertTrue(
+            any("'review' is a required property" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_wrong_extension_file_is_still_reported(self):
+        """Guards the over-broad-discovery rule (a wrong-extension
+        artifact under a canonical witness directory must surface) from
+        being collateral damage of the draft skip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            _, crate_root, witness_dir = self._crate(tmp)
+            (witness_dir / "task_queue.load_factor.yaml").write_text(json.dumps(witness_spec()))
+            findings = validate(crate_root, crate_root.parent)
+        self.assertTrue(
+            any("must be a .json file" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

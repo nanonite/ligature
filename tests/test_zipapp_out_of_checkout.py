@@ -472,6 +472,18 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
             descriptor["verifier_policy"] = policy
             path.write_text(json.dumps(descriptor, indent=2) + "\n")
 
+    def stamp_policy(self, build: dict) -> subprocess.CompletedProcess:
+        """`accept-policy --version` against the packaged artifact: `init`
+        installs the reliance policy template with its `Policy version:`
+        marker still a placeholder, which `doctor` treats as a blocking
+        condition (chainlink #113), so a test asserting `doctor` exit 0 has
+        to perform that one human step first -- through the artifact, which
+        is also the only place the packaged binary's own copy of the command
+        is exercised."""
+        return self.run_artifact(
+            build["artifact"],
+            "accept-policy", "--reviewer", "alice", "--version", "reliance-policy@1.0",
+        )
 
     def pinned_hash(self) -> str | None:
         manifest = json.loads((self.workspace / "ci" / "manifest" / "installation.json").read_text())
@@ -508,6 +520,12 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
         proc = self.run_artifact(self.new_build["artifact"], "migrate", "--upgrade")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(self.pinned_hash(), self.new_build["content_hash"])
+        # Stamped through the NEW artifact: `old_build` predates
+        # `accept-policy --version` entirely, and the policy template it
+        # installs is still the one `doctor` (chainlink #113) refuses to
+        # call clean.
+        stamped = self.stamp_policy(self.new_build)
+        self.assertEqual(stamped.returncode, 0, stamped.stdout + stamped.stderr)
 
         doctor = self.run_artifact(self.new_build["artifact"], "doctor")
         self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)

@@ -63,6 +63,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from validate_evidence import valid_evidence_ids  # noqa: E402
@@ -270,10 +271,30 @@ def validate_file(
 
 def find_conflict_files(root: Path) -> list[Path]:
     """Every file anywhere under a `_conflicts` directory, at any depth --
-    mirrors scripts/validate_evidence.py's own find_evidence_files."""
+    mirrors scripts/validate_evidence.py's own find_evidence_files.
+
+    Staged drafts (`<target>.json.draft`, written by
+    `review_checkpoint.stage_draft` via `pipeline.py draft`) are excluded
+    (chainlink #110). A workspace-level conflict resolution is the one
+    draft-capable kind whose staged file failed this validator TWICE over,
+    which is why the pilot's single staged resolution produced a G1b
+    rather than the usual G1a: the draft is discovered by
+    validate_workspace()'s crate-wide walk, is by definition not yet at
+    its canonical `specs/_conflicts/<id>.json` path, and so is reported
+    as MISLOCATED -- while its content, had the location check passed,
+    would have failed G1a on `'review' is a required property` for the
+    same reason as every other kind. Both readings of the file are wrong:
+    a draft is a pending decision, not a placed artifact. Excluding it
+    here -- the one discovery function validate(), validate_workspace()
+    (what `validate-conflict-resolution` runs) and count_discovered()
+    wrap -- makes a staged resolution inert, the exact convention
+    validate_interaction.find_interaction_files() has applied since
+    chainlink #90. Deliberately narrow: an unreviewed resolution at its
+    real `<conflict_id>.json` path is still validated and reported, and a
+    wrong-extension file is still a G1b violation."""
     if not root.is_dir():
         raise FileNotFoundError(f"conflict-resolution scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob("**/_conflicts/**/*") if p.is_file()]
+    return [p for p in root.glob("**/_conflicts/**/*") if p.is_file() and not is_staged_draft(p)]
 
 
 def validate(root: Path, evidence_ids: set[str] | None = None) -> list[Finding]:

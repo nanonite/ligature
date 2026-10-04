@@ -78,6 +78,23 @@ Classification = Literal["new", "mechanical", "semantic"]
 
 REVIEW_LOG_DEFAULT = Path("ci/results/review_log.jsonl")
 
+
+def review_log_path(workspace_root: Path) -> Path:
+    """Where this workspace's approval audit trail lives.
+
+    REVIEW_LOG_DEFAULT is cwd-relative, so every caller that means "the
+    log for THIS workspace" resolves it against the workspace root
+    instead (pipeline.py's own _workspace_review_log and
+    generate_promotion_receipt.accept_promotion()'s default each learned
+    this the hard way -- an approve run against another workspace wrote
+    its audit entry into whatever repo the CLI was invoked from, and the
+    provenance guard then read a different file). This is the one place
+    that resolution lives, so a gate reading the audit trail cannot end
+    up pointed at a different log than the one approve() appends to
+    (chainlink #97)."""
+    return workspace_root / REVIEW_LOG_DEFAULT
+
+
 # Any object with .severity ("error" | "info") and a __str__ -- deliberately
 # not validate_boundary_contracts.Finding, to keep this module decoupled
 # from any one artifact type's gate logic.
@@ -125,6 +142,10 @@ class DraftNotStaged(Exception):
     pointing at a file the caller was never told about."""
 
 
+DRAFT_SUFFIX = ".draft"
+"""The staging suffix `stage_draft()` appends to a target's path."""
+
+
 def draft_path_for(target_path: Path) -> Path:
     """Where a target's staged draft lives: `<target>.draft`.
 
@@ -133,7 +154,34 @@ def draft_path_for(target_path: Path) -> Path:
     commands -- it used to be open-coded in five places across the two
     files, which is how #102's preflight ended up on one promotion verb
     and not the other two."""
-    return target_path.with_suffix(target_path.suffix + ".draft")
+    return target_path.with_suffix(target_path.suffix + DRAFT_SUFFIX)
+
+
+def is_staged_draft(path: Path) -> bool:
+    """Whether `path` is a staged draft rather than a promoted artifact.
+
+    The counterpart to draft_path_for(), and the one place every artifact
+    scanner decides it (chainlink #110). `draft` stages `<target>.draft`
+    and `approve` renames it onto the target path, so the two forms are
+    distinguished by suffix alone -- never by the absence of `review`,
+    which is a schema requirement of the *promoted* form and says nothing
+    about whether a human is currently reviewing anything.
+
+    Every discover-then-reject validator filters on this before reading a
+    file: a draft is not an artifact under review, it is one pending
+    approval, and validating it fail-closed turns the tool's own
+    sanctioned authoring step into a blocking G1a error ("'review' is a
+    required property") that no one can fix without abandoning the
+    review. The skip is deliberately narrow and applies to every
+    draft-capable kind alike (chainlink #90 fixed boundary and interaction
+    records; #110 extended the same rule to bridges, witnesses,
+    exemptions, protocol-debt and conflict-resolution records, plus the
+    boundary naming/layout scan, which had the identical defect for the
+    kind `validate` already skipped). An unreviewed artifact sitting at
+    its REAL `<id>.json` path is not a draft and is still validated and
+    reported -- that is a draft-LIFECYCLE record, which `check`
+    normalizes to a pending human decision."""
+    return path.suffix == DRAFT_SUFFIX
 
 
 def no_staged_drafts_message(pairs: list[tuple[Path, Path]], promoted: int) -> str:

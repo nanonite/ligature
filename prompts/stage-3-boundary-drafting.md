@@ -7,9 +7,11 @@ but for the cross-concept reliance layer this pipeline owns — concept-to-code'
 own prompts stay interactive-session-oriented and are out of scope to change.
 
 Covers the current Prototype A scope only: a single boundary contract (O).
-Interaction-schema (I) and bridge-spec drafting are M3/M4 work — their
-schemas don't exist yet, so no template for them exists yet either. Do not
-invent one ahead of the schema.
+The I-schema and bridge-spec templates exist now
+(`prompts/stage-3-interaction-drafting.md`,
+`prompts/stage-3-bridge-drafting.md`) and are drafted by their own
+`draft 3 <name>` stage. What a bridge discharges is declared *here* (see
+Task); the bridge's own content is never yours to emit.
 
 ## Output contract
 
@@ -47,16 +49,37 @@ Given the caller and callee concept specs, draft the boundary contract for
 `{{caller_concept}}::{{caller_method}} -> {{callee_concept}}::{{callee_method}}`.
 
 Apply `{{reliance_policy}}`'s resolution rule while deciding what belongs in
-`callee_guarantees`:
+`callee_guarantees`. `callee_guarantees` is this boundary's record of what
+the call depends on, and it holds two roles that mean opposite things. Both
+go here, referenced as `<CalleeConcept>.<constraint id>`:
 
-- A callee **precondition** the caller must establish does **not** go here —
-  it belongs in a bridge specification (not yet in scope this stage).
 - A callee **postcondition or invariant** the caller's own correctness
-  depends on **does** go here, referenced as `<CalleeConcept>.<constraint id>`.
+  depends on is a guarantee: the callee provides it once the call returns.
+- A callee **precondition** the caller must establish before the call is a
+  **caller obligation, not a guarantee** — the callee neither provides it
+  nor checks it. Declare it here because this is where the call's reliance
+  surface is declared and nowhere else: a bridge's `callee_requirement` must
+  be one of this boundary's own `callee_guarantees` entries (G2, checked at
+  approve time), so a precondition recorded anywhere other than here is one
+  that no bridge can discharge. `scripts/validate_boundary_contracts.py`
+  reads the referenced constraint's own `kind` and reports a precondition
+  entry as a caller obligation the bridge discharges, not as something the
+  callee guarantees — declare it, do not work around the gate.
+- The **caller's own** obligations never go here. A caller precondition or
+  invariant belongs to the caller's contract and is cited by a bridge in its
+  `available_contract_facts`, not declared as something this call relies on
+  from the callee (G2+ rejects an entry naming the caller's concept).
 - An **adversary case** (`A*`-shaped) is evidence, never a guarantee. Do not
   put one in `callee_guarantees` under any circumstance, even if it looks
   like the closest match to what the caller depends on — say so is missing
   a real postcondition/invariant to cite instead, don't substitute.
+
+An **empty** `callee_guarantees` is not the way to avoid any of this. It
+says the caller's correctness depends on nothing of the callee's and that
+there is no precondition to establish, which is a claim, not an omission —
+and it is the shape that lets a real gap pass unnoticed. Leave it empty only
+when the callee spec genuinely declares no constraint with a stable `id` yet
+(the gap #6 case below).
 
 If the callee spec has no constraint with a stable `id` field yet (current
 concept-to-code doesn't expose one — `docs/concept-to-code-modifications.md`
@@ -101,3 +124,14 @@ file hand-written into this directory as a blocking `protected-write`
 violation, exactly as it reports a file outside `allowed_roots` (the
 crate `src/` and `tests/` trees) as `out-of-set`. If a finding implies
 writing anywhere else, surface it instead of writing.
+
+The one exception is a **sanctioned** protected write: one the issue in
+progress is authorized to make. It is authorized by a recorded,
+issue-scoped capability grant (`ligature authorize-write --issue <N>
+--path <path> --op write --issuer <name>`, recorded in
+`ci/results/protected-writes.jsonl`), and `ligature write-set-check
+--issue <N>` reports such a write as `authorized protected write [grant
+<id>]` rather than as a `protected-write` violation. If the work in hand
+needs a protected write that no grant covers, stop and report it — ask
+the human to record the grant. Never run `authorize-write` yourself (it is
+a human checkpoint like `approve`) and never hand-edit the grant ledger.

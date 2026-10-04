@@ -27,7 +27,7 @@
     "callee_requirement": {
       "type": "string",
       "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$",
-      "description": "<Concept>.<id> -- the specific callee_guarantees entry (docs/boundary-contract-schema.json) this bridge discharges. Must be one of boundary_id's own callee_guarantees (G2, cross-referenced) and must equal bridge_logic.conclusion.obligation_id exactly (G1b, checked structurally here -- the human-readable summary and the machine-checkable conclusion can never silently diverge)."
+      "description": "<Concept>.<id> -- the boundary contract's own callee_guarantees entry (docs/boundary-contract-schema.json) this bridge discharges, normally a callee PRECONDITION the caller must establish before the call (the boundary declares it there; G2+ reports its role, so it is not read as a callee guarantee). Must be one of boundary_id's own callee_guarantees (G2, cross-referenced) and must equal bridge_logic.conclusion.obligation_id exactly (G1b, checked structurally here -- the human-readable summary and the machine-checkable conclusion can never silently diverge)."
     },
     "available_contract_facts": {
       "type": "array",

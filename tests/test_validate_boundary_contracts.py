@@ -8,7 +8,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_boundary_contracts import (  # noqa: E402
+    GUARANTEE_ROLE,
+    OBLIGATION_ROLE,
+    callee_obligation_role,
     check_assumption_identity_collisions,
+    load_boundaries_by_id,
     validate,
     load_validator,
     valid_boundary_edges_from_crate,
@@ -282,6 +286,163 @@ class ValidBoundaryEdgesFromCrateTest(unittest.TestCase):
             canonical = crate_root / "specs" / "_boundaries"  # never created
             covered = valid_boundary_edges_from_crate(crate_root, canonical, None)
         self.assertEqual(covered, set())
+
+
+class CalleePreconditionRoleTest(unittest.TestCase):
+    """chainlink #111: `callee_guarantees` holds two roles and the field
+    name names only one of them. Until this, the boundary template forbade a
+    callee precondition here ("it belongs in a bridge specification") while
+    validate-bridge's G2 required a bridge's `callee_requirement` to BE one
+    of these entries -- so a bridge that checked a precondition could not be
+    authored at all, and the pilot's two escapes were both worse: declare
+    the precondition anyway and have it read as a callee postcondition, or
+    emit an empty list and assert the call depends on nothing.
+
+    The resolution is that the boundary is where a callee precondition is
+    declared, as the caller obligation a bridge discharges, and that the
+    role is read off the constraint's own `kind` instead of inferred from
+    the field. These tests pin that a precondition entry is accepted, is
+    REPORTED as a caller obligation rather than silently passing as a
+    guarantee, and stays subject to exactly the same applies_to check as any
+    other entry -- the distinction is in what an entry means, not in whether
+    the gate holds it to anything."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.specs = self.root / "specs"
+        self.boundary_dir = self.specs / "_boundaries"
+        self.boundary_dir.mkdir(parents=True)
+        self.callee = self._write_spec(
+            [
+                {
+                    "id": "C001",
+                    "english": "pop_ready is called only when a task with deadline <= now exists",
+                    "logic": "true",
+                    "kind": "precondition",
+                    "applies_to": ["pop_ready"],
+                },
+                {
+                    "id": "C002",
+                    "english": "pop_ready returns a task with the earliest deadline",
+                    "logic": "true",
+                    "kind": "postcondition",
+                    "applies_to": ["pop_ready"],
+                },
+            ]
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_spec(self, constraints):
+        (self.specs / "task_queue.json").write_text(
+            json.dumps({"concept": "TaskQueue", "constraints": constraints})
+        )
+
+    def _write_boundary(self, guarantees):
+        (self.boundary_dir / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                    "caller": {"concept": "Scheduler", "method": "dispatch"},
+                    "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+                    "callee_guarantees": list(guarantees),
+                    "review": {"reviewer": "alice", "reviewed_at": "2026-08-25"},
+                }
+            )
+        )
+
+    def _role_findings(self):
+        findings = validate(self.root, specs_search_root=self.specs)
+        return [f for f in findings if f.gate == "G2+"], findings
+
+    def test_a_callee_precondition_is_accepted_as_a_caller_obligation_not_refused(self):
+        """The pilot's exact case: declaring the precondition the caller must
+        establish used to read as a claim the callee guarantees it, so the
+        only way to approve a bridge that checked one was to break the
+        boundary template's own rule. Both documents now say it goes here."""
+        self._write_boundary(["TaskQueue.C001", "TaskQueue.C002"])
+        findings = validate(self.root, specs_search_root=self.specs)
+        self.assertEqual([str(f) for f in findings if f.severity == "error"], [])
+
+    def test_a_precondition_entry_is_reported_as_a_caller_obligation_not_silently_a_guarantee(self):
+        """The role is stated, not inferred from the field name. Non-blocking
+        -- the entry is correct -- but a reader of `validate`, `check` or the
+        review diff is told which of the two roles this entry holds instead of
+        having to remember it."""
+        self._write_boundary(["TaskQueue.C001", "TaskQueue.C002"])
+        g2_plus, _ = self._role_findings()
+        role_notes = [f for f in g2_plus if f.severity == "info" and "TaskQueue.C001" in f.reason]
+        self.assertEqual(len(role_notes), 1, [str(f) for f in g2_plus])
+        self.assertIn("caller obligation", role_notes[0].reason)
+        self.assertIn("NOT a guarantee the callee provides", role_notes[0].reason)
+        self.assertIn("callee_requirement", role_notes[0].reason)
+        # the postcondition beside it is a guarantee and is NOT annotated
+        self.assertFalse([f for f in g2_plus if "TaskQueue.C002" in f.reason])
+
+    def test_a_precondition_entry_is_held_to_the_same_applies_to_check(self):
+        """Role distinction is not a softer gate: a precondition that does not
+        apply to this boundary's callee method is as wrong here as a
+        postcondition that doesn't, and both are errors."""
+        self._write_spec(
+            [
+                {
+                    "id": "C001",
+                    "english": "len is called only when the queue is non-empty",
+                    "logic": "true",
+                    "kind": "precondition",
+                    "applies_to": ["len"],
+                }
+            ]
+        )
+        self._write_boundary(["TaskQueue.C001"])
+        errors = [f for f in validate(self.root, specs_search_root=self.specs) if f.severity == "error"]
+        self.assertEqual(len(errors), 1, [str(f) for f in errors])
+        self.assertIn("applies_to", errors[0].reason)
+        self.assertIn("TaskQueue.C001", errors[0].reason)
+
+    def test_a_role_note_is_a_note_not_a_disqualification(self):
+        """An info finding must not cost the boundary what it exists to
+        enable: R2 coverage (an eligible I edge with no boundary is a
+        finding), and the id lookup a bridge's own G2 cross-references."""
+        self._write_boundary(["TaskQueue.C001", "TaskQueue.C002"])
+        covered = valid_boundary_edges_from_crate(
+            self.root, self.boundary_dir, self.specs
+        )
+        self.assertEqual(covered, {("Scheduler", "dispatch", "TaskQueue", "pop_ready")})
+        boundaries = load_boundaries_by_id(self.boundary_dir, self.specs)
+        self.assertIn("scheduler_dispatch__to__task_queue_pop_ready", boundaries)
+        self.assertEqual(
+            boundaries["scheduler_dispatch__to__task_queue_pop_ready"]["callee_guarantees"],
+            ["TaskQueue.C001", "TaskQueue.C002"],
+        )
+
+    def test_the_role_is_read_off_the_constraint_kind(self):
+        """One definition, so the gate that reports the role and anything
+        else that needs to know cannot disagree: `kind` is the artifact's
+        own field, and an absent one means `invariant` in
+        concept-to-code's constraint $def -- a guarantee, not a guess."""
+        self.assertEqual(callee_obligation_role({"kind": "precondition"}), OBLIGATION_ROLE)
+        for guarantee in ({"kind": "postcondition"}, {"kind": "invariant"}, {}):
+            with self.subTest(kind=guarantee.get("kind")):
+                self.assertEqual(callee_obligation_role(guarantee), GUARANTEE_ROLE)
+        # an unresolved entry has no constraint to read; it keeps the role it
+        # claimed, and gate_g2_plus's existing findings are what report it
+        self.assertEqual(callee_obligation_role(None), GUARANTEE_ROLE)
+
+    def test_an_unresolvable_precondition_is_still_only_an_unverifiable_note(self):
+        """Gap #6 live state: the search root resolves nothing, so the role
+        cannot be read either. That degrades exactly as the applies_to check
+        already did -- one info note, no error -- rather than the entry
+        becoming a blocking finding on a pipeline state this gate already
+        reports honestly."""
+        self._write_boundary(["TaskQueue.C001"])
+        findings = validate(self.root, specs_search_root=None)
+        self.assertEqual([str(f) for f in findings if f.severity == "error"], [])
+        infos = [f for f in findings if f.severity == "info"]
+        self.assertTrue(any("unverifiable" in f.reason for f in infos), [str(f) for f in infos])
 
 
 def boundary_with_assumption(boundary_id: str, tracking_issue: str, assumption_hash: str) -> dict:

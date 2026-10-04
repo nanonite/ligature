@@ -1,3 +1,4 @@
+import importlib
 import json
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from review_checkpoint import (  # noqa: E402
     auto_promote_if_mechanical,
     classify,
     draft_path_for,
+    is_staged_draft,
     requires_human_checkpoint,
     stage_draft,
 )
@@ -353,6 +355,86 @@ class StandaloneCliCannotPromoteTest(unittest.TestCase):
         draft = stage_draft({"boundary_id": "a__to__b"}, self.target)
         rc = review_checkpoint.main(["classify", str(draft), str(self.target)])
         self.assertEqual(rc, 0)
+
+
+class StagedDraftIsPendingNotBrokenTest(unittest.TestCase):
+    """Chainlink #110: `stage_draft()` writes `<target>.draft` and
+    `approve()` renames it onto the target, so the two forms are
+    distinguished by suffix alone. The predicate that says so is one
+    definition, `is_staged_draft`, which every artifact-kind discovery
+    function now filters on -- before it, each wrote the rule out for
+    itself and four of the nine draft-capable kinds (#90 fixed two) never
+    learned it at all."""
+
+    def test_the_predicate_and_the_path_agree(self):
+        target = Path("specs/_bridges/BR-X-001.json")
+        staged = draft_path_for(target)
+        self.assertEqual(staged, Path("specs/_bridges/BR-X-001.json.draft"))
+        self.assertTrue(is_staged_draft(staged))
+        self.assertFalse(is_staged_draft(target))
+
+    def test_the_path_stage_draft_actually_wrote_is_recognized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "specs" / "_witnesses" / "task_queue.load_factor.json"
+            written = stage_draft({"witness_id": "W-X"}, target)
+            self.assertEqual(written, draft_path_for(target))
+            self.assertTrue(is_staged_draft(written))
+
+    def test_the_suffix_alone_decides(self):
+        """Never "has no review block": an unreviewed artifact at its real
+        path is a draft-LIFECYCLE record, which `check` reports as a
+        pending human decision -- the opposite disposition."""
+        self.assertFalse(is_staged_draft(Path("specs/_bridges/BR-X-001.json")))
+        self.assertFalse(is_staged_draft(Path("specs/_bridges/BR-X-001.yaml")))
+
+
+class EveryDraftCapableKindExcludesItsOwnStagedDraftsTest(unittest.TestCase):
+    """The convention as a property of the whole pipeline rather than of
+    five separately-fixed modules: for every directory `ligature draft`
+    can stage into (derived from scripts/draft_templates.py's own
+    registry, so a template added later is covered automatically), no
+    validator discovers, validates or counts a `<name>.json.draft`.
+
+    Each per-kind test in tests/test_validate_<kind>.py pins one module's
+    own entry points in detail; this one exists because the bug was
+    systematically missed -- the identical defect shipped in five modules
+    after #90 fixed two, and nothing mechanical said the rule applied
+    beyond the two."""
+
+    def _validator_modules(self):
+        import project_state
+
+        return [importlib.import_module(name) for name, _ in project_state._VALIDATE_MODULES]
+
+    def test_a_staged_draft_in_every_draft_capable_directory_is_invisible(self):
+        import draft_templates
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            staged_dirs = []
+            for template in draft_templates.DRAFT_TEMPLATES:
+                # targets are spelled `<crate_dir>/specs/<dir>/<name>.json`;
+                # materializing `<crate_dir>` as a real crate directory is
+                # the only substitution needed.
+                directory = template.target.rsplit("/", 1)[0].replace("<crate_dir>", "crates/a")
+                directory_path = workspace / directory
+                directory_path.mkdir(parents=True, exist_ok=True)
+                staged = directory_path / "staged_artifact.json.draft"
+                staged.write_text("{}")
+                staged_dirs.append(directory)
+
+            for module in self._validator_modules():
+                findings = module.validate(workspace)
+                self.assertEqual(
+                    [str(f) for f in findings],
+                    [],
+                    f"{module.__name__}.validate() reported a staged draft: {staged_dirs}",
+                )
+                self.assertEqual(
+                    module.count_discovered(workspace),
+                    0,
+                    f"{module.__name__}.count_discovered() counted a staged draft: {staged_dirs}",
+                )
 
 
 if __name__ == "__main__":

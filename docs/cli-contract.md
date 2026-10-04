@@ -26,8 +26,9 @@ ligature doctor                              # #57/#58
 ligature version [--verify]                  # #57
 ligature status [--json]                     # #56 -- project-state query
 ligature check [--json] [next]               # #56 -- consolidated gate run + next action
-ligature write-set-check [--json]            # #77, #103 -- read-only write-set conformanceligature write-set-check [--json]            # #77 -- read-only write-set conformance
-ligature accept-policy --reviewer <name>     # #78 -- record a reviewed governance change
+ligature write-set-check [--json] [--issue N]  # #77, #103, #114 -- read-only write-set conformance
+ligature authorize-write --issue N --path P --op K --issuer <name>  # #114 -- record one issue-scoped capability for a sanctioned protected-root write
+ligature accept-policy --reviewer <name> [--version <name>@<major>.<minor>]  # #78, #113 -- record a reviewed governance change
 ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
 ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
 ligature record-assurance <work-package> --proof <obligation>=<path> [...]  # #87 -- assemble a work package's assurance report from verifier proof certificates
@@ -50,9 +51,20 @@ Forcing them under `check` would misrepresent one-time planning output
 (pilot-cluster ranking) and standing review surfaces (the contact sheet)
 as part of `check`'s per-run gate loop; giving them no top-level verb at
 all would violate #55's own instruction not to silently lose reporting
-commands. `report` is the minimal, explicitly justified extension — the
-grammar stays "small," now eleven verbs instead of ten, and every verb
-still has exactly one job.
+commands. `report` is the minimal, explicitly justified extension, and
+every verb still has exactly one job.
+
+The verbs added since are of one kind each, and are named here so the
+grammar is not read as a frozen list: `promote-evidence` (#79) and
+`record-assurance` (#87) each own one promotion or projection no existing
+verb could perform; `record-ruling` (#82) and `accept-policy` (#78/#113)
+each own one explicit human checkpoint on an artifact the pipeline cannot
+promote without it; `write-set-check` (#77/#103) and `authorize-write`
+(#114) are the write-set pair — one read-only conformance report, one
+record of the capability that report consumes — and `authorize-write`
+exists because #103's enforcement left a *sanctioned* protected-root write
+with no route out (§8). None of them is a supervisory verb, and none
+changed the two-level grammar.
 
 `report` is **not** uniformly read-only — see §6's own write column. This
 was wrongly stated as a blanket "read-only" property in an earlier
@@ -85,6 +97,91 @@ the manifest provides, and the certificate must sit under a directory
 named for that obligation's own concept. It writes nothing on a refusal
 and exits 0 (recorded) / 1 (the evidence does not establish the
 obligation) / 2 (invalid input), per docs/exit-code-contract.md.
+
+`gate g14` re-opens what `record-assurance` wrote rather than taking it
+on declaration (chainlink #92): every obligation record's
+`evidence.scope.proof_targets` is resolved and re-read as the why3find
+certificate it claims to be -- workspace containment, the obligation's
+concept directory, a non-empty `proofs` section with no stuck subgoal
+and at least one proved goal, nothing older than its Coma program -- and
+every derived field (`evidence.kind`/`verifier`/`harness` from the
+manifest's own `harness`, `config` from its `provenance`) is re-derived
+from that manifest and must agree. A record that names no certificate,
+whose certificate cannot be re-opened or no longer establishes the
+obligation, or that its manifest contradicts blocks the cluster with a
+finding naming the field, exit 1; no degradation record excuses these
+(`failed_conditions` holds closure-condition keys only), and the check
+is read-only -- `gate g14` opens certificates, it never writes them.
+
+The CG3 verdict `gate g14` prints (`generic_callees_type_universal_or_
+creusot_owned` is *VERIFIED from artifact data*) is computed from the
+whole workspace's work-package artifacts, not only the closure profile's
+list (chainlink #93): every obligation and bridge in the closure AND in
+every work package it reaches through a declared `depends_on`
+(transitively, with a target resolving to no manifest failing closed)
+must have its own achieved record, and ownership must be creusot's
+positively -- every record in every readable assurance ledger under the
+workspace, and every declared guarantee harness in `ci/manifest`, is
+required to be creusot. Anything else (a non-creusot record or harness
+anywhere, an unrecorded obligation, an unreadable ledger, a dangling
+`depends_on`) withholds the verdict and reports the condition as the
+capability gap it is: exit 1 unless a degradation record names the
+condition with `capability_gap: CG3` and a tracking issue, with which
+the cluster is released as degraded (exit 0), never as closed. An
+`info`-severity note tagged with a condition -- including the VERIFIED
+note itself -- is a reported state, never a `limitations=` entry in
+`ligature status`; only findings that still limit the cluster are.
+
+A degradation record may release a cluster only once its OWN acceptance
+is provenanced and ruled on (chainlink #97, shared with
+`accept-promotion` via `scripts/degradation_review.py`): its `review`
+block must match an entry the sanctioned `approve` path appended to this
+workspace's `ci/results/review_log.jsonl`, and a `ratified` human
+ruling must cover the record's exact current bytes in
+`ci/results/human_rulings.jsonl` (record it with `ligature record-ruling
+--reviewer <name> --verdict ratified --artifact <path>`; re-run it after
+ANY edit, since the ruling is pinned to those bytes). A record that is
+hand-written, unruled, rejected, or stale against its own ruling excuses
+nothing at all -- the cluster stays BLOCKED with both reasons named, and
+`released under an accepted degradation record` is never printed. The
+G17 recomputation and the ceiling/`tracking_issue` rules are unchanged
+for a record that does clear both checks.
+
+A record may only be acted on at all if `validate-closure` accepts it:
+`gate g14` reads records only through `validate_closure.
+load_degradation_records()`, so the two commands share one notion of
+which records count (chainlink #99/#100). A record `validate-closure`
+refuses -- one naming a stale excuse its own profile contradicts (G17),
+one that is schema-invalid or whose `failed_conditions` is not an array
+of condition keys, one whose cluster disagrees with its filename, one
+with no valid profile beside it, or one filed outside `specs/_closure/`
+-- is named as an error and excuses nothing, so `gate g14` exits 1 on
+every one of them and never prints a cluster as released under it. A
+record held but unusable is never the same as a workspace declaring no
+degradation at all, and the two commands' exit status agrees on all of
+these. The single documented exception is chainlink #86's CG3 key:
+`generic_callees_type_universal_or_creusot_owned` is the one condition
+no profile/record comparison can settle, so a record naming it beside a
+`true` declaration is the tracking record a capability gap requires and
+stays valid; `gate g14` alone rejects that one as stale once the
+workspace's own artifacts verify the condition, which is the only case
+of `gate g14` refusing where `validate-closure` accepts.
+
+`ligature status` and `ligature check` read degradation records through
+that same loader (chainlink #101), so all three commands share one notion
+of which records count. A cluster's `limitations=` and its
+`degraded`/`unknown` state come only from a record the loader accepts; a
+record it refuses contributes neither, and `status` then reports exactly
+what it reports on a workspace that declares no degradation at all.
+`limitations=` entries are always closure-condition keys: a record whose
+`failed_conditions` is a string rather than an array is refused, never
+iterated into one limitation per character. The reason a record was
+refused is reported by the two commands that do the refusing --
+`validate-closure` runs inside `check`, as does `gate g14` -- so it is
+not restated as a limitation here. Closure PROFILES are unchanged:
+`status` still derives `closure_kind` and the cluster list from the
+profile files under `specs/_closure/`, which were never a record-side
+concern.
 
 There is no `ligature start` or other supervisory verb that runs the phase
 loop autonomously. `approve`/`promote` are human-authority checkpoints
@@ -128,6 +225,52 @@ never a Python traceback (chainlink #83). `validate-work-package` and
 `validate-promotion` -- the §10 aliases for `validate work-package` /
 `validate promotion` -- report exactly this line: an alias is routing,
 never a second error policy (§9).
+
+A staged `<target>.json.draft` (what `draft` writes, promoted by
+`approve`) is **not** an artifact under review: for every kind `draft`
+can stage, the `validate` that owns that kind skips `*.draft` in
+discovery, so a staged draft is neither reported nor counted until it is
+approved. `validate interaction` and `validate boundary` have done so
+since chainlink #90, `validate evidence` since #79, and `validate
+closure` since #98; chainlink #110 extended the same rule to the five
+that were still collecting their own — `validate bridge`, `validate
+witness`, `validate exemption`, `validate protocol-debt` and `validate
+conflict-resolution` — and to the boundary naming/layout scan, which
+reported a staged boundary draft as "not a .json file (suffix: '.draft')"
+while `validate` ignored the same file. The rule is one definition,
+`review_checkpoint.is_staged_draft()`, that each such discovery function
+filters on, so the next kind added inherits it. The distinction is the
+suffix, not the absence of `review`: an unreviewed artifact at its real
+`<id>.json` path is still validated and reported -- `check` normalizes
+that exact case to a pending human decision rather than a mechanized
+failure (chainlink #90). Gold sets and C_static reports are outside it
+only because no `draft` template produces one: they have no staging step
+to be confused with.
+
+Closure profiles and degradation records (`specs/_closure/<cluster>.json`
+/ `<cluster>.degradation.json`) go through `draft`/`approve` like every
+other normative artifact type (chainlink #98) -- workspace-level, not
+crate-scoped, dispatched the same way conflict-resolution records
+already are. Before this, hand-writing the target file directly was the
+only way either could ever exist at all, which is exactly how #94's
+pilot finding produced a degradation record with a fabricated `review`
+block and no corresponding approval: there was no sanctioned path for
+#96/#97's provenance checks to ever see satisfied. `draft` gives
+immediate G1a/G1b feedback with `review` not yet required and rejects a
+model- or human-supplied `review` block outright (the same checkpoint
+discipline every other draft-capable artifact type carries); `approve`
+re-validates with `review` required, writes it, and appends the
+matching entry to `ci/results/review_log.jsonl` that `review_checkpoint.
+review_provenance_gaps()` -- and so `gate g14`'s own provenance check,
+chainlink #97 -- requires before a degradation record may release
+anything. Approve-time validation is deliberately G1a/G1b only, never
+G17's cross-artifact profile/record consistency: G17 is inherently a
+two-artifact question, and `validate-closure` / `gate g14` already run
+it over the whole cluster and fail closed in both directions, so a
+transient inconsistency between two independently-approved artifacts
+(most visibly, a brand-new cluster's first profile declaring a failing
+condition before its degradation record is drafted and approved) is
+caught there rather than deadlocked here.
 
 ## 3. `gate <gate-id>`
 
@@ -463,6 +606,7 @@ workspace fail closed on a descriptor file it never had.
 `migrate` deliberately keeps recovering the descriptor the manifest
 recorded -- it recovers what `init` installed, not what a caller is
 trialling -- so it is never handed the flag.
+
 **Implemented by #108.** Every command that loads the project descriptor
 loads it through one shared guard, so a workspace with no
 `project-descriptor.json` is reported the same way everywhere instead of
@@ -528,16 +672,17 @@ alongside the other two bundled schemas.
 `write_set` (`allowed_roots` / `protected_roots`) machine-checked rather
 than merely declared: it reports the files in the workspace that are
 outside every `allowed_roots` pattern and not otherwise accounted for by
-`protected_roots`, the ownership manifest, a declared crate's `specs/`
-tree, or a canonical pipeline location (`ci/`, `evidence/`, workspace-
-level `specs/_<kind>/`, `docs/witnesses/`) -- the date-creusot pilot's
-`rust/rogue/evil.rs` repro, which every v1.0 command reported nothing
-for. It also reports the files inside `protected_roots` that nothing
-vouches for (the protected-surface audit, non-blocking), and flags the
-vacuous declaration shapes the schema accepts -- an `allowed_roots`
-pattern matching every path (`"**"`) and an empty `protected_roots` --
-as violations of the write set's own purpose. `status --json` carries
-the verdict as `write_set.state` (`clean` / `violations` / `unknown`),
+the ownership manifest, a declared user-owned document, a pipeline
+artifact, a declared crate's `specs/` tree, or a canonical pipeline
+location (`ci/`, `evidence/`, workspace-level `specs/_<kind>/`,
+`docs/witnesses/`) -- the date-creusot pilot's `rust/rogue/evil.rs`
+repro, which every v1.0 command reported nothing for. It also reports the
+files inside `protected_roots` that nothing vouches for (the
+protected-surface audit, non-blocking), and flags the vacuous
+declaration shapes the schema accepts -- an `allowed_roots` pattern
+matching every path (`"**"`) and an empty `protected_roots` -- as
+violations of the write set's own purpose. `status --json` carries the
+verdict as `write_set.state` (`clean` / `violations` / `unknown`),
 `check --json` carries one high-severity `write-set` finding per
 violation (so `check` exits 1 on an out-of-set file, the same
 blocking-findings code every other high-severity finding uses), and the
@@ -630,6 +775,124 @@ discipline #105 and #113 applied to their own dead ends (an explicit
 human-checkpointed command that writes the protected artifact, never an
 agent's hand edit).
 
+**Implemented by #114.** That last sentence named the shape of the remedy
+without saying what to do about a protected write that is *sanctioned* --
+which is not the same problem as a protected write that should not happen
+at all. #113 hit it exactly (a workspace whose normative policy document is
+a `protected_root` and whose only supported fix was a hand-edit no agent
+could make), and #107 hit it from the other end (an interaction spec whose
+only home is a `protected_root` an agent is forbidden to write). Enforcement
+with no exit is enforcement that pushes the work out of the tool, and both
+of the routes left were worse than the defect: widen `allowed_roots`, which
+deletes the boundary the write is supposed to live inside, or hand-edit a
+file, which is precisely what the conformance check cannot tell apart from
+an intrusion.
+
+`ligature authorize-write` is the third route: a **tool-mediated,
+issue-scoped capability record** authorizing one bounded protected-root
+write, appended to `ci/results/protected-writes.jsonl`, which
+`write-set-check` -- and only `write-set-check` -- consumes.
+
+| flag | what it binds |
+|---|---|
+| `--issue N` | the issue this grant is scoped to (positive integer, required) |
+| `--path P` | the exact workspace-relative path, or an explicitly bounded pattern |
+| `--op K` | `write` (create or replace the content -- the only operation the check consumes) or `delete` (recorded for the audit trail; a file's absence is not observable here) |
+| `--ttl S` / `--one-shot` | `expires_at = issued_at + S` (default 900s, ceiling 86400s); `--one-shot` binds one exact file instead of a standing grant |
+| `--issuer NAME` / `--issuer-kind human\|supervisor` | the named issuer, and which lane it issued in |
+| `--note` / `--issued-at` | audit metadata only, and the timestamp the expiry is computed from |
+
+What a grant cannot do, each of them recomputed on read rather than trusted
+from the record's own field -- the same discipline #112 applied to a
+bridge's `callee_shape`:
+
+* **not widen `allowed_roots`.** `authorize-write` refuses a path no
+  declared `protected_roots` pattern covers *and* a path `allowed_roots`
+  already permits, and the ledger is consulted on the protected branch only,
+  so a grant can never excuse an out-of-set write even if a line were
+  appended to the ledger by hand.
+* **not authorize another operation.** `op` is a closed vocabulary and only
+  the operation named is authorized; a `delete` grant cannot make an
+  existing file clean.
+* **not outlive its TTL.** The reader recomputes `expires_at` from
+  `issued_at + ttl_seconds` *and* rechecks the TTL's own bounds
+  (`1 <= ttl_seconds <= 86400`), so a hand-written line naming a year of
+  authority with a self-consistent `expires_at` is rejected as well as a
+  hand-edited one; an expired record authorizes nothing (it is reported as
+  `expired`, not dropped).
+* **not cover another issue or path.** A grant authorizes its own issue
+  only, which is why `write-set-check`, `status` and `check` all take
+  `--issue N` and all honor the same records; with no `--issue`, no grant is
+  consulted at all and the verdict is exactly what it was before #114.
+* **not be edited in place.** `grant_id` is a hash of the fields the
+  grant's authority is of, so moving the authorization to another path,
+  issue, operation, TTL or issuer under a preserved id is rejected. A
+  repeated id in the ledger is a `duplicate`, and `authorize-write` refuses
+  to record one at all, which makes a retry of the issuing command
+  idempotent rather than a way to stack grants.
+
+**The issuer is a named identity, never prose.** `--issuer` is required with
+no default. `--issuer-kind human` (the default) is a human checkpoint on the
+same terms as `approve`/`accept-policy`/`record-ruling` -- the installed
+skill says an agent must never run it. `--issuer-kind supervisor` is the
+automation lane, reachable only for an identity the descriptor explicitly
+declares in `write_set.authorized_supervisors`, a machine-checkable
+whitelist `write-set-check` re-verifies *every time it honors a record* --
+so withdrawing the identity from the descriptor stops the grant on the next
+run, and a hand-written record naming a supervisor nobody declared
+authorizes nothing. `--note` is recorded and excluded from the grant id: no
+prose field is consulted when deciding whether a grant authorizes a write,
+and it cannot invalidate a real record either.
+
+**Reported, not excused.** A protected write an active grant covered is
+clean *and* leaves `authorized_writes[]` in `write-set-check --json` with its
+grant id, issue, operation, issuer, expiry and status (`active`, or `spent`
+for a one-shot grant whose file is present), counts under its pattern's
+`protected_surface[].authorized`, and is named in `details`. The ledger
+itself is carried in `grants[]` with every record's status
+(`active`/`expired`/`other-issue`/`unverified-issuer`/`duplicate`/
+`no-issue-named`/`ledger-protected`) and every line that claims to be a grant
+and is not usable with the reason -- including when the ledger cannot be read
+at all, which yields no grant rather than an unproven one, and names the
+reason in `grants.error` rather than only the word `unreadable`.
+
+**A trail inside a protected root is not a capability record.** A declared
+`protected_roots` pattern covering `ci/results/` is a workspace
+`authorize-write` refuses to record a grant in, so a record read out of one
+cannot have come from the command whose rules `write-set-check` enforces. The
+consumer therefore holds the same half of that rule rather than trusting the
+writer to be the one that wrote: every record in such a ledger is reported
+`ledger-protected` and authorizes nothing, and the pattern is carried in
+`grants.ledger_protected`. The case that makes it load-bearing is a grant
+naming the ledger's *own* path — honored, it would move that file out of the
+protected-surface audit and report a declared protected root over
+`ci/results/` as one that was checked and found vouched, which is exactly the
+"a canonical pipeline location excuses a protected root" mistake #103
+closed.
+
+**The trust model, stated.** The ledger is an audit trail, not a signature:
+the same model `record-ruling`/`human_rulings.jsonl` and
+`approve`/`review_log.jsonl` already use, with the same residual -- an entry
+*appended* by someone with write access to `ci/results/` is
+indistinguishable from one `authorize-write` wrote. What #114 adds over that
+is the recomputation above (an existing entry cannot be edited into a
+different authorization) and one refusal that removes the residual's sharpest
+edge: `authorize-write` refuses to record anything when the ledger itself is
+inside a declared protected root, so a workspace cannot reach a state where
+every append to its own capability trail is a boundary breach.
+
+| surface | with `--issue N` | without |
+|---|---|---|
+| `write-set-check` | an active grant for that issue authorizes its own path/op | the pre-#114 verdict; `details` says no grant was consulted |
+| `status --json` / `check --json` | the same write-set state, through the same call | the same |
+| `authorize-write` | records the grant, exit 0 | records nothing, exit 2, one line naming the refused condition |
+
+`--issue` is the same flag with the same meaning on all four surfaces, so
+none of them can report a different write-set verdict about the same
+workspace and the same run; a `--issue` no grant can name (anything that is
+not a positive integer, which `authorize-write` refuses) matches no record
+and yields the same fail-closed verdict rather than a permissive one.
+
 **Implemented by #78.** A user-owned normative document (`docs/reliance-policy.md`)
 could not be drift-checked, and the ownership manifest recorded
 `base_hash`/`expected_hash` for it that were never compared -- the
@@ -657,6 +920,50 @@ with the declaration refused. A legacy manifest that records no
 `base_hash` adopts the on-disk content once, so a pre-#78 workspace
 becomes drift-checkable rather than permanently unverifiable.
 
+**Closed by #113.** The marker line that requirement rests on made
+Stage 4.5 unreachable in every workspace. `init` installs
+`docs/reliance-policy.md` as the template, placeholders and all, so the
+`Policy version:` line it carries is the literal
+`<policy-name>@<major>.<minor>` placeholder — which yields no
+`policy_version`. Both accept commands refuse such a document:
+`accept-promotion` with `must have exactly one ... marker line -- found
+0`, before it writes anything, and `accept-policy` — the one command
+whose job is to accept this document — because the marker it required was
+the marker it should have established. Meanwhile the document is a
+`protected_root` in the installed descriptor and the hash-pinned skill
+forbids any agent from writing into a protected root, so the only
+supported way out of the deadlock was a hand-edit no agent could make. The
+pilot measured it (chainlink #114, swisstable-verus, ligature 1.2.1): a
+completely correct Stage 4.5 sequence — 14 boundary contracts, 15
+interactions, 6 bridges and 1 conflict resolution, all approved at exit 0
+— died at `accept-promotion`.
+
+Two halves, both in the command that already owns the document:
+
+* **`accept-policy --version <name>@<major>.<minor>`** stamps the single
+  `Policy version:` line and records the stamped document as the reviewed
+  `base_hash`, in one atomic write. That line and nothing else in the
+  document changes; the value is validated against the same pattern the
+  marker line itself accepts, so this command cannot produce a document
+  `accept-promotion` would later refuse. It is also how a real version is
+  bumped on a substantive policy change. Like `approve`, `accept-promotion`
+  and `record-ruling`, it is a human checkpoint — never run it on a human's
+  behalf. Without `--version` nothing is written but the manifest, and a
+  document with no well-formed marker is still refused. A document with no
+  marker line at all, or with more than one, is refused rather than
+  guessed at.
+* **Early reporting.** An unstamped marker is reported where it can be
+  acted on long before Stage 4.5: on the document's own line of the
+  `init`/`doctor`/`migrate` inventory (with the command named), as a
+  non-zero `doctor` exit, and as a high-severity blocking
+  `policy-version-marker` finding in `check --json` / `status --json`.
+  `init` itself still exits 0 and still reports `installation: current`:
+  an unfilled template is not installation drift — nothing conflicted and
+  nothing was modified — so the two installation verdicts keep the meaning
+  they had, and the outstanding condition is the finding. A *missing*
+  document remains `policy-drift`'s own signal, so one defect never
+  produces two findings.
+
 ## 9. Compatibility alias policy
 
 Every legacy flat command not listed in §7 (internal) becomes a
@@ -676,7 +983,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 44/44)
+## 10. Legacy command → disposition (complete, 45/45)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -685,7 +992,8 @@ set of names matches `pipeline.registered_commands()` exactly.
 
 | legacy command | disposition |
 |---|---|
-| `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` (`out-of-set`) and files inside `protected_roots` that no declaration vouches for (`protected-write`), relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json`. The protected surface is reported per declared pattern, including patterns matching no file (#77, #103, §8) |
+| `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` (`out-of-set`) and files inside `protected_roots` that no declaration vouches for (`protected-write`), relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json`. The protected surface is reported per declared pattern, including patterns matching no file (#77, #103, §8). `--issue N` scopes the write grants it consumes to one issue; with no `--issue`, no grant is consulted (#114, §8) |
+| `authorize-write` | stable; records ONE issue-scoped capability authorizing a single sanctioned write into a declared `protected_roots` path, as an append-only entry in `ci/results/protected-writes.jsonl` -- the third route out of the dead end #103's enforcement left (widen `allowed_roots`, hand-edit outside every tool, or record a bound grant; §8, #114). The record binds the exact path or an explicitly bounded pattern, the operation (`write`|`delete`), the issue, `issued_at`/`expires_at`, the one-shot flag, the named issuer, the grant id (a hash of that binding, recomputed on read) and audit metadata. Refused, writing nothing, for a path no `protected_roots` pattern covers, one `allowed_roots` already permits, an absolute/escaping/vacuous/directory path, an undeclared `--issuer-kind supervisor`, a TTL outside `[1, 86400]`, `--one-shot` on a pattern, a replayed grant id, or a ledger that itself sits inside a protected root. A human checkpoint in the `human` lane; the `supervisor` lane needs the identity declared in `write_set.authorized_supervisors`. Exits 0/2 per docs/exit-code-contract.md |
 | `validate` | alias → `validate boundary` |
 | `validate-interaction` | alias → `validate interaction` |
 | `validate-exemption` | alias → `validate exemption` |
@@ -710,7 +1018,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `approve-pair` | alias → `approve pair` |
 | `approve-exemption-pair` | alias → `approve exemption-pair` |
 | `accept-promotion` | alias → `approve promotion` |
-| `accept-policy` | stable; records a reviewed change to the normative reliance-policy document as the manifest's reviewed `base_hash` (the explicit accept path for governance drift; `--policy-path` defaults to the descriptor's `compatibility_policy.reliance_policy_path`, and a disagreeing explicit path is refused) (#78, §8) |
+| `accept-policy` | stable; records a reviewed change to the normative reliance-policy document as the manifest's reviewed `base_hash` (the explicit accept path for governance drift; `--policy-path` defaults to the descriptor's `compatibility_policy.reliance_policy_path`, and a disagreeing explicit path is refused) (#78, §8). `--version <name>@<major>.<minor>` stamps the document's single `Policy version:` marker line first — that line and nothing else — so the template `init` installs can reach an accepted state, and be re-versioned, without a hand-edit of a `protected_root`; a human checkpoint like `approve` and `accept-promotion` (#113, §8) |
 | `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1) |
 | `record-ruling` | stable; records an explicit human verdict (`ratified`\|`rejected`) over an exact artifact set in `ci/results/human_rulings.jsonl` -- the human-ruling gate `accept-promotion` enforces: no receipt is minted until every artifact in the accepted set carries a `ratified` ruling over its current content (#82, §5) |
 | `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from the verifier's proof certificates (`proof.json`) and writes it atomically -- the achieved side `gate g14` reads, and the producer the obligation half of `docs/assurance-report-schema.json` never had (#87, §1). Every record field is derived (certificate + manifest provenance); the caller's only declaration, `--proof <obligation>=<path>`, is checked (obligation provided by this manifest; certificate under a directory named for the obligation's concept; certificate not older than its Coma program) and a certificate with a stuck subgoal records nothing. A feature ledger already sitting at that path is replaced with a warning naming the collision; unrecognizable content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
@@ -731,7 +1039,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 44 has a nested home, an internal-operation classification,
+every one of the 45 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

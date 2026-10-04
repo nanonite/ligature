@@ -64,6 +64,14 @@ its four report-ids write a generated projection file; only
 writes the one artifact `gate g14` reads, a work package's assurance
 report at its manifest's own `report.emit` path (see §5).
 
+`authorize-write` (#114) is **not** in this read-only list either — it
+appends one capability record to `ci/results/protected-writes.jsonl` and
+nothing else. It is the only command that can make a `write-set-check`
+protected-write finding non-blocking, so it is a human checkpoint (or an
+identity the descriptor explicitly whitelists) by construction: the three
+read-only surfaces stay read-only, and `write-set-check --issue N` is the
+only consumer of what it writes.
+
 ## 5. Which operations may write, and under what authority
 
 | operation | writes | authority |
@@ -77,9 +85,10 @@ report at its manifest's own `report.emit` path (see §5).
 | `report gold-set-measurement` | `ci/results/gold_set/` (default; `--no-write` suppresses it) | none required — same as above |
 | `accept-promotion` (#45, #82) | a promotion receipt under `specs/_promotions/` | `--reviewer` (required, human identity); the accepted artifact set and the policy document's own `Policy version:` line are the authority inputs, each accepted artifact's own `review` block must be provable to the sanctioned approve path (a matching entry in `ci/results/review_log.jsonl`) **and** every artifact in the set must carry a `ratified` human ruling over its current content in `ci/results/human_rulings.jsonl` -- a block that merely exists in the file, or an approval an unattended agent recorded, is not authority, and neither is silence (#82) |
 | `record-ruling` (#82) | one append-only entry in `ci/results/human_rulings.jsonl` | `--reviewer` (required, human identity) plus an explicit `--verdict ratified\|rejected` over an explicit `--artifact` set; this is the human-decision event Stage 4.5 is gated on, so it is a human checkpoint exactly like `approve` -- an agent must not run it either |
-| `accept-policy` (#78) | the ownership manifest's reviewed `base_hash` for the normative reliance-policy document | `--reviewer` (required, human identity); the only path through which a normative user-owned document's recorded base moves — `init`/`migrate` never re-base it (#78) |
+| `accept-policy` (#78, #113) | the ownership manifest's reviewed `base_hash` for the normative reliance-policy document, and -- with `--version` -- that document's single `Policy version:` marker line | `--reviewer` (required, human identity); the only path through which a normative user-owned document's recorded base moves — `init`/`migrate` never re-base it (#78). `--version <name>@<major>.<minor>` writes to the document itself, and only its one marker line: the sanctioned way to reach an accepted state from the template `init` installs, whose placeholder marker yields no `policy_version` and therefore blocks every promotion. A human checkpoint for that reason, and for `accept-policy`'s own: an agent must ask the human to run it (#113) |
 | `promote-evidence` (#79) | renames a staged evidence draft (`evidence/<id>.json.draft`) to its target, plus an audit entry in `ci/results/evidence_promotions.jsonl` | none required — evidence is non-normative (no `review` block, not a human checkpoint per plan.md §7.2), so promotion is mechanical (G1a/G1b re-validate + atomic rename); the human checkpoint remains on evidence-conflict-resolution, not evidence itself |
 | `record-assurance` (#87) | a work package's assurance report at its manifest's own `report.emit` path (the achieved side `gate g14` reads) | none required — every record field is derived from the verifier's own proof certificate and the manifest's provenance, never from a caller's word for what was proved (docs/achieved-assurance-schema.json: a hand-authored achieved record would be indistinguishable from fabricating a verification result), so there is no `review` block to checkpoint and no human identity to record. The only caller declaration — which certificate is about which obligation — is checked (the obligation must be one this manifest provides; the certificate must sit under a directory named for that obligation's concept; it must not be older than the Coma program it certifies), and a certificate with a stuck subgoal records nothing at all. A feature ledger already occupying the path is replaced with a warning naming the collision; content that is neither artifact is refused rather than destroyed |
+| `authorize-write` (#114) | one append-only capability record in `ci/results/protected-writes.jsonl`, authorizing a single write into a declared `protected_roots` path — the only thing besides a pipeline artifact that can make a `write-set-check` protected-write finding non-blocking | `--issuer NAME` (required, human identity) plus the record's own binding: `--issue N`, `--path P`, `--op write\|delete`, `--ttl` (a grant never outlives `issued_at + ttl`), `--one-shot`. In the `human` lane (the default) it is a human checkpoint exactly like `approve`/`accept-policy`/`record-ruling`, and an agent must ask the human to run it — #103's enforcement left a protected write that is genuinely *sanctioned* with only two routes, both worse than the defect: widen `allowed_roots`, which deletes the boundary, or hand-edit a file outside every tool, which the audit trail cannot tell apart from an intrusion. In the `supervisor` lane the identity must be declared in the descriptor's `write_set.authorized_supervisors` whitelist, and `write-set-check` re-verifies that on every consumption, so withdrawing the identity withdraws the grant on the next run. Nothing else is authority: no prose field is ever read when deciding whether a grant authorizes a write, and a grant cannot widen `allowed_roots`, authorize a different operation, outlive its TTL, or cover a different issue or path. The ledger is an audit trail, not a signature — see §8's closing paragraph for what that forecloses and what it does not |
 
 `report pilot-cluster` writes nothing (stdout only) and belongs in §4's
 read-only list in every respect except that it shares the `report` verb
@@ -149,6 +158,28 @@ file changed since the ruling) or unreadable all refuse. Like `approve`,
 `record-ruling` is a human checkpoint: a human ruling on a review block
 written out-of-band, or on a set promoted by hand, is recorded there,
 never inferred and never supplied by the agent.
+
+The write-grant ledger (`authorize-write`, #114) is the same kind of trail
+and carries the same residual, stated rather than glossed: an entry
+*appended* by someone with write access to `ci/results/` is
+indistinguishable from one `authorize-write` wrote — which is a boundary
+breach in its own right and is exactly what the agent-facing rule forbids.
+What the trail does *not* permit is an entry edited in place: `grant_id` is
+a hash of the fields the grant's authority is of (issue, path, operation,
+one-shot, issuer, issuer-kind, issued-at, TTL) and the consumer recomputes
+it, so a record edited to authorize a different path, issue, operation or
+time under a preserved id is rejected and reported. Deleting a whole line
+cannot be detected by any append-only trail; what can be, and is, is that
+`authorize-write` refuses to record a grant at all when the ledger itself
+sits inside a declared protected root, so a workspace cannot reach a state
+where every append to its own capability trail is a boundary breach. The
+consumer holds the same half of that rule, because a writer-side refusal a
+hand-appended line walks straight past is not a refusal: `write-set-check`
+reports every record read out of such a ledger as `ledger-protected` and
+honors none of them. Without it, a grant naming the ledger's own path would
+let a capability trail vouch for its own presence in a declared protected
+root -- the same thing `write_set` has refused since #103, when a canonical
+pipeline location was allowed to account for a file the descriptor protects.
 
 ## 9. Witnesses and differential agreement falsify, never prove
 

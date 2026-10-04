@@ -25,6 +25,17 @@ CLI_CONTRACT = (ROOT / "docs" / "cli-contract.md").read_text()
 TRUST_BOUNDARIES = (ROOT / "docs" / "trust-and-compatibility-boundaries.md").read_text()
 CONSOLIDATED_CHECK_SCHEMA = json.loads((ROOT / "schemas" / "consolidated-check.schema.json").read_text())
 
+# chainlink #111: every document that states where a callee PRECONDITION
+# belongs. Read from disk per test so a repository-state change is what a
+# failure reports, not a stale module-level copy.
+PRECONDITION_RULE_SOURCES = {
+    "prompts/stage-3-boundary-drafting.md": ROOT / "prompts" / "stage-3-boundary-drafting.md",
+    "prompts/stage-3-bridge-drafting.md": ROOT / "prompts" / "stage-3-bridge-drafting.md",
+    "docs/reliance-policy.template.md": ROOT / "docs" / "reliance-policy.template.md",
+    "docs/boundary-contract-schema.json": ROOT / "docs" / "boundary-contract-schema.json",
+    "docs/bridge-schema.json": ROOT / "docs" / "bridge-schema.json",
+}
+
 
 class CheckReadOnlyConsistencyTest(unittest.TestCase):
     """Round-1 defect: docs/cli-contract.md said `check` "orchestrates
@@ -205,6 +216,134 @@ class ExitCodeConditionVocabularyConsistencyTest(unittest.TestCase):
                 exit_codes.GATE_INTEGRITY_FAILED,
             },
         )
+
+
+class CalleePreconditionPlacementConsistencyTest(unittest.TestCase):
+    """chainlink #111: the exact shape of contradiction this file exists to
+    catch, in the two templates that produce the artifacts it happened
+    between. `prompts/stage-3-boundary-drafting.md` said a callee
+    precondition the caller must establish does NOT belong in
+    `callee_guarantees`; `prompts/stage-3-bridge-drafting.md` requires a
+    bridge's `callee_requirement` to be one of the boundary's own
+    `callee_guarantees` (G2, enforced by scripts/validate_bridge.py). Two
+    installed, hash-pinned prompts, each internally coherent, jointly
+    unsatisfiable: the boundary approved and the bridge that discharged its
+    precondition was refused at approve time, which is what the swisstable-
+    verus pilot reported.
+
+    Five documents state this rule -- the two templates, the boundary
+    contract schema's own `callee_guarantees` description, the bridge
+    schema's own `callee_requirement` description, and the reliance-policy
+    template's resolution table that `init` installs as the project's
+    standing governance -- plus the boundary template's own re-entry prose.
+    Each is asserted to place a callee precondition in `callee_guarantees`
+    as the caller obligation a bridge discharges, and each is asserted NOT
+    to still forbid it, so a future edit to any one of them cannot
+    reintroduce the split without a test failing.
+    """
+
+    # The sentences the boundary template and the boundary schema shipped
+    # with, in the form they shipped with. Either reappearing anywhere is
+    # the defect returning. Scoped to those exact sentences deliberately:
+    # "never a `callee_guarantees` entry" is still correct for the caller's
+    # OWN obligations, which is a different prohibition (asserted separately,
+    # on the row it belongs to).
+    RETIRED = (
+        "it belongs in a bridge specification (not yet in scope this stage)",
+        "Never a callee precondition (-> bridge spec instead)",
+        "callee **precondition** | bridge specification",
+    )
+
+    def _texts(self):
+        # The schemas are compared as their own JSON text so a retired
+        # phrase is caught whether it sits in prose or in an escaped string.
+        return {
+            name: (json.dumps(json.loads(path.read_text())) if path.suffix == ".json" else path.read_text())
+            for name, path in PRECONDITION_RULE_SOURCES.items()
+        }
+
+    def test_no_document_still_forbids_a_precondition_in_callee_guarantees(self):
+        for name, text in self._texts().items():
+            for retired in self.RETIRED:
+                with self.subTest(source=name):
+                    self.assertNotIn(retired, text)
+
+    def test_the_policy_tables_precondition_row_places_it_and_keeps_the_other_prohibitions(self):
+        """`init` installs this template as the project's standing
+        governance, so its table is the normative statement an operator
+        reads. Read the rows rather than matching prose: the callee
+        precondition row must place the entry in `callee_guarantees` without
+        forbidding it, the caller's-own row must keep forbidding it (that one
+        is correct and unrelated to #111), and the adversary row is
+        unchanged."""
+        text = (ROOT / "docs" / "reliance-policy.template.md").read_text()
+        rows = {
+            key: next(line for line in text.splitlines() if line.startswith(f"| {key}"))
+            for key in (
+                "callee **precondition**",
+                "callee **postcondition**",
+                "adversary case",
+                "the **caller's own**",
+            )
+        }
+        precondition_row = rows["callee **precondition**"]
+        self.assertIn("`callee_guarantees`", precondition_row)
+        self.assertNotIn("never", precondition_row)
+        self.assertIn("caller", precondition_row)
+        self.assertIn("bridge", precondition_row)
+        # the rows #111 did not touch still say what they always said
+        self.assertIn("`callee_guarantees`", rows["callee **postcondition**"])
+        self.assertIn("**never**", rows["adversary case"])
+        self.assertIn("never a `callee_guarantees` entry", rows["the **caller's own**"])
+
+    def test_every_document_says_the_precondition_is_declared_here_and_discharged_by_a_bridge(self):
+        for name, text in self._texts().items():
+            normalized = " ".join(text.split())
+            with self.subTest(source=name):
+                self.assertIn("precondition", normalized)
+                # the obligation the caller must establish, not a guarantee
+                self.assertTrue(
+                    "caller obligation" in normalized or "caller must establish" in normalized,
+                    f"{name} never says who holds a precondition",
+                )
+                # and a bridge is what discharges it
+                self.assertIn("bridge", normalized)
+
+    def test_the_boundary_and_bridge_templates_name_each_other_on_this_rule(self):
+        """Neither template may again be the only document that knows the
+        rule: the author reading one is told where the other half is
+        decided, which is what lets a model correct itself at draft time
+        rather than at approve time."""
+        boundary_text = " ".join(
+            (ROOT / "prompts" / "stage-3-boundary-drafting.md").read_text().split()
+        )
+        bridge_text = " ".join(
+            (ROOT / "prompts" / "stage-3-bridge-drafting.md").read_text().split()
+        )
+        self.assertIn("stage-3-bridge-drafting.md", boundary_text)
+        self.assertIn("stage-3-boundary-drafting.md", bridge_text)
+
+    def test_the_gates_and_the_documents_agree_about_the_requirement(self):
+        """The mechanical half: validate_bridge's own G2 message is the
+        document an author sees when the templates did not stop them, so it
+        has to point at the same resolution rather than restating the
+        impossibility it used to report."""
+        from validate_boundary_contracts import OBLIGATION_ROLE, callee_obligation_role
+        from validate_bridge import check_boundary_cross_reference
+
+        boundary_id = "scheduler_dispatch__to__task_queue_pop_ready"
+        findings = check_boundary_cross_reference(
+            Path("crates/scheduler/specs/_bridges/BR-SCHED-TQ-001.json"),
+            {"boundary_id": boundary_id, "callee_requirement": "TaskQueue.C001"},
+            {boundary_id: {"callee_guarantees": ["TaskQueue.C002"]}},
+        )
+        self.assertEqual(len(findings), 1, [str(f) for f in findings])
+        self.assertEqual(findings[0].severity, "error")
+        self.assertIn("re-draft the boundary contract", findings[0].reason)
+
+        # ...and the boundary gate's role classification is the one the
+        # documents describe: a precondition is a caller obligation.
+        self.assertEqual(callee_obligation_role({"kind": "precondition"}), OBLIGATION_ROLE)
 
 
 if __name__ == "__main__":

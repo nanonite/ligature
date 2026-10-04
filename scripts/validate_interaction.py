@@ -76,6 +76,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
@@ -366,7 +367,7 @@ def load_interactions_by_id(interactions_dir: Path) -> InteractionLookup:
     validator = load_validator()
     candidates: dict[str, list[tuple[Path, dict]]] = {}
     for path in sorted(
-        p for p in interactions_dir.iterdir() if p.is_file() and p.suffix != ".draft"
+        p for p in interactions_dir.iterdir() if p.is_file() and not is_staged_draft(p)
     ):
         try:
             data = json.loads(path.read_text())
@@ -485,17 +486,43 @@ def validate_file(
 
 
 def find_interaction_files(root: Path) -> list[Path]:
-    """Every file anywhere under a `_interactions` directory, at any depth --
-    deliberately over-broad (mirrors find_boundary_files) so nested
-    placements surface as G1b violations instead of being silently
+    """Every non-staged file anywhere under a `_interactions` directory, at
+    any depth -- deliberately over-broad (mirrors find_boundary_files) so
+    nested placements surface as G1b violations instead of being silently
     invisible to a glob("*.json") that only looks one level down.
+
+    Staged drafts (`<target>.json.draft`, written by
+    `review_checkpoint.stage_draft` via `pipeline.py draft`) are
+    excluded: a draft is a pending, not-yet-approved artifact, and
+    chainlink #90 found that `validate-interaction` picked each one up
+    as a G1a *error* ("'review' is a required property") while `validate`
+    (boundary contracts) already skipped its own staged drafts -- so the
+    very output the Stage 3 template prescribes
+    (stage-3-interaction-drafting.md tells the model to omit `review`;
+    only approve/approve-pair adds it, and `draft` itself reports "OK:
+    generated draft passes G1a/G1b immediate checks") was flagged as a
+    defect by Stage 4, and `check` gained one medium finding plus a
+    human_decision_required condition per staged draft. Excluding drafts
+    here -- in the ONE discovery function validate(), validate_crate(),
+    count_discovered() and select_pilot_cluster's edge discovery all
+    wrap -- makes a staged interaction inert (neither reported nor
+    counted), the exact convention
+    validate_boundary_contracts.validate()'s own `.json` suffix filter
+    applies to boundary drafts and find_evidence_files() applies to
+    evidence drafts (chainlink #79). An unreviewed artifact at its real
+    `<id>.json` path is untouched by this: that is a draft-lifecycle
+    record, still reported (and normalized to a pending human decision
+    by check), not a staging file. Use load_interactions_by_id()'s own
+    `.draft` skip for approved-only lookups.
 
     Raises if `root` doesn't exist: a typo'd crate_dir in a project
     descriptor must be a loud failure, not a silent 'OK: 0 findings'
     (same discipline established for boundary contracts)."""
     if not root.is_dir():
         raise FileNotFoundError(f"interaction scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob("**/_interactions/**/*") if p.is_file()]
+    return [
+        p for p in root.glob("**/_interactions/**/*") if p.is_file() and not is_staged_draft(p)
+    ]
 
 
 def _standalone_debt_coverage(root: Path) -> dict[Path, set[str]]:
@@ -579,7 +606,12 @@ def validate(
     OK with zero findings -- every file found is now validated (and
     check_naming's own suffix check, above, catches the well-formed-JSON-
     but-wrong-extension case that would otherwise slip past validate_file's
-    JSON-parse step).
+    JSON-parse step). The one deliberate exception is a staged
+    `<target>.json.draft` (chainlink #90): find_interaction_files()
+    excludes it from discovery, so a pending draft is neither validated
+    nor counted -- the same `.draft` convention boundary contracts'
+    validate() applies -- while an unreviewed `<id>.json` at its real
+    path is still validated and reported here.
 
     If no explicit coverage is supplied, this root-level scan derives
     per-directory coverage from sibling `_protocol_debt/`/`_boundaries/`/

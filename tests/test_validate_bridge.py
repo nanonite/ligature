@@ -11,6 +11,7 @@ from bridge_harness import CompileError  # noqa: E402
 from bridge_harness import VERIFIERS  # noqa: E402
 from bridge_harness import compile_bridge  # noqa: E402
 from validate_bridge import (  # noqa: E402
+    count_discovered,
     find_bridge_files,
     load_draft_validator,
     load_validator,
@@ -183,6 +184,34 @@ class BoundaryCrossReferenceTest(unittest.TestCase):
     def test_matching_boundary_is_accepted(self):
         findings = run(load_valid(), boundaries_by_id=default_boundaries_by_id())
         self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_a_precondition_declared_by_its_boundary_is_accepted(self):
+        """chainlink #111, the pilot's second shape: `callee_requirement`
+        naming a callee PRECONDITION the caller must establish (C001 here),
+        declared by the boundary it discharges. The boundary template used to
+        forbid exactly this entry, so the pair of documents could not both
+        be satisfied -- and this half is what a bridge that checks a
+        precondition is for."""
+        boundaries = {BOUNDARY_ID: {"callee_guarantees": ["TaskQueue.C001"]}}
+        findings = run(load_valid(), boundaries_by_id=boundaries)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_a_precondition_the_boundary_omitted_is_refused_and_names_the_boundary(self):
+        """The pilot's first shape, reproduced: the boundary carries only the
+        postcondition, so approving the bridge fails with a bare 'the boundary
+        never declared it'. The refusal now names the remedy, which is the
+        boundary contract and not this artifact -- renaming
+        `callee_requirement`, or pointing the bridge at a boundary that
+        happens to declare it, would discharge an obligation the reviewed
+        reliance record does not contain."""
+        boundaries = {BOUNDARY_ID: {"callee_guarantees": ["TaskQueue.C002"]}}
+        findings = run(load_valid(), boundaries_by_id=boundaries)
+        errors = [str(f) for f in findings if f.severity == "error"]
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("TaskQueue.C001", errors[0])
+        self.assertIn("TaskQueue.C002", errors[0])
+        self.assertIn("re-draft the boundary contract", errors[0])
+        self.assertIn("not this bridge", errors[0])
 
 
 class CompilableFragmentTest(unittest.TestCase):
@@ -380,6 +409,108 @@ class StandaloneCliMainTest(unittest.TestCase):
             (d / "BR-WRONG-001.json").write_text(json.dumps(load_valid()))
             rc = main([tmp])
         self.assertEqual(rc, 1)
+
+
+class StagedDraftInertTest(unittest.TestCase):
+    """Chainlink #110: `draft 3 bridge-drafting` stages
+    `<target>.json.draft` WITHOUT a `review` block (only `approve`
+    attaches one), and `draft` itself reports "OK: generated draft passes
+    G1a/G1b immediate checks" -- yet every bridge scan collected that file
+    and failed it on `'review' is a required property` at G1a, so
+    `validate-bridge` exited 1 on the output the tool prescribes and
+    `check --json` gained one medium finding plus a
+    `human_decision_required` condition per staged bridge, with no
+    mechanical way to tell a review-in-progress from a schema break.
+    validate_interaction/validate_boundary_contracts have skipped staged
+    drafts since #90; this pins the same convention for bridges.
+
+    A staged draft is inert (neither reported nor counted) everywhere
+    find_bridge_files() is the discovery point -- the standalone
+    validate(), validate_crate() (what `validate-bridge` runs) and
+    count_discovered() -- while an unreviewed bridge at its REAL
+    `<id>.json` path is still a reported draft-lifecycle record."""
+
+    def _staged_draft_dir(self, tmp: str, directory: Path) -> Path:
+        directory.mkdir(parents=True)
+        draft = load_valid()
+        draft.pop("review")  # exactly what stage-3-bridge-drafting produces
+        (directory / "BR-SCHED-TQ-001.json.draft").write_text(json.dumps(draft))
+        return directory
+
+    def test_find_bridge_files_excludes_staged_drafts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._staged_draft_dir(tmp, Path(tmp) / "specs" / "_bridges")
+            (d / "BR-SCHED-TQ-002.json").write_text(json.dumps(load_valid()))
+            found = find_bridge_files(Path(tmp))
+        self.assertEqual([p.name for p in found], ["BR-SCHED-TQ-002.json"])
+
+    def test_recursive_scan_reports_nothing_for_a_staged_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._staged_draft_dir(tmp, Path(tmp) / "specs" / "_bridges")
+            findings = validate(Path(tmp))
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_staged_draft_is_not_counted_as_discovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._staged_draft_dir(tmp, Path(tmp) / "specs" / "_bridges")
+            self.assertEqual(count_discovered(Path(tmp)), 0)
+
+    def test_validate_crate_reports_nothing_for_a_staged_draft(self):
+        """cmd_validate_bridge's own path -- the exact command the pilot
+        report's EXIT 1 came from."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root = Path(tmp)
+            canonical = crate_root / "specs" / "_bridges"
+            self._staged_draft_dir(tmp, canonical)
+            findings = validate_crate(crate_root, canonical, default_boundaries_by_id())
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_the_cli_exits_zero_on_a_staged_draft(self):
+        """The reported symptom: `validate-bridge` exit 1 with
+        [G1a/error] "'review' is a required property" against the draft."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._staged_draft_dir(tmp, Path(tmp) / "specs" / "_bridges")
+            rc = main([tmp])
+        self.assertEqual(rc, 0)
+
+    def test_staged_draft_in_a_mislocated_directory_is_still_inert(self):
+        """Consistency, not just the happy path: a draft under a wrong
+        directory is still a pending draft, and stage_draft only accepts
+        canonical targets, so `approve` could never promote it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._staged_draft_dir(tmp, Path(tmp) / "not_specs" / "_bridges")
+            findings = validate(Path(tmp))
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_an_unreviewed_real_json_is_still_reported(self):
+        """The skip must be exactly `.draft`: an unreviewed artifact at
+        its real `<id>.json` path is a draft-LIFECYCLE record (check
+        normalizes it to a pending human decision), not a staging file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_bridges"
+            d.mkdir(parents=True)
+            unreviewed = load_valid()
+            unreviewed.pop("review")
+            (d / "BR-SCHED-TQ-001.json").write_text(json.dumps(unreviewed))
+            findings = validate(Path(tmp))
+        self.assertTrue(
+            any("'review' is a required property" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_wrong_extension_file_is_still_reported(self):
+        """Guards the earlier external-review fix (a malformed or
+        wrong-extension artifact under _bridges must surface) from being
+        collateral damage of the draft skip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_bridges"
+            d.mkdir(parents=True)
+            (d / "BR-SCHED-TQ-001.yaml").write_text(json.dumps(load_valid()))
+            findings = validate(Path(tmp))
+        self.assertTrue(
+            any("must be a .json file" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 import argparse
 import io
 import json
+import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -502,6 +504,7 @@ class SelectDraftValidateFnTest(unittest.TestCase):
         (self.workspace / "crate_a" / "specs" / "_witnesses").mkdir(parents=True)
         (self.workspace / "evidence").mkdir(parents=True)
         (self.workspace / "specs" / "_conflicts").mkdir(parents=True)
+        (self.workspace / "specs" / "_closure").mkdir(parents=True)
         self._write_real_evidence("E-0143")
         self._write_real_evidence("E-0201")
 
@@ -1098,6 +1101,97 @@ class SelectDraftValidateFnTest(unittest.TestCase):
         self.assertIn("no draft validator recognizes target", str(ctx.exception))
         self.assertIn("concept specs at", str(ctx.exception))
 
+    def test_valid_pre_review_closure_profile_draft_passes(self):
+        """Chainlink #98: specs/_closure/ is now wired into
+        _select_draft_validate_fn -- before this, hand-writing the file
+        directly was the only way a closure profile or degradation record
+        could ever come to exist."""
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.json"
+        data = {
+            "schema_version": "1.0",
+            "cluster": "scheduler-core",
+            "closure_kind": "deductive",
+            "work_packages": ["WP-SCHED-001"],
+            "conditions": {
+                "single_verifier_system": True,
+                "owning_verifier": "creusot",
+                "protocol_class_all_pairwise": True,
+                "unresolved_indirect_calls_at_or_above_medium": 0,
+                "generic_callees_type_universal_or_creusot_owned": True,
+                "transitive_assumptions_within_policy": True,
+                "scc_wellfoundedness_discharged": "not-applicable",
+            },
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_closure_profile_draft_with_model_supplied_review_is_rejected(self):
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.json"
+        data = {
+            "schema_version": "1.0",
+            "cluster": "scheduler-core",
+            "closure_kind": "deductive",
+            "work_packages": ["WP-SCHED-001"],
+            "conditions": {
+                "single_verifier_system": True,
+                "owning_verifier": "creusot",
+                "protocol_class_all_pairwise": True,
+                "unresolved_indirect_calls_at_or_above_medium": 0,
+                "generic_callees_type_universal_or_creusot_owned": True,
+                "transitive_assumptions_within_policy": True,
+                "scc_wellfoundedness_discharged": "not-applicable",
+            },
+            "review": {"reviewer": "a-model-should-not-write-this", "reviewed_at": "2026-09-02"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_valid_pre_review_degradation_record_draft_passes(self):
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.degradation.json"
+        data = {
+            "schema_version": "1.0",
+            "cluster": "scheduler-core",
+            "failed_conditions": ["single_verifier_system"],
+            "affected_edges": ["scheduler_dispatch__to__task_queue_pop_ready"],
+            "ceiling": "harness-tested",
+            "capability_gap": "CG1",
+            "tracking_issue": "chainlink:713",
+        }
+        self.assertEqual(self._findings(target, data), [])
+
+    def test_degradation_record_draft_with_model_supplied_review_is_rejected(self):
+        """#94's own pilot defect reduced to a draft-time check: a model
+        (or a human pasting a hand-written block) cannot assert its own
+        sign-off -- only approve() attaches `review`, after a human
+        reviewer signs off through the sanctioned path."""
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.degradation.json"
+        data = {
+            "schema_version": "1.0",
+            "cluster": "scheduler-core",
+            "failed_conditions": ["single_verifier_system"],
+            "affected_edges": ["scheduler_dispatch__to__task_queue_pop_ready"],
+            "ceiling": "harness-tested",
+            "tracking_issue": "chainlink:713",
+            "review": {"reviewer": "nobody-reviewed-this", "reviewed_at": "1999-01-01"},
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("must not include its own" in f.reason for f in findings), [str(f) for f in findings])
+
+    def test_malformed_degradation_draft_is_flagged_at_draft_time(self):
+        """failed_conditions as a string is G1a's own shape check
+        (check_failed_conditions_shape), not deferred to approve time --
+        immediate Stage 0/3 feedback, plan.md §6.1."""
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.degradation.json"
+        data = {
+            "schema_version": "1.0",
+            "cluster": "scheduler-core",
+            "failed_conditions": "single_verifier_system",
+            "affected_edges": ["scheduler_dispatch__to__task_queue_pop_ready"],
+            "ceiling": "harness-tested",
+            "tracking_issue": "chainlink:713",
+        }
+        findings = self._findings(target, data)
+        self.assertTrue(any("failed_conditions" in str(f) for f in findings), [str(f) for f in findings])
+
 
 class CmdDraftBoundaryEndToEndTest(unittest.TestCase):
     """CLI-level counterpart to SelectDraftValidateFnTest's boundary
@@ -1505,6 +1599,29 @@ class CmdValidateInteractionIntegrationTest(unittest.TestCase):
         _exemptions directory at all must fail closed, not report OK."""
         self.assertEqual(self._run(INTERACTION_FIXTURES / "uncovered_r2"), 1)
 
+    def test_staged_draft_is_inert_not_a_g1a_error(self):
+        """Chainlink #90: the exact pilot repro. `draft 3
+        interaction-drafting` stages `<target>.json.draft` without a
+        `review` block (only approve/approve-pair adds one), so the
+        output the tool prescribes used to come back from Stage 4 as
+        [G1a/error] "'review' is a required property", EXIT 1 -- while
+        `validate` skipped the equivalent staged boundary draft and
+        exited 0. Both validators now use the same `.draft` convention:
+        staged drafts are neither reported nor counted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            src = INTERACTION_FIXTURES / "valid"
+            shutil.copytree(src, workspace)
+            draft = json.loads(
+                (src / "specs" / "_interactions" / "I-SCHED-TQ-001.json").read_text()
+            )
+            draft.pop("review")
+            (workspace / "specs" / "_interactions" / "I-SCHED-TQ-001.json.draft").write_text(
+                json.dumps(draft)
+            )
+            rc = self._run(workspace)
+        self.assertEqual(rc, 0)
+
 
 class CmdValidateExemptionIntegrationTest(unittest.TestCase):
     def _run(self, workspace: Path) -> int:
@@ -1719,6 +1836,49 @@ class CmdPromoteEvidenceIntegrationTest(unittest.TestCase):
         self.assertEqual(action["kind"], "automated-command")
         self.assertEqual(action["action_id"], "promote-evidence")
         self.assertIn("promote-evidence", action["command"])
+
+
+class StagedDraftIsInertThroughTheCliTest(unittest.TestCase):
+    """Chainlink #110, end to end through pipeline.main() with real argv:
+    #90 gave `validate-interaction` and `validate` the `.draft` exclusion
+    and left the other four draft-capable kinds collecting their own,
+    so the swisstable-verus pilot's in-flight Stage 3 work (6 bridges,
+    2 witnesses, 1 conflict resolution) made the owning validator exit 1
+    and `check --json` exit 3 on a `human_decision_required` condition
+    that no output could distinguish from a genuine schema break. Staging
+    a draft is the tool's own sanctioned way to hold an artifact for
+    review, so the validator for that kind must skip it -- each row below
+    is the real command, over a real fixture crate, with the fixture's own
+    approved artifact left in place beside the draft."""
+
+    ROWS = (
+        ("validate-bridge", BRIDGE_FIXTURES / "valid", "specs/_bridges/BR-SCHED-TQ-001.json"),
+        ("validate-exemption", EXEMPTION_FIXTURES / "valid", "specs/_exemptions/I-SCHED-TQ-001.json"),
+        ("validate-protocol-debt", PROTOCOL_DEBT_FIXTURES / "valid",
+         "specs/_protocol_debt/I-SCHED-TQ-001.json"),
+        ("validate-conflict-resolution", CONFLICT_RESOLUTION_FIXTURES / "valid",
+         "specs/_conflicts/EC-004.json"),
+    )
+
+    def _run(self, command: str, workspace: Path) -> int:
+        with tempfile.TemporaryDirectory() as tmp:
+            descriptor_path = _single_crate_descriptor_path(tmp)
+            return pipeline.main(
+                ["--workspace", str(workspace), "--descriptor", str(descriptor_path), command]
+            )
+
+    def test_a_staged_draft_does_not_fail_the_command_that_owns_its_kind(self):
+        for command, fixture, relative in self.ROWS:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as tmp:
+                    workspace = Path(tmp) / "ws"
+                    shutil.copytree(fixture, workspace)
+                    artifact = workspace / relative
+                    draft = json.loads(artifact.read_text())
+                    draft.pop("review")  # exactly what `draft` stages
+                    artifact.with_suffix(".json.draft").write_text(json.dumps(draft))
+                    rc = self._run(command, workspace)
+                self.assertEqual(rc, 0)
 
 
 class CmdValidateConflictResolutionIntegrationTest(unittest.TestCase):
@@ -2504,6 +2664,149 @@ class CmdHumanRulingGateIntegrationTest(unittest.TestCase):
         self.assertIn("different version", stderr)
 
 
+class AcceptPolicyVersionUnblocksPromotionTest(unittest.TestCase):
+    """chainlink #113 end to end through the real CLI, in exactly the shape
+    the swisstable-verus pilot filed it (chainlink #114): a REAL
+    `ligature init` workspace, so `docs/reliance-policy.md` is the shipped
+    template whose `Policy version:` line is still a placeholder; one
+    boundary contract approved through the sanctioned `approve` path; a
+    recorded human ruling over the accepted set. `accept-promotion` then
+    refused the whole promotion -- "must have exactly one ... marker line --
+    found 0" -- before the ruling gate even ran, and `accept-policy`, the
+    one command whose job is to accept this document, refused it too. The
+    document is a `protected_root` in the installed descriptor and the
+    hash-pinned skill forbids any agent from writing there, so no agent
+    could resolve it at all.
+
+    The fix under test: one human command stamps the marker, and Stage 4.5
+    completes."""
+
+    POLICY = "docs/reliance-policy.md"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        self._assert_cli(self._run("init", "--mode", "greenfield", "--name", "repro") == 0)
+        self.boundary_id = "scheduler_dispatch__to__task_queue_pop_ready"
+        self.boundary = f"crates/repro-core/specs/_boundaries/{self.boundary_id}.json"
+        draft = Path(self.workspace) / f"{self.boundary}.draft"
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_text(json.dumps({
+            "schema_version": "1.0",
+            "boundary_id": self.boundary_id,
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C003"],
+        }))
+        self._assert_cli(self._run(
+            "approve", str(Path(self.workspace) / self.boundary),
+            "--reviewer", "alice", "--reviewed-at", "2026-10-02",
+        ) == 0)
+        self.artifacts = [self.POLICY, self.boundary]
+        self.receipt_path = Path(self.workspace) / "specs" / "_promotions" / "scheduling.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args) -> int:
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return pipeline.main(["--workspace", str(self.workspace), *args])
+
+    def _assert_cli(self, condition, message=""):
+        if not condition:
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(out):
+                pipeline.main(["--workspace", str(self.workspace), "check"])
+            raise AssertionError(f"{message}\n{out.getvalue()}")
+
+    def _accept(self) -> tuple[int, str]:
+        argv = [
+            "--workspace", str(self.workspace), "accept-promotion", "scheduling",
+            "--reviewer", "a-human",
+            "--policy-path", self.POLICY,
+        ]
+        for artifact in self.artifacts:
+            argv += ["--artifact", artifact]
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            rc = pipeline.main(argv)
+        return rc, stderr.getvalue()
+
+    def _record_ruling(self) -> int:
+        argv = [
+            "--workspace", str(self.workspace), "record-ruling",
+            "--reviewer", "a-human", "--verdict", "ratified",
+        ]
+        for artifact in self.artifacts:
+            argv += ["--artifact", artifact]
+        return pipeline.main(argv)
+
+    def _stamp(self, version: str = "repro-policy@1.0") -> int:
+        return self._run("accept-policy", "--reviewer", "a-human", "--version", version)
+
+    def test_the_installed_template_blocks_promotion_until_one_command_stamps_it(self):
+        """The pilot's sequence, in order. Every other precondition is
+        genuinely satisfied -- the boundary is approved through the
+        sanctioned path and the human ruling is recorded -- so the
+        refusal is the unstamped marker and nothing else."""
+        rc, stderr = self._accept()
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.receipt_path.exists())
+        self.assertIn("Policy version", stderr)
+        self.assertIn("found 0", stderr)
+
+        self._assert_cli(self._stamp() == 0)
+        self.assertIn("Policy version: `repro-policy@1.0`", (Path(self.workspace) / self.POLICY).read_text())
+
+        # The ruling covers bytes; stamping is an edit, so it is recorded
+        # over the stamped document (the same discipline
+        # CmdHumanRulingGateIntegrationTest pins for any other edit).
+        self._assert_cli(self._record_ruling() == 0)
+        rc, stderr = self._accept()
+        self.assertEqual(rc, 0, stderr)
+        receipt = json.loads(self.receipt_path.read_text())
+        self.assertEqual(receipt["policy_version"], "repro-policy@1.0")
+        self.assertEqual(
+            len(receipt["artifact_manifest"]), len(self.artifacts),
+        )
+        self._assert_cli(self._run("validate-promotion", str(self.receipt_path)) == 0)
+
+    def test_a_ruling_taken_over_the_placeholder_bytes_does_not_survive_the_stamp(self):
+        """The one interaction a workspace must know about: `accept-policy
+        --version` changes the policy document, so a ruling recorded over
+        the pre-stamp bytes no longer covers it and the promotion is
+        refused -- by the ruling gate, naming its own remedy. Ratifying the
+        stamped document is what completes the sequence."""
+        self._assert_cli(self._record_ruling() == 0)
+        rc, _ = self._accept()
+        self.assertEqual(rc, 1)  # the unstamped marker, still
+
+        self._assert_cli(self._stamp() == 0)
+        rc, stderr = self._accept()
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.receipt_path.exists())
+        self.assertIn("record-ruling", stderr)
+
+        self._assert_cli(self._record_ruling() == 0)
+        rc, stderr = self._accept()
+        self.assertEqual(rc, 0, stderr)
+
+    def test_doctor_reports_the_blocking_condition_before_stage_45_is_reached(self):
+        """The early warning the pilot had none of: the same workspace,
+        before any promotion is attempted, already says what is missing
+        and which command fixes it."""
+        code = self._run("doctor")
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            pipeline.main(["--workspace", str(self.workspace), "doctor"])
+        self.assertEqual(code, 1)
+        self.assertIn(self.POLICY, stdout.getvalue())
+        self.assertIn("accept-policy --reviewer <name> --version", stdout.getvalue())
+
+        self._assert_cli(self._stamp() == 0)
+        self._assert_cli(self._run("doctor") == 0)
+
+
 class CmdAcceptPromotionWitnessIntegrationTest(unittest.TestCase):
     """chainlink #35, exercised end to end through pipeline.main() --
     accept-promotion (witness completeness + promotion-digest hashing)
@@ -3199,8 +3502,197 @@ class CmdApproveConceptSpecIntegrationTest(unittest.TestCase):
         )
 
 
-VALID_DESCRIPTOR = {
-    "schema_version": "1.0",
+class BoundaryDeclaresThePreconditionItsBridgeDischargesTest(unittest.TestCase):
+    """chainlink #111 end to end, through the real CLI: the swisstable-verus
+    pilot's two shapes, in the order it ran them.
+
+    Shape 1 (what the pilot did): approve the boundary contract, whose
+    `callee_guarantees` lists only the callee's postcondition because the
+    installed boundary template says a callee precondition does not go
+    there -- then approve the bridge that discharges that precondition, and
+    be refused at exit 1 by G2 with a message naming an impossibility the
+    two installed templates created between them.
+
+    Shape 2 (the fix): the boundary declares the precondition too, as the
+    caller obligation the bridge discharges. The same bridge now promotes,
+    and `validate-bridge` agrees.
+
+    Shape 1's refusal is kept, deliberately: it is the message an author
+    meets when the boundary still omits the obligation, and it must name the
+    boundary contract as the remedy rather than leaving the author to guess
+    which of the two artifacts is wrong."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        self.boundaries = self.workspace / "crate_a" / "specs" / "_boundaries"
+        self.bridges = self.workspace / "crate_a" / "specs" / "_bridges"
+        self.boundaries.mkdir(parents=True)
+        self.bridges.mkdir(parents=True)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+        self.spec_target = self.workspace / "crate_a" / "specs" / "task_queue.json"
+        self.boundary_target = self.boundaries / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        self.bridge_target = self.bridges / "BR-SCHED-TQ-001.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args):
+        """Returns (exit code, everything the commands printed) -- the
+        output matters here because the refusal text IS the artifact an
+        author acts on."""
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            rc = pipeline.main([
+                "--workspace", str(self.workspace),
+                "--descriptor", str(self.descriptor_path),
+                *args,
+            ])
+        return rc, out.getvalue()
+
+    def _concept_spec(self) -> dict:
+        """A callee declaring one obligation of each role: C001, the
+        precondition the caller must establish, and C002, the postcondition
+        the caller then relies on."""
+        return {
+            "schema_version": "1.0",
+            "concept": "TaskQueue",
+            "cluster": "data-model",
+            "english_description": "A priority queue of tasks ordered by deadline",
+            "verifier": "creusot",
+            "queries": [
+                {
+                    "english": "Returns the number of tasks in the queue",
+                    "rust_sig": "fn len(&self) -> usize",
+                    "pure": True,
+                    "witness_required": False,
+                },
+            ],
+            "commands": [
+                {
+                    "english": "Removes and returns the task with the earliest deadline",
+                    "rust_sig": "fn pop_ready(&mut self) -> Option<Task>",
+                },
+            ],
+            "constraints": [
+                {
+                    "english": "pop_ready is called only when a task is due by now",
+                    "logic": "self.has_due(self.now())",
+                    "kind": "precondition",
+                    "source": "hand",
+                    "applies_to": ["pop_ready"],
+                    "id": "C001",
+                },
+                {
+                    "english": "pop_ready returns the task with the earliest deadline",
+                    "logic": "self.len() > 0",
+                    "kind": "postcondition",
+                    "source": "hand",
+                    "applies_to": ["pop_ready"],
+                    "id": "C002",
+                },
+            ],
+            "adversary_table": [
+                {
+                    "scenario": "Pushing a task with a deadline in the past",
+                    "violates": "deadline ordering",
+                    "resolution": "reject",
+                },
+            ],
+        }
+
+    def _write_draft(self, target: Path, data: dict) -> None:
+        target.with_suffix(target.suffix + ".draft").write_text(json.dumps(data))
+
+    def _promote_concept_spec(self) -> None:
+        self._write_draft(self.spec_target, self._concept_spec())
+        rc, output = self._run("approve", str(self.spec_target), "--reviewer", "alice")
+        self.assertEqual(rc, 0, output)
+
+    def _write_boundary_draft(self, guarantees) -> None:
+        self._write_draft(self.boundary_target, {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": list(guarantees),
+        })
+
+    def _write_bridge_draft(self) -> None:
+        self._write_draft(self.bridge_target, {
+            "schema_version": "1.0",
+            "bridge_id": "BR-SCHED-TQ-001",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "callee_requirement": "TaskQueue.C001",
+            "available_contract_facts": [
+                {"obligation_id": "Scheduler.C010", "role": "caller-precondition"},
+            ],
+            "target_expression": "TaskQueue.pop_ready(args, callee_state)",
+            "protocol_class": "pairwise",
+            "bridge_logic": {
+                "bindings": {"caller_self": "Scheduler"},
+                "premises": ["caller_self.has_due_task()"],
+                "conclusion": {"obligation_id": "TaskQueue.C001"},
+            },
+        })
+
+    def test_the_pilots_first_shape_is_refused_and_the_remedy_names_the_boundary(self):
+        """The boundary declares only the postcondition; the bridge discharges
+        the precondition. G2 refuses at exit 1, writes nothing, and says the
+        boundary contract is the thing to re-draft."""
+        self._promote_concept_spec()
+        self._write_boundary_draft(["TaskQueue.C002"])
+        rc, output = self._run("approve", str(self.boundary_target), "--reviewer", "alice")
+        self.assertEqual(rc, 0, output)
+        self.assertTrue(self.boundary_target.is_file())
+
+        self._write_bridge_draft()
+        rc, output = self._run("approve", str(self.bridge_target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.bridge_target.exists())
+        self.assertIn("TaskQueue.C001", output)
+        self.assertIn("re-draft the boundary contract", output)
+
+    def test_the_same_bridge_promotes_once_the_boundary_declares_the_precondition(self):
+        """The fix, measured where the pilot measured it: the boundary
+        template now says a callee precondition belongs here, as the caller
+        obligation a bridge discharges, so the pilot's second shape is a
+        documented artifact rather than a deviation from the template."""
+        self._promote_concept_spec()
+        self._write_boundary_draft(["TaskQueue.C001", "TaskQueue.C002"])
+        rc, output = self._run("approve", str(self.boundary_target), "--reviewer", "alice")
+        self.assertEqual(rc, 0, output)
+
+        self._write_bridge_draft()
+        rc, output = self._run("approve", str(self.bridge_target), "--reviewer", "alice")
+        self.assertEqual(rc, 0, output)
+        promoted = json.loads(self.bridge_target.read_text())
+        self.assertEqual(promoted["callee_requirement"], "TaskQueue.C001")
+        self.assertEqual(promoted["review"]["reviewer"], "alice")
+
+        # ...and the next command agrees with what approve just promoted.
+        rc, output = self._run("validate-bridge")
+        self.assertEqual(rc, 0, output)
+
+    def test_the_boundary_gate_reports_the_precondition_as_a_caller_obligation(self):
+        """The role distinction is visible where an operator reads it, and
+        it does not block: `validate` exits 0 with the entry named as the
+        obligation a bridge discharges rather than a guarantee the callee
+        provides -- so the role is never read off the field name alone."""
+        self._promote_concept_spec()
+        self._write_boundary_draft(["TaskQueue.C001", "TaskQueue.C002"])
+        rc, output = self._run("approve", str(self.boundary_target), "--reviewer", "alice")
+        self.assertEqual(rc, 0, output)
+
+        rc, output = self._run("validate")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("TaskQueue.C001", output)
+        self.assertIn("caller obligation", output)
+        self.assertIn("NOT a guarantee the callee provides", output)
+
+
+VALID_DESCRIPTOR = {    "schema_version": "1.0",
     "project": {"name": "repro", "crate_naming_convention": "^repro-[a-z]+"},
     "mode": "greenfield",
     "crates": [
@@ -4007,6 +4499,7 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertFalse(target.exists(), "a non-.json target was approved and written through")
 
+
 class MissingStagedDraftTest(unittest.TestCase):
     """chainlink #102 (the date-creusot pilot's `date-ligature-101`,
     mirrored from full-ligature-port chainlink #106): every promotion verb
@@ -4270,6 +4763,165 @@ class MissingStagedDraftTest(unittest.TestCase):
         self.assertEqual(json.loads(target.read_text())["callee_guarantees"], ["TaskQueue.C004"])
         self.assertFalse(staged.exists())
 
+
+class CmdApproveClosureIntegrationTest(unittest.TestCase):
+    """Chainlink #98: closure profiles and degradation records, wired
+    into `pipeline.py draft`/`approve` for the first time. Before this,
+    hand-writing specs/_closure/<cluster>.degradation.json directly was
+    the ONLY way either artifact type could exist -- #94's own pilot
+    finding was exactly a hand-written, unreviewed degradation record
+    (`review: {reviewer: "nobody-reviewed-this", ...}`) releasing a
+    cluster, because nothing sanctioned could ever have produced a
+    provenanced one. These tests exercise the real `approve` CLI path,
+    workspace-level like conflict-resolution (deliberately not under any
+    crate), and close the loop with #96/#97: a record approved here must
+    leave behind a matching entry in ci/results/review_log.jsonl, the
+    exact audit trail review_checkpoint.review_provenance_gaps() (and so
+    gate-g14's own provenance check) requires before it may release
+    anything."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        (self.workspace / "specs" / "_closure").mkdir(parents=True)
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args):
+        return pipeline.main(
+            ["--workspace", str(self.workspace), "--descriptor", str(self.descriptor_path), *args]
+        )
+
+    def _profile_data(self) -> dict:
+        return {
+            "schema_version": "1.0",
+            "cluster": "scheduler-core",
+            "closure_kind": "deductive",
+            "work_packages": ["WP-SCHED-001"],
+            "conditions": {
+                "single_verifier_system": True,
+                "owning_verifier": "creusot",
+                "protocol_class_all_pairwise": True,
+                "unresolved_indirect_calls_at_or_above_medium": 0,
+                "generic_callees_type_universal_or_creusot_owned": True,
+                "transitive_assumptions_within_policy": True,
+                "scc_wellfoundedness_discharged": "not-applicable",
+            },
+        }
+
+    def _degradation_data(self) -> dict:
+        return {
+            "schema_version": "1.0",
+            "cluster": "scheduler-core",
+            "failed_conditions": ["single_verifier_system"],
+            "affected_edges": ["scheduler_dispatch__to__task_queue_pop_ready"],
+            "ceiling": "harness-tested",
+            "capability_gap": "CG1",
+            "tracking_issue": "chainlink:713",
+        }
+
+    def test_approve_valid_closure_profile_succeeds(self):
+        """Workspace-level like conflict-resolution: no crate declared
+        at all, proving the dispatcher recognizes specs/_closure/ purely
+        by location (the same #20 lesson _require_target_in_workspace's
+        own docstring already states for conflict-resolution/evidence)."""
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.json"
+        target.with_suffix(".json.draft").write_text(json.dumps(self._profile_data()))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+        written = json.loads(target.read_text())
+        self.assertEqual(written["review"]["reviewer"], "alice")
+
+    def test_approve_valid_degradation_record_succeeds_with_no_profile_on_disk(self):
+        """Approve-time validation for a degradation record is G1a/G1b
+        only -- it deliberately does NOT re-check G17 against a sibling
+        profile (that is validate-closure's and gate-g14's job, run over
+        the whole cluster), so a record may be approved on its own, the
+        same way a closure profile may be. A record with no profile
+        beside it is simply unusable until one is approved too --
+        surfaced by validate-closure, not hidden by refusing the
+        approval outright and deadlocking "you need the profile to
+        approve the record, and the record to approve the profile" for
+        a cluster whose very first profile declares a failing
+        condition."""
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.degradation.json"
+        target.with_suffix(".json.draft").write_text(json.dumps(self._degradation_data()))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.exists())
+
+    def test_approve_closes_the_review_provenance_loop(self):
+        """The actual #94/#96/#97 regression check: a record approved
+        through the sanctioned path must be provenanced -- its `review`
+        block must match a real entry review_checkpoint.approve() wrote
+        to ci/results/review_log.jsonl, which is exactly what gate-g14's
+        check_degradation_provenance() (chainlink #97) requires before a
+        degradation record may release anything. A hand-written record
+        with the same review block but no log entry remains unprovenanced
+        (DegradationProvenanceTest in tests/test_gate_g14.py already
+        covers that half; this test covers the half #98 adds: the
+        sanctioned path actually produces an entry that matches)."""
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import review_checkpoint
+
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.degradation.json"
+        target.with_suffix(".json.draft").write_text(json.dumps(self._degradation_data()))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 0)
+
+        record = json.loads(target.read_text())
+        review_log = self.workspace / "ci" / "results" / "review_log.jsonl"
+        self.assertTrue(review_log.exists())
+        relative = target.relative_to(self.workspace)
+        gaps = review_checkpoint.review_provenance_gaps(
+            self.workspace, {str(relative): record["review"]}, review_log
+        )
+        self.assertEqual(gaps, [])
+
+    def test_approve_refuses_a_schema_invalid_degradation_record(self):
+        data = self._degradation_data()
+        data["failed_conditions"] = "single_verifier_system"  # must be an array
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.degradation.json"
+        target.with_suffix(".json.draft").write_text(json.dumps(data))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_approve_refuses_a_profile_declaring_deductive_over_kani(self):
+        """G17's self-contained clause (check_kind_against_owning_
+        verifier) still runs at approve time -- it needs no sibling
+        artifact, unlike cross-artifact profile/record consistency."""
+        data = self._profile_data()
+        data["closure_kind"] = "deductive"
+        data["conditions"]["owning_verifier"] = "kani"
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.json"
+        target.with_suffix(".json.draft").write_text(json.dumps(data))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_approve_refuses_non_json_closure_target(self):
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.yaml"
+        target.with_suffix(".yaml.draft").write_text(json.dumps(self._profile_data()))
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists())
+
+    def test_a_staged_degradation_draft_is_inert_to_validate_closure(self):
+        """Chainlink #98's other half, mirroring #90's own interaction
+        regression: a staged `<target>.json.draft` must not be scanned by
+        validate-closure (and so not by gate-g14) as though it were the
+        real artifact -- it has no `review` yet by construction, so
+        without the exclusion this would come back as a G1a/G1b error on
+        work staged exactly as the tool prescribes."""
+        target = self.workspace / "specs" / "_closure" / "scheduler-core.degradation.json"
+        target.with_suffix(".json.draft").write_text(json.dumps(self._degradation_data()))
+        rc = self._run("validate-closure")
+        self.assertEqual(rc, 0, "a workspace with only a staged draft declares no closure artifacts")
 
 
 class TargetContainmentTest(unittest.TestCase):
@@ -4804,6 +5456,109 @@ class Stage8aBridgeCheckIntegrationTest(unittest.TestCase):
         printed = buffer.getvalue()
         self.assertIn("check-bridges", printed)
         self.assertIn("gate-g9", printed)
+
+
+class Stage8aRelativeWorkspaceRootTest(unittest.TestCase):
+    """chainlink #89: `ligature check-bridges` / `ligature gate-g9` run
+    from the workspace root with the DEFAULT `--workspace .` used to die
+    with an unhandled ValueError ('<abs>/ci/harness/...' is not in the
+    subpath of '.') as soon as a bridge was promoted -- harness_dir_for()
+    resolves the harness path to absolute while the root stayed the
+    literal '.', and pathlib refuses to relativize one against the other.
+    The default invocation must behave exactly like an absolute
+    `--workspace`."""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_gate_g14 import Workspace  # noqa: E402
+        from test_gate_g9 import descriptor_with  # noqa: E402
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        Workspace(self.workspace)
+        # No verifier_backends: the finding whose formatting is what
+        # crashed in the report (harness generated for <verifier> at
+        # <relative path>), and gate-g9's missing-harness finding.
+        self.descriptor_path = self.workspace / "project-descriptor.json"
+        self.descriptor_path.write_text(json.dumps(descriptor_with(backends=None)))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_from_root(self, *args) -> tuple[int, str]:
+        """Run pipeline.main() with the cwd at the workspace root, i.e.
+        with the default `--workspace .`."""
+        buffer = io.StringIO()
+        errors = io.StringIO()
+        original = Path.cwd()
+        os.chdir(self.workspace)
+        try:
+            with redirect_stdout(buffer), redirect_stderr(errors):
+                code = pipeline.main(list(args))
+        finally:
+            os.chdir(original)
+        return code, buffer.getvalue() + errors.getvalue()
+
+    def _run_absolute(self, *args) -> tuple[int, str]:
+        buffer = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(buffer), redirect_stderr(errors):
+            code = pipeline.main([
+                "--workspace", str(self.workspace),
+                "--descriptor", str(self.descriptor_path),
+                *args,
+            ])
+        return code, buffer.getvalue() + errors.getvalue()
+
+    def test_check_bridges_under_the_default_workspace_dot_reports_findings(self):
+        code, printed = self._run_from_root("check-bridges")
+        self.assertEqual(code, 1, printed)
+        self.assertNotIn("Traceback", printed)
+        self.assertNotIn("ValueError", printed)
+        self.assertIn("harness generated for creusot at ci/harness/BR-SCHED-TQ-001.creusot.rs", printed)
+        # the harness is written before the finding is built -- it must
+        # still be on disk after the run, exactly as with an abs root
+        self.assertTrue(
+            (self.workspace / "ci" / "harness" / "BR-SCHED-TQ-001.creusot.rs").is_file()
+        )
+
+    def test_check_bridges_output_is_identical_for_dot_and_an_absolute_root(self):
+        dot_code, dot_printed = self._run_from_root("check-bridges")
+        abs_code, abs_printed = self._run_absolute("check-bridges")
+        self.assertEqual(dot_code, abs_code)
+        self.assertEqual(dot_printed, abs_printed)
+
+    def test_gate_g9_under_the_default_workspace_dot_reports_findings(self):
+        code, printed = self._run_from_root("gate-g9")
+        self.assertEqual(code, 1, printed)
+        self.assertNotIn("Traceback", printed)
+        self.assertNotIn("ValueError", printed)
+        self.assertIn("no generated harness at ci/harness/BR-SCHED-TQ-001.creusot.rs", printed)
+
+    def test_gate_g9_output_is_identical_for_dot_and_an_absolute_root(self):
+        dot_code, dot_printed = self._run_from_root("gate-g9")
+        abs_code, abs_printed = self._run_absolute("gate-g9")
+        self.assertEqual(dot_code, abs_code)
+        self.assertEqual(dot_printed, abs_printed)
+
+    def test_gate_g9_passes_under_the_default_workspace_dot_after_a_relative_root_generate(self):
+        from test_gate_g9 import descriptor_with, fake_backend  # noqa: E402
+        from gate_g9 import bridge_records_for  # noqa: E402
+
+        # with a backend configured, check-bridges dispatches and records
+        descriptor = descriptor_with(fake_backend())
+        self.descriptor_path.write_text(json.dumps(descriptor))
+
+        code, printed = self._run_from_root("check-bridges")
+        self.assertEqual(code, 0, printed)
+        report_path = self.workspace / "ci" / "results" / "WP-A.json"
+        report = json.loads(report_path.read_text())
+        report["bridge_records"] = bridge_records_for(self.workspace)
+        report_path.write_text(json.dumps(report))
+
+        code, printed = self._run_from_root("gate-g9")
+        self.assertEqual(code, 0, printed)
+        self.assertIn("(1 discovered)", printed)
 
 
 class Stage8cClosureIntegrationTest(unittest.TestCase):

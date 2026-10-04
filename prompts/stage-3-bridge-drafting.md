@@ -85,6 +85,23 @@ claim. They can never silently diverge.
 `callee_guarantees` entries — a bridge cannot discharge an obligation the
 boundary contract never declared (G2, checked at approve time).
 
+That entry is normally a callee **precondition**, and the boundary is where
+it is declared: `callee_guarantees` holds both the callee guarantees the
+caller depends on and the callee preconditions the caller must establish
+(see `stage-3-boundary-drafting.md`'s Task section), and G2+ reports which
+of the two an entry is — a precondition is a **caller obligation**, never
+something the callee guarantees. Discharging it is exactly this artifact's
+job: `gate-g9` records a passing bridge as the claim
+`callee-precondition-established`, so `callee_requirement` naming a
+postcondition describes a different claim than the one that gate records.
+
+If the obligation you need to discharge is not among
+`{{boundary_contract}}`'s entries, do not name it anyway and do not re-point
+this bridge at a different boundary: the boundary contract is the reviewed
+record of what this call depends on, so re-draft **it**
+(`draft 3 boundary-drafting`, with the finding that blocked this bridge as
+`{{finding}}`) and then re-run this stage against the re-drafted boundary.
+
 ### 2. `available_contract_facts` — what is genuinely available at the call site
 
 plan.md §8.2: the real obligation is that caller preconditions AND caller
@@ -203,3 +220,14 @@ file hand-written into this directory as a blocking `protected-write`
 violation, exactly as it reports a file outside `allowed_roots` (the
 crate `src/` and `tests/` trees) as `out-of-set`. If a finding implies
 writing anywhere else, surface it instead of writing.
+
+The one exception is a **sanctioned** protected write: one the issue in
+progress is authorized to make. It is authorized by a recorded,
+issue-scoped capability grant (`ligature authorize-write --issue <N>
+--path <path> --op write --issuer <name>`, recorded in
+`ci/results/protected-writes.jsonl`), and `ligature write-set-check
+--issue <N>` reports such a write as `authorized protected write [grant
+<id>]` rather than as a `protected-write` violation. If the work in hand
+needs a protected write that no grant covers, stop and report it — ask
+the human to record the grant. Never run `authorize-write` yourself (it is
+a human checkpoint like `approve`) and never hand-edit the grant ledger.

@@ -100,8 +100,48 @@ rejected by the schema: descriptor schemas are a stable public contract
 precedent for exactly this situation (chainlink #67's Stage-P0
 placeholder) is a conservative finding, not a schema rule.
 
+**Sanctioned protected writes (chainlink #114).** Enforcement with no exit
+is enforcement that pushes work out of the tool: a protected-root write that
+is genuinely required has, until #114, only two routes -- widen
+`allowed_roots`, which deletes the boundary the write is supposed to live
+inside, or have somebody edit the file outside every tool, which is
+precisely what this check cannot tell apart from an intrusion. So an
+`issue`-scoped capability record (`ligature authorize-write`, owned by
+`write_authorization`) can now authorize one such write, and this module is
+the only consumer:
+
+  * grants are consulted **on the protected branch only** -- a grant can
+    never excuse an out-of-set write, and `authorize-write` refuses a path
+    no declared `protected_roots` pattern covers in the first place, so
+    "a grant widens `allowed_roots`" is refused twice over;
+  * a grant authorizes **its own issue only**, so the check must be told
+    which issue the run is for (`--issue N`); with no issue named, no grant
+    is consulted at all and the verdict is exactly what it was before #114,
+    which is the fail-closed reading of a binding this check cannot confirm;
+  * the grant's own `op` must be the operation observed (`write`): a
+    `delete` grant cannot make an existing file clean;
+  * an authorized write is **reported, not excused silently** -- it appears
+    in `authorized_writes` with its grant id, issuer, issue and expiry, and
+    its pattern's `protected_surface` entry counts it under `authorized`, so
+    a `clean` verdict over a protected root a grant was used on still says
+    so. An expired, replayed, other-issue or unverified-issuer grant
+    authorizes nothing and is reported with that status;
+* **a trail inside a protected root is not a capability record.** A
+    declared `protected_roots` pattern covering `ci/results/` is a workspace
+    `authorize-write` refuses to record a grant in, so a record read out of
+    one was not written by the command whose rules this check enforces. This
+    module holds the same rule on the read side rather than trusting the
+    writer to have been the one that wrote it: every record in such a ledger
+    is reported `ledger-protected` and none of them authorizes anything --
+    without it, a line appended by hand would authorize the writes it names
+    *and* a grant naming the ledger's own path would make the trail vouch for
+    its own presence in the protected surface it must stay outside of. That
+    is this module's own #103 discipline applied to the newest accounting
+    category: a canonical pipeline location never excuses a declared
+    protected root.
+
 Read-only by construction: this module walks the workspace and reads the
-ownership manifest; it never writes.
+ownership manifest and the grant ledger; it never writes.
 """
 from __future__ import annotations
 
@@ -109,6 +149,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -119,6 +160,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # file under this allowed/protected pattern" is the same engine chainlink
 # #14's review chain hardened and #35's renderer-integrity check already
 # proves coverage with.
+import write_authorization  # noqa: E402
+from review_checkpoint import DRAFT_SUFFIX as _DRAFT_SUFFIX  # noqa: E402
 from validate_work_package import _pattern_covers_path  # noqa: E402
 
 # Directories pruned from the walk: VCS internals and Python bytecode
@@ -146,13 +189,13 @@ _DETAILS_LIST_LIMIT = 10
 # keeps no import-time dependency on the heavier state builder.
 _OWNERSHIP_MANIFEST_REL = "ci/manifest/installation.json"
 
-# The staged-draft suffix `review_checkpoint.stage_draft` appends when
-# `ligature draft` writes `<target>.json.draft` for a later `approve` /
-# `promote-evidence`. A staged draft lives inside the protected artifact
-# location it will be promoted into, is inert to every consumer (no
-# consumer globs `*.json.draft`), and is written by the pipeline's own
-# command -- so it is pipeline output, not a boundary breach.
-_DRAFT_SUFFIX = ".draft"
+# A staged draft lives inside the protected artifact location it will be
+# promoted into, is inert to every consumer (every artifact-kind discovery
+# function excludes it -- chainlink #79/#90/#98/#110), and is written by
+# the pipeline's own command -- so it is pipeline output, not a boundary
+# breach. The suffix itself is review_checkpoint's DRAFT_SUFFIX (imported
+# above), the one spelling of the name stage_draft() writes and
+# is_staged_draft() decides by.
 
 # Violation classes, carried in the report so a caller can tell an
 # out-of-set file from a write into a protected root. Only the second is a
@@ -184,17 +227,109 @@ class ProtectedGlob:
     """One declared `protected_roots` pattern and what it covers.
 
     `files` is how many workspace files the pattern matched, `violations`
-    how many of those are blocking `protected-write` findings, and
-    `unattributed` how many are the non-blocking audit. A pattern with
-    `files == 0` is reported by name: a protected root nothing matches is
-    a declaration that protects nothing on disk, and must not read as a
-    protected root that was checked and found clean.
+    how many of those are blocking `protected-write` findings, `authorized`
+    how many a write grant covered (chainlink #114), and `unattributed` how
+    many are the non-blocking audit. A pattern with `files == 0` is
+    reported by name: a protected root nothing matches is a declaration that
+    protects nothing on disk, and must not read as a protected root that was
+    checked and found clean.
     """
 
     pattern: str
     files: int = 0
     violations: int = 0
     unattributed: int = 0
+    authorized: int = 0
+
+
+@dataclass
+class AuthorizedWrite:
+    """One protected-root write an active write grant covered (chainlink
+    #114) -- reported rather than excused, so a `clean` verdict names the
+    grant whose authority made it clean.
+
+    `status` is `active` for a standing grant and `spent` for a `--one-shot`
+    one: a one-shot grant authorized the single write it names and
+    authorizes nothing further, which a snapshot of the workspace can say
+    (the file it authorized is present) even though it cannot count the
+    edits made to that file afterwards. That limit is the same one
+    `protected_unvouched` is reported under, and it is stated rather than
+    assumed.
+    """
+
+    path: str
+    grant_id: str
+    issue: int
+    op: str
+    issuer: str
+    issuer_kind: str
+    issued_at: str
+    expires_at: str
+    one_shot: bool
+    status: str
+
+    def as_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "grant_id": self.grant_id,
+            "issue": self.issue,
+            "op": self.op,
+            "issuer": self.issuer,
+            "issuer_kind": self.issuer_kind,
+            "issued_at": self.issued_at,
+            "expires_at": self.expires_at,
+            "one_shot": self.one_shot,
+            "status": self.status,
+        }
+
+
+@dataclass
+class GrantAudit:
+    """The write-grant ledger as this run consumed it (chainlink #114): where
+    it is, whether it could be read, the issue the run named, every usable
+    record with its status (`active`, `expired`, `other-issue`,
+    `unverified-issuer`, `duplicate`, `no-issue-named`, `ledger-protected`),
+    and the lines that claim to be grants and are not usable.
+
+    Carried in full whether or not any grant authorized anything: a ledger
+    nobody looked at is how an authorization surface goes stale unnoticed.
+
+    Two run-wide reasons for consuming no grant are carried as fields rather
+    than only as prose, because both are machine-actionable and a consumer
+    reading the JSON cannot act on a sentence:
+
+    * `error` -- why the ledger could not be read at all (`state:
+      "unreadable"`). An unreadable trail proves no authorization, so it
+      yields none, and the reason is reported instead of dropped: "the ledger
+      is broken" is not something an operator can fix.
+    * `ledger_protected` -- the declared `protected_roots` pattern covering
+      the ledger itself, when there is one. `authorize-write` refuses to
+      record a grant there, so a record found in one was not written by the
+      command whose rules this check enforces, and honoring it would let a
+      trail inside a protected root authorize the very writes -- including
+      its own presence -- that the declaration protects.
+    """
+
+    ledger: str | None = None
+    state: str = "absent"
+    issue: int | None = None
+    entries: list[dict] = field(default_factory=list)
+    rejected: list[dict] = field(default_factory=list)
+    ignored: int = 0
+    error: str | None = None
+    ledger_protected: str | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "ledger": self.ledger,
+            "state": self.state,
+            "issue": self.issue,
+            "entries": list(self.entries),
+            "rejected": list(self.rejected),
+            "ignored": self.ignored,
+            "error": self.error,
+            "ledger_protected": self.ledger_protected,
+        }
 
 
 @dataclass
@@ -202,11 +337,13 @@ class WriteSetReport:
     """The verdict for one workspace against its descriptor's write set.
 
     `state` is `clean` (every file accounted for), `violations` (out-of-set
-    files, writes into a protected root, or a vacuous declaration), or
-    `unknown` (no valid project descriptor -- the write set cannot be
-    evaluated). `violations` carries the blocking findings;
-    `protected_unvouched` is the non-blocking protected-surface audit, and
-    `protected_surface` reports the same surface per declared pattern.
+    files, writes into a protected root with no active grant, or a vacuous
+    declaration), or `unknown` (no valid project descriptor -- the write set
+    cannot be evaluated). `violations` carries the blocking findings;
+    `protected_unvouched` is the non-blocking protected-surface audit,
+    `protected_surface` reports the same surface per declared pattern,
+    `authorized_writes` the protected writes an active grant covered, and
+    `grants` the grant ledger this run consumed.
     """
 
     state: str
@@ -214,6 +351,8 @@ class WriteSetReport:
     violations: list[WriteSetViolation] = field(default_factory=list)
     protected_unvouched: list[str] = field(default_factory=list)
     protected_surface: list[ProtectedGlob] = field(default_factory=list)
+    authorized_writes: list[AuthorizedWrite] = field(default_factory=list)
+    grants: GrantAudit = field(default_factory=GrantAudit)
 
 
 def _read_json(path: Path):
@@ -324,10 +463,11 @@ def _is_staged_draft(rel: str, artifact_dirs: set[str]) -> bool:
     `review_checkpoint.stage_draft` (reached through `ligature draft`) is
     the pipeline's own command writing inside a protected artifact tree,
     and the staged file is inert until `approve` / `promote-evidence`
-    promotes it: no consumer globs `*.json.draft` (chainlink #105), so it
-    is a pending artifact, not a hand-placed one. Recognized by the
-    pipeline's own suffix convention and restricted to the artifact
-    directories, so a `.draft` file in, say, `scripts/` gets no exemption.
+    promotes it: every artifact-kind discovery function excludes it
+    (chainlink #79/#90/#98/#110), so it is a pending artifact, not a
+    hand-placed one. Recognized by the pipeline's own suffix convention
+    and restricted to the artifact directories, so a `.draft` file in,
+    say, `scripts/` gets no exemption.
     """
     if not rel.endswith(_DRAFT_SUFFIX):
         return False
@@ -491,12 +631,172 @@ def _protected_surface_details(surface: list[ProtectedGlob], unattributed: list[
     return "; " + "; ".join(clauses) if clauses else ""
 
 
-def check_write_set(workspace: Path, descriptor: dict | None, descriptor_path: Path) -> WriteSetReport:
+def _grant_details(audit: GrantAudit, authorized: list[AuthorizedWrite]) -> str:
+    """The write-grant clause appended to `details` (chainlink #114).
+
+    Reported whichever way it goes. When a grant authorized a write, the
+    verdict says so and names the issue it was scoped to -- a `clean` over a
+    protected root a grant was spent on must not read as "nothing happened
+    there". When grants exist but none was consulted, the clause names the
+    condition: the flag that would consume them, or the run-wide reason none
+    of them could be (an unreadable ledger, with its cause; a ledger inside a
+    declared protected root). Each is stated where it is observed rather than
+    at the moment someone tries the write.
+    """
+    clauses: list[str] = []
+    if authorized:
+        grant_ids: list[str] = []
+        for entry in authorized:
+            if entry.grant_id not in grant_ids:
+                grant_ids.append(entry.grant_id)
+        listed = ", ".join(grant_ids[:_DETAILS_LIST_LIMIT])
+        more = (
+            f" (+{len(grant_ids) - _DETAILS_LIST_LIMIT} more)"
+            if len(grant_ids) > _DETAILS_LIST_LIMIT
+            else ""
+        )
+        clauses.append(
+            f"{len(authorized)} protected write(s) authorized by {len(grant_ids)} active write "
+            f"grant(s) [{listed}{more}] for issue {audit.issue} (recorded in {audit.ledger})"
+        )
+    if audit.state == "unreadable":
+        # The reason travels with the clause: "the ledger is unreadable" is a
+        # condition to fix, and dropping the cause would leave the report
+        # saying only that something is wrong with a file nobody can now open.
+        clauses.append(
+            "the write-grant ledger could not be read, so no write grant was honored"
+            + (f" ({audit.error})" if audit.error else "")
+        )
+    elif audit.ledger_protected is not None:
+        clauses.append(
+            f"the write-grant ledger {audit.ledger} is inside declared protected root "
+            f"{audit.ledger_protected!r}, where ligature authorize-write refuses to record a grant, "
+            f"so no grant recorded in it was honored: a capability trail inside a protected root is "
+            "not a capability record, whoever appended its lines"
+        )
+    elif audit.entries and audit.issue is None:
+        clauses.append(
+            f"{len(audit.entries)} write grant(s) recorded in {audit.ledger} were not consulted: "
+            "a grant is scoped to one issue, so pass --issue <N> to consume the grants recorded "
+            "for the issue this run is about"
+        )
+    if audit.rejected:
+        clauses.append(
+            f"{len(audit.rejected)} line(s) of {audit.ledger} claim to be write grants and are not "
+            "usable, so they authorize nothing"
+        )
+    return "; " + "; ".join(clauses) if clauses else ""
+
+
+def _grant_audit(
+    workspace: Path,
+    descriptor: dict | None,
+    *,
+    issue: int | None,
+    now: datetime | None,
+) -> tuple[GrantAudit, list[write_authorization.Grant]]:
+    """The ledger as this run consumes it, and the records active for it.
+
+    Read once per workspace rather than once per file: the statuses depend on
+    the clock, the issue, the descriptor's supervisor whitelist and the
+    descriptor's own protected roots, none of which varies within a walk, and
+    re-deriving them per file would make the verdict quadratic in the number
+    of grants.
+
+    The descriptor's `protected_roots` are consulted here, and not only for
+    the file being judged: they are also what decides whether the ledger may
+    be consumed at all. A declared pattern covering `ci/results/` is a
+    workspace `authorize-write` refuses to record a grant in, so a record read
+    out of one cannot have come from the command whose rules this check
+    enforces -- and honoring it would make the trail vouch for its own
+    presence in a protected root.
+    """
+    ledger = write_authorization.read_grant_ledger(workspace)
+    supervisors = write_authorization.supervisor_authorities(descriptor)
+    write_set = descriptor.get("write_set") if isinstance(descriptor, dict) else None
+    write_set = write_set if isinstance(write_set, dict) else {}
+    protected_roots = [
+        pattern for pattern in (write_set.get("protected_roots") or []) if isinstance(pattern, str)
+    ]
+    ledger_protected = (
+        write_authorization.ledger_protected_by(protected_roots, write_authorization.GRANT_LEDGER_REL)
+        if ledger.path is not None
+        else None
+    )
+    statuses = ledger.statuses(
+        issue=issue,
+        supervisors=supervisors,
+        now=now,
+        ledger_protected=ledger_protected,
+    )
+    audit = GrantAudit(
+        ledger=write_authorization.GRANT_LEDGER_REL if ledger.path is not None else None,
+        state=ledger.state,
+        issue=issue,
+        entries=[
+            {
+                "grant_id": grant.grant_id,
+                "issue": grant.issue,
+                "path": grant.path,
+                "path_kind": grant.path_kind,
+                "op": grant.op,
+                "one_shot": grant.one_shot,
+                "issuer": grant.issuer,
+                "issuer_kind": grant.issuer_kind,
+                "issued_at": grant.issued_at,
+                "expires_at": grant.expires_at,
+                "line": grant.line,
+                "status": status,
+            }
+            for grant, status in statuses
+        ],
+        rejected=[entry.as_dict() for entry in ledger.rejected],
+        ignored=ledger.ignored,
+        error=ledger.error,
+        ledger_protected=ledger_protected,
+    )
+    active = [grant for grant, status in statuses if status == write_authorization.STATUS_ACTIVE]
+    return audit, active
+
+
+def _authorized_write(grant: write_authorization.Grant, rel: str) -> AuthorizedWrite:
+    """The report entry for one protected write a grant covered. A one-shot
+    grant is `spent` the moment the file it authorized is present: it
+    authorized that single write and nothing further, which is the most a
+    snapshot can honestly say."""
+    return AuthorizedWrite(
+        path=rel,
+        grant_id=grant.grant_id,
+        issue=grant.issue,
+        op=grant.op,
+        issuer=grant.issuer,
+        issuer_kind=grant.issuer_kind,
+        issued_at=grant.issued_at,
+        expires_at=grant.expires_at,
+        one_shot=grant.one_shot,
+        status="spent" if grant.one_shot else "active",
+    )
+
+
+def check_write_set(
+    workspace: Path,
+    descriptor: dict | None,
+    descriptor_path: Path,
+    *,
+    issue: int | None = None,
+    now: datetime | None = None,
+) -> WriteSetReport:
     """The write-set verdict for `workspace` against its descriptor.
 
     `descriptor` is None when no schema-valid descriptor could be loaded
     (absent, invalid, unreadable); the report is then honestly `unknown`
     -- the write set cannot be evaluated, never silently clean.
+
+    `issue` (chainlink #114) is the issue this run is about, and it is what
+    scopes every write grant the check consumes: a grant authorizes its own
+    issue only, so with no issue named none is consulted and the verdict is
+    the pre-#114 one. `now` exists for the same reason `issued_at` does on
+    the writer -- expiry is otherwise untestable without a clock race.
     """
     workspace = workspace.resolve()
     if descriptor is None:
@@ -543,6 +843,16 @@ def check_write_set(workspace: Path, descriptor: dict | None, descriptor_path: P
     spec_trees = _spec_tree_prefixes(descriptor)
     port_prefix = _port_source_prefix(workspace, descriptor)
     pipeline_artifact_paths, pipeline_artifact_dirs = _pipeline_artifacts(workspace, descriptor)
+    # chainlink #114: the write-grant ledger, read once. `active` is empty
+    # whenever no issue was named -- a grant authorizes its own issue only,
+    # so a run that does not say which issue it is about consumes none.
+    grant_audit, active_grants = _grant_audit(workspace, descriptor, issue=issue, now=now)
+    grant_clause = (
+        f" and no active write grant in {write_authorization.GRANT_LEDGER_REL} covers this path"
+        f" for issue {issue}"
+        if issue is not None
+        else " and no write grant is consulted for a run that named no issue"
+    )
 
     # Per declared protected pattern, so a pattern that protects nothing on
     # disk is named rather than indistinguishable from one that was checked
@@ -554,12 +864,17 @@ def check_write_set(workspace: Path, descriptor: dict | None, descriptor_path: P
     out_of_set: list[WriteSetViolation] = []
     protected_writes: list[WriteSetViolation] = []
     protected_unvouched: list[str] = []
+    authorized_writes: list[AuthorizedWrite] = []
     for rel in _walk_files(workspace):
         if port_prefix is not None and _under_prefix(rel, port_prefix):
             continue
         if any(_pattern_covers_path(pattern, rel) for pattern in allowed_roots):
             # An explicitly allowed path is permitted, so it is not also a
             # breach of a protected root the descriptor happened to overlap.
+            # Deliberately ahead of the grant lookup: a grant authorizes a
+            # PROTECTED-root write, so it has nothing to say about a path the
+            # descriptor already permits -- and `authorize-write` refuses to
+            # record one for such a path at all.
             continue
         # What vouches for this specific file, independent of where it sits.
         # `protected_roots` is NOT in this list: being inside one is the
@@ -580,6 +895,20 @@ def check_write_set(workspace: Path, descriptor: dict | None, descriptor_path: P
             entry.files += 1
             if vouched:
                 continue
+            # chainlink #114: a sanctioned protected-root write, authorized by
+            # an active grant for this issue. Reported, not excused silently:
+            # it leaves `authorized_writes` with its grant id and counts under
+            # its pattern's `authorized`, so a clean verdict says which grant
+            # made it clean. Checked before the decidable/undecidable split,
+            # because a grant answers the same question in both halves --
+            # who vouches for this file -- and only its own report differs.
+            grant = write_authorization.authorizing_grant(
+                active_grants, rel, write_authorization.OP_WRITE
+            )
+            if grant is not None:
+                entry.authorized += 1
+                authorized_writes.append(_authorized_write(grant, rel))
+                continue
             if _parent_dir(rel) in pipeline_artifact_dirs:
                 # Decidable: this is a location the pipeline's own artifact
                 # system owns, and it does not recognize the file, so the
@@ -591,8 +920,9 @@ def check_write_set(workspace: Path, descriptor: dict | None, descriptor_path: P
                         reason=(
                             f"inside protected_roots pattern {protected_pattern!r} and outside "
                             "every allowed_roots pattern, in a location the pipeline writes its "
-                            "own artifacts into -- no declaration vouches for it, so it is a "
-                            "write into a protected root (chainlink #103)"
+                            "own artifacts into -- no declaration vouches for it"
+                            + grant_clause
+                            + ", so it is a write into a protected root (chainlink #103, #114)"
                         ),
                         kind=CLASS_PROTECTED_WRITE,
                     )
@@ -628,6 +958,7 @@ def check_write_set(workspace: Path, descriptor: dict | None, descriptor_path: P
 
     protected_surface = [surface[pattern] for pattern in protected_roots]
     surface_details = _protected_surface_details(protected_surface, protected_unvouched)
+    grant_details = _grant_details(grant_audit, authorized_writes)
 
     if violations:
         listed = ", ".join(v.path for v in violations[:_DETAILS_LIST_LIMIT])
@@ -643,23 +974,29 @@ def check_write_set(workspace: Path, descriptor: dict | None, descriptor_path: P
         if counts:
             details += f" ({'; '.join(counts)})"
         details += surface_details
+        details += grant_details
         return WriteSetReport(
             state="violations",
             details=details,
             violations=violations,
             protected_unvouched=protected_unvouched,
             protected_surface=protected_surface,
+            authorized_writes=authorized_writes,
+            grants=grant_audit,
         )
 
     details = (
         "write set is clean -- every file is accounted for by allowed_roots, the ownership "
-        "manifest, a declared user-owned document, a pipeline artifact, a declared crate's "
-        "specs/ tree, or a canonical pipeline location"
+        "manifest, a declared user-owned document, a pipeline artifact, an active write grant "
+        "(chainlink #114), a declared crate's specs/ tree, or a canonical pipeline location"
     )
     details += surface_details
+    details += grant_details
     return WriteSetReport(
         state="clean",
         details=details,
         protected_unvouched=protected_unvouched,
         protected_surface=protected_surface,
+        authorized_writes=authorized_writes,
+        grants=grant_audit,
     )

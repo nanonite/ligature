@@ -139,6 +139,9 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ligature_install import POLICY_VERSION_MARKER_RE  # noqa: E402
+from ligature_install import policy_marker_advice  # noqa: E402
+from ligature_install import policy_version_gap  # noqa: E402
+from ligature_install import policy_version_state  # noqa: E402
 from ligature_install import safe_target  # noqa: E402
 from project_descriptor import boundary_dir_for  # noqa: E402
 from project_descriptor import conflict_dir_for  # noqa: E402
@@ -147,6 +150,7 @@ from project_descriptor import exemption_dir_for  # noqa: E402
 from project_descriptor import interaction_dir_for  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
 from project_descriptor import protocol_debt_dir_for  # noqa: E402
+import review_checkpoint  # noqa: E402
 from review_checkpoint import ApprovalRefused  # noqa: E402
 from review_checkpoint import review_provenance_gaps  # noqa: E402
 from validate_boundary_contracts import load_validator as _load_boundary_validator  # noqa: E402
@@ -549,9 +553,17 @@ def extract_policy_version(workspace_root: Path, policy_path: str) -> str:
         raise PromotionReceiptError(f"could not read policy document {policy_path!r}: {e}")
     matches = POLICY_VERSION_MARKER_RE.findall(text)
     if len(matches) != 1:
+        # chainlink #113: the diagnosis and its remedy come from
+        # ligature_install's own policy_version_state/gap, the same
+        # functions `accept-policy` and `doctor`/`check` report with -- so
+        # the command an operator actually reaches for at Stage 4.5 names
+        # the one command that resolves it, instead of restating the
+        # convention with no way forward.
+        state = policy_version_state(text)
         raise PromotionReceiptError(
             f"{policy_path!r} must have exactly one 'Policy version: <name>@<major>.<minor>' marker "
-            f"line (docs/reliance-policy.template.md's own convention) -- found {len(matches)}"
+            f"line (docs/reliance-policy.template.md's own convention) -- found {len(matches)} "
+            f"({policy_marker_advice(state, policy_version_gap(text))})"
         )
     return matches[0]
 
@@ -745,7 +757,7 @@ def accept_promotion(
     if descriptor_path is None:
         descriptor_path = workspace_root / "project-descriptor.json"
     if review_log is None:
-        review_log = workspace_root / "ci" / "results" / "review_log.jsonl"
+        review_log = review_checkpoint.review_log_path(workspace_root)
 
     descriptor = load_project_descriptor(descriptor_path)
 
@@ -843,7 +855,7 @@ def accept_promotion(
     # provenance check, so an artifact with a genuinely unprovenanced
     # review block is still refused for that reason first.
     if ruling_log is None:
-        ruling_log = _ruling_log_path(workspace_root)
+        ruling_log = ruling_log_path(workspace_root)
     ruling_problems = ruling_gaps(workspace_root, artifact_manifest, ruling_log)
     if ruling_problems:
         raise PromotionReceiptError(
@@ -906,10 +918,15 @@ silent absence (the pilot's ruling 1 is exactly this shape: eight review
 blocks a human must ratify or reject, not quietly promote)."""
 
 
-def _ruling_log_path(workspace_root: Path) -> Path:
+def ruling_log_path(workspace_root: Path) -> Path:
     """Where rulings live. Workspace-scoped from the start, applying the
     cwd-relative lesson #45 already taught accept_promotion()'s audit-log
-    default rather than re-learning it here."""
+    default rather than re-learning it here.
+
+    Public (chainlink #97) so gate-g14 can gate a degradation record's
+    release on a ruling at exactly the path record_ruling() writes to,
+    instead of re-deriving the string -- a gate reading a different log
+    than the writer writes is the cwd-relative bug all over again."""
     return workspace_root / "ci" / "results" / "human_rulings.jsonl"
 
 
@@ -972,7 +989,7 @@ def record_ruling(
         descriptor_path = workspace_root / "project-descriptor.json"
     descriptor = load_project_descriptor(descriptor_path)
     if ruling_log is None:
-        ruling_log = _ruling_log_path(workspace_root)
+        ruling_log = ruling_log_path(workspace_root)
 
     artifacts = compute_artifact_manifest(workspace_root, artifact_paths, descriptor)
     entry = {

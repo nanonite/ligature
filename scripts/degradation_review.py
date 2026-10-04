@@ -31,22 +31,24 @@ modules' real logic instead of re-deriving it:
   - degradation_record_gaps() runs both and returns the combined list,
     the one entry point a gate is expected to call.
 
-No import cycle: this module depends on review_checkpoint and
-generate_promotion_receipt, neither of which imports validate_closure
-or gate_g14 (confirmed by inspection -- generate_promotion_receipt's own
-imports are project_descriptor, review_checkpoint, ligature_install and
-the validate_* artifact-kind modules, none of which import closure or
-gate code). scripts/gate_g14.py importing THIS module (chainlink #97,
-not done here) therefore adds one more edge to an already-acyclic graph,
-not a cycle.
+Import graph, corrected by chainlink #97: this module depends on
+review_checkpoint and generate_promotion_receipt, neither of which
+imports validate_closure or gate_g14 DIRECTLY -- but
+generate_promotion_receipt imports validate_promotion_receipt, which
+imports generate_feature_ledger, which imports gate_g14. So while
+scripts/gate_g14.py importing THIS module at top level (chainlink #97)
+raised ImportError against a partially initialized gate_g14,
+check_degradation_provenance() resolves it lazily inside the function
+instead -- after both modules are initialized -- which is what
+gate_g14.check_record_certificates() already does for its
+record_assurance half. The dependency is real and the checks are the
+shared facts this module exists for; only the import ORDER had to give.
 
 This module deliberately does not decide what a degradation record's
-`failed_conditions`/`ceiling`/`affected_edges` mean, does not recompute
-the closure, and does not wire itself into any gate -- #96's own scope
-is the shared facts only ("review.provenance must match the accepted
-review log, and the record must have a hash-pinned ratified human
-ruling over its exact artifact bytes"); #97 wires `gate-g14` to require
-them before a degradation record may release a cluster."""
+`failed_conditions`/`ceiling`/`affected_edges` mean and does not
+recompute the closure. `gate-g14` now calls degradation_record_gaps()
+(chainlink #97) to require both checks before a degradation record may
+release a cluster -- it owns that decision, not this module."""
 from __future__ import annotations
 
 import sys

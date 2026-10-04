@@ -120,6 +120,28 @@ def load_bridge_check_validator():
     return make_validator(json.loads(BRIDGE_CHECK_SCHEMA_PATH.read_text()))
 
 
+def _workspace_relative(path: Path, workspace: Path) -> str:
+    """`path` as a path relative to the workspace root, whichever way the
+    root was spelled.
+
+    chainlink #89: the default `--workspace .` hands this module an
+    UNRESOLVED root while harness_dir_for()/write_harness() hand back
+    RESOLVED (absolute) harness paths, so a bare
+    `harness_path.relative_to(workspace)` raised ValueError -- '<abs>/ci/
+    harness/BR-...rs' is not in the subpath of '.' -- and took the whole
+    command down AFTER the harness had already been written, leaving it
+    on disk with no check record. Both sides are resolved first (the
+    pattern record_assurance.py, generate_feature_ledger.py and
+    project_state.py already use); a path genuinely outside the root
+    falls back to its absolute form rather than raising, because a
+    display helper must never be the thing that fails a gate."""
+    resolved = Path(path).resolve()
+    try:
+        return str(resolved.relative_to(Path(workspace).resolve()))
+    except ValueError:
+        return str(resolved)
+
+
 def owning_verifier_by_bridge(workspace: Path, descriptor: dict) -> dict[str, str]:
     """Which verifier system owns each bridge.
 
@@ -235,6 +257,12 @@ def check_bridges(
     completed produces a finding and no record -- an absent record blocks
     at the gate, which is the honest outcome for a bridge nothing
     checked."""
+    # chainlink #89: resolve the root here, once, so `--workspace .`
+    # (the default) behaves exactly like an absolute path all the way
+    # down -- harness paths, findings text and the record directory all
+    # derive from this root, and none of them may depend on how the
+    # caller spelled it.
+    workspace = Path(workspace).resolve()
     findings: list[Finding] = []
     written: list[Path] = []
     backends = descriptor.get("verifier_backends") or {}
@@ -260,7 +288,7 @@ def check_bridges(
             findings.append(
                 Finding(
                     "G9", bridge_id,
-                    f"harness generated for {verifier} at {harness_path.relative_to(workspace)}, but "
+                    f"harness generated for {verifier} at {_workspace_relative(harness_path, workspace)}, but "
                     f"the project descriptor configures no verifier_backends.{verifier} command -- "
                     "nothing was checked, so no result is recorded (the ceiling here is "
                     "harness-tested, never bridge-checked)",
@@ -383,6 +411,11 @@ def bridge_records_for(workspace: Path) -> list[dict]:
 def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[Finding], int]:
     """G9 proper: every promoted bridge must have a check that is
     demonstrably about IT. Returns (findings, bridges discovered)."""
+    # chainlink #89: same root resolution as check_bridges() -- gate-g9
+    # must not crash on `--workspace .` where it would with an absolute
+    # path (the pilot's report hit this at the "no generated harness"
+    # finding below).
+    workspace = Path(workspace).resolve()
     findings: list[Finding] = []
     bridges, bridge_findings = load_bridges(workspace, descriptor)
     findings.extend(bridge_findings)
@@ -407,7 +440,7 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[Finding], in
             findings.append(
                 Finding(
                     "G9", bridge_id,
-                    f"no generated harness at {harness_path.relative_to(workspace)} -- run "
+                    f"no generated harness at {_workspace_relative(harness_path, workspace)} -- run "
                     "`pipeline.py check-bridges`",
                 )
             )
@@ -524,6 +557,10 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[Finding], in
 
 
 def report_findings(findings: list[Finding], discovered: int, workspace: Path) -> int:
+    # chainlink #89: resolve so the root printed here (and handed to
+    # pass_line) reads the same under `--workspace .` as under an
+    # absolute path.
+    workspace = Path(workspace).resolve()
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
 
@@ -562,6 +599,9 @@ def main(argv: list[str]) -> int:
     if not args.workspace.is_dir():
         print(f"error: workspace root does not exist or is not a directory: {args.workspace}", file=sys.stderr)
         return EXIT_INPUT_ERROR
+    # chainlink #89: resolve the root once at the CLI boundary so the
+    # standalone `gate_g9.py .` behaves exactly like an absolute path.
+    args.workspace = args.workspace.resolve()
     descriptor_path = args.descriptor or (args.workspace / "project-descriptor.json")
     try:
         descriptor = json.loads(descriptor_path.read_text())

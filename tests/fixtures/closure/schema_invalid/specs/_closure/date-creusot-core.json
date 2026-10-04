@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "cluster": "date-creusot-core",
+  "closure_kind": "bounded",
+  "work_packages": ["WP-DATE-001"],
+  "conditions": {
+    "single_verifier_system": false,
+    "owning_verifier": "creusot",
+    "protocol_class_all_pairwise": false,
+    "unresolved_indirect_calls_at_or_above_medium": 0,
+    "generic_callees_type_universal_or_creusot_owned": true,
+    "transitive_assumptions_within_policy": true,
+    "scc_wellfoundedness_discharged": "not-applicable"
+  },
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-09-04"
+  }
+}

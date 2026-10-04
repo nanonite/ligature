@@ -262,22 +262,22 @@
     {
       "name": "accept-policy",
       "func": "cmd_accept_policy",
-      "stable_mapping": "stable accept path for reviewed normative-policy drift -- records the on-disk reliance-policy document as the manifest's reviewed base_hash (chainlink #78, docs/cli-contract.md §8)"
+      "stable_mapping": "stable accept path for reviewed normative-policy drift -- records the on-disk reliance-policy document as the manifest's reviewed base_hash, and with --version stamps that document's single `Policy version:` marker line first so the template `init` installs can reach an accepted state without a hand-edit of a protected_root (chainlink #78, #113, docs/cli-contract.md \u00a78)"
     },
     {
       "name": "promote-evidence",
       "func": "cmd_promote_evidence",
-      "stable_mapping": "stable mechanical evidence-draft promotion -- re-validates a staged evidence/*.json.draft (G1a/G1b), renames it to its target, and records the move (chainlink #79, docs/cli-contract.md §1/§10)"
+      "stable_mapping": "stable mechanical evidence-draft promotion -- re-validates a staged evidence/*.json.draft (G1a/G1b), renames it to its target, and records the move (chainlink #79, docs/cli-contract.md \u00a71/\u00a710)"
     },
     {
       "name": "record-ruling",
       "func": "cmd_record_ruling",
-      "stable_mapping": "stable human-ruling record over an exact artifact set -- the gate accept-promotion enforces before minting a receipt (chainlink #82, docs/cli-contract.md §1/§5/§10)"
+      "stable_mapping": "stable human-ruling record over an exact artifact set -- the gate accept-promotion enforces before minting a receipt (chainlink #82, docs/cli-contract.md \u00a71/\u00a75/\u00a710)"
     },
     {
       "name": "record-assurance",
       "func": "cmd_record_assurance",
-      "stable_mapping": "stable assurance-recording command -- assembles a work package's assurance report at its manifest's own report.emit path from why3find proof certificates, with only the obligation-to-certificate mapping declared by the caller and that declaration checked (chainlink #87, docs/cli-contract.md §1/§10)"
+      "stable_mapping": "stable assurance-recording command -- assembles a work package's assurance report at its manifest's own report.emit path from why3find proof certificates, with only the obligation-to-certificate mapping declared by the caller and that declaration checked (chainlink #87, docs/cli-contract.md \u00a71/\u00a710)"
     },
     {
       "name": "draft",
@@ -400,6 +400,11 @@
       "stable_mapping": "stable read-only write-set conformance report -- files outside allowed_roots (class out-of-set) and files written into protected_roots that no declaration vouches for (class protected-write) relative to the project descriptor, with the protected surface reported per declared pattern (chainlink #77, #103, docs/cli-contract.md \u00a78)"
     },
     {
+      "name": "authorize-write",
+      "func": "cmd_authorize_write",
+      "stable_mapping": "stable issue-scoped write-grant record -- authorizes one bounded write into a declared protected root as an append-only entry in ci/results/protected-writes.jsonl, consumed only by write-set-check/status/check run with the same --issue (chainlink #114, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
+    },
+    {
       "name": "doctor",
       "func": "cmd_doctor",
       "stable_mapping": "stable capability manifest; owns the text `status` used to print (docs/cli-contract.md \u00a78); its descriptor gate follows the global `--descriptor` flag (chainlink #109)"
@@ -447,7 +452,7 @@
       "path": "scripts/degradation_review.py",
       "role": "shared-loader",
       "disposition": "runtime-required",
-      "summary": "Shared degradation-record review-provenance and human-ruling checks (chainlink #96)."
+      "summary": "Shared degradation-record review-provenance and human-ruling checks (chainlink #96), required by gate-g14 before a degradation record may release a cluster (chainlink #97)."
     },
     {
       "path": "scripts/draft_templates.py",
@@ -471,7 +476,7 @@
       "path": "scripts/gate_g14.py",
       "role": "gate",
       "disposition": "runtime-required",
-      "summary": "G14: release closure over the transitive assurance dependency graph."
+      "summary": "G14: release closure over the transitive assurance dependency graph; a degradation record releases a cluster only once its review block is provenanced and a ratified human ruling covers its exact bytes (chainlink #97), and only when the canonical validated degradation-record loader accepts it (chainlink #100)."
     },
     {
       "path": "scripts/gate_g18.py",
@@ -537,7 +542,7 @@
       "path": "scripts/pipeline.py",
       "role": "entrypoint",
       "disposition": "runtime-required",
-      "summary": "The pipeline CLI entrypoint (plan.md \u00a76.1, chainlink #37)."
+      "summary": "The pipeline CLI entrypoint (plan.md \u00a76.1, chainlink #37); draft/approve dispatch to closure profiles and degradation records at specs/_closure/*.json, workspace-level like conflict-resolution (chainlink #98)."
     },
     {
       "path": "scripts/project_descriptor.py",
@@ -549,7 +554,7 @@
       "path": "scripts/review_checkpoint.py",
       "role": "shared-loader",
       "disposition": "runtime-required",
-      "summary": "Human review/approval checkpoint (plan.md \u00a77.2, chainlink #39)."
+      "summary": "Human review/approval checkpoint (plan.md \u00a77.2, chainlink #39). Owns draft_path_for() and is_staged_draft(), the one spelling of the `.draft` staging convention stage_draft() writes and every artifact-kind discovery function filters on (chainlink #110)."
     },
     {
       "path": "scripts/satisfies.py",
@@ -579,19 +584,19 @@
       "path": "scripts/validate_boundary_contracts.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Boundary contract validation: G1a, G1b, G2+."
+      "summary": "Boundary contract validation: G1a, G1b, G2+ -- including callee_obligation_role(), which reads each callee_guarantees entry's constraint `kind` so a `kind: precondition` entry is reported as the caller obligation a bridge discharges rather than a callee guarantee (#111)."
     },
     {
       "path": "scripts/validate_boundary_naming.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Boundary-artifact naming and layout (plan.md \u00a72 / chainlink #8)."
+      "summary": "Boundary-artifact naming and layout (plan.md \u00a72 / chainlink #8). Its find_boundary_files() is the discovery function validate_boundary_contracts.py shares, and excludes staged *.json.draft files so both agree on what a staged draft is (chainlink #110)."
     },
     {
       "path": "scripts/validate_bridge.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Bridge specification validation: G1a (schema), G1b (naming, conclusion consistency, and the compilable bridge_logic fragment -- predicate-application premises and snake_case bindings, #112), G2 (boundary cross-reference)."
+      "summary": "Bridge specification validation: G1a (schema), G1b (naming, conclusion consistency, and the compilable bridge_logic fragment -- predicate-application premises and snake_case bindings, #112), G2 (boundary cross-reference: callee_requirement must be one of the boundary's own callee_guarantees, which is where a callee precondition is declared as the obligation this bridge discharges, #111). Draft/approve-time discovery excludes staged *.json.draft files (chainlink #110)."
     },
     {
       "path": "scripts/validate_callsites.py",
@@ -609,13 +614,13 @@
       "path": "scripts/validate_closure.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Closure-profile and degradation-record validation: G1a, G1b, G17."
+      "summary": "Closure-profile and degradation-record validation: G1a, G1b, G17; also the one validated degradation-record loader every command reads records through (chainlink #99); draft/approve-time discovery excludes staged *.json.draft files (chainlink #98)."
     },
     {
       "path": "scripts/validate_conflict_resolution.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Evidence conflict resolution validation: G1a, G1b, G11."
+      "summary": "Evidence conflict resolution validation: G1a, G1b, G11; draft/approve-time discovery excludes staged *.json.draft files, which were otherwise refused as MISLOCATED before their content was even read (chainlink #110)."
     },
     {
       "path": "scripts/validate_evidence.py",
@@ -627,7 +632,7 @@
       "path": "scripts/validate_exemption.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Boundary-required exemption validation: G1a, G1b."
+      "summary": "Boundary-required exemption validation: G1a, G1b; draft/approve-time discovery excludes staged *.json.draft files, so a pending exemption is neither reported nor admitted to R2's coverage set (chainlink #110)."
     },
     {
       "path": "scripts/validate_gold_set.py",
@@ -651,13 +656,13 @@
       "path": "scripts/validate_protocol_debt.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Protocol-debt record validation: G1a, G1b."
+      "summary": "Protocol-debt record validation: G1a, G1b; draft/approve-time discovery excludes staged *.json.draft files, so a half-promoted pair is not reported and never contributes G15 coverage (chainlink #110)."
     },
     {
       "path": "scripts/validate_witness.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Witness validation: G1a, G1b, G2."
+      "summary": "Witness validation: G1a, G1b, G2; its discovery is also what gate-g18's collect_valid_witnesses() and gate-g19 walk, and excludes staged *.json.draft files (chainlink #110)."
     },
     {
       "path": "scripts/validate_work_package.py",
@@ -701,7 +706,13 @@
       "path": "scripts/write_set.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "chainlink #77, #103: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state. A protected root is ENFORCED rather than accounted for (#103): a file inside one is a violation unless a declaration vouches for that file, and the two location carve-outs #77 shipped (the `ci/` canonical prefix, and any file under a declared crate's specs/ tree) are replaced by recognizing a pipeline artifact through project_state's own discovery, so the protected surface is judged by the artifact system the pipeline actually runs."
+      "summary": "chainlink #77, #103: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state. A protected root is ENFORCED rather than accounted for (#103): a file inside one is a violation unless a declaration vouches for that file, and the two location carve-outs #77 shipped (the `ci/` canonical prefix, and any file under a declared crate's specs/ tree) are replaced by recognizing a pipeline artifact through project_state's own discovery, so the protected surface is judged by the artifact system the pipeline actually runs. #114 adds the sanctioned case: this module is the only consumer of the issue-scoped write grants in ci/results/protected-writes.jsonl, consulted on the protected branch only, and it holds the writer's own refusal -- a ledger inside a declared protected root authorizes nothing (status `ledger-protected`), so a trail cannot vouch for its own presence in the surface it must stay outside of."
+    },
+    {
+      "path": "scripts/write_authorization.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "chainlink #114: the record half of a sanctioned protected-root write -- `ligature authorize-write --issue N --path P --op K --issuer <name>` appends one issue-scoped capability record to ci/results/protected-writes.jsonl, binding the exact path or a bounded pattern, the operation, the issue, issued_at/expires_at, the one-shot flag, a named issuer and a grant id that is a hash of that binding. Every binding is recomputed on read (expiry relation, id, path classification, and the issuer against the descriptor's write_set.authorized_supervisors whitelist), so a record cannot be edited into a different authorization; a refusal writes nothing."
     },
     {
       "path": "scripts/promote_evidence.py",
@@ -837,6 +848,11 @@
     {
       "path": "docs/protocol-debt-schema.json",
       "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/write-grant-schema.json",
+      "disposition": "runtime-required",
+      "summary": "chainlink #114: the versioned shape of one ci/results/protected-writes.jsonl line -- the issue-scoped capability record `ligature authorize-write` writes. Closed, and bundled so the build attestation states which record format the binary writes; the semantics JSON Schema cannot express (expires_at == issued_at + ttl_seconds, grant_id == sha256 of the binding) are recomputed by scripts/write_authorization."
     },
     {
       "path": "docs/witness-result-schema.json",
@@ -1212,6 +1228,16 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_authorize_write.py",
+      "kind": "regression",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_write_authorization.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_promote_evidence.py",
       "kind": "regression",
       "disposition": "test-only"
@@ -1272,6 +1298,11 @@
       "path": "tests/fixtures/callsites",
       "disposition": "test-only",
       "note": "A single crate_scheduler/ C_static report fixture."
+    },
+    {
+      "path": "tests/fixtures/closure",
+      "disposition": "test-only",
+      "note": "Regression fixtures for chainlink #99's canonical degradation-record loader: schema_invalid/ (a record claiming a verification method a ceiling cannot carry -- refused at G1a, and excusing nothing) and stale/ (a record whose excuse its own closure profile contradicts)."
     },
     {
       "path": "tests/fixtures/conflict_resolution",
@@ -1399,16 +1430,16 @@
   ],
   "counts": {
     "by_disposition": {
-      "documentation": 14,
+      "runtime-required": 92,
       "excluded": 1,
+      "documentation": 14,
       "installed-template": 4,
-      "runtime-required": 90,
-      "test-only": 70,
+      "test-only": 73,
       "vendored-runtime": 1
     },
-    "total_entries": 180,
-    "test_count": 57,
-    "registered_cli_command_count": 44
+    "total_entries": 185,
+    "test_count": 59,
+    "registered_cli_command_count": 45
   },
   "documentation_and_templates": [
     {

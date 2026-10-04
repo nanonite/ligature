@@ -121,3 +121,14 @@ blocking `protected-write` violation, exactly as it reports a file
 outside `allowed_roots` (the crate `src/` and `tests/` trees) as
 `out-of-set`.
 If a finding implies writing anywhere else, surface it instead of writing.
+
+The one exception is a **sanctioned** protected write: one the issue in
+progress is authorized to make. It is authorized by a recorded,
+issue-scoped capability grant (`ligature authorize-write --issue <N>
+--path <path> --op write --issuer <name>`, recorded in
+`ci/results/protected-writes.jsonl`), and `ligature write-set-check
+--issue <N>` reports such a write as `authorized protected write [grant
+<id>]` rather than as a `protected-write` violation. If the work in hand
+needs a protected write that no grant covers, stop and report it — ask
+the human to record the grant. Never run `authorize-write` yourself (it is
+a human checkpoint like `approve`) and never hand-edit the grant ledger.

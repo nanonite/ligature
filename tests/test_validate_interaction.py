@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_interaction import (  # noqa: E402
     compute_eligibility,
+    count_discovered,
     find_interaction_files,
     load_interactions_by_id,
     load_validator,
@@ -973,6 +974,107 @@ class StandaloneCliMainTest(unittest.TestCase):
                 for finding in findings
             ),
             [str(finding) for finding in findings],
+        )
+
+
+class StagedDraftInertTest(unittest.TestCase):
+    """Chainlink #90: a staged `<target>.json.draft` (written by
+    `draft 3 interaction-drafting`, which the Stage 3 template tells the
+    model to author WITHOUT `review` -- only approve/approve-pair adds
+    one) used to be picked up by every interaction scan and reported as
+    a G1a error ("'review' is a required property"), while
+    validate_boundary_contracts.validate() already skipped its own
+    staged drafts. The sanctioned output of `draft` was therefore a
+    Stage 4 defect, and `check` gained one medium finding plus a
+    human_decision_required condition per staged draft.
+
+    These pin the convention: a staged draft is inert (neither reported
+    nor counted) everywhere find_interaction_files() is the discovery
+    point -- the standalone validate(), validate_crate() (what
+    `validate-interaction` runs), and count_discovered() -- while an
+    unreviewed artifact at its REAL `<id>.json` path is still a reported
+    draft-lifecycle record, not a staging file."""
+
+    def _staged_draft_dir(self, tmp: str) -> Path:
+        d = Path(tmp) / "specs" / "_interactions"
+        d.mkdir(parents=True)
+        draft = load_valid()
+        draft.pop("review")  # exactly what stage-3-interaction-drafting produces
+        (d / "I-SCHED-TQ-001.json.draft").write_text(json.dumps(draft))
+        return d
+
+    def test_find_interaction_files_excludes_staged_drafts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._staged_draft_dir(tmp)
+            (d / "I-SCHED-TQ-002.json").write_text(json.dumps(load_valid()))
+            found = find_interaction_files(Path(tmp))
+        self.assertEqual([p.name for p in found], ["I-SCHED-TQ-002.json"])
+
+    def test_recursive_scan_reports_nothing_for_a_staged_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._staged_draft_dir(tmp)
+            findings = validate(Path(tmp))
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_staged_draft_is_not_counted_as_discovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._staged_draft_dir(tmp)
+            self.assertEqual(count_discovered(Path(tmp)), 0)
+
+    def test_validate_crate_reports_nothing_for_a_staged_draft(self):
+        """cmd_validate_interaction's own path -- the exact command the
+        pilot report's EXIT 1 came from."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root = Path(tmp)
+            canonical = crate_root / "specs" / "_interactions"
+            self._staged_draft_dir(tmp)
+            findings = validate_crate(crate_root, canonical, set(), set(), set())
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_staged_draft_in_a_mislocated_directory_is_still_inert(self):
+        """Consistency, not just the happy path: a draft under a wrong
+        directory is still a pending draft, and validate_boundary_con-
+        tracts.validate() skips staged boundary drafts wherever they sit.
+        Its approve() path can never promote it anyway -- stage_draft
+        only accepts canonical targets."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "not_specs" / "_interactions"
+            d.mkdir(parents=True)
+            draft = load_valid()
+            draft.pop("review")
+            (d / "I-SCHED-TQ-001.json.draft").write_text(json.dumps(draft))
+            findings = validate(Path(tmp))
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
+    def test_an_unreviewed_real_json_is_still_reported(self):
+        """The skip must be exactly `.draft`: an unreviewed artifact at
+        its real `<id>.json` path is a draft-LIFECYCLE record (check
+        normalizes it to a pending human decision), not a staging file,
+        and must not be swept up by this fix."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_interactions"
+            d.mkdir(parents=True)
+            unreviewed = load_valid()
+            unreviewed.pop("review")
+            (d / "I-SCHED-TQ-001.json").write_text(json.dumps(unreviewed))
+            findings = validate(Path(tmp))
+        self.assertTrue(
+            any("'review' is a required property" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_wrong_extension_file_is_still_reported(self):
+        """Guards the sibling external-review fix (non-.json under
+        _interactions must surface) from being collateral damage of the
+        draft skip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "specs" / "_interactions"
+            d.mkdir(parents=True)
+            (d / "I-SCHED-TQ-001.yaml").write_text(json.dumps(load_valid()))
+            findings = validate(Path(tmp))
+        self.assertTrue(
+            any("must be a .json file" in f.reason for f in findings),
+            [str(f) for f in findings],
         )
 
 

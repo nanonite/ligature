@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_protocol_debt import (  # noqa: E402
+    count_discovered,
     find_protocol_debt_files,
     load_validator,
     main,
@@ -268,6 +269,122 @@ class StandaloneCliMainTest(unittest.TestCase):
             (d / "wrong-name.json").write_text(json.dumps(load_valid()))
             rc = main([tmp])
         self.assertEqual(rc, 1)
+
+
+class StagedDraftInertTest(unittest.TestCase):
+    """Chainlink #110: `draft 3 protocol-debt-drafting` stages
+    `<target>.json.draft` WITHOUT a `review` block (only `approve --reviewer`,
+    in the pairing transaction with the interaction, attaches one), and
+    `draft` itself reports "OK: generated draft passes G1a/G1b immediate
+    checks" -- yet every protocol-debt scan collected that file and failed
+    it on `'review' is a required property` at G1a, so
+    `validate-protocol-debt` exited 1 mid-review and `check --json` gained
+    one medium finding plus a `human_decision_required` condition per
+    staged record. validate_interaction/validate_boundary_contracts have
+    skipped staged drafts since #90; this pins the same convention for
+    protocol-debt records.
+
+    A staged draft is inert (neither reported, counted, nor admitted to
+    G15's coverage set) everywhere find_protocol_debt_files() is the
+    discovery point -- the standalone validate(), validate_crate() (what
+    `validate-protocol-debt` runs), count_discovered() and
+    valid_interaction_ids_from_crate() -- while an unreviewed record at
+    its REAL `<interaction_id>.json` path is still reported."""
+
+    def _crate_with_draft(self, tmp: str, under_canonical: bool = True) -> tuple[Path, Path]:
+        crate_root = Path(tmp)
+        canonical = crate_root / "specs" / "_protocol_debt"
+        directory = canonical if under_canonical else crate_root / "not_specs" / "_protocol_debt"
+        directory.mkdir(parents=True, exist_ok=True)
+        draft = load_valid()
+        draft.pop("review")  # exactly what stage-3-protocol-debt-drafting produces
+        (directory / "I-SCHED-TQ-001.json.draft").write_text(json.dumps(draft))
+        return crate_root, canonical
+
+    def test_find_protocol_debt_files_excludes_staged_drafts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, canonical = self._crate_with_draft(tmp)
+            (canonical / "I-SCHED-TQ-002.json").write_text(json.dumps(load_valid()))
+            found = find_protocol_debt_files(crate_root)
+        self.assertEqual([p.name for p in found], ["I-SCHED-TQ-002.json"])
+
+    def test_the_recursive_scan_reports_nothing_for_a_staged_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, _ = self._crate_with_draft(tmp)
+            findings = validate(crate_root, default_interactions_by_id())
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_staged_draft_is_not_counted_as_discovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, _ = self._crate_with_draft(tmp)
+            self.assertEqual(count_discovered(crate_root), 0)
+
+    def test_validate_crate_reports_nothing_for_a_staged_draft(self):
+        """cmd_validate_protocol_debt's own path -- the exact command the
+        pilot report's EXIT 1 came from."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, canonical = self._crate_with_draft(tmp)
+            findings = validate_crate(crate_root, canonical, default_interactions_by_id())
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_a_staged_draft_never_contributes_g15_coverage(self):
+        """Coverage came from the same discovery function, so a pending
+        debt record is excluded by not being discovered rather than by
+        failing validation as a side effect."""
+        from validate_protocol_debt import valid_interaction_ids_from_crate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, canonical = self._crate_with_draft(tmp)
+            covered = valid_interaction_ids_from_crate(
+                crate_root, canonical, default_interactions_by_id()
+            )
+        self.assertEqual(covered, set())
+
+    def test_the_cli_exits_zero_on_a_staged_draft(self):
+        """The reported symptom: `validate-protocol-debt` exit 1 with
+        [G1a/error] "'review' is a required property" against the draft."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, _ = self._crate_with_draft(tmp)
+            rc = main([str(crate_root)])
+        self.assertEqual(rc, 0)
+
+    def test_staged_draft_in_a_mislocated_directory_is_still_inert(self):
+        """Consistency, not just the happy path: a draft under a wrong
+        directory is still a pending draft, and stage_draft only accepts
+        canonical targets, so `approve --pair` could never consume it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, _ = self._crate_with_draft(tmp, under_canonical=False)
+            findings = validate(crate_root, default_interactions_by_id())
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_an_unreviewed_real_json_is_still_reported(self):
+        """The skip must be exactly `.draft`: an unreviewed artifact at
+        its real `<interaction_id>.json` path is a draft-LIFECYCLE record
+        (check normalizes it to a pending human decision), not a staging
+        file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, canonical = self._crate_with_draft(tmp)
+            unreviewed = load_valid()
+            unreviewed.pop("review")
+            (canonical / "I-SCHED-TQ-001.json").write_text(json.dumps(unreviewed))
+            findings = validate(crate_root, default_interactions_by_id())
+        self.assertTrue(
+            any("'review' is a required property" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_wrong_extension_file_is_still_reported(self):
+        """Guards the over-broad-discovery rule (a wrong-extension
+        artifact under a real _protocol_debt directory must surface) from
+        being collateral damage of the draft skip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            crate_root, canonical = self._crate_with_draft(tmp)
+            (canonical / "I-SCHED-TQ-001.yaml").write_text(json.dumps(load_valid()))
+            findings = validate(crate_root, default_interactions_by_id())
+        self.assertTrue(
+            any("must be a .json file" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
 
 
 if __name__ == "__main__":

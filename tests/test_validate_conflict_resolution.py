@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_conflict_resolution import (  # noqa: E402
+    count_discovered,
     find_conflict_files,
     load_validator,
     main,
@@ -337,6 +338,115 @@ class ValidateWorkspaceTest(unittest.TestCase):
             findings = validate_workspace(workspace_root, canonical, {"E-0143", "E-0201"})
         self.assertTrue(
             any("not directly under the canonical directory" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+
+class StagedDraftInertTest(unittest.TestCase):
+    """Chainlink #110: `draft 3 conflict-resolution-drafting` stages
+    `<target>.json.draft` WITHOUT a `review` block (only `approve`
+    attaches one), and `draft` itself reports "OK: generated draft passes
+    G1a/G1b immediate checks" -- yet `validate-conflict-resolution`
+    collected it and exited 1, twice over: the staged file is by
+    definition not yet at its canonical `specs/_conflicts/<id>.json`
+    path, so validate_workspace()'s crate-wide walk reported it as
+    MISLOCATED (G1b) before its content could even fail G1a on
+    `'review' is a required property`. Both readings of a pending draft
+    are wrong. validate_interaction/validate_boundary_contracts have
+    skipped staged drafts since #90; this pins the same convention for
+    conflict-resolution records.
+
+    A staged draft is inert (neither reported nor counted) everywhere
+    find_conflict_files() is the discovery point -- the standalone
+    validate() and validate_workspace() (what
+    `validate-conflict-resolution` runs) and count_discovered() -- while
+    an unreviewed resolution at its REAL `<conflict_id>.json` path is
+    still reported."""
+
+    def _stage_draft(self, directory: Path) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        draft = load_valid()
+        draft.pop("review")  # exactly what stage-3-conflict-resolution-drafting produces
+        (directory / "EC-004.json.draft").write_text(json.dumps(draft))
+
+    def _workspace_with_draft(self, tmp: str, under_canonical: bool = True) -> Path:
+        root = Path(tmp)
+        self._stage_draft(root / "specs" / "_conflicts" if under_canonical
+                          else root / "not_specs" / "_conflicts")
+        write_valid_evidence(root / "evidence", "E-0143")
+        write_valid_evidence(root / "evidence", "E-0201")
+        return root
+
+    def test_find_conflict_files_excludes_staged_drafts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._workspace_with_draft(tmp)
+            (root / "specs" / "_conflicts" / "EC-005.json").write_text(json.dumps(load_valid()))
+            found = find_conflict_files(root)
+        self.assertEqual([p.name for p in found], ["EC-005.json"])
+
+    def test_the_recursive_scan_reports_nothing_for_a_staged_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            findings = validate(self._workspace_with_draft(tmp))
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_validate_workspace_reports_nothing_for_a_staged_draft(self):
+        """validate_workspace()'s own path -- the exact command the pilot
+        report's EXIT 1 came from, and where the draft used to be refused
+        as mislocated."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._workspace_with_draft(tmp)
+            findings = validate_workspace(root, root / "specs" / "_conflicts", {"E-0143", "E-0201"})
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_staged_draft_is_not_counted_as_discovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(count_discovered(self._workspace_with_draft(tmp)), 0)
+
+    def test_the_cli_exits_zero_on_a_staged_draft(self):
+        """The reported symptom: `validate-conflict-resolution` exit 1
+        against the draft `draft` had just staged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = main([str(self._workspace_with_draft(tmp))])
+        self.assertEqual(rc, 0)
+
+    def test_staged_draft_in_a_mislocated_directory_is_still_inert(self):
+        """Consistency, not just the happy path: a draft under a wrong
+        directory is still a pending draft, and stage_draft only accepts
+        canonical targets, so `approve` could never promote it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            findings = validate(self._workspace_with_draft(tmp, under_canonical=False))
+        self.assertEqual([str(f) for f in findings], [])
+
+    def test_an_unreviewed_real_json_is_still_reported(self):
+        """The skip must be exactly `.draft`: an unreviewed artifact at
+        its real `<conflict_id>.json` path is a draft-LIFECYCLE record
+        (check normalizes it to a pending human decision), not a staging
+        file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._workspace_with_draft(tmp)
+            unreviewed = load_valid()
+            unreviewed.pop("review")
+            (root / "specs" / "_conflicts" / "EC-004.json").write_text(json.dumps(unreviewed))
+            findings = validate(root)
+        self.assertTrue(
+            any("'review' is a required property" in f.reason for f in findings),
+            [str(f) for f in findings],
+        )
+
+    def test_wrong_extension_file_is_still_reported(self):
+        """Guards the over-broad-discovery rule (a wrong-extension
+        artifact under a canonical _conflicts directory must surface)
+        from being collateral damage of the draft skip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical = root / "specs" / "_conflicts"
+            canonical.mkdir(parents=True)
+            (canonical / "EC-004.yaml").write_text(json.dumps(load_valid()))
+            write_valid_evidence(root / "evidence", "E-0143")
+            write_valid_evidence(root / "evidence", "E-0201")
+            findings = validate(root)
+        self.assertTrue(
+            any("must be a .json file" in f.reason for f in findings),
             [str(f) for f in findings],
         )
 

@@ -29,6 +29,8 @@ import pipeline  # noqa: E402
 import project_state  # noqa: E402
 from project_state import Analysis, NormalizedFinding, _next_action  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
+from generate_promotion_receipt import compute_artifact_manifest  # noqa: E402
+from validate_closure import CONDITION_KEYS, load_degradation_records  # noqa: E402
 
 EXAMPLES = ROOT / "schemas" / "examples"
 PROJECT_STATE_SCHEMA = json.loads((ROOT / "schemas" / "project-state.schema.json").read_text())
@@ -36,6 +38,26 @@ CONSOLIDATED_CHECK_SCHEMA = json.loads(
     (ROOT / "schemas" / "consolidated-check.schema.json").read_text()
 )
 
+
+def _sha256(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+BOUNDARY = {
+    "schema_version": "1.0",
+    "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+    "caller": {"concept": "Scheduler", "method": "dispatch"},
+    "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+    "callee_guarantees": ["TaskQueue.C003"],
+    "review": {"reviewer": "example-reviewer", "reviewed_at": "2026-08-25"},
+}
+
+# The one cluster these tests' degradation records hang off. A bare
+# `{"cluster": ...}` profile is not schema-valid, and chainlink #99's loader
+# refuses a record beside one -- "there is nothing for it to be a departure
+# from" -- so every test that expects a record to COUNT has to write the
+# schema-valid pair, exactly as a real workspace does.
+DEGRADED_CLUSTER = "mcmc-chain"
 
 # artifact-kind -> a body the artifact discovery recognizes as that kind.
 # Discovery keys on directory and extension; the identity field is what
@@ -59,18 +81,58 @@ ARTIFACT_BODIES = {
     "work-package": {"work_package": "WP-1"},
 }
 
-def _sha256(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+def minimal_closure_profile(cluster: str = DEGRADED_CLUSTER, **conditions) -> dict:
+    """A schema-valid closure profile declaring `single_verifier_system` as
+    FAILING (and every other condition as holding), so a record naming that
+    one condition beside it is a consistent pair rather than a stale
+    excuse. `conditions` overrides individual condition bits -- that is how
+    a test makes a record stale without hand-writing a second profile."""
+    profile = {
+        "schema_version": "1.0",
+        "cluster": cluster,
+        "closure_kind": "bounded",
+        "work_packages": ["WP-MCMC-001"],
+        "conditions": {
+            "single_verifier_system": False,
+            "owning_verifier": "creusot",
+            "protocol_class_all_pairwise": True,
+            "unresolved_indirect_calls_at_or_above_medium": 0,
+            "generic_callees_type_universal_or_creusot_owned": True,
+            "transitive_assumptions_within_policy": True,
+            "scc_wellfoundedness_discharged": "not-applicable",
+        },
+        "review": {"reviewer": "alice", "reviewed_at": "2026-09-04"},
+    }
+    profile["conditions"].update(conditions)
+    return profile
 
 
-BOUNDARY = {
-    "schema_version": "1.0",
-    "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
-    "caller": {"concept": "Scheduler", "method": "dispatch"},
-    "callee": {"concept": "TaskQueue", "method": "pop_ready"},
-    "callee_guarantees": ["TaskQueue.C003"],
-    "review": {"reviewer": "example-reviewer", "reviewed_at": "2026-08-25"},
-}
+def accepted_record(
+    cluster: str = DEGRADED_CLUSTER,
+    failed_conditions=("single_verifier_system",),
+    **overrides,
+) -> dict:
+    """A schema-valid degradation record -- the shape #99's loader accepts,
+    and therefore the only shape whose `failed_conditions` `status` may
+    report as a limitation."""
+    record = {
+        "schema_version": "1.0",
+        "cluster": cluster,
+        # Left exactly as given: a test that deliberately writes a
+        # non-array `failed_conditions` must get one back, not
+        # `list("...")` -- the shape it is testing is the shape that
+        # reaches the loader.
+        "failed_conditions": (
+            list(failed_conditions) if isinstance(failed_conditions, (list, tuple)) else failed_conditions
+        ),
+        "affected_edges": ["mcmc__to__sample_prior"],
+        "ceiling": "documented",
+        "tracking_issue": "chainlink:101",
+        "review": {"reviewer": "alice", "reviewed_at": "2026-09-04"},
+    }
+    record.update(overrides)
+    return record
 
 
 class WorkspaceFixture(unittest.TestCase):
@@ -114,9 +176,20 @@ class WorkspaceFixture(unittest.TestCase):
         `write_descriptor` applies on top, so `check` runs against a
         pinned installation rather than an unpinned hand-written one
         (chainlink #75). Tests whose scenario is orthogonal to gate
-        integrity use this to keep testing their own behavior."""
-        code, _ = self.run_cli("init", "--mode", mode, "--name", name)
+        integrity use this to keep testing their own behavior.
+
+        The installed policy template's `Policy version:` marker is stamped
+        afterwards (chainlink #113): `init` deliberately installs it
+        unfilled, and an unfilled one is a blocking `policy-version-marker`
+        finding for `check` and a non-zero `doctor`. A workspace a real
+        project reaches has had that one human step performed, and a test
+        about anything else must not be measuring it."""
+        code, out = self.run_cli("init", "--mode", mode, "--name", name)
         self.assertEqual(code, 0)
+        code, out = self.run_cli(
+            "accept-policy", "--reviewer", "real-reviewer", "--version", "reliance-policy@1.0"
+        )
+        self.assertEqual(code, 0, out)
         descriptor = json.loads(self.descriptor_path.read_text())
         descriptor["crates"] = [
             {"crate_dir": crate, "contracts_crate": "contracts", "specs_search_root": "crates"}
@@ -149,6 +222,65 @@ class WorkspaceFixture(unittest.TestCase):
     def status(self, *args) -> tuple[int, dict]:
         code, out = self.run_cli("status", "--json", *args)
         return code, json.loads(out)
+
+    def gate_g14(self) -> tuple[int, str]:
+        """`pipeline.py gate-g14`'s own exit code and printed report, so the
+        cross-command tests below compare what an operator sees from each
+        command rather than three readings of one function's return value."""
+        return self.run_cli("gate-g14")
+
+    def validate_closure(self) -> tuple[int, str]:
+        """`pipeline.py validate-closure`, for the same reason. Run through
+        `pipeline.main` rather than the module's own `main()` so the
+        workspace and descriptor flags are the ones an operator passes."""
+        return self.run_cli("validate-closure")
+
+    def approve_record(self, relative: str, reviewer: str = "alice", reviewed_at: str = "2026-09-04") -> None:
+        """Append the audit entry review_checkpoint.approve() writes for a
+        degradation record, so its `review` block is provenanced
+        (chainlink #97). The log is workspace-scoped, which is why this
+        writes under the fixture's own workspace rather than a tmpdir."""
+        log = self.workspace / "ci" / "results" / "review_log.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as stream:
+            stream.write(
+                json.dumps({
+                    "target_path": str(self.workspace / relative),
+                    "classification": "new",
+                    "reviewer": reviewer,
+                    "reviewed_at": reviewed_at,
+                    "validation": "checked",
+                    "logged_at": f"{reviewed_at}T12:00:00+00:00",
+                }) + "\n"
+            )
+
+    def rule_on_record(self, relative: str, verdict: str = "ratified") -> None:
+        """Append the human ruling generate_promotion_receipt.record_ruling()
+        writes over the record's CURRENT bytes -- the hash comes from the
+        same compute_artifact_manifest() the gate re-computes with, so
+        ratify-then-edit stops covering the record (chainlink #82/#97)."""
+        log = self.workspace / "ci" / "results" / "human_rulings.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as stream:
+            stream.write(
+                json.dumps({
+                    "artifacts": compute_artifact_manifest(self.workspace, [relative]),
+                    "verdict": verdict,
+                    "reviewer": "alice",
+                    "ruled_at": "2026-09-05",
+                    "logged_at": "2026-09-05T12:00:00+00:00",
+                }) + "\n"
+            )
+
+    def write_accepted_record(self, relative: str, record: dict) -> Path:
+        """A record that may actually RELEASE a cluster under chainlink
+        #97: written, then provenanced, then ratified over its exact bytes.
+        A plain `write()` of a record is correctly not enough -- #97 made a
+        self-asserted `review` block unable to excuse anything by itself."""
+        path = self.write(relative, record)
+        self.approve_record(relative)
+        self.rule_on_record(relative)
+        return path
 
     def check(self, *args) -> tuple[int, dict]:
         code, out = self.run_cli("check", "--json", *args)
@@ -329,19 +461,77 @@ class ProjectStateDocumentTest(WorkspaceFixture):
                 self.assertNotEqual(dimension["dimension"], "witness")
         self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
 
-    def test_degraded_cluster_reports_limitations_and_change_request(self):
+    def test_an_accepted_record_reports_limitations_and_change_request(self):
+        # chainlink #101: a record reaches `limitations=` only if
+        # validate_closure's loader (#99) accepts it, so this fixture writes
+        # the schema-valid pair a real workspace has. The bare
+        # `{"cluster": ...}` profile and record this test used to write are
+        # BOTH refused by `validate-closure`, and the pre-#101 `_clusters`
+        # reported the refused record's `failed_conditions` as declared
+        # limitations anyway -- on a workspace two other commands failed at
+        # 1. The record is now genuinely accepted, so its excuse IS a
+        # limitation; the cluster's `state` is gate-g14's own verdict on
+        # this fixture's (deliberately evidence-free) closure, which has
+        # nothing to do with the record.
         self.write_descriptor()
-        self.write("specs/_closure/mcmc-chain.json", {"cluster": "mcmc-chain", "closure_kind": "bounded"})
-        self.write(
-            "specs/_closure/mcmc-chain.degradation.json",
-            {"cluster": "mcmc-chain", "failed_conditions": ["single_verifier_system"]},
+        self.write("specs/_closure/mcmc-chain.json", minimal_closure_profile())
+        self.write_accepted_record(
+            "specs/_closure/mcmc-chain.degradation.json", accepted_record()
         )
         _, doc = self.status()
         cluster = next(c for c in doc["clusters"] if c["cluster"] == "mcmc-chain")
         self.assertEqual(cluster["closure_kind"], "bounded")
-        self.assertEqual(cluster["state"], "degraded")
+        self.assertEqual(cluster["state"], "blocked")
         self.assertEqual(cluster["limitations"], ["single_verifier_system"])
         self.assertEqual([c["target"] for c in doc["change_requests"]], ["specs/_closure/mcmc-chain.json"])
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+
+    def test_an_info_note_is_not_a_limitation_of_a_closing_cluster(self):
+        """chainlink #93: `_clusters` collected the condition tag off
+        EVERY gate-g14 finding into `limitations=`, including the info
+        note itself -- so `status` printed `limitations=['
+        generic_callees_type_universal_or_creusot_owned']` on exactly
+        the cluster the same output called VERIFIED and closed. An info
+        note reports a checked state; only findings that still limit the
+        cluster (error/degraded) belong in the list, and a degradation
+        record's own failed_conditions, unchanged, still lead."""
+        import gate_g14
+
+        self.write_descriptor()
+        self.write(
+            "specs/_closure/mcmc-chain.json", {"cluster": "mcmc-chain", "closure_kind": "deductive"}
+        )
+        outcome = gate_g14.ClusterOutcome(
+            cluster="mcmc-chain",
+            status="closes",
+            closure_kind="deductive",
+            work_packages=1,
+            obligations=1,
+            cycles=[],
+            findings=[
+                gate_g14.Finding(
+                    "G14", "mcmc-chain",
+                    "generic_callees_type_universal_or_creusot_owned is VERIFIED from artifact "
+                    "data, not taken on declaration",
+                    severity="info",
+                    condition="generic_callees_type_universal_or_creusot_owned",
+                ),
+                gate_g14.Finding(
+                    "G14", "mcmc-chain",
+                    "a failing condition nobody excused",
+                    condition="single_verifier_system",
+                ),
+            ],
+        )
+        real_gate_workspace = gate_g14.gate_workspace
+        gate_g14.gate_workspace = lambda workspace, descriptor: ([outcome], [])
+        try:
+            _, doc = self.status()
+        finally:
+            gate_g14.gate_workspace = real_gate_workspace
+        cluster = next(c for c in doc["clusters"] if c["cluster"] == "mcmc-chain")
+        self.assertEqual(cluster["state"], "closes")
+        self.assertEqual(cluster["limitations"], ["single_verifier_system"])
         self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
 
     def test_a_partially_verified_cluster_kind_is_echoed(self):
@@ -446,6 +636,272 @@ class ProjectStateDocumentTest(WorkspaceFixture):
         _, second = self.run_cli("status", "--json")
         self.assertEqual(first, second)
         self.assertTrue(first.endswith("\n"))
+
+
+class CanonicalDegradationRecordLoaderTest(WorkspaceFixture):
+    """chainlink #99: `status` must read degradation records through the
+    one validated loader, not by parsing whatever sits next to the
+    closure profile.
+
+    #99 does not rewire `_clusters` (chainlink #101 does that); what it
+    owes this command is the guarantee the wiring relies on -- the loader
+    reaches a defensible verdict on exactly the records `_clusters`
+    currently reads off disk, including the ones it reads without any
+    validation at all."""
+
+    RECORD = "specs/_closure/mcmc-chain.degradation.json"
+
+    def load(self):
+        return load_degradation_records(self.workspace)
+
+    def degraded_record(self, **overrides):
+        """A schema-valid record over the fixture's minimal profile. The
+        profile `WorkspaceFixture` writes is itself schema-minimal, so
+        this is the record shape a real workspace's `status` sees."""
+        return accepted_record(**overrides)
+
+    def minimal_profile(self):
+        """A schema-valid closure profile declaring `single_verifier_system`
+        as FAILING, so the record beside it is a consistent pair rather
+        than a stale excuse. The bare `{"cluster": ...}` profiles other
+        tests in this module write are not schema-valid, and a record
+        beside an unreadable profile is refused for exactly that
+        reason."""
+        self.write_descriptor()
+        self.write("specs/_closure/mcmc-chain.json", minimal_closure_profile())
+
+    def test_a_valid_record_is_the_one_the_loader_hands_status(self):
+        self.minimal_profile()
+        self.write(self.RECORD, self.degraded_record())
+        records = self.load()
+        self.assertEqual(records.record_for("mcmc-chain"), self.degraded_record())
+        self.assertEqual(records.invalid, {})
+
+    def test_a_record_status_today_reads_without_validation_is_refused(self):
+        """`ligature status` currently lists a record's
+        `failed_conditions` as the cluster's `limitations=` with no
+        validation whatsoever -- so a malformed or schema-invalid record
+        is reported as a declared limitation. The loader refuses exactly
+        what `validate-closure` refuses, which is what #101 wires in."""
+        self.minimal_profile()
+        self.write(self.RECORD, self.degraded_record(ceiling="creusot-deductive-check"))
+        records = self.load()
+        self.assertEqual(records.record_for("mcmc-chain"), None)
+        reasons = records.reasons_for(self.workspace / self.RECORD)
+        self.assertTrue(any("creusot-deductive-check" in r for r in reasons), reasons)
+        self.assertEqual(
+            {p.name for p in records.invalid}, {"mcmc-chain.degradation.json"}
+        )
+
+    def test_a_malformed_failed_conditions_is_refused_rather_than_iterated(self):
+        """`[str(c) for c in degradation.get("failed_conditions", []) or []]`
+        iterates whatever is there: a string became one limitation per
+        character. The loader refuses the record instead, so a caller can
+        never read that list without a guarantee about its shape."""
+        self.minimal_profile()
+        self.write(self.RECORD, self.degraded_record(failed_conditions="single_verifier_system"))
+        records = self.load()
+        self.assertEqual(records.record_for("mcmc-chain"), None)
+        self.assertTrue(
+            any("failed_conditions must be an array" in r
+                for r in records.reasons_for(self.workspace / self.RECORD))
+        )
+
+    def test_a_record_with_no_profile_is_refused_not_reported_degraded(self):
+        self.write_descriptor()
+        self.write(self.RECORD, self.degraded_record())
+        records = self.load()
+        self.assertEqual(records.record_for("mcmc-chain"), None)
+        self.assertTrue(
+            any("no closure profile beside it" in r
+                for r in records.reasons_for(self.workspace / self.RECORD))
+        )
+
+    def test_a_record_with_no_closure_directory_at_all_is_named_by_location(self):
+        """`_clusters` reads the record sitting next to the closure
+        profile, so a record mislocated away from `specs/_closure/` is
+        invisible to it. The loader is where that becomes nameable: it
+        must report the record `validate-closure` refuses rather than
+        returning an empty result that reads as 'nothing is declared'
+        (chainlink #101 is what consumes this)."""
+        self.write_descriptor()
+        self.write("docs/_closure/mcmc-chain.degradation.json", self.degraded_record())
+        self.assertFalse((self.workspace / "specs" / "_closure").exists())
+
+        records = self.load()
+        self.assertEqual(records.valid, {})
+        mislocated = self.workspace / "docs/_closure/mcmc-chain.degradation.json"
+        self.assertIn(mislocated, records.invalid)
+        self.assertTrue(
+            any("not directly under the canonical directory" in r for r in records.reasons_for(mislocated))
+        )
+
+
+class StatusReadsRecordsThroughTheCanonicalLoaderTest(WorkspaceFixture):
+    """chainlink #101: `status`/`check` derive a cluster's `limitations` and
+    its degraded/unknown state ONLY from degradation records chainlink
+    #99's loader accepts -- the same records gate-g14 acts on (#100).
+
+    The pre-#101 `_clusters` opened `<cluster>.degradation.json` beside the
+    profile and took whatever parsed, with no validation at all. So on a
+    workspace where `validate-closure` exits 1 and gate-g14 refuses to
+    release, `status` reported a cluster as `degraded` under a list of
+    "limitations" that could include one entry per CHARACTER of a string
+    `failed_conditions`. Each test below therefore pins the same fact from
+    three commands: what the loader refuses is a limitation for nobody.
+
+    The cross-command shape matters more than any single assertion: a
+    refused record must leave `status` reporting exactly what it reports on
+    a workspace where no degradation is declared at all (that is what
+    `limitations_with_no_record_at_all` measures), while the two commands
+    that DO refuse it say so out loud with their own exit codes.
+    """
+
+    RECORD = "specs/_closure/mcmc-chain.degradation.json"
+
+    def setUp(self):
+        super().setUp()
+        self.write_descriptor()
+        self.write("specs/_closure/mcmc-chain.json", minimal_closure_profile())
+
+    def cluster(self) -> dict:
+        _, doc = self.status()
+        cluster = next(c for c in doc["clusters"] if c["cluster"] == DEGRADED_CLUSTER)
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        return cluster
+
+    def limitations_with_no_record_at_all(self) -> list[str]:
+        """The same workspace with the record taken away: what `status`
+        reports when no degradation is declared. Compare against this
+        rather than against a hard-coded list, so the assertion is about
+        the record's absence having no effect rather than about which
+        conditions this fixture's (deliberately evidence-free) closure
+        happens to trip gate-g14 on."""
+        (self.workspace / self.RECORD).unlink(missing_ok=True)
+        return self.cluster()["limitations"]
+
+    def assertNoCommandReleasesTheRecord(self, *expected_fragments):
+        """The two commands that judge a record must both fail, and neither
+        may print a cluster as released under it."""
+        code, printed = self.validate_closure()
+        self.assertEqual(code, 1, printed)
+        for fragment in expected_fragments:
+            self.assertIn(fragment, printed)
+        gate_code, gate_printed = self.gate_g14()
+        self.assertNotEqual(gate_code, 0, gate_printed)
+        self.assertNotIn(
+            "released under an accepted degradation record",
+            gate_printed,
+            "a record no command may act on must never be printed as an accepted release",
+        )
+
+    def test_an_accepted_record_is_the_one_status_reports_as_a_limitation(self):
+        """The control: a record all three commands accept is still a
+        limitation, and a `degraded`/`blocked` state is reported rather than
+        the `unknown` fallback for a cluster that declares nothing."""
+        self.write_accepted_record(self.RECORD, accepted_record())
+
+        code, printed = self.validate_closure()
+        self.assertEqual(code, 0, printed)
+        gate_printed = self.gate_g14()[1]
+        self.assertNotIn(
+            "refused by `pipeline.py validate-closure`",
+            gate_printed,
+            "gate-g14 must see this as the cluster's record, not as one it has to refuse",
+        )
+
+        cluster = self.cluster()
+        self.assertEqual(cluster["limitations"], ["single_verifier_system"])
+        self.assertNotEqual(
+            cluster["state"], "unknown", "a cluster with an accepted record is not in the unknown fallback"
+        )
+
+    def test_a_stale_excuse_is_a_limitation_of_none_of_the_three_commands(self):
+        """G17's record-side direction: the record names
+        `scc_wellfoundedness_discharged`, which this profile declares as
+        holding ('not-applicable'). Refusing the record for that takes its
+        one legitimate excuse (`single_verifier_system`) with it -- one
+        record is one excuse list, not two independently votable ones."""
+        self.write(
+            self.RECORD,
+            accepted_record(
+                failed_conditions=["single_verifier_system", "scc_wellfoundedness_discharged"]
+            ),
+        )
+
+        self.assertNoCommandReleasesTheRecord("a stale excuse")
+
+        self.assertEqual(self.cluster()["limitations"], self.limitations_with_no_record_at_all())
+
+    def test_a_string_failed_conditions_is_never_iterated_as_limitations(self):
+        """The pilot's exact wrong output: `_clusters` ran
+        `[str(c) for c in degradation.get("failed_conditions", []) or []]`
+        over whatever sat on disk, so a record whose failed_conditions was
+        the string "single_verifier_system" reported twenty-one limitations
+        -- 's', 'i', 'n', ... -- on a cluster `validate-closure` refused at
+        all."""
+        self.write(self.RECORD, accepted_record(failed_conditions="single_verifier_system"))
+
+        self.assertNoCommandReleasesTheRecord(
+            "failed_conditions must be an array of closure-condition keys"
+        )
+
+        cluster = self.cluster()
+        self.assertEqual(
+            [c for c in cluster["limitations"] if c not in CONDITION_KEYS],
+            [],
+            f"a limitation must be a closure-condition key, not a character: {cluster['limitations']}",
+        )
+        self.assertNotIn("s", cluster["limitations"])
+        self.assertEqual(cluster["limitations"], self.limitations_with_no_record_at_all())
+
+    def test_a_schema_invalid_record_is_not_a_limitation_either(self):
+        """Schema-invalid for a field the loader does not otherwise police:
+        `ceiling` is not one of the schema's values. The refusal is a
+        property of the record, so the record excuses nothing."""
+        self.write(self.RECORD, accepted_record(ceiling="creusot-deductive-check"))
+
+        self.assertNoCommandReleasesTheRecord("is not one of")
+
+        self.assertEqual(self.cluster()["limitations"], self.limitations_with_no_record_at_all())
+
+    def test_a_record_filed_outside_the_closure_directory_is_not_a_limitation(self):
+        """#99's `misplaced` half, consumed here: a record filed away from
+        specs/_closure/ is refused by location, so it is not the record
+        beside the profile either -- and it is the workspace's only record,
+        the shape where silence would read as "no degradation declared"."""
+        self.write("docs/_closure/mcmc-chain.degradation.json", accepted_record())
+
+        self.assertNoCommandReleasesTheRecord("not directly under the canonical directory")
+
+        self.assertEqual(self.cluster()["limitations"], self.limitations_with_no_record_at_all())
+
+    def test_check_reports_the_same_closure_state_as_status(self):
+        """`check` builds its cluster facts from the same `Analysis`, so the
+        degraded/unknown state it derives for a cluster is the one `status`
+        reports. Asserted on the stale-excuse workspace, where the two
+        commands an operator runs after a refusal are `check` and
+        `gate-g14`."""
+        self.write(
+            self.RECORD,
+            accepted_record(
+                failed_conditions=["single_verifier_system", "scc_wellfoundedness_discharged"]
+            ),
+        )
+
+        _, doc = self.check()
+        stub = next(c for c in doc["change_request_stubs"] if "mcmc-chain" in c["change_request_id"])
+        status_cluster = self.cluster()
+        self.assertIn(
+            f"is {status_cluster['state']}",
+            stub["summary"],
+            f"the change-request stub must describe the state status reports: {stub['summary']!r}",
+        )
+        self.assertIn(
+            str(status_cluster["limitations"]),
+            stub["summary"],
+            "the stub's limitation list is the status report's, item for item",
+        )
 
 
 class NextActionSelectionTest(unittest.TestCase):
@@ -605,6 +1061,133 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
         self.assertIn("blocking_findings", doc["result"]["conditions"])
         self.assertTrue(any(f["severity"] == "high" for f in doc["findings"]))
+
+    def test_staged_draft_file_is_inert_not_a_finding(self):
+        """Chainlink #90: a staged `crates/a/specs/_interactions/
+        I-x.json.draft` (what `draft 3 interaction-drafting` writes -- no
+        `review` block, only approve adds one) used to surface through
+        `_run_standalone_validators` as one medium finding per staged
+        draft with authority human-decision-pending, adding
+        human_decision_required to check's conditions -- while the
+        equivalent staged BOUNDARY draft was already invisible, because
+        validate_boundary_contracts.validate() skips non-.json. Both
+        validators now share the `.draft` convention: neither reports
+        staged drafts, and neither counts them."""
+        self.init_workspace()
+        staged = {
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["stateful", "cross-verifier"],
+            "eligibility": "boundary-required",
+            "rationale": "staged, not yet approved",
+            "evidence_links": ["E-0143"],
+            "protocol_class": "pairwise",
+            "realization": {
+                "requirement": "required",
+                "config_scope": {"target": "x86_64-unknown-linux-gnu", "features": ["default"], "cfg": []},
+            },
+            # deliberately no `review` -- that is what draft stages
+        }
+        self.write("crates/a/specs/_interactions/I-SCHED-TQ-001.json.draft", staged)
+        code, doc = self.check()
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertEqual(doc["findings"], [], [str(f) for f in doc["findings"]])
+        self.assertEqual(code, 0)
+        self.assertNotIn("human_decision_required", doc["result"]["conditions"])
+
+    def test_staged_drafts_of_every_remaining_kind_are_inert_not_findings(self):
+        """Chainlink #110: #90 fixed this for interaction and boundary
+        drafts and left the other four draft-capable kinds collecting
+        theirs, so the swisstable-verus pilot's Stage 0-3 set (6 bridges,
+        2 witnesses, 1 conflict resolution) made `validate-bridge`,
+        `validate-witness` and `validate-conflict-resolution` exit 1 and
+        pinned `check --json` at exit 3 with nine medium
+        human-decision-pending findings -- each one a staged draft, and
+        none of them distinguishable from a genuine schema break. Every
+        kind now shares one rule: a staged draft is a pending artifact,
+        inert until `approve` promotes it."""
+        self.init_workspace()
+        staged = {
+            "crates/a/specs/_bridges/BR-SCHED-TQ-001.json.draft": {
+                "schema_version": "1.0",
+                "bridge_id": "BR-SCHED-TQ-001",
+                "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+                "callee_requirement": "TaskQueue.C003",
+                "available_contract_facts": [
+                    {"obligation_id": "Scheduler.C010", "role": "caller-precondition"},
+                ],
+                "target_expression": "TaskQueue.C003(args, callee_state)",
+                "protocol_class": "pairwise",
+                "bridge_logic": {
+                    "bindings": {"caller_self": "Scheduler"},
+                    "premises": ["Scheduler.I001(caller_self)"],
+                    "conclusion": {"obligation_id": "TaskQueue.C003"},
+                },
+                # deliberately no `review` -- that is what draft stages
+            },
+            "crates/a/specs/_witnesses/task_queue.load_factor.json.draft": {
+                "schema_version": "1.0",
+                "witness_id": "W-TQ-LOAD-FACTOR",
+                "concept": "TaskQueue",
+                "query": "load_factor",
+                "fixture": {
+                    "fixture_id": "FX-QUEUE-BOTTOM-ROW",
+                    "seed": 0,
+                    "description": "8-slot queue, 3 ready tasks front-loaded",
+                },
+                "renderer": "scalar_field_svg",
+                "expectation": {
+                    "renderer": "scalar_field_svg",
+                    "coverage_region": "bottom-row",
+                    "value_distribution": "must-vary",
+                    "fixture_family": "FX-BOTTOM-ROW",
+                },
+                "determinism": {
+                    "value_hash": "sha256:" + "b" * 64,
+                    "claim": "byte-identical-across-runs",
+                    "platforms": ["x86_64-unknown-linux-gnu"],
+                },
+                "output": {
+                    "path": "docs/witnesses/task_queue.load_factor.svg",
+                    "render_hash": "sha256:" + "c" * 64,
+                    "renderer_actual": "scalar_field_svg",
+                },
+            },
+            "crates/a/specs/_exemptions/I-SCHED-TQ-001.json.draft": {
+                "schema_version": "1.0",
+                "interaction_id": "I-SCHED-TQ-001",
+                "rationale": "Prototype scaffolding boundary, tracked for removal (chainlink:#41)",
+            },
+            "crates/a/specs/_protocol_debt/I-SCHED-TQ-001.json.draft": {
+                "schema_version": "1.0",
+                "interaction_id": "I-SCHED-TQ-001",
+                "rationale": "Handshake protocol not yet modeled",
+                "no_promoted_obligation_depends_on_protocol": True,
+                "no_work_package_touches_its_path": True,
+                "no_release_claim_includes_it": True,
+                "tracking_issue": "chainlink:#99",
+            },
+            "specs/_conflicts/EC-004.json.draft": {
+                "schema_version": "1.0",
+                "conflict_id": "EC-004",
+                "evidence": ["E-0143", "E-0201"],
+                "status": "resolved",
+                "resolution": {
+                    "selected_authority": "E-0201",
+                    "disposition_of_other": "incidental",
+                    "rationale": "compatibility policy: do not preserve the legacy defect",
+                },
+            },
+        }
+        for relative, body in staged.items():
+            self.write(relative, body)
+        code, doc = self.check()
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        self.assertEqual(doc["findings"], [], [str(f) for f in doc["findings"]])
+        self.assertEqual(code, 0)
+        self.assertNotIn("human_decision_required", doc["result"]["conditions"])
 
     def test_draft_is_a_human_decision_not_a_mechanized_failure(self):
         self.init_workspace()
@@ -790,9 +1373,14 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
         """Exactly what `ligature init` writes for `mode`: a real init, so
         the four gate_integrity paths are pinned in a manifest and `check`
         isolates the placeholder behavior under test rather than also
-        failing closed on an unpinned workspace (chainlink #75)."""
+        failing closed on an unpinned workspace (chainlink #75). The
+        policy template's `Policy version:` marker is stamped too
+        (chainlink #113), so an unfilled marker is not a second, unrelated
+        finding in a test about descriptor placeholders."""
         code, _ = self.run_cli("init", "--mode", mode, "--name", name)
         self.assertEqual(code, 0)
+        code, out = self.run_cli("accept-policy", "--reviewer", "real-reviewer", "--version", "reliance-policy@1.0")
+        self.assertEqual(code, 0, out)
         return json.loads(self.descriptor_path.read_text())
 
     def p0_findings(self, doc: dict) -> list[dict]:
@@ -1428,7 +2016,6 @@ class BoundaryG2PlusSearchRootTest(WorkspaceFixture):
         self.assertIn("no --specs-search-root given", g2_findings[0]["summary"])
 
 
-
 class ArtifactDirectoryConsistencyTest(WorkspaceFixture):
     """`project_state.artifact_dirs()` names the locations the pipeline
     writes its own artifacts into, and scripts/write_set.py's protected-root
@@ -1529,9 +2116,6 @@ class ArtifactDirectoryConsistencyTest(WorkspaceFixture):
         self.assertIn("ci/manifest", registered)
         self.assertEqual(self.discovered(), {})
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 if __name__ == "__main__":
     unittest.main()

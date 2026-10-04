@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "cluster": "scheduler-core",
+  "failed_conditions": ["single_verifier_system"],
+  "affected_edges": ["scheduler_dispatch__to__task_queue_pop_ready"],
+  "ceiling": "harness-tested",
+  "capability_gap": "CG1",
+  "tracking_issue": "chainlink:713",
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-09-04"
+  }
+}

@@ -51,6 +51,7 @@ from project_descriptor import load_project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 import write_set  # noqa: E402
+from validate_closure import load_degradation_records  # noqa: E402
 from validate_evidence import find_evidence_drafts  # noqa: E402
 
 # Re-exported from the adjudicator, which is the single source of the
@@ -445,6 +446,63 @@ def _normative_drift_records(workspace: Path) -> list[dict]:
         return normative_drift_records(workspace)
     except Exception:
         return []
+
+
+def _policy_marker_records(workspace: Path) -> list[dict]:
+    """The unfilled-marker records behind check's policy-version-marker
+    gate (chainlink #113), computed by ligature_install (which owns the
+    registry of normative user-owned documents and the marker convention
+    both accept commands read). Lazily imported and exception-tolerant for
+    the same two reasons as `_normative_drift_records` above: the import
+    cycle, and a corrupt manifest degrading to honest-unknown rather than
+    crashing the run."""
+    try:
+        from ligature_install import policy_marker_records
+    except ImportError:
+        return []
+    try:
+        return policy_marker_records(workspace)
+    except Exception:
+        return []
+
+
+def _policy_marker_findings(records: list[dict]) -> list[NormalizedFinding]:
+    """check's policy-version-marker gate (chainlink #113): one
+    high-severity finding per normative user-owned document whose own
+    `Policy version:` marker line cannot yield a policy_version.
+
+    `init` installs the reliance policy as a template whose marker line is
+    still the `<policy-name>@<major>.<minor>` placeholder, and both accept
+    commands refuse such a document -- so a completely correct Stage 4.5
+    sequence died at `accept-promotion` (before the human-ruling gate even
+    ran), and `accept-policy`, the one command whose job is to accept this
+    document, refused it too. High severity and blocking because it is not
+    a quality signal but a hard stop in the pipeline: no promotion receipt
+    can be minted, and this finding is what reports it at `check`/`status`
+    time instead of forty-eight artifacts later. The remedy is a human
+    checkpoint (`accept-policy --version`, named in the reason), which is
+    why this is a finding and not a `next_action` the agent may perform.
+
+    A missing document is deliberately absent here: that is
+    `policy-drift`'s own signal (#78), and two findings for one defect
+    would read as two problems."""
+    findings: list[NormalizedFinding] = []
+    for record in records:
+        findings.append(
+            NormalizedFinding(
+                gate_id="policy-version-marker",
+                severity="high",
+                subject=record["path"],
+                reason=(
+                    f"{record['reason']} -- until it carries a version, `accept-promotion` refuses "
+                    "the whole promotion (it reads this document to compute the receipt's "
+                    "`policy_version`) and no Stage 4.5 receipt can be minted (chainlink #113)"
+                ),
+                authority="mechanized-gate",
+                provenance="scripts/ligature_install.py:policy_marker_records",
+            )
+        )
+    return findings
 
 
 def _policy_drift_findings(records: list[dict]) -> list[NormalizedFinding]:
@@ -865,6 +923,20 @@ def _clusters(workspace: Path, descriptor: dict | None) -> list[dict]:
     profiles = _closure_profiles(workspace)
     if not profiles:
         return []
+    # chainlink #101: a degradation RECORD is read only through
+    # validate_closure.load_degradation_records() -- chainlink #99's one
+    # validated discovery-and-validation path, and the same one gate-g14
+    # consumes (chainlink #100). `_clusters` used to open
+    # `<cluster>.degradation.json` beside the profile and take whatever
+    # parsed, so `ligature status` reported limitations, and a `degraded`
+    # state, that `validate-closure` failed at 1 and gate-g14 refused to
+    # release on. `records.valid` is the only source of an accepted
+    # record: a refused one is not a weaker limitation but none at all,
+    # and the reason it was refused is already reported by the two
+    # commands that do the refusing (`validate-closure` runs in
+    # _run_standalone_validators, gate-g14 in _run_gates), so nothing is
+    # lost by not repeating it as a limitation here.
+    records = load_degradation_records(workspace)
     outcomes: dict[str, object] = {}
     if descriptor is not None:
         try:
@@ -884,8 +956,12 @@ def _clusters(workspace: Path, descriptor: dict | None) -> list[dict]:
             closure_kind = data.get("closure_kind", "unknown")
         if not isinstance(cluster, str):
             cluster = path.stem
-        degradation_path = path.parent / f"{cluster}.degradation.json"
-        degradation = _read_json(degradation_path) if degradation_path.is_file() else None
+        # `None` here means either "this cluster declares no degradation"
+        # or "the one it declares may not be acted on" -- both report no
+        # accepted degradation, and `records.invalid` (consumed by the
+        # validators above) is what tells the two apart. Only a cluster's
+        # own gate outcome can still move it off `unknown`.
+        degradation = records.record_for(cluster)
         outcome = outcomes.get(cluster)
         if outcome is not None:
             state = getattr(outcome, "status", "unknown")
@@ -894,12 +970,25 @@ def _clusters(workspace: Path, descriptor: dict | None) -> list[dict]:
         else:
             state = "unknown"
         limitations: list[str] = []
-        if isinstance(degradation, dict):
-            limitations = [str(c) for c in degradation.get("failed_conditions", []) or []]
+        if degradation is not None:
+            # #99 guarantees `failed_conditions` on a valid record is an
+            # array of condition-key strings, so this iteration reads
+            # condition names. It used to read whatever sat on disk: a
+            # record whose failed_conditions was the string
+            # "single_verifier_system" became one limitation per letter.
+            limitations = [str(c) for c in degradation.get("failed_conditions") or []]
         if not limitations and outcome is not None:
             for finding in getattr(outcome, "findings", []) or []:
                 condition = getattr(finding, "condition", None)
-                if condition:
+                # chainlink #93: an info note tagged with a condition is
+                # a REPORTED state, not a limitation -- CG3's own
+                # `VERIFIED from artifact data` note used to be listed
+                # under `limitations=` by a cluster the same output
+                # called closed. Only findings that still limit the
+                # cluster (error/degraded) count; a degradation record's
+                # own failed_conditions, above, already lists the
+                # accepted ones.
+                if condition and getattr(finding, "severity", "error") != "info":
                     limitations.append(str(condition))
         result.append(
             {
@@ -1418,7 +1507,7 @@ def _lifecycle_findings(artifacts: list[dict]) -> list[NormalizedFinding]:
     return findings
 
 
-def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
+def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None) -> Analysis:
     workspace = workspace.resolve()
     descriptor: dict | None = None
     descriptor_state = "absent"
@@ -1443,6 +1532,15 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
     # computed once here and consumed by both the installation state and
     # the policy-drift findings below.
     policy_drift_records = _normative_drift_records(workspace)
+    # chainlink #113: the same normative documents' `Policy version:` marker
+    # state -- the placeholder `init` ships, which both accept commands
+    # refuse. Kept out of `installation_manifest.state` deliberately: an
+    # unfilled template is incomplete governance content, not installation
+    # drift (nothing conflicted, nothing was modified), so `init` and a
+    # `doctor` inventory line still report a current installation. The
+    # blocking signal is the finding below, which both `check` and `status`
+    # carry.
+    policy_marker_records = _policy_marker_records(workspace)
     artifacts = _artifacts(workspace, descriptor, promotions)
     obligations = _obligations(workspace, descriptor)
     clusters = _clusters(workspace, descriptor)
@@ -1456,7 +1554,14 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
     # consumed by no command and mentioned in no generated file. The same
     # run reports it here (status carries the state, check carries the
     # findings) so the boundary is machine-checked, not merely declared.
-    write_set_state = write_set.check_write_set(workspace, descriptor, descriptor_path)
+    # chainlink #114: `issue` scopes the write grants this run honors -- a
+    # grant authorizes its own issue only, so `status --issue N`,
+    # `check --issue N` and `write-set-check --issue N` agree by
+    # construction, and with no issue named none is consulted (which leaves
+    # the pre-#114 verdict intact rather than inventing a permissive one).
+    write_set_state = write_set.check_write_set(
+        workspace, descriptor, descriptor_path, issue=issue
+    )
     write_set_doc = {"state": write_set_state.state, "details": write_set_state.details}
     # chainlink #75: installation_manifest.state must not read "current"
     # while the gate definitions it pins are drifted or unverifiable --
@@ -1484,6 +1589,9 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
     # chainlink #78: one high-severity finding per normative user-owned
     # document that is missing or drifted from its reviewed content.
     findings.extend(_policy_drift_findings(policy_drift_records))
+    # chainlink #113: one high-severity finding per normative user-owned
+    # document whose `Policy version:` marker is not stamped.
+    findings.extend(_policy_marker_findings(policy_marker_records))
     # chainlink #77: one high-severity finding per write-set violation (an
     # out-of-set file, or a vacuous declaration that enforces nothing).
     # High severity: a file no declaration accounts for, or a write set
@@ -1554,8 +1662,8 @@ def analyze(workspace: Path, descriptor_path: Path) -> Analysis:
 # ---------------------------------------------------------------------------
 # Document builders
 # ---------------------------------------------------------------------------
-def build_project_state(workspace: Path, descriptor_path: Path) -> dict:
-    analysis = analyze(workspace, descriptor_path)
+def build_project_state(workspace: Path, descriptor_path: Path, *, issue: int | None = None) -> dict:
+    analysis = analyze(workspace, descriptor_path, issue=issue)
     descriptor = analysis.descriptor
     path = _rel(descriptor_path, workspace) if descriptor_path.is_absolute() else str(descriptor_path)
 
@@ -1786,8 +1894,8 @@ def _next_action(analysis: Analysis) -> dict | None:
     return None
 
 
-def build_consolidated_check(workspace: Path, descriptor_path: Path) -> dict:
-    analysis = analyze(workspace, descriptor_path)
+def build_consolidated_check(workspace: Path, descriptor_path: Path, *, issue: int | None = None) -> dict:
+    analysis = analyze(workspace, descriptor_path, issue=issue)
     findings = [f.as_dict() for f in analysis.findings]
     # Consolidate by dedup_key without double-counting; keep first
     # provenance (deterministic because findings are produced in a fixed

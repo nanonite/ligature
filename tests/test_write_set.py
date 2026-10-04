@@ -67,9 +67,14 @@ class WriteSetFixture(unittest.TestCase):
         """A real `ligature init` (which records the gate_integrity hashes
         in a manifest, pinning them), then the descriptor edits a real
         project applies on top -- the same fixture shape
-        test_project_state.py's WorkspaceFixture uses."""
+        test_project_state.py's WorkspaceFixture uses. The installed policy
+        template's `Policy version:` marker is stamped as well
+        (chainlink #113), so a write-set test is never also measuring the
+        one condition an unfilled policy marker is."""
         code, _ = self.run_cli("init", "--mode", mode, "--name", name)
         self.assertEqual(code, 0)
+        code, out = self.run_cli("accept-policy", "--reviewer", "pilot-reviewer", "--version", "reliance-policy@1.0")
+        self.assertEqual(code, 0, out)
         descriptor = json.loads(self.descriptor_path.read_text())
         descriptor["crates"] = [
             {"crate_dir": "rust/date-creusot-core", "contracts_crate": "contracts", "specs_search_root": "rust"}
@@ -221,48 +226,6 @@ class WriteSetViolationTest(WriteSetFixture):
         code, doc = self.write_set_check()
         self.assertEqual(code, 0)
         self.assertEqual(doc["write_set"]["state"], "clean")
-
-
-class ProtectedSurfaceAuditTest(WriteSetFixture):
-    """Files inside protected_roots that nothing vouches for -- the report's
-    'no command reports a file ... inside write_set.protected_roots'
-    half. Reported, deliberately non-blocking: the check cannot
-    distinguish a project's own protected files from an agent's intrusion
-    into a protected area."""
-
-    def test_unvouched_protected_file_is_reported_without_blocking(self):
-        self.init_workspace()
-        self.write("scripts/evil.py", "echo rogue\n")
-        code, doc = self.write_set_check()
-        self.assertEqual(code, 0)
-        self.assertEqual(doc["write_set"]["state"], "clean")
-        self.assertEqual(doc["write_set"]["protected_unvouched"], ["scripts/evil.py"])
-        self.assertIn("audit only", doc["write_set"]["details"])
-
-    def test_protected_file_the_product_managed_is_not_unvouched(self):
-        self.init_workspace()
-        # ci/manifest/installation.json is under protected root
-        # ci/manifest/** AND product-managed -- accounted for either way
-        code, doc = self.write_set_check()
-        self.assertEqual(code, 0)
-        self.assertNotIn("ci/manifest/installation.json", doc["write_set"]["protected_unvouched"])
-
-    def test_protected_spec_artifact_is_not_unvouched(self):
-        self.init_workspace()
-        self.write(
-            "rust/date-creusot-core/specs/_boundaries/a__to__b.json",
-            json.dumps({"boundary_id": "a__to__b"}),
-        )
-        code, doc = self.write_set_check()
-        self.assertEqual(code, 0)
-        self.assertEqual(doc["write_set"]["protected_unvouched"], [])
-
-    def test_unvouched_protected_file_does_not_block_check(self):
-        self.init_workspace()
-        self.write("scripts/evil.py", "echo rogue\n")
-        code, doc = self.check()
-        self.assertEqual(code, 0)
-        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
 
 
 class ProtectedWriteTest(WriteSetFixture):

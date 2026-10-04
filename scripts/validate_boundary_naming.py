@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from review_checkpoint import is_staged_draft  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 
 # <segment>__to__<segment>, where each segment is snake_case with no leading/
@@ -55,10 +56,24 @@ def find_boundary_files(root: Path) -> list[Path]:
     indistinguishable from a real, fully-clean scan (external review
     finding, high severity). A root that exists and legitimately has no
     _boundaries directories yet is fine and returns []; a root that doesn't
-    exist at all is a caller mistake, not a clean project."""
+    exist at all is a caller mistake, not a clean project.
+
+    Staged drafts (`<target>.json.draft`, written by
+    `review_checkpoint.stage_draft` via `pipeline.py draft`) are excluded
+    (chainlink #110). This is the discovery function
+    validate_boundary_contracts.py shares, and that module has skipped
+    staged boundary drafts since chainlink #90 -- so before this, a staged
+    boundary draft was invisible to `validate` (which only reads `*.json`)
+    and a *naming violation* to this scan, which has no `review` requirement
+    to fail on and therefore reported it for what it is: "not a .json file
+    (suffix: '.draft')". One artifact kind, two opposite dispositions from
+    two commands reading the same directory. Excluding it here makes both
+    agree, and is the same rule every other artifact kind's discovery now
+    applies. Deliberately narrow: a real boundary at the wrong extension or
+    the wrong nesting is still a violation."""
     if not root.is_dir():
         raise FileNotFoundError(f"boundary scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob("**/_boundaries/**/*") if p.is_file()]
+    return [p for p in root.glob("**/_boundaries/**/*") if p.is_file() and not is_staged_draft(p)]
 
 
 def check_file(path: Path, data: dict | None = None) -> list[Violation]:

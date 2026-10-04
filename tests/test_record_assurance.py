@@ -234,8 +234,12 @@ class TheIssuesBaselineTest(RecordAssuranceTestCase):
             [],
             "every provided guarantee must be satisfied by what was recorded",
         )
-        # CG3 (#86) is computed from these very records once they exist.
-        verifiable, reason = gate_g14.generic_callees_verification(closure, reports)
+        # CG3 (#86, derivation #93) is computed from these very records
+        # once they exist: closure scope, the project's manifests, and
+        # the workspace root for reading any report outside the closure.
+        verifiable, reason = gate_g14.generic_callees_verification(
+            closure, reports, manifests, self.root
+        )
         self.assertTrue(verifiable, reason)
 
     def test_records_are_derived_not_asserted(self):

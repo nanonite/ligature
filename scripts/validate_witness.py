@@ -78,6 +78,7 @@ from jsonschema import Draft202012Validator
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
 from project_descriptor import is_underscore_artifact_path  # noqa: E402
+from review_checkpoint import is_staged_draft  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
@@ -461,9 +462,32 @@ def check_unique_ids(specs: list[tuple[Path, dict]]) -> list[Finding]:
 
 
 def find_witness_files(root: Path) -> list[Path]:
+    """Every file anywhere under a canonical witness directory, at any
+    depth -- nested placements surface as G1b violations instead of going
+    unchecked.
+
+    Staged drafts (`<target>.json.draft`, written by
+    `review_checkpoint.stage_draft` via `pipeline.py draft`) are excluded
+    (chainlink #110), for the reason every draft-capable kind's discovery
+    now excludes them: a Stage 3 witness draft is authored WITHOUT a
+    `review` block -- only `approve` attaches one -- so collecting it
+    failed G1a with `'review' is a required property`, sent
+    `validate-witness` to exit 1 on the sanctioned output of `draft` (which
+    itself prints "OK: generated draft passes G1a/G1b immediate checks"),
+    and gave `check --json` one medium finding plus a
+    `human_decision_required` condition per staged witness. Excluding it
+    HERE -- the one discovery function validate(), validate_crate(),
+    count_discovered(), gate_g18's collect_valid_witnesses() and
+    gate_g19's own walk all use -- makes a staged witness inert everywhere
+    at once, exactly as validate_interaction.find_interaction_files()
+    has since chainlink #90. Deliberately narrow: an unreviewed witness at
+    its real `<witness_id>.json` path is still validated and reported, and
+    a wrong-extension file is still a G1b violation."""
     if not root.is_dir():
         raise FileNotFoundError(f"witness scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob(f"**/{CANONICAL_DIR_NAME}/**/*") if p.is_file()]
+    return [
+        p for p in root.glob(f"**/{CANONICAL_DIR_NAME}/**/*") if p.is_file() and not is_staged_draft(p)
+    ]
 
 
 def count_discovered(root: Path) -> int:

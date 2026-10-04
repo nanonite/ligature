@@ -358,8 +358,11 @@ Implemented now, against schemas that actually exist:
             explicit well-foundedness discharge naming exactly its
             members (CG6). The one condition no artifact can always
             settle (CG3's generic-callee type universality) is
-            recomputed from the closure's own records when those
-            determine it, and is otherwise a capability gap that
+            recomputed from the workspace's own work-package artifacts
+            when they determine it -- the closure AND its declared
+            `depends_on` dependencies, per obligation, with
+            creusot-owned evidence and harnesses project-wide
+            (chainlink #93) -- and is otherwise a capability gap that
             blocks without a degradation record naming it and carrying
             a tracking issue (chainlink #86). Outcome is per cluster and
             never global: closes / degraded-under-an-accepted-record /
@@ -459,6 +462,9 @@ from validate_callsites import validate_workspace as validate_callsites_workspac
 from validate_callsites import count_discovered as _count_callsite_reports  # noqa: E402
 from validate_closure import closure_dir_for as _closure_dir_for  # noqa: E402
 from validate_closure import count_discovered as _count_closure_artifacts  # noqa: E402
+from validate_closure import load_validators as load_closure_validators  # noqa: E402
+from validate_closure import validate_data as validate_closure_data  # noqa: E402
+from validate_closure import validate_draft_data as validate_closure_draft_data  # noqa: E402
 from validate_closure import validate_workspace as validate_closure_workspace  # noqa: E402
 from validate_gold_set import count_discovered as _count_gold_sets  # noqa: E402
 from validate_gold_set import gold_set_dir_for as _gold_set_dir_for  # noqa: E402
@@ -471,6 +477,8 @@ from validate_witness import validate_crate as validate_witness_crate  # noqa: E
 from validate_witness import validate_draft_data as validate_witness_draft_data  # noqa: E402
 from validate_witness import validate_results as validate_witness_results  # noqa: E402
 from validate_witness import witness_dir_for as _witness_dir_for  # noqa: E402
+import write_authorization  # noqa: E402
+from write_authorization import WriteAuthorizationError  # noqa: E402
 from gate_g20 import validate_witness_for_approval  # noqa: E402
 from generate_witness import GenerationError  # noqa: E402
 from generate_witness import generate as generate_witness  # noqa: E402
@@ -843,13 +851,14 @@ def cmd_record_ruling(args: argparse.Namespace) -> int:
 
 
 def cmd_accept_policy(args: argparse.Namespace) -> int:
-    """`ligature accept-policy --reviewer <name> [--policy-path <path>]`
-    (docs/cli-contract.md §1, §8): record a reviewed governance change to a
-    normative user-owned document -- the reliance policy -- as the
-    manifest's reviewed `base_hash`, so the edit stops reading as drift
-    (chainlink #78). The explicit accept path analogous to
-    `accept-promotion`: the recorded base moves through this command and
-    nothing else, which is what makes the drift signal trustworthy.
+    """`ligature accept-policy --reviewer <name> [--policy-path <path>]
+    [--version <name>@<major>.<minor>]` (docs/cli-contract.md §1, §8):
+    record a reviewed governance change to a normative user-owned
+    document -- the reliance policy -- as the manifest's reviewed
+    `base_hash`, so the edit stops reading as drift (chainlink #78). The
+    explicit accept path analogous to `accept-promotion`: the recorded base
+    moves through this command and nothing else, which is what makes the
+    drift signal trustworthy.
 
     `--policy-path` defaults to the descriptor's
     `compatibility_policy.reliance_policy_path`; an explicit path that
@@ -857,23 +866,106 @@ def cmd_accept_policy(args: argparse.Namespace) -> int:
     exactly one `Policy version: <name>@<major>.<minor>` marker line, the
     same convention `accept-promotion` reads.
 
+    `--version` (chainlink #113) is how a human reaches that state from the
+    template `init` ships, whose marker line is still a placeholder: one
+    command stamps the marker line -- that line and nothing else in the
+    document -- and records the result as reviewed, so Stage 4.5 is
+    reachable without hand-editing a document every project declares a
+    `protected_root`. It is equally the way to bump a real version on a
+    substantive policy change. A human checkpoint, like `approve` and
+    `accept-promotion`: never run it on a human's behalf. Without it,
+    nothing is written but the manifest.
+
     Exit codes per docs/exit-code-contract.md: 0 recorded; 2 refused
     (uninitialized workspace, unresolvable/disagreeing path, missing or
-    malformed document, empty reviewer)."""
+    malformed document, malformed `--version`, empty reviewer)."""
     try:
         result = accept_policy(
             workspace=args.workspace,
             reviewer=args.reviewer,
             policy_path=args.policy_path,
+            version=args.version,
         )
     except InstallError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     print(f"accepted policy: {result['path']}")
     print(f"reviewer: {result['reviewer']}")
+    if result["stamped"]:
+        previous = result["previous_version"] or "the shipped placeholder"
+        print(f"stamped: Policy version: `{result['policy_version']}` (was {previous})")
     print(f"policy version: {result['policy_version']}")
     print(f"previous hash: {result['previous_hash']}")
     print(f"accepted hash: {result['accepted_hash']}")
+    return 0
+
+
+def cmd_authorize_write(args: argparse.Namespace) -> int:
+    """`ligature authorize-write --issue N --path P --op K --issuer <name>
+    [--issuer-kind human|supervisor] [--ttl S] [--one-shot] [--note T]
+    [--issued-at T] [--json]` (docs/cli-contract.md §1, §10): record one
+    issue-scoped capability authorizing a single sanctioned write into a
+    declared `protected_roots` path (chainlink #114), so a protected write
+    that is genuinely required no longer needs `allowed_roots` widened (which
+    deletes the boundary) or a hand-edit outside every tool (which the audit
+    trail cannot tell apart from an intrusion).
+
+    Writes exactly one append-only record to
+    `ci/results/protected-writes.jsonl` -- the grant itself, with the fields
+    its authority is of: the exact path or bounded pattern, the operation,
+    the issue, `issued_at`/`expires_at`, the one-shot flag, the issuer, the
+    grant id, and audit metadata. `write-set-check --issue N` consumes the
+    records active for that issue; nothing else does.
+
+    A human checkpoint in the `human` lane (`--issuer-kind human`, the
+    default) on the same terms as `approve`/`accept-policy`/
+    `record-ruling`: never run it on a human's behalf. The `supervisor` lane
+    is the automation one, and it is only reachable for an identity the
+    descriptor explicitly whitelists in
+    `write_set.authorized_supervisors` -- a named machine-checkable list,
+    re-verified by the consumer every time it honors a record, never an
+    unbounded LLM prose permission. `--note` is recorded and never read back
+    as authority.
+
+    Exit codes per docs/exit-code-contract.md: 0 recorded; 2 refused --
+    every refusal is about the request (no valid descriptor, an unbound or
+    vacuous path, a path no `protected_roots` pattern covers or one
+    `allowed_roots` already permits, an undeclared supervisor, a TTL outside
+    its bounds, `--one-shot` on a pattern, a replayed grant, or a ledger
+    inside a protected root), and a refusal writes nothing."""
+    try:
+        grant = write_authorization.authorize_write(
+            args.workspace,
+            issue=args.issue,
+            path=args.path,
+            op=args.op,
+            issuer=args.issuer,
+            issuer_kind=args.issuer_kind,
+            ttl_seconds=args.ttl,
+            one_shot=args.one_shot,
+            note=args.note,
+            issued_at=args.issued_at,
+            descriptor_path=args.descriptor,
+        )
+    except (WriteAuthorizationError, ProjectDescriptorError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(canonical_json(grant.as_record()))
+        return 0
+    print(f"grant: {grant.grant_id}")
+    print(f"issue: {grant.issue}")
+    print(f"path: {grant.path} ({grant.path_kind})")
+    print(f"op: {grant.op}")
+    print(f"one_shot: {'yes' if grant.one_shot else 'no'}")
+    print(f"issuer: {grant.issuer} ({grant.issuer_kind})")
+    print(f"issued at: {grant.issued_at}")
+    print(f"expires at: {grant.expires_at} (ttl {grant.ttl_seconds}s)")
+    print(f"ledger: {write_authorization.GRANT_LEDGER_REL} (line {grant.line})")
+    print(
+        f"check it with: write-set-check --issue {grant.issue} "
+        "(this grant authorizes nothing outside its own issue, path, operation and TTL)"
+    )
     return 0
 
 
@@ -1576,7 +1668,17 @@ def _require_target_in_workspace(target: Path, workspace: Path, descriptor: dict
     before fixing. Evidence is still never routed through `approve()`
     (see scripts/validate_evidence.py's own docstring for why), so this
     only needs to widen the *draft*-time in-bounds check, not
-    `_select_validate_fn`'s dispatcher, which `cmd_draft` never calls."""
+    `_select_validate_fn`'s dispatcher, which `cmd_draft` never calls.
+
+    Chainlink #98: specs/_closure/ (validate_closure.closure_dir_for) is
+    a THIRD workspace-level, not crate-scoped, artifact location --
+    plan.md §4's own reason, repeated from #20's conflict-resolution
+    case: a cluster spans crates by construction, so filing its closure
+    profile or degradation record under one crate would misrepresent
+    what closed. Unlike evidence, both artifact types here ARE routed
+    through `approve()` (plan.md §7.2 lists closure-profile/degradation-
+    record acceptance as a human checkpoint), so this also matters for
+    `cmd_approve`, not only `cmd_draft`."""
     try:
         target.resolve().relative_to(workspace.resolve())
     except ValueError:
@@ -1586,6 +1688,8 @@ def _require_target_in_workspace(target: Path, workspace: Path, descriptor: dict
     if target.resolve().parent == _conflict_dir_for(workspace):
         return
     if target.resolve().parent == _evidence_dir_for(workspace):
+        return
+    if target.resolve().parent == _closure_dir_for(workspace):
         return
     raise PipelineError(
         f"target {target} does not belong to any crate declared in the project "
@@ -1640,12 +1744,33 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
     one's validate_fn (gate_g20.validate_witness_for_approval) needs the
     WHOLE workspace, not just the one document being promoted -- G20's
     checks are inherently cross-witness the same way G9/G14/G18/G19 are,
-    which none of this dispatcher's other validators have needed before."""
+    which none of this dispatcher's other validators have needed before.
+
+    A SEVENTH addition (chainlink #98) wires in closure profiles and
+    degradation records at specs/_closure/*.json -- workspace-level like
+    conflict-resolution, for plan.md §4's same reason (a cluster spans
+    crates by construction). Before this, hand-writing the file was the
+    ONLY way either artifact type could exist at all: #94's pilot finding
+    was exactly a hand-written, unreviewed degradation record releasing a
+    cluster, because there was no sanctioned authoring path for #96/#97's
+    provenance checks to ever see satisfied. The validator here is
+    validate_closure.validate_data() -- G1a/G1b, schema-checked with
+    `review` required, same as every other approve-time validator in this
+    dispatcher. G17 cross-artifact consistency (profile vs. degradation
+    record) is deliberately NOT re-checked here: it is inherently a
+    two-artifact question, and this dispatcher's validators each judge
+    one artifact in isolation -- `validate-closure` (over the whole
+    workspace) and `gate-g14`/`load_degradation_records()` (at release
+    time) already run it per-cluster and fail closed in both directions,
+    so a transient inconsistency between two independent approvals (e.g.
+    a profile approved before its degradation record) is caught there,
+    the same way an undeclared degradation from any other source is."""
     if target.suffix != ".json":
         raise PipelineError(
             f"target {target} is not a .json file -- this pipeline only "
             "recognizes .json artifacts for boundary contracts, interactions, "
-            "exemptions, protocol-debt records, bridges, and conflict-resolution records"
+            "exemptions, protocol-debt records, bridges, conflict-resolution records, "
+            "closure profiles, and degradation records"
         )
     # Chainlink #20: conflict-resolution records are workspace-level, not
     # crate-scoped -- checked before the crate-anchored block below, not
@@ -1655,6 +1780,12 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         validator = load_conflict_resolution_validator()
         evidence_ids = valid_evidence_ids(_evidence_dir_for(workspace))
         return lambda path, data: validate_conflict_resolution_data(path, data, validator, evidence_ids)
+    # Chainlink #98: closure profiles and degradation records are also
+    # workspace-level, same reason and same position as conflict-
+    # resolution above.
+    if target.resolve().parent == _closure_dir_for(workspace):
+        closure_validators = load_closure_validators()
+        return lambda path, data: validate_closure_data(path, data, closure_validators)
     crate = _crate_for(target, workspace, descriptor)
     if crate is not None:
         resolved_parent = target.resolve().parent
@@ -1739,10 +1870,10 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
         "<crate_dir>/specs/_protocol_debt/*.json, bridges at "
         "<crate_dir>/specs/_bridges/*.json, witnesses at "
         "<crate_dir>/specs/_witnesses/*.json, concept specs at "
-        "<crate_dir>/specs/<snake_case(concept)>.json, and conflict-resolution "
-        "records at specs/_conflicts/*.json "
-        "(workspace-level) today. Evidence records at evidence/*.json "
-        "(workspace-level) are a valid draft "
+        "<crate_dir>/specs/<snake_case(concept)>.json, conflict-resolution records "
+        "at specs/_conflicts/*.json (workspace-level), and closure profiles / "
+        "degradation records at specs/_closure/*.json (workspace-level) today. "
+        "Evidence records at evidence/*.json (workspace-level) are a valid draft "
         "target but are never approved -- they carry no review block, so approve() "
         "cannot promote them; `ligature promote-evidence` is their promotion path. "
         "Refusing to draft/approve an artifact type or "
@@ -1809,6 +1940,15 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
     on that -- but calls the draft-time validator, not the approve-time
     one.
 
+    Chainlink #98 adds closure profiles and degradation records at
+    specs/_closure/*.json, workspace-level like evidence and conflict-
+    resolution above: validate_closure.validate_draft_data() already
+    existed (schema with `review` not yet required, plus
+    check_no_draft_review()'s rejection of a model-supplied `review`
+    block) but was never reachable from either dispatcher, so hand-
+    writing the target file directly was the only way to create either
+    artifact type at all -- the exact gap #94's pilot finding named.
+
     Chainlink #105 reworked the concept-spec branch this dispatcher
     already had. It used to call a local one-off closure over
     `validator.iter_errors` whose only logic was a hard-coded "concept
@@ -1837,6 +1977,9 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
     if target.resolve().parent == _conflict_dir_for(workspace):
         validator = load_conflict_resolution_draft_validator()
         return lambda path, data: validate_conflict_resolution_draft_data(path, data, validator)
+    if target.resolve().parent == _closure_dir_for(workspace):
+        closure_draft_validators = load_closure_validators(draft=True)
+        return lambda path, data: validate_closure_draft_data(path, data, closure_draft_validators)
     crate = _crate_for(target, workspace, descriptor)
     if crate is not None:
         resolved_parent = target.resolve().parent
@@ -1884,8 +2027,9 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
         "<crate_dir>/specs/_witnesses/*.json, concept specs at "
         "<crate_dir>/specs/<snake_case(concept)>.json under the owning crate's own "
         "crates[].specs_search_root, evidence at evidence/*.json "
-        "(workspace-level), and conflict-resolution records at "
-        "specs/_conflicts/*.json (workspace-level) today."
+        "(workspace-level), conflict-resolution records at specs/_conflicts/*.json "
+        "(workspace-level), and closure profiles / degradation records at "
+        "specs/_closure/*.json (workspace-level) today."
     )
 
 
@@ -2133,7 +2277,7 @@ def _workspace_review_log(workspace: Path) -> Path:
     refused as unprovenanced. Workspace-scoped, matching
     generate_promotion_receipt.accept_promotion()'s own default (and the
     same cwd-relative-default lesson #45 already learned there)."""
-    return workspace / "ci" / "results" / "review_log.jsonl"
+    return review_checkpoint.review_log_path(workspace)
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
@@ -2370,7 +2514,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "write-set-check (read-only write-set conformance: files outside allowed_roots and "
         "inside protected_roots relative to the project descriptor, chainlink #77), "
         "accept-policy (record a reviewed change to the normative reliance-policy document, "
-        "chainlink #78), "
+        "stamping its `Policy version:` marker with --version while the template placeholder is "
+        "still in place -- chainlink #78, #113), "
         "promote-evidence (mechanically promote a staged evidence draft to its target and record "
         "the move -- the Stage 0 promotion path approve() cannot provide, chainlink #79), "
         "record-assurance (assemble a work package's assurance report from verifier proof "
@@ -2430,13 +2575,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return 1
     if report.status in ("conflict", "drifted", "incompatible"):
         return 1
+    # chainlink #113: a normative user-owned document whose `Policy version:`
+    # marker is still the template's placeholder. `installation: current`
+    # above is true and stays true -- nothing drifted and nothing conflicted
+    # -- but the document cannot yield the `policy_version` every Stage 4.5
+    # promotion receipt carries, so `accept-promotion` refuses the whole
+    # promotion before it writes anything, and `accept-policy` (the command
+    # that exists to accept this document) refused it too. A workspace in
+    # that state cannot finish the pipeline, so doctor exits 1 with the
+    # remedy named on the document's own inventory line rather than listing
+    # the file as merely user-owned.
+    if report.policy_markers:
+        return 1
     return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:
     """`ligature init --mode greenfield|port`: install the mode-correct
     descriptor, policy/schema/prompt templates, and the versioned
-    `.codex/skills/ligature/SKILL.md`, atomically and idempotently."""
+    `.codex/skills/ligature/SKILL.md`, atomically and idempotently.
+
+    The reliance policy installs as a template with its
+    `Policy version:` marker still a placeholder, so the report says so on
+    the document's own line and names the command that stamps it
+    (chainlink #113). `init` still exits 0: nothing conflicted and nothing
+    drifted -- `doctor` and `check` are what make the unfilled marker
+    blocking."""
     name = args.name or default_project_name(args.workspace)
     descriptor_rel = _descriptor_relative_to_workspace(args.workspace, args.descriptor)
     try:
@@ -2494,8 +2658,13 @@ def _descriptor_relative_to_workspace(workspace: Path, descriptor: Path) -> str:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Real project state (docs/cli-contract.md §8, schemas/project-state.schema.json)."""
-    document = build_project_state(args.workspace, args.descriptor)
+    """Real project state (docs/cli-contract.md §8, schemas/project-state.schema.json).
+
+    `--issue N` (chainlink #114) scopes the write-set state to one issue's
+    write grants; all three read-only surfaces take the same flag and mean
+    the same thing, so none of them can report a different write-set verdict
+    about the same workspace and the same run."""
+    document = build_project_state(args.workspace, args.descriptor, issue=args.issue)
     if args.json:
         sys.stdout.write(canonical_json(document))
     else:
@@ -2505,8 +2674,12 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     """Consolidated read-only gate run + one recommended next action
-    (docs/cli-contract.md §7, schemas/consolidated-check.schema.json)."""
-    document = build_consolidated_check(args.workspace, args.descriptor)
+    (docs/cli-contract.md §7, schemas/consolidated-check.schema.json).
+
+    `--issue N` (chainlink #114) scopes the write-set finding's write grants
+    to that issue, exactly as `write-set-check --issue N` and
+    `status --issue N` do."""
+    document = build_consolidated_check(args.workspace, args.descriptor, issue=args.issue)
     if args.json:
         sys.stdout.write(canonical_json(document))
     elif args.next:
@@ -2517,17 +2690,19 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_write_set_check(args: argparse.Namespace) -> int:
-    """`ligature write-set-check [--json]` (docs/cli-contract.md §8, §10):
-    the descriptor's write_set evaluated against the workspace's actual
-    files (chainlink #77) -- the enforcement boundary made machine-checked
-    rather than merely declared, with `protected_roots` enforced as the
-    violation class it always was meant to be (chainlink #103). Read-only:
-    walks the workspace and reads the ownership manifest, writes nothing.
+    """`ligature write-set-check [--json] [--issue N]` (docs/cli-contract.md
+    §8, §10): the descriptor's write_set evaluated against the workspace's
+    actual files (chainlink #77) -- the enforcement boundary made
+    machine-checked rather than merely declared, with `protected_roots`
+    enforced as the violation class it always was meant to be (#103) and a
+    sanctioned protected write honorable only through an active issue-scoped
+    write grant (#114). Read-only: walks the workspace, reads the ownership
+    manifest and the grant ledger, writes nothing.
 
     Exit codes follow docs/exit-code-contract.md: 0 clean, 1 violations
-    (out-of-set files, writes into a protected root, or a vacuous
-    declaration -- the same blocking-findings code `check` reports them
-    under), 2 no valid project descriptor (the write set cannot be
+    (out-of-set files, writes into a protected root with no active grant, or
+    a vacuous declaration -- the same blocking-findings code `check` reports
+    them under), 2 no valid project descriptor (the write set cannot be
     evaluated)."""
     descriptor_path = args.descriptor or (args.workspace / "project-descriptor.json")
     descriptor: dict | None = None
@@ -2547,7 +2722,9 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
         except OSError as e:
             print(f"error: cannot read project descriptor {descriptor_path}: {e}", file=sys.stderr)
             descriptor_state = "unknown"
-    report = write_set.check_write_set(args.workspace, descriptor, descriptor_path)
+    report = write_set.check_write_set(
+        args.workspace, descriptor, descriptor_path, issue=args.issue
+    )
 
     if args.json:
         descriptor_rel = (
@@ -2571,9 +2748,12 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
                         "files": entry.files,
                         "violations": entry.violations,
                         "unattributed": entry.unattributed,
+                        "authorized": entry.authorized,
                     }
                     for entry in report.protected_surface
                 ],
+                "authorized_writes": [entry.as_dict() for entry in report.authorized_writes],
+                "grants": report.grants.as_dict(),
             },
         }
         if descriptor is not None:
@@ -2585,6 +2765,13 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
     else:
         print(f"write set: {report.state}")
         print(f"descriptor: {descriptor_state} ({descriptor_path})")
+        if args.issue is None:
+            print(
+                "issue: (none) -- no write grant is consulted; pass --issue <N> to consume the "
+                "grants recorded for the issue this run is about (chainlink #114)"
+            )
+        else:
+            print(f"issue: {args.issue} -- only write grants recorded for this issue are honored")
         if descriptor is not None:
             write_set_declaration = descriptor.get("write_set")
             if isinstance(write_set_declaration, dict):
@@ -2599,16 +2786,46 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
         # to tell them apart from the reason text (chainlink #103).
         for violation in report.violations:
             print(f"  violation [{violation.kind}]: {violation.path}: {violation.reason}")
+        # chainlink #114: a protected write an active grant covered is
+        # reported on its own line, naming the grant -- a clean verdict must
+        # never read as "nothing was written into that protected root".
+        for entry in report.authorized_writes:
+            print(
+                f"  authorized protected write [grant {entry.grant_id}]: {entry.path} "
+                f"(issue {entry.issue}, op {entry.op}, issuer {entry.issuer} "
+                f"[{entry.issuer_kind}], {entry.status}, expires {entry.expires_at})"
+            )
         for entry in report.protected_surface:
             if entry.files == 0:
                 print(f"  protected_root (matched no file): {entry.pattern}")
             else:
                 print(
                     f"  protected_root: {entry.pattern} -- {entry.files} file(s), "
-                    f"{entry.violations} violation(s), {entry.unattributed} unattributed"
+                    f"{entry.violations} violation(s), {entry.unattributed} unattributed, "
+                    f"{entry.authorized} authorized by a write grant"
                 )
         for rel in report.protected_unvouched:
             print(f"  protected (not vouched by any declaration, audit only): {rel}")
+        if report.grants.entries or report.grants.rejected or report.grants.error:
+            print(f"grant ledger: {report.grants.state} ({report.grants.ledger})")
+            if report.grants.error:
+                # The cause, not just the verdict: an unreadable trail is a
+                # condition to fix, and `unreadable` alone names nothing.
+                print(f"  ledger unreadable: {report.grants.error}")
+            if report.grants.ledger_protected is not None:
+                print(
+                    f"  ledger inside declared protected root "
+                    f"{report.grants.ledger_protected!r}, where ligature authorize-write refuses "
+                    "to record a grant: no grant read from it was honored"
+                )
+            for entry in report.grants.entries:
+                print(
+                    f"  grant {entry['grant_id']}: {entry['status']} -- issue {entry['issue']}, "
+                    f"{entry['op']} {entry['path']} ({entry['path_kind']}), issuer "
+                    f"{entry['issuer']} [{entry['issuer_kind']}], expires {entry['expires_at']}"
+                )
+            for rejected in report.grants.rejected:
+                print(f"  grant line {rejected['line']}: rejected -- {rejected['reason']}")
 
     if report.state == "violations":
         return 1
@@ -2757,13 +2974,18 @@ def build_parser() -> argparse.ArgumentParser:
     record_ruling_p.add_argument(
         "--verdict", required=True, choices=["ratified", "rejected"],
         help=(
-            "`ratified`: this artifact may be promoted as it stands; `rejected`: it must not be "
-            "(accept-promotion refuses either way for a rejected artifact, with the rejection named)"
+            "`ratified`: this artifact may be relied on as it stands; `rejected`: it must not be "
+            "(accept-promotion refuses either way for a rejected artifact, with the rejection named, "
+            "and gate g14 refuses a rejected degradation record the same way)"
         ),
     )
     record_ruling_p.add_argument(
         "--artifact", action="append", default=[], required=True,
-        help="workspace-relative path being ruled on, repeatable -- the same paths accept-promotion takes",
+        help=(
+            "workspace-relative path being ruled on, repeatable -- promotion artifacts AND closure "
+            "records (specs/_closure/<cluster>.degradation.json, which gate g14 reads as chainlink "
+            "#94/#97); anything in the workspace the manifest routine can hash"
+        ),
     )
     record_ruling_p.add_argument(
         "--ruled-at", default=None,
@@ -2782,6 +3004,16 @@ def build_parser() -> argparse.ArgumentParser:
             "workspace-relative path of the policy document being accepted. Defaults to the "
             "descriptor's compatibility_policy.reliance_policy_path; an explicit path that "
             "disagrees with that declaration is refused"
+        ),
+    )
+    accept_policy_p.add_argument(
+        "--version", default=None,
+        help=(
+            "stamp the document's `Policy version:` marker line with this value "
+            "(<name>@<major>[.<minor>], e.g. reliance-policy@1.2) before recording it. The "
+            "marker line and nothing else in the document is rewritten; it is the way out of "
+            "the placeholder `init` ships, and equally how a substantive policy change bumps "
+            "its version. A human checkpoint like `approve`: never run it on a human's behalf"
         ),
     )
     accept_policy_p.set_defaults(func=cmd_accept_policy)
@@ -3015,11 +3247,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_p = sub.add_parser("status", help="Project state: artifact lifecycles, obligations, clusters, integrity (chainlink #56)")
     status_p.add_argument("--json", action="store_true", help="emit schemas/project-state.schema.json JSON")
+    status_p.add_argument(
+        "--issue",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "issue this run is about (chainlink #114). The three read-only surfaces "
+            "(status/check/write-set-check) all take it and all mean the same thing: only write "
+            "grants recorded for THIS issue are honored. Omit it and no grant is consulted -- a "
+            "grant is scoped to one issue, and this check must be told which one"
+        ),
+    )
     status_p.set_defaults(func=cmd_status)
 
     check_p = sub.add_parser("check", help="Read-only consolidated gate run + one recommended next action (chainlink #56)")
     check_p.add_argument("--json", action="store_true", help="emit schemas/consolidated-check.schema.json JSON")
     check_p.add_argument("next", nargs="?", help="print only the recommended next action")
+    check_p.add_argument(
+        "--issue",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "issue this run is about (chainlink #114): only write grants recorded for THIS issue "
+            "are honored by the write-set finding. Omitted, no grant is consulted"
+        ),
+    )
     check_p.set_defaults(func=cmd_check)
 
     write_set_p = sub.add_parser(
@@ -3027,7 +3281,123 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read-only write-set conformance report: files outside allowed_roots / inside protected_roots (chainlink #77)",
     )
     write_set_p.add_argument("--json", action="store_true", help="emit the versioned JSON write-set report")
+    write_set_p.add_argument(
+        "--issue",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "issue this run is about (chainlink #114): a write grant authorizes its own issue "
+            "only, so name it to consume the records in ci/results/protected-writes.jsonl issued "
+            "for it. Omitted, no grant is consulted and a protected write with no other "
+            "declaration vouching for it is the blocking protected-write violation it always was"
+        ),
+    )
     write_set_p.set_defaults(func=cmd_write_set_check)
+
+    authorize_write_p = sub.add_parser(
+        "authorize-write",
+        help=(
+            "Record one issue-scoped capability authorizing a single sanctioned write into a "
+            "declared protected root (chainlink #114) -- a human checkpoint, or an identity the "
+            "descriptor whitelists in write_set.authorized_supervisors"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--issue",
+        type=int,
+        required=True,
+        metavar="N",
+        help="the issue this grant is scoped to (positive integer, required): write-set-check consumes it only for this issue",
+    )
+    authorize_write_p.add_argument(
+        "--path",
+        required=True,
+        metavar="P",
+        help=(
+            "workspace-relative exact path (ci/manifest/WP-114.json) or explicitly bounded pattern "
+            "(ci/manifest/WP-114.*.json) the grant covers. Refused when it is absolute, contains "
+            "'..', names a directory, matches every path, is already under allowed_roots, or names "
+            "nothing a declared protected_roots pattern covers -- a grant cannot widen allowed_roots"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--op",
+        required=True,
+        choices=list(write_authorization.WRITE_OPERATIONS),
+        help=(
+            "write: create or replace this path's content -- the only operation write-set-check "
+            "consumes, because a file's presence is what it can observe. delete: authorize "
+            "removing the granted path, recorded for the audit trail; it can never make an existing "
+            "file clean"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--issuer",
+        required=True,
+        metavar="NAME",
+        help=(
+            "the named identity issuing this grant -- no default, no LLM-supplied value. A "
+            "grant with no named issuer is not a capability record"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--issuer-kind",
+        choices=list(write_authorization.ISSUER_KINDS),
+        default=write_authorization.ISSUER_KIND_HUMAN,
+        help=(
+            "human (default): a human checkpoint exactly like approve/accept-policy/record-ruling, "
+            "which an agent must never run on a human's behalf. supervisor: the automation lane, "
+            "reachable only for an identity the descriptor declares in "
+            "write_set.authorized_supervisors, and re-verified by write-set-check every time it "
+            "honors the record"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--ttl",
+        type=int,
+        default=write_authorization.DEFAULT_TTL_SECONDS,
+        metavar="SECONDS",
+        help=(
+            f"how long the grant authorizes a write, in seconds (default {write_authorization.DEFAULT_TTL_SECONDS}, "
+            f"ceiling {write_authorization.MAX_TTL_SECONDS}). expires_at is issued_at + ttl and the "
+            "consumer recomputes that relation, so a grant cannot outlive its TTL"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--one-shot",
+        action="store_true",
+        help=(
+            "bind a single exact file write rather than a standing grant for the TTL (refused on "
+            "a pattern path, which authorizes as many writes as its TTL allows). Reported as "
+            "`spent` once the file it authorized is present"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--note",
+        default=None,
+        help=(
+            "free-text audit metadata, recorded and never read back as authority: no prose field "
+            "is consulted when deciding whether a grant authorizes a write, and it is excluded from "
+            "the grant id so it cannot invalidate a real record either"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--issued-at",
+        default=None,
+        metavar="TIMESTAMP",
+        help=(
+            "ISO-8601 timestamp with a UTC offset (2026-10-03T12:00:00+00:00) to record as "
+            "issued_at; defaults to now. Present so a re-run of the issuing command is idempotent "
+            "(the grant id is a hash of the binding) and an expiring grant is reproducible"
+        ),
+    )
+    authorize_write_p.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the grant record itself (the line appended to ci/results/protected-writes.jsonl)",
+    )
+    authorize_write_p.set_defaults(func=cmd_authorize_write)
 
     gate_p = sub.add_parser("gate", help="Cross-artifact gate runner: `gate <gate-id>` (docs/cli-contract.md §3)")
     gate_p.add_argument("gate_id", choices=sorted(_GATE_VERBS), metavar="GATE-ID")

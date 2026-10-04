@@ -92,6 +92,18 @@ progress.
    `protected (not vouched by any declaration, audit only)` and does not
    block: leave it alone, and do not read a `clean` verdict as covering
    it.
+   The one exception is a **sanctioned** protected write — one the issue in
+   progress is authorized to make. It is authorized by a recorded,
+   issue-scoped capability grant, never by a hand edit: `ligature
+   authorize-write --issue <N> --path <path> --op write --issuer <name>`
+   records one, and `write-set-check --issue <N>` then reports that write as
+   `authorized protected write [grant <id>]` instead of as a violation. If a
+   finding needs a protected write and no grant covers it, **stop and report
+   it** — ask the human to run `authorize-write`, and pass `--issue <N>` to
+   your own write-set check so its verdict is about the same issue. Never run
+   `authorize-write` yourself: it is a human checkpoint like `approve`, and
+   it is the one command that can turn a `protected-write` finding
+   non-blocking. Never hand-edit `ci/results/protected-writes.jsonl` either.
 6. **There is no supervisory start.** The agent drives the loop; the
    binary stays a passive oracle. `check` is read-only and never runs a
    writing operation on its own — it only recommends one through
@@ -126,14 +138,15 @@ progress.
 
 | command | purpose |
 |---|---|
-| `ligature status [--json]` | current project state (artifact lifecycles, obligations, clusters, findings, gate integrity, write-set conformance) |
-| `ligature check [--json] [next]` | read-only consolidated gate run + exactly one recommended next action |
-| `ligature write-set-check [--json]` | read-only write-set conformance: files outside `allowed_roots` (`out-of-set`) and files written into `protected_roots` that no declaration vouches for (`protected-write`), both blocking; the protected surface reported per declared pattern |
+| `ligature status [--json] [--issue N]` | current project state (artifact lifecycles, obligations, clusters, findings, gate integrity, write-set conformance; `--issue N` scopes the write grants the write-set state honors, #114) |
+| `ligature check [--json] [next] [--issue N]` | read-only consolidated gate run + exactly one recommended next action; `--issue N` scopes the write grants its write-set finding honors, so all three read-only surfaces agree about the same run (#114) |
+| `ligature write-set-check [--json] [--issue N]` | read-only write-set conformance: files outside `allowed_roots` (`out-of-set`) and files written into `protected_roots` that no declaration vouches for (`protected-write`), both blocking; the protected surface reported per declared pattern. `--issue N` also consumes the write grants recorded for that issue (#114) |
+| `ligature authorize-write --issue N --path P --op K --issuer <name>` | record one issue-scoped capability authorizing a single sanctioned write into a declared protected root, in `ci/results/protected-writes.jsonl` — the sanctioned-route exception to rule 5 (#114). A human checkpoint in the `human` lane (never run it yourself); the `supervisor` lane needs the identity declared in the descriptor's `write_set.authorized_supervisors`. A grant cannot widen `allowed_roots`, authorize another operation, outlive its TTL, or cover another issue or path |
 | `ligature validate <kind> <target>` | deterministic per-artifact check (G1a/G1b/G2+) |
 | `ligature gate <gate-id> [args...]` | deterministic cross-artifact gate |
 | `ligature draft <stage> <template> <target>` | Stage 0/3 one-shot LLM draft (advisory; human review required). Run `ligature draft --help` for the complete template list — every shipped template, what it drafts, and which command promotes it — rather than guessing a name |
 | `ligature approve <op> <target...>` | human checkpoint (requires `--reviewer`); every normative artifact, including a concept spec (#105) |
-| `ligature accept-policy --reviewer <name>` | record a reviewed change to the normative reliance-policy document (`docs/reliance-policy.md`) as the manifest's reviewed base — the explicit accept path for governance drift, analogous to `accept-promotion` |
+| `ligature accept-policy --reviewer <name> [--version <name>@<major>.<minor>]` | record a reviewed change to the normative reliance-policy document (`docs/reliance-policy.md`) as the manifest's reviewed base — the explicit accept path for governance drift, analogous to `accept-promotion`. `--version` stamps the document's `Policy version:` marker line (that line and nothing else) and is how the placeholder `init` ships gets replaced; a human checkpoint: ask the human to run it, never run it yourself |
 | `ligature promote-evidence <target>` | mechanically promote a staged evidence draft (`evidence/<id>.json.draft`) to its target and record the move — the Stage 0 promotion path (evidence carries no `review` block, so `approve` cannot promote it; no `--reviewer` needed) |
 | `ligature record-ruling --reviewer <name> --verdict ratified/rejected --artifact <path>…` | record a human ruling over an exact artifact set — the human-ruling gate `accept-promotion` enforces before it will mint a receipt (#82). A human checkpoint: never run it yourself |
 | `ligature record-assurance <work-package> --proof <obligation>=<path>…` | assemble a work package's assurance report from the verifier's own proof certificates and write it to the manifest's `report.emit` path — the achieved side `gate g14` reads (#87). Never hand-write that report: every field is derived from the certificate, the mapping you declare is checked, and the command refuses when the evidence does not establish the obligation |
@@ -161,5 +174,19 @@ the installation as drifted. A reviewed change is recorded with
 `ligature accept-policy --reviewer <name>` — the recorded base moves
 through that command and nothing else, which is what makes the drift
 signal trustworthy.
+
+That document also arrives as a template: `init` installs it with its
+`Policy version:` line still the `<policy-name>@<major>.<minor>`
+placeholder, and both `accept-policy` and `accept-promotion` refuse a
+policy that cannot yield a `policy_version` — so no promotion can be
+minted until it carries one. `ligature doctor` exits 1 and `check`
+reports a blocking `policy-version-marker` finding until it does. **You
+cannot fix this yourself**: the document is a `protected_root` (rule 5
+above), so writing into it is forbidden to you. Report the finding and ask
+the human to run `ligature accept-policy --reviewer <name> --version
+<name>@<major>.<minor>`, which stamps that one line and records the result
+as the reviewed content. Then re-read the ruling state before retrying a
+promotion: stamping changed the document's bytes, so a human ruling taken
+over the pre-stamp version no longer covers it and must be re-recorded.
 
 <!-- LIGATURE-AUTHORITY-END -->

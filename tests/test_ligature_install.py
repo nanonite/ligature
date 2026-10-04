@@ -61,6 +61,21 @@ class InstallFixture(unittest.TestCase):
             args += ["--name", name]
         return self.run_cli(*args)
 
+    def stamp_policy(self, version="reliance-policy@1.0", reviewer="alice"):
+        """`accept-policy --version`: stamp the installed policy template's
+        `Policy version:` marker and record it as reviewed (chainlink #113).
+
+        The one step every workspace owes its governance document before
+        `doctor`/`check` are clean -- an unfilled marker is a blocking
+        condition for both. A test about managed files, descriptors,
+        migrations or the adjudicator pin is not about that, so it says
+        `self.stamp_policy()` rather than re-deriving the condition."""
+        code, out, err = self.run_cli(
+            "accept-policy", "--reviewer", reviewer, "--version", version
+        )
+        self.assertEqual(code, 0, err)
+        return out
+
     def manifest(self) -> dict:
         return json.loads((self.workspace / "ci" / "manifest" / "installation.json").read_text())
 
@@ -175,7 +190,11 @@ class FreshInitTest(InstallFixture):
         paths = {f["path"]: f for f in self.manifest()["files"]}
         self.assertEqual(paths[".ligature/schemas/project-descriptor.schema.json"]["ownership"], "managed")
         self.assertEqual(paths[".ligature/schemas/project-descriptor.schema.json"]["expected_hash"], "sha256:" + hashlib.sha256(installed.read_bytes()).hexdigest())
-        # doctor inventories it as an unchanged managed file.
+        # doctor inventories it as an unchanged managed file. The policy's
+        # `Policy version:` marker is stamped first because an unfilled one
+        # is a blocking condition of its own (chainlink #113) and is not
+        # what this test is about.
+        self.stamp_policy()
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
         self.assertIn("unchanged  .ligature/schemas/project-descriptor.schema.json", out)
@@ -196,7 +215,9 @@ class FreshInitTest(InstallFixture):
         paths = {f["path"]: f for f in self.manifest()["files"]}
         self.assertEqual(paths["schemas/project-descriptor.schema.json"]["ownership"], "managed")
         self.assertEqual(paths["schemas/project-descriptor.schema.json"]["expected_hash"], "sha256:" + hashlib.sha256(installed.read_bytes()).hexdigest())
-        # doctor inventories it as an unchanged managed file.
+        # doctor inventories it as an unchanged managed file (the policy
+        # marker is stamped first -- chainlink #113; see the sibling case).
+        self.stamp_policy()
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
         self.assertIn("unchanged  schemas/project-descriptor.schema.json", out)
@@ -264,6 +285,7 @@ class ConflictAndAuthorityTest(InstallFixture):
 
     def test_migrate_force_is_the_explicit_recovery_path(self):
         self.init("greenfield", name="myproj")
+        self.stamp_policy()
         target = self.workspace / MANAGED_SCHEMA_REL
         target.write_text("locally broken")
         code, _, _ = self.run_cli("migrate", "--force", MANAGED_SCHEMA_REL)
@@ -337,8 +359,11 @@ class ConflictAndAuthorityTest(InstallFixture):
         """The flip side of the #75 verdict derivation: an untouched skill
         file's region hash matches the record, so the attestation reads
         `verified` -- the word the pre-#75 code also printed for a clean
-        install, now derived from the recorded authority_hash."""
+        install, now derived from the recorded authority_hash. (The policy
+        marker is stamped first: an unstamped `Policy version:` is its own
+        blocking condition -- chainlink #113 -- and has its own tests.)"""
         self.init("greenfield", name="myproj")
+        self.stamp_policy()
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
         self.assertIn("skill authority hash: verified", out)
@@ -388,6 +413,7 @@ class WitnessRendererScriptsInstallTest(InstallFixture):
 
     def test_rerun_is_unchanged_and_a_local_edit_is_a_conflict(self):
         self.init("greenfield", name="myproj")
+        self.stamp_policy()
         code, out, _ = self.init("greenfield", name="myproj")
         self.assertEqual(code, 0, out)
         for rel in RENDERER_SCRIPTS:
@@ -458,6 +484,7 @@ class UpgradePruneIncompatibilityTest(InstallFixture):
 
     def test_safe_upgrade_applies_and_returns_to_current(self):
         self.init("greenfield", name="myproj")
+        self.stamp_policy()
         self._make_managed_file_look_locally_old(MANAGED_SCHEMA_REL)
 
         code, out, _ = self.run_cli("doctor")
@@ -629,6 +656,7 @@ class DoctorDescriptorSchemaTest(InstallFixture):
 
     def test_doctor_annotates_a_valid_descriptor(self):
         self.init("greenfield", name="myproj")
+        self.stamp_policy()
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
         self.assertIn("  user-owned  project-descriptor.json  schema: valid", out)
@@ -796,6 +824,7 @@ class DoctorDescriptorFlagTest(InstallFixture):
         actually about: an invalid candidate elsewhere must not make the
         installed descriptor look broken."""
         self.init("greenfield", name="myproj")
+        self.stamp_policy()
         self.candidate("probe-closure-kind.json", self.invalid_enum)
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
@@ -804,6 +833,7 @@ class DoctorDescriptorFlagTest(InstallFixture):
 
     def test_a_valid_descriptor_named_by_the_flag_keeps_doctor_clean(self):
         self.init("greenfield", name="myproj")
+        self.stamp_policy()
         probe = self.candidate("candidate.json")
         code, out, _ = self.run_cli("--descriptor", str(probe), "doctor")
         self.assertEqual(code, 0)
@@ -840,8 +870,11 @@ class DoctorDescriptorFlagTest(InstallFixture):
         """One file under a different spelling is still one file: without
         the resolved-path comparison, `--descriptor <ws>/project-descriptor.json`
         would report a second descriptor and exit 2 on a clean workspace.
-        The `docs/..` spelling exercises resolution, not string equality."""
+        The `docs/..` spelling exercises resolution, not string equality.
+        (The policy marker is stamped first: an unstamped one is its own
+        blocking condition -- chainlink #113.)"""
         self.init("greenfield", name="myproj")
+        self.stamp_policy()
         plain_code, plain_out, _ = self.run_cli("doctor")
         spelled = self.workspace / "docs" / ".." / "project-descriptor.json"
         code, out, _ = self.run_cli("--descriptor", str(spelled), "doctor")
@@ -1176,6 +1209,343 @@ class NormativePolicyDriftTest(InstallFixture):
         self.assertEqual(code, 1)
         self.assertIn("installation: drifted", out)
 
+    def test_prose_that_merely_starts_with_the_convention_is_not_a_marker_line(self):
+        """#78's acceptance rule was about marker LINES, and this change must
+        not quietly tighten it. A policy whose body contains a sentence
+        beginning `Policy version: see the change history` still accepts on
+        the strength of its one real marker line, and `accept-policy
+        --version` stamps that marker line rather than the prose."""
+        self.init("greenfield", name="myproj")
+        prose = self.edited_policy() + "\nPolicy version: see the change history below.\n"
+        (self.workspace / self.POLICY).write_text(prose)
+
+        code, _, err = self.accept_policy()
+        self.assertEqual(code, 0, err)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0, out)
+
+        code, out, _ = self.accept_policy("--version", "reliance-policy@2.0")
+        self.assertEqual(code, 0)
+        self.assertIn("Policy version: `reliance-policy@2.0`", self.read(self.POLICY))
+        self.assertIn("Policy version: see the change history below.", self.read(self.POLICY))
+
+
+class PolicyVersionMarkerTest(InstallFixture):
+    """chainlink #113: `init` installs the reliance policy as a template
+    whose `Policy version:` line is still the `<policy-name>@<major>.<minor>`
+    placeholder, and both accept commands refuse such a document --
+    `accept-promotion` reads it to compute a receipt's `policy_version`,
+    and `accept-policy`, the one command whose job is to accept it,
+    required the marker it was supposed to establish. The documented
+    advance into an accepted policy was therefore reachable only by
+    hand-editing a document every project declares a `protected_root`,
+    which the installed skill forbids any agent from writing. Reported
+    from the swisstable-verus pilot (chainlink #114), where a completely
+    correct Stage 4.5 sequence -- 14 boundary contracts, 15 interactions,
+    6 bridges, 1 conflict resolution, all approved at exit 0 -- died at
+    `accept-promotion` with "found 0" before the human-ruling gate even
+    ran.
+
+    Two halves, both pinned here: `accept-policy --version` stamps the
+    single marker line (that line and nothing else) so the advance is one
+    command, and the placeholder is reported early -- on the document's own
+    inventory line, and as a blocking `policy-version-marker` finding in
+    `check`/`status` plus a non-zero `doctor` -- instead of surfacing for
+    the first time at Stage 4.5."""
+
+    POLICY = "docs/reliance-policy.md"
+    PLACEHOLDER = "Policy version: `<policy-name>@<major>.<minor>`"
+
+    def init_and_read(self, name="myproj"):
+        code, out, _ = self.init("greenfield", name=name)
+        self.assertEqual(code, 0)
+        return self.read(self.POLICY), out
+
+    def accept(self, *extra):
+        return self.run_cli("accept-policy", "--reviewer", "alice", *extra)
+
+    def base_hash(self) -> str:
+        return next(f for f in self.manifest()["files"] if f["path"] == self.POLICY)["base_hash"]
+
+    def test_init_installs_the_placeholder_and_says_so_on_the_policy_line(self):
+        """The report names the condition where the file is, rather than
+        listing the document as merely user-owned -- and `init` still exits
+        0: nothing conflicted and nothing drifted, so the installation
+        itself is current."""
+        text, out = self.init_and_read()
+        self.assertIn(self.PLACEHOLDER, text)
+        self.assertIn(f"create  {self.POLICY}", out)
+        self.assertIn("the placeholder `<policy-name>@<major>.<minor>`", out)
+        self.assertIn("accept-policy --reviewer <name> --version <name>@<major>.<minor>", out)
+        self.assertIn("installation: current", out)
+
+    def test_doctor_exits_nonzero_on_the_unstamped_template_and_names_the_remedy(self):
+        self.init_and_read()
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        # The installation is genuinely current -- only the marker is
+        # outstanding, and the line says which document and which command.
+        self.assertIn("installation: current", out)
+        self.assertIn(f"user-owned  {self.POLICY}", out)
+        self.assertIn("the placeholder `<policy-name>@<major>.<minor>`", out)
+        self.assertIn("accept-policy --reviewer <name> --version", out)
+
+    def test_the_issues_exact_repro_and_its_one_command_resolution(self):
+        """Step 1 of the report: `accept-policy` on the as-shipped template
+        is refused, and the refusal now names the flag that resolves it.
+        Step 2: with `--version`, the same command stamps the marker,
+        records the reviewed content, and leaves the workspace clean."""
+        self.init_and_read()
+        code, _, err = self.accept()
+        self.assertEqual(code, 2)
+        self.assertIn("Policy version", err)
+        self.assertIn("accept-policy --reviewer <name> --version", err)
+
+        code, out, _ = self.accept("--version", "reliance-policy@1.2")
+        self.assertEqual(code, 0)
+        self.assertIn("stamped: Policy version: `reliance-policy@1.2`", out)
+        self.assertIn("(was the shipped placeholder)", out)
+        self.assertIn("Policy version: `reliance-policy@1.2`", self.read(self.POLICY))
+        # The reviewed base moved to the stamped content, so nothing drifts.
+        self.assertEqual(
+            self.base_hash(),
+            "sha256:" + hashlib.sha256(self.read(self.POLICY).encode()).hexdigest(),
+        )
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("installation: current", out)
+        self.assertNotIn("accept-policy --reviewer <name> --version", out)
+
+    def test_stamping_rewrites_the_marker_line_and_nothing_else(self):
+        """`accept-policy --version` may touch exactly one line of a
+        normative user-owned governance document. Every other line of the
+        template -- including the instructions telling a human to fill the
+        marker in by hand, which the flag supersedes -- survives
+        byte-identical."""
+        before, _ = self.init_and_read()
+        code, _, _ = self.accept("--version", "reliance-policy@1.2")
+        self.assertEqual(code, 0)
+        after = self.read(self.POLICY)
+        self.assertEqual(
+            [line for line in after.splitlines() if not line.startswith("Policy version:")],
+            [line for line in before.splitlines() if not line.startswith("Policy version:")],
+        )
+        self.assertEqual(after.splitlines(True).count("Policy version: `reliance-policy@1.2`\n"), 1)
+
+    def test_check_and_status_report_the_unstamped_marker_as_blocking(self):
+        """The early signal the pilot lacked: `check` fails closed with a
+        high-severity finding naming the exact command, and `status` carries
+        the same finding -- both long before Stage 4.5."""
+        self.init_and_read()
+        code, out, _ = self.run_cli("check", "--json")
+        self.assertEqual(code, 1)
+        document = json.loads(out)
+        self.assertIn("blocking_findings", document["result"]["conditions"])
+        marker = [f for f in document["findings"] if f["gate_id"] == "policy-version-marker"]
+        self.assertEqual(len(marker), 1)
+        self.assertEqual(marker[0]["severity"], "high")
+        self.assertEqual(marker[0]["subject"], self.POLICY)
+        self.assertIn("accept-policy --reviewer <name> --version", marker[0]["reason"])
+        # Not a gate-integrity or descriptor problem: the run is a normal
+        # blocking-findings block.
+        self.assertNotIn("gate_integrity_failed", document["result"]["conditions"])
+
+        code, out, _ = self.run_cli("status", "--json")
+        self.assertEqual(code, 0)
+        self.assertTrue(
+            any(f["gate_id"] == "policy-version-marker" for f in json.loads(out)["open_findings"])
+        )
+
+        # One command clears the marker finding. (The run may still exit 1
+        # on the descriptor's own untouched-template P0 finding -- that is
+        # a different gate, about a different file.)
+        self.stamp_policy()
+        code, out, _ = self.run_cli("check", "--json")
+        self.assertEqual(
+            [f for f in json.loads(out)["findings"] if f["gate_id"] == "policy-version-marker"], []
+        )
+        self.assertEqual(
+            [f for f in json.loads(out)["findings"] if f["gate_id"] == "policy-drift"], []
+        )
+
+    def test_a_missing_policy_document_is_reported_as_drift_not_as_a_marker(self):
+        """One defect, one finding: a deleted document is `policy-drift`'s
+        signal (#78). Reporting it here too would make one real problem
+        read as two."""
+        self.init_and_read()
+        (self.workspace / self.POLICY).unlink()
+        code, out, _ = self.run_cli("check", "--json")
+        document = json.loads(out)
+        drift = [f for f in document["findings"] if f["gate_id"] == "policy-drift"]
+        self.assertEqual(len(drift), 1)
+        self.assertIn("missing", drift[0]["reason"])
+        self.assertEqual(
+            [f for f in document["findings"] if f["gate_id"] == "policy-version-marker"], []
+        )
+
+    def test_bumping_a_real_version_is_the_same_command(self):
+        """The template asks for a bump on every substantive policy change;
+        with the marker stamped, that is `accept-policy --version` again --
+        and it still records the new content as the reviewed base, so the
+        bump itself is not an unreviewed edit."""
+        self.init_and_read()
+        self.stamp_policy("reliance-policy@1.0")
+        previous = self.base_hash()
+        code, out, _ = self.accept("--version", "reliance-policy@2.0")
+        self.assertEqual(code, 0)
+        self.assertIn("(was reliance-policy@1.0)", out)
+        self.assertIn("Policy version: `reliance-policy@2.0`", self.read(self.POLICY))
+        self.assertNotEqual(self.base_hash(), previous)
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("installation: current", out)
+
+    def test_restamping_the_same_value_records_without_rewriting(self):
+        self.init_and_read()
+        self.stamp_policy("reliance-policy@1.0")
+        before = self.read(self.POLICY)
+        code, out, _ = self.accept("--version", "reliance-policy@1.0")
+        self.assertEqual(code, 0)
+        self.assertNotIn("stamped:", out)
+        self.assertEqual(self.read(self.POLICY), before)
+        # Accepted, and idempotent: the same hash in and out.
+        self.assertIn(f"previous hash: {self.base_hash()}", out)
+
+    def test_a_backquoted_or_padded_version_is_accepted(self):
+        """Operators copy the marker line out of the template, backticks and
+        all; the flag takes that value rather than refusing a document over
+        quoting."""
+        self.init_and_read()
+        code, _, _ = self.accept("--version", "  `reliance-policy@1.2`  ")
+        self.assertEqual(code, 0)
+        self.assertIn("Policy version: `reliance-policy@1.2`", self.read(self.POLICY))
+
+    def test_a_malformed_version_is_refused_and_writes_nothing(self):
+        """Every value the marker line itself would refuse is refused here
+        too -- one pattern, two consumers -- and the refusal leaves the
+        document AND the recorded base exactly as they were, because the
+        whole stamped text is validated before anything is written."""
+        for bad in [
+            "",
+            "reliance-policy",
+            "Reliance-Policy@1.2",
+            "reliance policy@1.2",
+            "reliance-policy@",
+            "@1.2",
+            "reliance-policy@1.2.3.4-beta",
+            "reliance-policy@1.2 --and-more",
+        ]:
+            with self.subTest(version=bad):
+                self.init_and_read()
+                before = self.read(self.POLICY)
+                base_before = self.base_hash()
+                code, _, err = self.accept("--version", bad)
+                self.assertEqual(code, 2)
+                self.assertIn("not a policy version", err)
+                self.assertEqual(self.read(self.POLICY), before)
+                self.assertEqual(self.base_hash(), base_before)
+
+    def test_every_accepted_version_is_one_the_marker_line_can_read_back(self):
+        """The shared-pattern guarantee, asserted from both ends: whatever
+        `--version` accepts, the marker regex `accept-promotion` reads
+        accepts -- so no invocation of this command can produce a document
+        the promotion path would refuse."""
+        for version in ["reliance-policy@1.2", "policy@0", "a-b-9@10.20.30"]:
+            with self.subTest(version=version):
+                self.init_and_read()
+                self.assertEqual(self.accept("--version", version)[0], 0)
+                self.assertEqual(
+                    ligature_install.POLICY_VERSION_MARKER_RE.findall(self.read(self.POLICY)), [version]
+                )
+
+    def test_version_on_a_document_with_no_marker_line_is_refused(self):
+        """The flag stamps a line; it never invents one. A document with no
+        `Policy version:` line at all needs a human to put one there --
+        which is what the error says."""
+        self.init_and_read()
+        (self.workspace / self.POLICY).write_text("# Reliance policy\n\nNo marker line here.\n")
+        before = self.read(self.POLICY)
+        code, _, err = self.accept("--version", "reliance-policy@1.2")
+        self.assertEqual(code, 2)
+        self.assertIn("no `Policy version:` line to stamp", err)
+        self.assertEqual(self.read(self.POLICY), before)
+
+    def test_version_on_an_ambiguous_document_is_refused(self):
+        """Two marker lines, well-formed and different: #78's exactly-one
+        rule refused them before #113 and still does. The flag will not
+        pick one."""
+        self.init_and_read()
+        (self.workspace / self.POLICY).write_text(
+            "# Reliance policy\n\nPolicy version: `a@1.0`\nPolicy version: `b@2.0`\n"
+        )
+        code, _, err = self.accept("--version", "reliance-policy@1.2")
+        self.assertEqual(code, 2)
+        self.assertIn("2 `Policy version:` lines", err)
+        self.assertIn("will not", err)
+        self.assertIn("Policy version: `b@2.0`", self.read(self.POLICY))
+
+    def test_an_ambiguous_marker_is_named_without_a_remedy_the_flag_cannot_apply(self):
+        """`doctor`/`check` still report an ambiguous marker, and the
+        remedy they name is the human edit rather than a flag that would
+        have to guess which line was meant."""
+        self.init_and_read()
+        (self.workspace / self.POLICY).write_text(
+            "# Reliance policy\n\nPolicy version: `a@1.0`\nPolicy version: `a@1.0`\n"
+        )
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("more than one `Policy version:` line", out)
+        self.assertNotIn("--version <name>@<major>.<minor>`", out)
+
+    def test_an_absent_marker_line_is_reported_by_doctor_without_flagging_a_remedy(self):
+        self.init_and_read()
+        (self.workspace / self.POLICY).write_text("# Reliance policy\n\nNo marker line here.\n")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("no `Policy version:` line at all", out)
+        self.assertNotIn("--version <name>@<major>.<minor>`", out)
+
+    def test_version_is_refused_for_a_path_the_descriptor_does_not_declare(self):
+        """`--version` inherits every path guard `accept-policy` already
+        had: it cannot be pointed at some other document to stamp."""
+        self.init_and_read()
+        code, _, err = self.accept("--policy-path", "docs/other-policy.md", "--version", "p@1.0")
+        self.assertEqual(code, 2)
+        self.assertIn("disagrees with the project descriptor", err)
+
+    def test_a_reviewer_is_still_required_to_stamp(self):
+        """Stamping writes a normative user-owned document, so it is a
+        human checkpoint on the same terms as everything else this command
+        accepts: argparse refuses the invocation before any of it runs."""
+        self.init_and_read()
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_cli("accept-policy", "--version", "reliance-policy@1.2")
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(self.PLACEHOLDER, self.read(self.POLICY))
+
+    def test_the_library_reports_the_same_states_the_commands_act_on(self):
+        """The vocabulary the reports and the refusals share, asserted at
+        its source: `stamped` only for a document that yields exactly one
+        marker value."""
+        self.init_and_read()
+        template = self.read(self.POLICY)
+        self.assertEqual(ligature_install.policy_version_state(template), "unfilled")
+        self.assertEqual(
+            ligature_install.policy_version_state(template.replace(self.PLACEHOLDER, "Policy version: `p@1.0`")),
+            "stamped",
+        )
+        self.assertEqual(ligature_install.policy_version_state("# none\n"), "absent")
+        self.assertEqual(
+            ligature_install.policy_version_state("Policy version: `p@1.0`\nPolicy version: `p@2.0`\n"),
+            "ambiguous",
+        )
+        # An indented declaration is not a marker line the convention
+        # recognizes: it is a `Policy version:` line without a value.
+        self.assertEqual(
+            ligature_install.policy_version_state("  Policy version: `p@1.0`\n"), "unfilled"
+        )
+        self.assertEqual(ligature_install.policy_version_state(""), "absent")
+
 
 def _identity(content_hash, *, kind="zipapp", version=ligature_install.PRODUCT_VERSION) -> dict:
     """A full `adjudicator.current_identity()` shape, so both `init` (which
@@ -1385,6 +1755,7 @@ class AdjudicatorRepinTest(InstallFixture):
 
     def test_migrate_upgrade_is_the_explicit_repin_path(self):
         self.init_as(self.H_A)
+        self.stamp_policy()
         self.init_as(self.H_B)  # refused, pin stays A
         code, out, _ = self.run_as(self.H_B, "migrate", "--upgrade")
         self.assertEqual(code, 0)

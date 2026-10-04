@@ -38,7 +38,7 @@ import resources
 
 PRODUCT_NAME = "ligature"
 # Bump together with the git tag (vX.Y) and CHANGELOG.md's release heading.
-PRODUCT_VERSION = "1.1.1"
+PRODUCT_VERSION = "1.2.1"
 
 # The interpreter floor this packaging contract supports and needs `doctor`
 # to report rather than silently assume. `importlib.resources.files` (the

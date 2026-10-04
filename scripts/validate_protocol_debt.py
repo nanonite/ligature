@@ -47,6 +47,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
@@ -220,10 +221,30 @@ def find_protocol_debt_files(root: Path) -> list[Path]:
     """Every file anywhere under a `_protocol_debt` directory, at any
     depth -- mirrors find_exemption_files/find_interaction_files so
     nested placements surface as G1b violations instead of going
-    unchecked."""
+    unchecked.
+
+    Staged drafts (`<target>.json.draft`, written by
+    `review_checkpoint.stage_draft` via `pipeline.py draft`) are excluded
+    (chainlink #110). A protocol-debt record is the paired half of an
+    interaction's `approve-pair`, and the record an author is staging is
+    precisely the one whose `review` block is not attached yet: collecting
+    it failed G1a with `'review' is a required property`, sent
+    `validate-protocol-debt` to exit 1 mid-review, and gave `check --json`
+    a medium finding and a `human_decision_required` condition per staged
+    record -- a second copy of the same "a pair is half-promoted" state the
+    pairing transaction exists to make atomic. Excluding it HERE -- the
+    one discovery function validate(), validate_crate(),
+    count_discovered() and valid_interaction_ids_from_crate() wrap --
+    means a pending debt record contributes to G15's coverage set by never
+    being discovered, rather than by first failing G1a and being discarded
+    as a side effect. Same convention
+    validate_interaction.find_interaction_files() has applied since
+    chainlink #90. Deliberately narrow: an unreviewed record at its real
+    `<interaction_id>.json` path is still validated and reported, and a
+    wrong-extension file is still a G1b violation."""
     if not root.is_dir():
         raise FileNotFoundError(f"protocol-debt scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob("**/_protocol_debt/**/*") if p.is_file()]
+    return [p for p in root.glob("**/_protocol_debt/**/*") if p.is_file() and not is_staged_draft(p)]
 
 
 def validate(root: Path, interactions_by_id: dict[str, dict] | None = None) -> list[Finding]:

@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "cluster": "date-creusot-core",
+  "failed_conditions": ["single_verifier_system", "protocol_class_all_pairwise"],
+  "affected_edges": ["date_from_epoch__to__time_zone_lookup"],
+  "ceiling": "harness-tested",
+  "verifier": "creusot-deductive-check",
+  "capability_gap": "CG1",
+  "tracking_issue": "chainlink:99",
+  "review": {
+    "reviewer": "nobody-reviewed-this",
+    "reviewed_at": "1999-01-01"
+  }
+}

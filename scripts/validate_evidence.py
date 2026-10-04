@@ -51,6 +51,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 
@@ -150,7 +151,7 @@ def find_evidence_files(root: Path) -> list[Path]:
     throughout this pipeline)."""
     if not root.is_dir():
         raise FileNotFoundError(f"evidence scan root does not exist or is not a directory: {root}")
-    return [p for p in root.glob("**/evidence/**/*") if p.is_file() and p.suffix != ".draft"]
+    return [p for p in root.glob("**/evidence/**/*") if p.is_file() and not is_staged_draft(p)]
 
 
 def find_evidence_drafts(root: Path) -> list[Path]:
@@ -164,7 +165,7 @@ def find_evidence_drafts(root: Path) -> list[Path]:
     directory at all has no pending drafts, not a scan error)."""
     if not root.is_dir():
         return []
-    return [p for p in root.glob("**/evidence/**/*") if p.is_file() and p.suffix == ".draft"]
+    return [p for p in root.glob("**/evidence/**/*") if p.is_file() and is_staged_draft(p)]
 
 
 def validate(root: Path) -> list[Finding]:

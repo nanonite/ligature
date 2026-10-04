@@ -19,6 +19,11 @@ schema-invalid document isn't meaningful.
           adversary case, and (when resolvable) must apply to the declared
           callee method. Never checks a declared assurance target -- that's
           deferred to the I-schema's reliances[].required_assurance (M3).
+          Role safety includes telling the two roles an entry can hold apart
+          (chainlink #111): a `kind: precondition` constraint named here is a
+          CALLER OBLIGATION -- the caller must establish it before the call,
+          and a bridge specification is what discharges it -- not something
+          the callee guarantees. See callee_obligation_role().
 
 CAVEAT (docs/concept-to-code-modifications.md gap #6): callee_guarantees
 entries reference a constraint by <Concept>.<id>, but concept-to-code does
@@ -46,6 +51,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from project_descriptor import is_underscore_artifact_path  # noqa: E402
@@ -62,6 +68,38 @@ SCHEMA_PATH = resources.resource_path("docs", "boundary-contract-schema.json")
 # there's no reason for them to disagree with each other.
 OBLIGATION_RE = re.compile(r"^([A-Z][A-Za-z0-9]*)\.C([0-9]+)$")
 ADVERSARY_SHAPED_RE = re.compile(r"^([A-Z][A-Za-z0-9]*)\.A[0-9]+$")
+
+# chainlink #111: `callee_guarantees` carries two roles that mean OPPOSITE
+# things, and the field name only names one of them. A resolved constraint
+# with `kind: precondition` is a caller obligation -- the caller must
+# establish it before the call, and a bridge specification is what discharges
+# it (plan.md §8.2) -- while `postcondition`/`invariant` is what the callee
+# guarantees. The role is read off the constraint the boundary already
+# resolves to, so the distinction is a property of the artifacts rather than
+# prose a reader has to remember, and an entry's role is never inferred from
+# the field it happens to sit in. These are the only two role words
+# concept-to-code's own `constraint` $def allows (docs/
+# concept-to-code-modifications.md gap #6, vendored spec.schema.json), and an
+# absent `kind` means `invariant` there -- so an absent one is a guarantee,
+# not an unknown role.
+GUARANTEE_ROLE = "callee-guarantee"
+OBLIGATION_ROLE = "caller-obligation"
+
+
+def callee_obligation_role(constraint: dict | None) -> str:
+    """The role a resolved `callee_guarantees` entry plays, read off the
+    constraint's own `kind` -- GUARANTEE_ROLE for a postcondition or
+    invariant, OBLIGATION_ROLE for a precondition. `None` (an unresolvable
+    entry, which gate_g2_plus already reports in its own terms) and any
+    unrecognized `kind` both answer GUARANTEE_ROLE, the conservative
+    reading: it is the role an entry claimed when nothing says otherwise,
+    and gate_g2_plus's role-safety checks (callee's own obligations, never
+    an adversary case, applies_to covers the callee method) are what a
+    claimed-guarantee entry still has to pass. One definition, read by the
+    gate that reports the role and by anything else that needs to know."""
+    if not constraint:
+        return GUARANTEE_ROLE
+    return OBLIGATION_ROLE if constraint.get("kind") == "precondition" else GUARANTEE_ROLE
 
 
 @dataclass
@@ -267,6 +305,32 @@ def gate_g2_plus(
 
         status, constraint = _resolve_constraint(ref_concept, entry.split(".", 1)[1], specs_search_root)
         if status == "resolved" and constraint is not None:
+            # chainlink #111: name the role out loud. This entry resolved to
+            # a constraint that declares itself a precondition, so it is the
+            # caller obligation the caller must establish before the call --
+            # a bridge specification discharges it (plan.md §8.2) and G9
+            # records the discharge as `callee-precondition-established`.
+            # Declaring it here is what makes that possible at all: a bridge's
+            # callee_requirement must be one of this boundary's own
+            # callee_guarantees (validate-bridge G2), so an obligation
+            # recorded nowhere here is one no bridge can ever discharge.
+            # Non-blocking, because the entry is correct -- it is only
+            # readable as a caller's obligation rather than the callee's
+            # guarantee the field name suggests, and a reviewer or a reader
+            # of `check` deserves to be told which one this is.
+            if callee_obligation_role(constraint) == OBLIGATION_ROLE:
+                findings.append(
+                    Finding(
+                        "G2+",
+                        path,
+                        f"{entry!r} is a precondition of {ref_concept}: a caller obligation the "
+                        "caller must establish before this call, NOT a guarantee the callee "
+                        "provides. It is declared here because a bridge's callee_requirement must "
+                        "be one of these entries (validate-bridge G2) -- the bridge specification "
+                        "is what discharges it",
+                        severity="info",
+                    )
+                )
             applies_to = constraint.get("applies_to") or []
             if applies_to and callee_method not in applies_to:
                 findings.append(
@@ -469,7 +533,7 @@ def load_boundaries_by_id(canonical_dir: Path, specs_search_root: Path | None = 
 
     validator = load_validator()
     candidates: dict[str, list[tuple[Path, dict]]] = {}
-    for path in sorted(p for p in canonical_dir.iterdir() if p.is_file() and p.suffix != ".draft"):
+    for path in sorted(p for p in canonical_dir.iterdir() if p.is_file() and not is_staged_draft(p)):
         try:
             data = json.loads(path.read_text())
         except (json.JSONDecodeError, UnicodeDecodeError):

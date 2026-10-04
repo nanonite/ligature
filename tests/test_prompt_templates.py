@@ -82,6 +82,46 @@ class PromptTemplateScaffoldingTest(unittest.TestCase):
                 self.assertIn(line, text)
 
 
+    def test_the_two_stage_3_templates_agree_on_where_a_callee_precondition_goes(self):
+        """chainlink #111: `stage-3-boundary-drafting.md` said a callee
+        precondition the caller must establish does NOT go in
+        `callee_guarantees`, while `stage-3-bridge-drafting.md` requires a
+        bridge's `callee_requirement` to be one of the boundary's own
+        `callee_guarantees` (G2). Both cannot be satisfied, so a bridge that
+        checks a precondition could not be authored at all -- and the
+        swisstable-verus pilot hit it: the boundary approved, the bridge was
+        refused. The two templates now say one thing, and this asserts both
+        halves of the agreement rather than only the one being fixed."""
+        boundary_text = (PROMPTS / "stage-3-boundary-drafting.md").read_text()
+        bridge_text = (PROMPTS / "stage-3-bridge-drafting.md").read_text()
+
+        # the boundary template: a precondition IS declared here, in the terms
+        # that make it a caller obligation rather than a callee guarantee
+        self.assertIn("precondition** the caller must establish before the call", boundary_text)
+        self.assertIn("caller obligation, not a guarantee", boundary_text)
+        self.assertIn("callee_requirement", boundary_text)
+        # ...and the old prohibition is gone, not merely supplemented
+        self.assertNotIn("does **not** go here", boundary_text)
+        self.assertNotIn("it belongs in a bridge specification (not yet in scope this stage)", boundary_text)
+
+        # the bridge template: the requirement is one of the boundary's own
+        # entries, and which role that entry holds is stated, not implied
+        self.assertIn("must be one of `{{boundary_contract}}`'s own", bridge_text)
+        self.assertIn("caller obligation", bridge_text)
+        self.assertIn("callee-precondition-established", bridge_text)
+        # ...and the remedy when the boundary omits it is the boundary
+        self.assertIn("re-draft **it**", bridge_text)
+
+    def test_the_boundary_template_refuses_the_vacuous_empty_guarantee_list(self):
+        """The third way out the pilot report names, and the worst: an empty
+        `callee_guarantees` is schema-valid, satisfies G2 for the boundary,
+        and asserts that the call depends on nothing at all -- a silently
+        vacuous reliance record. The template that authors the field has to
+        say an empty list is a claim, not an omission."""
+        text = (PROMPTS / "stage-3-boundary-drafting.md").read_text()
+        self.assertIn("**empty** `callee_guarantees` is not the way", text)
+        self.assertIn("claim, not an omission", text)
+
     def test_stage_3_witness_template_has_required_scaffolding(self):
         text = (PROMPTS / "stage-3-witness-drafting.md").read_text()
         self.assertIn("Output **only** the JSON object", text)
@@ -277,6 +317,83 @@ class SimulatedCompliantOutputTest(unittest.TestCase):
         findings = validate_file(self.target, validator, specs_search_root=None)
         errors = [f for f in findings if f.severity == "error"]
         self.assertEqual(errors, [], [str(f) for f in errors])
+
+    def test_a_simulated_precondition_declaration_survives_stage_and_approve_and_validate(self):
+        """chainlink #111, end to end: what a model following the fixed
+        template emits for a call whose callee declares a precondition --
+        `callee_guarantees: ["TaskQueue.C001", "TaskQueue.C002"]`, the
+        obligation first. Before the fix this exact artifact was the thing
+        the boundary template told a model NOT to write (a callee
+        precondition "belongs in a bridge specification"), yet it was the
+        only shape a bridge could pass G2 against -- so the template's own
+        contract was unsatisfiable, and this test is what proves the fixed
+        one is satisfiable rather than merely self-consistent.
+
+        The callee spec is present and resolvable, so G2+ does its real work:
+        the precondition entry is accepted and REPORTED as a caller
+        obligation, and the postcondition beside it is not."""
+        import json
+
+        specs_dir = self.root / "crate_a" / "specs"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        (specs_dir / "task_queue.json").write_text(
+            json.dumps(
+                {
+                    "concept": "TaskQueue",
+                    "constraints": [
+                        {
+                            "id": "C001",
+                            "english": "pop_ready is called only when a task is due by now",
+                            "logic": "true",
+                            "kind": "precondition",
+                            "applies_to": ["pop_ready"],
+                        },
+                        {
+                            "id": "C002",
+                            "english": "pop_ready returns the task with the earliest deadline",
+                            "logic": "true",
+                            "kind": "postcondition",
+                            "applies_to": ["pop_ready"],
+                        },
+                    ],
+                }
+            )
+        )
+
+        simulated_llm_output = {
+            "schema_version": "1.0",
+            "boundary_id": "scheduler_dispatch__to__task_queue_pop_ready",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "callee_guarantees": ["TaskQueue.C001", "TaskQueue.C002"],
+        }
+        self.assertNotIn("review", simulated_llm_output)
+
+        validator = load_validator()
+
+        def validate_fn(path, data):
+            return validate_data(path, data, validator, specs_search_root=specs_dir)
+
+        draft = stage_draft(simulated_llm_output, self.target)
+        result = approve(
+            draft, self.target, reviewer="test-reviewer", reviewed_at="2026-08-25",
+            review_log=self.log, validate_fn=validate_fn,
+        )
+        self.assertEqual(result.classification, "new")
+
+        findings = validate_file(self.target, validator, specs_search_root=specs_dir)
+        self.assertEqual([str(f) for f in findings if f.severity == "error"], [])
+        role_notes = [f for f in findings if f.severity == "info" and "TaskQueue.C001" in f.reason]
+        self.assertEqual(len(role_notes), 1, [str(f) for f in findings])
+        self.assertIn("caller obligation", role_notes[0].reason)
+
+        # ...and the bridge the template now points at this entry for is
+        # approvable against it: the boundary's own G2 lookup accepts
+        # `TaskQueue.C001`, which is the step the pilot could not get past.
+        from validate_boundary_contracts import load_boundaries_by_id
+
+        boundaries = load_boundaries_by_id(self.target.parent, specs_dir)
+        self.assertIn("scheduler_dispatch__to__task_queue_pop_ready", boundaries)
 
     def test_simulated_llm_output_that_violates_the_policy_rule_is_still_caught(self):
         """The template tells the model never to put an adversary case in

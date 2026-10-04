@@ -1,5 +1,6 @@
 import copy
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -10,12 +11,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_closure import (  # noqa: E402
     CONDITION_KEYS,
+    check_failed_conditions_shape,
     closure_dir_for,
     cluster_for_path,
     count_discovered,
     find_closure_files,
     is_degradation_path,
     load_cluster_artifacts,
+    load_degradation_records,
     load_validators,
     main,
     validate,
@@ -25,6 +28,7 @@ from validate_closure import (  # noqa: E402
 
 PROFILE_PATH = Path("specs/_closure/scheduler-core.json")
 DEGRADATION_PATH = Path("specs/_closure/scheduler-core.degradation.json")
+CLOSURE_FIXTURES = ROOT / "tests" / "fixtures" / "closure"
 
 REVIEW = {"reviewer": "alice", "reviewed_at": "2026-09-04"}
 
@@ -356,6 +360,369 @@ class WorkspaceTest(unittest.TestCase):
         self.write("specs/_closure/scheduler-core.json", valid_profile())
         self.write("specs/_closure/scheduler-core.degradation.json", valid_degradation())
         self.assertEqual(main([str(self.workspace)]), 1)
+
+
+class DegradationRecordLoaderTest(unittest.TestCase):
+    """chainlink #99: ONE loader for specs/_closure/*.degradation.json.
+
+    Every command that acts on a degradation record used to open the
+    closure directory and parse whatever it found there, so what a
+    record was worth depended on which command was asking. The loader
+    below answers one question -- may this record be acted on as this
+    cluster's declared degradation -- and answers it from validation
+    alone, refusing schema-invalid records, malformed
+    `failed_conditions`, records whose excuse the profile contradicts,
+    and every record validate-closure itself excludes (mislocated,
+    misnamed, profileless), each refusal carrying its reason.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self.canonical = closure_dir_for(self.workspace)
+        self.canonical.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, relative: str, data: dict) -> Path:
+        path = self.workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+        return path
+
+    def write_pair(self, profile: dict | None = None, record: dict | None = None):
+        """A cluster whose profile declares single_verifier_system as
+        FAILING, so a record naming it is a consistent pair rather than a
+        stale excuse -- the default 'the record is fine' case every
+        refusal test below departs from by changing exactly one thing."""
+        if profile is None:
+            profile = valid_profile()
+            profile["conditions"]["single_verifier_system"] = False
+            profile["closure_kind"] = "bounded"
+        if record is None:
+            record = valid_degradation()
+        self.write("specs/_closure/scheduler-core.json", profile)
+        self.write("specs/_closure/scheduler-core.degradation.json", record)
+
+    def copy_fixture(self, case: str) -> None:
+        """Lay a regression fixture's tree into the workspace root,
+        files and all -- the fixture IS a specs/_closure/ directory,
+        because where the record sits is part of what it tests."""
+        shutil.copytree(CLOSURE_FIXTURES / case, self.workspace, dirs_exist_ok=True)
+
+    def fixture_record_path(self, case: str, name: str) -> Path:
+        return self.workspace / "specs" / "_closure" / name
+
+    def reasons(self, records, relative: str = "specs/_closure/scheduler-core.degradation.json") -> list[str]:
+        return records.reasons_for(self.workspace / relative)
+
+    # -- the valid case ---------------------------------------------------
+
+    def test_a_consistent_pair_yields_the_record(self):
+        self.write_pair()
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(sorted(records.valid), ["scheduler-core"])
+        self.assertEqual(records.invalid, {})
+        self.assertEqual(records.record_for("scheduler-core"), valid_degradation())
+
+    def test_every_returned_record_carries_a_usable_failed_conditions(self):
+        """The guarantee a consumer is entitled to: a record in `valid`
+        has an array of real condition keys, so `set(record[
+        "failed_conditions"])` and `[str(c) for c in ...]` -- what
+        gate_g14 and `ligature status` each do -- read conditions, not
+        characters."""
+        self.write_pair()
+        records = load_degradation_records(self.workspace)
+        for _, record in records.valid.values():
+            self.assertIsInstance(record["failed_conditions"], list)
+            for key in record["failed_conditions"]:
+                self.assertIn(key, CONDITION_KEYS)
+
+    def test_a_cg3_tracking_record_stays_valid(self):
+        """chainlink #86 survives the loader unchanged: a record naming
+        generic_callees_type_universal_or_creusot_owned beside a `true`
+        declaration is the tracking record plan.md §3 requires, not a
+        stale excuse."""
+        record = valid_degradation()
+        record["failed_conditions"] = ["generic_callees_type_universal_or_creusot_owned"]
+        record["ceiling"] = "per-instantiation"
+        record["capability_gap"] = "CG3"
+        self.write_pair(record=record)
+        records = load_degradation_records(self.workspace)
+        self.assertTrue(records.is_valid("scheduler-core"))
+
+    def test_a_workspace_with_no_closure_directory_is_empty_not_an_error(self):
+        self._tmp.cleanup()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        records = load_degradation_records(self.workspace)
+        self.assertEqual((records.valid, records.invalid, len(records)), ({}, {}, 0))
+
+    # -- refusals ---------------------------------------------------------
+
+    def test_a_stale_excuse_is_refused(self):
+        """The record says single_verifier_system failed; the profile
+        says it holds. Acting on it would keep a closed gap reading as
+        degraded -- so the record excuses nothing, and says why."""
+        self.write_pair(profile=valid_profile(), record=valid_degradation())
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.valid, {})
+        self.assertEqual(records.record_for("scheduler-core"), None)
+        self.assertTrue(any("stale excuse" in r for r in self.reasons(records)))
+
+    def test_a_schema_invalid_record_is_refused(self):
+        record = valid_degradation()
+        record["ceiling"] = "creusot-deductive-check"  # a method, not a ceiling
+        self.write_pair(record=record)
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.valid, {})
+        self.assertTrue(any("G1a" in r for r in self.reasons(records)))
+
+    def test_a_malformed_failed_conditions_is_refused(self):
+        """Every way the excuse vocabulary can be unusable. A string is
+        the sharp one: iterating it yields characters, which is how a
+        cluster comes to read as excused by 's', 'i', 'n', ... ."""
+        for value in (
+            "single_verifier_system",
+            [1],
+            ["obligation_unprovable"],
+            [],
+            ["single_verifier_system", "single_verifier_system"],
+        ):
+            with self.subTest(failed_conditions=value):
+                record = valid_degradation()
+                record["failed_conditions"] = value
+                self.write_pair(record=record)
+                records = load_degradation_records(self.workspace)
+                self.assertEqual(records.valid, {})
+                self.assertTrue(any("failed_conditions" in r for r in self.reasons(records)))
+
+    def test_check_failed_conditions_shape_names_what_is_wrong(self):
+        for value, expected in (
+            ("single_verifier_system", "the string"),
+            ({"condition": True}, "a dict"),
+            (7, "the scalar"),
+            ([], "failed_conditions is empty"),
+            ([3], "must be closure-condition key strings"),
+            (["nonsense"], "not a closure condition key"),
+            (["single_verifier_system"] * 2, "more than once"),
+        ):
+            with self.subTest(failed_conditions=value):
+                findings = check_failed_conditions_shape(DEGRADATION_PATH, {"failed_conditions": value})
+                self.assertTrue(
+                    any(expected in str(f) for f in findings),
+                    f"expected {expected!r} among {[str(f) for f in findings]}",
+                )
+
+    def test_a_record_with_no_profile_beside_it_is_refused(self):
+        self.write("specs/_closure/ghost.degradation.json", {**valid_degradation(), "cluster": "ghost"})
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.valid, {})
+        self.assertTrue(
+            any("no closure profile beside it" in r for r in records.reasons_for(
+                self.workspace / "specs/_closure/ghost.degradation.json"
+            ))
+        )
+
+    def test_a_record_beside_an_invalid_profile_is_refused(self):
+        """A degradation is a departure from a DECLARED profile. An
+        unreadable one declares nothing, so the record beside it cannot
+        be checked against anything."""
+        self.write("specs/_closure/scheduler-core.json", {**valid_profile(), "closure_kind": "proved"})
+        self.write("specs/_closure/scheduler-core.degradation.json", valid_degradation())
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.valid, {})
+        self.assertTrue(any("no closure profile beside it" in r for r in self.reasons(records)))
+
+    def test_a_mislocated_record_is_refused_and_named(self):
+        self.write_pair()
+        self.write("docs/_closure/scheduler-core.degradation.json", valid_degradation())
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(sorted(records.valid), ["scheduler-core"])
+        self.assertTrue(
+            any(
+                "not directly under the canonical directory" in r
+                for r in records.reasons_for(self.workspace / "docs/_closure/scheduler-core.degradation.json")
+            )
+        )
+
+    def test_a_mislocated_record_is_named_when_there_is_no_closure_directory(self):
+        """A workspace with no specs/_closure/ at all is exactly where a
+        mislocated record is most likely to be the ONLY record there is.
+        The loader's location rejection must not be reachable only
+        through the canonical directory's existence: an empty result here
+        would read as 'no degradation is declared' off a workspace that
+        holds one, while `validate()` on the same workspace names it."""
+        self._tmp.cleanup()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self.write(
+            "docs/_closure/ghost.degradation.json",
+            {**valid_degradation(), "cluster": "ghost"},
+        )
+        self.assertFalse(closure_dir_for(self.workspace).exists())
+
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.valid, {})
+        self.assertEqual(records.record_for("ghost"), None)
+        reasons = records.reasons_for(self.workspace / "docs/_closure/ghost.degradation.json")
+        self.assertTrue(reasons, "a refused record must not be silently absent")
+        self.assertTrue(any("not directly under the canonical directory" in r for r in reasons), reasons)
+        self.assertEqual(
+            {p.name for p in records.invalid},
+            {Path(f.path).name for f in validate(self.workspace)
+             if Path(f.path).name.endswith(".degradation.json")},
+        )
+
+    def test_a_misnamed_record_is_refused(self):
+        self.write_pair()
+        record = valid_degradation()
+        record["cluster"] = "scheduler-core-degradation"
+        self.write("specs/_closure/other.degradation.json", record)
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(sorted(records.valid), ["scheduler-core"])
+        self.assertTrue(
+            any("its filename says" in r for r in records.reasons_for(
+                self.workspace / "specs/_closure/other.degradation.json"
+            ))
+        )
+
+    def test_an_undeclared_degradation_is_the_profiles_finding_not_the_records(self):
+        """A profile failing a condition nothing excuses is the profile's
+        own G17 finding. The loader must not refuse a record for another
+        artifact's defect -- it can only report that there is no record."""
+        profile = valid_profile()
+        profile["conditions"]["single_verifier_system"] = False
+        profile["closure_kind"] = "bounded"
+        self.write("specs/_closure/scheduler-core.json", profile)
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.record_for("scheduler-core"), None)
+        self.assertEqual(records.invalid, {})
+        self.assertTrue(any("undeclared degradation" in str(f) for f in validate(self.workspace)))
+
+    def test_no_record_declared_is_distinguishable_from_a_refused_record(self):
+        """The distinction the structured result exists for: both leave
+        `valid` empty, and only one of them has a reason to report."""
+        self.write("specs/_closure/scheduler-core.json", valid_profile())
+        declared_none = load_degradation_records(self.workspace)
+        self.assertEqual(declared_none.valid, {})
+        self.assertEqual(declared_none.invalid, {})
+
+        self.write_pair(profile=valid_profile(), record=valid_degradation())  # stale excuse
+        refused = load_degradation_records(self.workspace)
+        self.assertEqual(refused.valid, {})
+        self.assertEqual(len(refused.invalid), 1)
+
+    # -- the issue's two regression fixtures ------------------------------
+
+    def test_the_schema_invalid_fixture_is_refused_and_excuses_nothing(self):
+        """The pilot record, with the claim a ceiling cannot make
+        smuggled in beside it: `verifier` is not a property of a
+        degradation record, so the record is refused at G1a -- and since
+        a refused record excuses nothing, the profile's own failing
+        conditions come back as undeclared degradations."""
+        self.copy_fixture("schema_invalid")
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.valid, {})
+        reasons = records.reasons_for(self.fixture_record_path("schema_invalid", "date-creusot-core.degradation.json"))
+        self.assertTrue(any("verifier" in r for r in reasons), reasons)
+        findings = [str(f) for f in validate(self.workspace)]
+        self.assertEqual(len([f for f in findings if "undeclared degradation" in f]), 2, findings)
+
+    def test_the_stale_fixture_is_refused_as_a_stale_excuse(self):
+        self.copy_fixture("stale")
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.valid, {})
+        reasons = records.reasons_for(self.fixture_record_path("stale", "scheduler-core.degradation.json"))
+        self.assertTrue(any("stale excuse" in r for r in reasons), reasons)
+
+    def test_the_loader_agrees_with_validate_closure_on_both_fixtures(self):
+        """One rule, two commands: whatever validate-closure refuses,
+        the loader refuses, and neither can drift into a second opinion
+        about what a record is worth."""
+        for case in ("schema_invalid", "stale"):
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as tmp:
+                    workspace = Path(tmp)
+                    shutil.copytree(CLOSURE_FIXTURES / case, workspace, dirs_exist_ok=True)
+                    refused_by_gate = {
+                        Path(f.path)
+                        for f in validate(workspace)
+                        if Path(f.path).name.endswith(".degradation.json")
+                    }
+                    records = load_degradation_records(workspace)
+                    self.assertTrue(refused_by_gate)
+                    self.assertEqual(
+                        {p.name for p in records.invalid}, {p.name for p in refused_by_gate}
+                    )
+
+
+class DraftExclusionTest(unittest.TestCase):
+    """Chainlink #98: a staged `<target>.json.draft` -- what `pipeline.py
+    draft` writes for a closure profile or degradation record now that
+    specs/_closure/ is wired into its dispatchers -- must be inert here,
+    the same `.draft` convention find_interaction_files()/
+    find_evidence_files() already apply (chainlink #90). Before this fix,
+    neither find_closure_files() nor _scan_closure_dir()'s own iterdir
+    excluded it, so a staged draft (deliberately missing `review`, as
+    every draft is) would be scanned, fail check_naming()'s "must be a
+    .json file" / schema's "review is required" checks, and come back as
+    a spurious G1a/G1b error on work staged exactly as the tool
+    prescribes."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self.canonical = closure_dir_for(self.workspace)
+        self.canonical.mkdir(parents=True)
+        profile = valid_profile()
+        (self.canonical / "scheduler-core.json").write_text(json.dumps(profile))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _stage_draft(self, name: str, data: dict) -> Path:
+        draft_path = self.canonical / name
+        draft_path.write_text(json.dumps(data))
+        return draft_path
+
+    def test_find_closure_files_excludes_a_staged_draft(self):
+        self._stage_draft("scheduler-core.degradation.json.draft", {"cluster": "scheduler-core"})
+        found = find_closure_files(self.workspace)
+        self.assertEqual({p.name for p in found}, {"scheduler-core.json"})
+
+    def test_count_discovered_excludes_a_staged_draft(self):
+        self.assertEqual(count_discovered(self.workspace), 1)
+        self._stage_draft("scheduler-core.degradation.json.draft", {"cluster": "scheduler-core"})
+        self.assertEqual(count_discovered(self.workspace), 1)
+
+    def test_a_staged_degradation_draft_is_not_reported_by_validate(self):
+        draft = valid_degradation()
+        del draft["review"]  # a draft never carries one yet
+        self._stage_draft("scheduler-core.degradation.json.draft", draft)
+        findings = [str(f) for f in validate(self.workspace)]
+        self.assertEqual(findings, [])
+
+    def test_a_staged_profile_draft_does_not_shadow_the_approved_profile(self):
+        """A draft re-proposing a change to an already-approved profile
+        must not occupy that cluster's 'profile' slot ahead of the real
+        artifact, nor be reported at all."""
+        draft = valid_profile()
+        draft["closure_kind"] = "bounded"
+        del draft["review"]
+        self._stage_draft("scheduler-core.json.draft", draft)
+        artifacts = load_cluster_artifacts(self.workspace)
+        self.assertEqual(artifacts["scheduler-core"]["profile"][1]["closure_kind"], "deductive")
+        self.assertEqual([str(f) for f in validate(self.workspace)], [])
+
+    def test_load_degradation_records_ignores_a_staged_draft(self):
+        draft = valid_degradation()
+        del draft["review"]
+        self._stage_draft("scheduler-core.degradation.json.draft", draft)
+        records = load_degradation_records(self.workspace)
+        self.assertEqual(records.valid, {})
+        self.assertEqual(records.invalid, {})
 
 
 if __name__ == "__main__":

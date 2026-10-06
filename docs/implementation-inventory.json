@@ -726,6 +726,12 @@
       "summary": "chainlink #115: the generator half of the sanctioned-protected-write mechanism -- `ligature scaffold-crate --issue N --crate <name>` writes a missing declared crate's Cargo.toml and canonical src/lib.rs deterministically, from the project descriptor alone. Exactly two files, and they are not the same kind of write: the manifest is a protected-root write requiring an active issue-scoped grant at exactly that path (read through write_authorization's own ledger reader and status rules, so this verb cannot believe a grant is live when write-set-check would report it expired/not-yet-issued/other-issue/duplicate/unverified-issuer/ledger-protected), while the skeleton is inside allowed_roots, needs no grant, and is never overwritten. No content flag and no target flag exist: both files are pure functions of the declared crate_dir, so there is nothing for a caller to inject and the bytes are checkable by hash. Refuses an undeclared/ambiguous/escaping/glob crate name, a non-port mode, a target inside a canonical artifact location, a specs/ tree or the pinned upstream checkout (judged by write_set's own predicates), a manifest protected_roots does not cover or allowed_roots already permits, no active grant, or a --grant-id mismatch -- each refusal writing nothing. Idempotent (identical bytes are `unchanged`) and never overwrites a manifest with different bytes or an existing src/lib.rs. Re-derives every claim before reporting success: descriptor gate, manifest re-parsed as TOML and compared byte for byte, skeleton, write_set.check_write_set's OWN verdict on the write just made, and doctor's installation state (recorded rather than enforced beyond its descriptor gate). Writes no implementation code and no normative policy or spec content."
     },
     {
+      "path": "scripts/work_package_manifest.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "chainlink #121: pure Stage 7 work-package derivation. Resolves selected obligations, bridges, assumptions, dependencies, verifier assurance, promotion provenance, and gate hashes only from validated project artifacts; refuses missing, ambiguous, contradictory, duplicate, dangling, stale, or out-of-policy inputs; emits schema-checked canonical JSON bytes without writing files or authorization records."
+    },
+    {
       "path": "scripts/promote_evidence.py",
       "role": "helper",
       "disposition": "runtime-required",
@@ -1264,6 +1270,11 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_work_package_manifest.py",
+      "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_promote_evidence.py",
       "kind": "regression",
       "disposition": "test-only"
@@ -1456,15 +1467,15 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 94,
+      "runtime-required": 95,
       "excluded": 1,
       "documentation": 14,
       "installed-template": 4,
-      "test-only": 75,
+      "test-only": 76,
       "vendored-runtime": 1
     },
-    "total_entries": 189,
-    "test_count": 61,
+    "total_entries": 191,
+    "test_count": 62,
     "registered_cli_command_count": 46
   },
   "documentation_and_templates": [

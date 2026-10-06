@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- `migrate --upgrade` now refreshes the manifest's `gate_hashes` (the pins `gate_integrity` checks) from the actually installed managed files, updates only managed installation metadata, preserves the user-owned descriptor and normative policy content, keeps a locally modified managed file's old pin instead of silently adopting the drifted bytes as the new pin, and `migrate --json` emits a machine-readable audit result with old/new version, changed paths, hashes, and required human action — after which `doctor`, `status --json`, `check --json` and `write-set-check` read the same state, and rerunning is safe and idempotent (#117)
 - 114a: implement issue-scoped write capability records and authorization CLI (#118)
 - 114b: consume issue-scoped write grants in write-set-check, status and check (#119)
 - a grant in a ledger that a declared `protected_roots` pattern covers authorizes nothing, and is reported `ledger-protected` rather than honored (#114)

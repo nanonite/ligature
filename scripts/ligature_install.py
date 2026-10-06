@@ -483,6 +483,10 @@ class InstallReport:
     # `init` still exits 0 and `installation: current` still means exactly
     # what it meant before.
     policy_markers: list[dict] = field(default_factory=list)
+    # chainlink #117: the machine-readable upgrade audit (old/new version,
+    # changed paths, hashes, required human action). Always populated by
+    # `migrate`; `None` for `init`/`inspect` reports.
+    audit: dict | None = None
 
     def marker_record(self, path: str) -> dict | None:
         """The unfilled-marker record for `path`, or None when the document
@@ -726,9 +730,22 @@ def apply_plan(
         adjudicator_record = running_adjudicator_record()
     adjudicator_pin = adjudicator_record.get("content_hash") or UNATTESTED
     gate_hashes = {}
+    # chainlink #117: a locally modified managed file is a conflict, not a
+    # new trusted truth. Its previously recorded gate pin survives the
+    # upgrade untouched, so `status`/`check`/`write-set-check` keep
+    # reporting the drift `doctor` already reports -- instead of the
+    # tampered bytes being adopted as the new pin.
+    conflicted_paths = {plan.path for plan in report.files if plan.outcome == "conflict"}
+    old_gate_hashes = manifest.get("gate_hashes") if isinstance(manifest, dict) else None
+    if not isinstance(old_gate_hashes, dict):
+        old_gate_hashes = {}
     for rel in _GATE_PINNED_PATHS:
         if rel == ADJUDICATOR_PIN_TOKEN:
             gate_hashes[rel] = adjudicator_pin
+            continue
+        if rel in conflicted_paths:
+            if rel in old_gate_hashes:
+                gate_hashes[rel] = old_gate_hashes[rel]
             continue
         target = workspace / rel
         if target.is_file():
@@ -1088,11 +1105,16 @@ def migrate(
     name = str(manifest.get("project_name", ""))
     descriptor_rel = _manifest_descriptor_rel(manifest)
     messages: list[str] = []
+    # chainlink #117: capture the pre-migration state so the upgrade can
+    # emit a deterministic, machine-readable audit result.
+    before_manifest = json.loads(json.dumps(manifest))
+    upgrade_plans: list[FilePlan] = []
 
     if upgrade or force:
         registry = {entry.path: entry for entry in file_registry(mode, name, descriptor_rel)}
         if upgrade:
             plan = plan_install(workspace, mode, name, descriptor_rel, manifest)
+            upgrade_plans = list(plan.files)
             for file_plan in plan.files:
                 if file_plan.outcome in ("create", "upgrade") and file_plan.content is not None:
                     _write(workspace, file_plan.path, file_plan.content)
@@ -1132,7 +1154,155 @@ def migrate(
 
     report = inspect(workspace)
     report.messages = messages + report.messages
+    action = "migrate"
+    if upgrade and prune:
+        action = "migrate --upgrade --prune"
+    elif upgrade:
+        action = "migrate --upgrade"
+    elif prune:
+        action = "migrate --prune"
+    elif force:
+        action = "migrate --force"
+    report.audit = build_migration_audit(
+        workspace,
+        action,
+        before_manifest,
+        load_manifest(workspace),
+        report,
+        upgrade_plans,
+        list(force),
+        messages,
+    )
     return report
+
+
+def build_migration_audit(
+    workspace: Path,
+    action: str,
+    before: dict,
+    after: dict | None,
+    report: InstallReport,
+    upgrade_plans: list[FilePlan],
+    forced: list[str],
+    messages: list[str],
+) -> dict:
+    """The machine-readable audit result of a `migrate` run (chainlink
+    #117): old/new version, changed paths, hashes, and required human
+    action. Emitted as JSON on `migrate --json`; deterministic because it
+    is derived only from the pre/post manifests and the plan, never from
+    clock or locale."""
+    after = after or {}
+    old_files = {f["path"]: f for f in before.get("files", []) if isinstance(f, dict) and "path" in f}
+    new_files = {f["path"]: f for f in after.get("files", []) if isinstance(f, dict) and "path" in f}
+    outcomes = {plan.path: plan.outcome for plan in upgrade_plans}
+
+    changed_paths = []
+    for path in sorted(set(old_files) | set(new_files)):
+        old = old_files.get(path)
+        new = new_files.get(path)
+        if old == new:
+            continue
+        entry = {
+            "path": path,
+            "ownership": (new or old or {}).get("ownership"),
+            "old_base_hash": (old or {}).get("base_hash"),
+            "new_base_hash": (new or {}).get("base_hash"),
+            "old_expected_hash": (old or {}).get("expected_hash"),
+            "new_expected_hash": (new or {}).get("expected_hash"),
+        }
+        if path in outcomes:
+            entry["outcome"] = outcomes[path]
+        changed_paths.append(entry)
+
+    old_gates = before.get("gate_hashes") if isinstance(before.get("gate_hashes"), dict) else {}
+    new_gates = after.get("gate_hashes") if isinstance(after.get("gate_hashes"), dict) else {}
+    gate_hashes = {}
+    for path in sorted(set(old_gates) | set(new_gates)):
+        if old_gates.get(path) != new_gates.get(path):
+            gate_hashes[path] = {"old": old_gates.get(path), "new": new_gates.get(path)}
+
+    old_adj = before.get("adjudicator") if isinstance(before.get("adjudicator"), dict) else {}
+    new_adj = after.get("adjudicator") if isinstance(after.get("adjudicator"), dict) else {}
+
+    def versions(key: str) -> dict:
+        return {"old": before.get(key), "new": after.get(key)}
+
+    old_skill = old_files.get(SKILL_RELATIVE_PATH, {})
+    new_skill = new_files.get(SKILL_RELATIVE_PATH, {})
+
+    conflicts = []
+    required_human_action = []
+    for plan in report.files:
+        if plan.ownership == MANAGED and plan.outcome in ("conflict", "missing"):
+            target = workspace / plan.path
+            disk = None
+            if target.is_file():
+                try:
+                    disk = _sha256_file(target)
+                except OSError:
+                    disk = None
+            conflicts.append(
+                {
+                    "path": plan.path,
+                    "outcome": plan.outcome,
+                    "recorded_base_hash": plan.base_hash,
+                    "disk_hash": disk,
+                    "expected_hash": plan.expected_hash,
+                }
+            )
+            required_human_action.append(
+                {
+                    "path": plan.path,
+                    "action": (
+                        f"resolve the local modification of managed file {plan.path}: "
+                        "either restore the recorded bytes or explicitly adopt the product "
+                        f"version with `ligature migrate --force {plan.path}`"
+                    ),
+                }
+            )
+        elif plan.ownership == USER and plan.normative and plan.outcome == "drifted":
+            required_human_action.append(
+                {
+                    "path": plan.path,
+                    "action": (
+                        f"review the unrecorded change to the normative document {plan.path} "
+                        "and accept it with `ligature accept-policy --reviewer <name>`"
+                    ),
+                }
+            )
+    for forced_path in forced:
+        required_human_action = [a for a in required_human_action if a["path"] != forced_path]
+    for message in messages:
+        if "not pruned" in message:
+            required_human_action.append({"path": None, "action": message})
+
+    return {
+        "schema_version": "1.0",
+        "action": action,
+        "workspace": str(workspace),
+        "result": report.status,
+        "product_version": {"old": before.get("product_version"), "new": after.get("product_version")},
+        "installed_product_version": versions("installed_product_version"),
+        "installed_schema_versions": {
+            "old": before.get("installed_schema_versions"),
+            "new": after.get("installed_schema_versions"),
+        },
+        "installed_skill_version": versions("installed_skill_version"),
+        "adjudicator": {
+            "old": old_adj.get("content_hash"),
+            "new": new_adj.get("content_hash"),
+        },
+        "skill_authority_hash": {
+            "old": old_skill.get("authority_hash"),
+            "new": new_skill.get("authority_hash"),
+        },
+        "changed_paths": changed_paths,
+        "gate_hashes": gate_hashes,
+        "obsolete": list(report.obsolete),
+        "conflicts": conflicts,
+        "required_human_action": required_human_action,
+        "notes": list(messages),
+    }
 
 
 def _manifest_descriptor_rel(manifest: dict) -> str:

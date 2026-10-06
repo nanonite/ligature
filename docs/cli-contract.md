@@ -1036,7 +1036,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3 (#57 grammar v1.0) |
 | `report` | stable; nested reporting verb, `report <report-id>` dispatches the four report generators in §6 (#57 grammar v1.0) |
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo, plus the two witness-renderer scripts G13 hash-pins (#84, §8, #58) |
-| `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C) |
+| `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C). `--upgrade` also refreshes the manifest's `gate_hashes` (the pins `gate_integrity` checks) from the actually installed managed files, updates only managed installation metadata, preserves the user-owned descriptor and normative policy, keeps a locally modified managed file's old pin instead of adopting the drifted bytes, and `--json` emits the machine-readable audit result (old/new version, changed paths, hashes, required human action) so `doctor`, `status --json`, `check --json` and `write-set-check` all read the same post-migration state (#117) |
 
 No command from today's registered set is deliberately unsupported —
 every one of the 45 has a nested home, an internal-operation classification,

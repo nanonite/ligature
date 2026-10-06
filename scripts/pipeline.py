@@ -2645,7 +2645,12 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     except InstallError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    sys.stdout.write(render_installation_report(report))
+    if getattr(args, "json", False):
+        # chainlink #117: the machine-readable audit result (old/new
+        # version, changed paths, hashes, required human action).
+        sys.stdout.write(canonical_json(report.audit or {"action": "migrate", "result": report.status}))
+    else:
+        sys.stdout.write(render_installation_report(report))
     return 1 if report.status in ("conflict", "drifted", "incompatible") else 0
 
 
@@ -3229,6 +3234,7 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_p.add_argument("--assumptions", action="store_true", help="migrate legacy composite assumption_refs to registry IDs (chainlink #59 phase C)")
     migrate_p.add_argument("--apply", action="store_true", help="with --assumptions, write the rewrites (requires --reviewer)")
     migrate_p.add_argument("--reviewer", help="human identity triggering an --apply rewrite")
+    migrate_p.add_argument("--json", action="store_true", help="emit the machine-readable migration audit result (chainlink #117)")
     migrate_p.set_defaults(func=cmd_migrate)
 
     doctor_p = sub.add_parser("doctor", help="Capability manifest + installed-file/version diagnostics")

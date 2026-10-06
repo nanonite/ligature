@@ -1238,6 +1238,11 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_migrate_upgrade.py",
+      "kind": "regression",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_promote_evidence.py",
       "kind": "regression",
       "disposition": "test-only"
@@ -1434,11 +1439,11 @@
       "excluded": 1,
       "documentation": 14,
       "installed-template": 4,
-      "test-only": 73,
+      "test-only": 74,
       "vendored-runtime": 1
     },
-    "total_entries": 185,
-    "test_count": 59,
+    "total_entries": 186,
+    "test_count": 60,
     "registered_cli_command_count": 45
   },
   "documentation_and_templates": [

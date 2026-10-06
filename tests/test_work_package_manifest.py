@@ -103,6 +103,12 @@ def make_state(root: Path | None = None, **updates) -> AuthoritativeState:
         interactions=(
             {
                 "interaction_id": "I-SCHED-TQ-001",
+                "realization": {
+                    "config_scope": {
+                        "target": "x86_64-unknown-linux-gnu",
+                        "features": ["default"],
+                    }
+                },
                 "reliances": [
                     {"obligation_id": "TaskQueue.C003", "required_assurance": assurance}
                 ],
@@ -296,6 +302,14 @@ def test_conflicting_authoritative_assurance_is_refused():
             make_request(),
             make_state(interactions=state.interactions + (conflicting,)),
         )
+    assert error.value.code == "contradictory-source"
+
+
+def test_provenance_configuration_must_match_selected_interactions():
+    with pytest.raises(
+        ManifestDerivationError, match="do not match selected interaction"
+    ) as error:
+        derive_manifest(make_request(), make_state(target="aarch64-unknown-linux-gnu"))
     assert error.value.code == "contradictory-source"
 
 

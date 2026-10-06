@@ -107,8 +107,9 @@ is genuinely required has, until #114, only two routes -- widen
 inside, or have somebody edit the file outside every tool, which is
 precisely what this check cannot tell apart from an intrusion. So an
 `issue`-scoped capability record (`ligature authorize-write`, owned by
-`write_authorization`) can now authorize one such write, and this module is
-the only consumer:
+`write_authorization`) can now authorize one such write. This module is the
+conformance-report consumer; deterministic generators such as `scaffold-crate`
+and `generate-work-package` use the same grant reader for their own writes:
 
   * grants are consulted **on the protected branch only** -- a grant can
     never excuse an out-of-set write, and `authorize-write` refuses a path

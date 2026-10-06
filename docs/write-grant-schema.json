@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/docs/write-grant-schema.json",
-  "title": "Write grant record — v1.0",
-  "description": "One line of ci/results/protected-writes.jsonl, written only by `ligature authorize-write` (chainlink #114). A grant is a CAPABILITY RECORD: an issue-scoped authorization for one bounded write into a declared protected root, so a protected write that is genuinely sanctioned does not need `allowed_roots` widened (#103's enforcement left that write with only two routes, both worse -- widen the root, or hand-edit a file outside every tool). It is not a permission surface: the fields below are the whole of what a grant authorizes, every one of them is recomputed by the consumer (`scripts/write_authorization.parse_grant`) rather than trusted, and a recomputed disagreement authorizes nothing. Closed (`additionalProperties: false`) with the same discipline chainlink #104 applied to `verifier_policy`: a key nobody reads must not validate as if it authorized something. This schema states the shape; the CONSUMER states the semantics -- notably `expires_at == issued_at + ttl_seconds` and `grant_id == sha256(the binding fields)[:12]`, neither of which JSON Schema can express, and both of which `parse_grant` recomputes on every read. Trust model: an audit trail, not a signature. A line appended by someone with write access to `ci/results/` is indistinguishable from one `authorize-write` wrote -- that access is itself outside the agent's write set, and `authorize-write` refuses to record anything at all when this ledger is inside a declared protected root. The CONSUMER holds that same refusal rather than trusting the writer to have been the one that wrote the line: `write-set-check` reports every record read from such a ledger with status `ledger-protected` and honors none of them, because a capability trail inside a protected root must not be able to authorize writes there -- including, by a grant naming this ledger's own path, to vouch for its own presence in the very protected surface it has to stay outside of.",
+  "title": "Write grant record \u2014 v1.0",
+  "description": "One event: grant row in ci/results/protected-writes.jsonl, written by `ligature authorize-write` (chainlink #114). Work-package generation use-audit rows in the same ledger have their own schema and are not capability records. A grant is an issue-scoped authorization for one bounded write into a declared protected root. Its binding fields are recomputed by scripts/write_authorization.parse_grant rather than trusted; disagreement authorizes nothing. Closed with chainlink #104's discipline: an unread key must not validate as authority. JSON Schema states the shape while the consumer enforces expires_at == issued_at + ttl_seconds and grant_id == sha256(the binding fields)[:12]. The ledger is an audit trail, not a signature. The grant reader ignores unrelated event types and refuses every grant in a ledger inside a declared protected root, because such a capability trail cannot authorize a protected write.",
   "type": "object",
   "required": [
     "event",
@@ -25,12 +25,12 @@
     "event": {
       "type": "string",
       "const": "grant",
-      "description": "The ledger is a trail of events; a line whose `event` is anything else is not an authorization record and is never read as one."
+      "description": "Only event: grant is an authorization record. Other ledger event types, including work-package-generation, are audit data and are never honored as grants."
     },
     "schema_version": {
       "type": "string",
       "const": "1.0",
-      "description": "Versioned like every other artifact schema in this pipeline (docs/trust-and-compatibility-boundaries.md §1/§3): a breaking change to the record's shape takes a new value and a migration note."
+      "description": "Versioned like every other artifact schema in this pipeline (docs/trust-and-compatibility-boundaries.md \u00a71/\u00a73): a breaking change to the record's shape takes a new value and a migration note."
     },
     "grant_id": {
       "type": "string",
@@ -50,12 +50,18 @@
     },
     "path_kind": {
       "type": "string",
-      "enum": ["exact", "pattern"],
+      "enum": [
+        "exact",
+        "pattern"
+      ],
       "description": "`exact` covers one file; `pattern` covers the files the (bounded) glob names. Recomputed from `path` on read and required to agree, so a record cannot declare a pattern to be an exact file -- or an exact file to be a pattern."
     },
     "op": {
       "type": "string",
-      "enum": ["write", "delete"],
+      "enum": [
+        "write",
+        "delete"
+      ],
       "description": "Closed vocabulary: a grant authorizes exactly the one operation it names, which is what 'a grant cannot authorize another operation' means. `write` covers creating or replacing the content -- the only operation `write-set-check` consumes, because a file's presence is what a file walk can observe (create and replace are indistinguishable here, and the record says so rather than pretending otherwise). `delete` authorizes removing the granted path and is recorded so a sanctioned deletion is auditable; it can never make an existing file clean, since an absent file is not an observable this check reports on."
     },
     "one_shot": {
@@ -69,7 +75,10 @@
     },
     "issuer_kind": {
       "type": "string",
-      "enum": ["human", "supervisor"],
+      "enum": [
+        "human",
+        "supervisor"
+      ],
       "description": "Which lane issued it. `human` (the default) is a human checkpoint on the same terms as `approve`/`accept-policy`/`record-ruling` -- the installed skill says an agent must never run it. `supervisor` is the automation lane, reachable only for an identity the descriptor declares in `write_set.authorized_supervisors`, and re-verified against that whitelist EVERY time a consumer honors the record: withdrawing the identity from the descriptor withdraws the grant on the next run, and a hand-written record naming an undeclared supervisor authorizes nothing. No unbounded LLM prose permission exists in either lane."
     },
     "issued_at": {
@@ -89,7 +98,10 @@
       "description": "`issued_at + ttl_seconds`, recomputed on read together with `ttl_seconds`'s own bounds: a record claiming more time than it was granted is rejected ('a grant cannot outlive its TTL'), as is one naming a TTL no issuer could have been granted, and an expired one authorizes nothing while being reported as `expired` rather than dropped. `write-set-check` treats `now >= expires_at` as expired (the boundary is inclusive, decided against the run's own clock -- no sleeping and no clock race, which is what lets a re-run of the same command report the same verdict for the same bytes)."
     },
     "note": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "Free-text audit metadata, or null. Recorded and never read back as authority: no prose field is consulted when deciding whether a grant authorizes a write, and it is excluded from `grant_id` so it can neither create an authorization nor invalidate a real one."
     }
   }

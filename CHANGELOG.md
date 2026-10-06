@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Add authorized Stage 7 work-package manifest generation (#122)
 - Define deterministic work-package manifest derivation (#121)
 - 114c: finish write-grant audit, one-shot, documentation, and black-box coverage (#120)
 - Make migrate --upgrade refresh managed gate_integrity hashes deterministically (#117)

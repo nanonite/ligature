@@ -402,12 +402,17 @@
     {
       "name": "authorize-write",
       "func": "cmd_authorize_write",
-      "stable_mapping": "stable issue-scoped write-grant record -- authorizes one bounded write into a declared protected root as an append-only entry in ci/results/protected-writes.jsonl, consumed only by write-set-check/status/check run with the same --issue, with each record's status reported in a closed vocabulary (chainlink #114, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
+      "stable_mapping": "stable issue-scoped write-grant record -- authorizes one bounded write into a declared protected root as an append-only event in ci/results/protected-writes.jsonl. write-set-check/status/check report grant status; scaffold-crate and generate-work-package consume exact issue/path/op grants for their bounded generator writes, and generation audit events are never authority (chainlink #114/#122, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
     },
     {
       "name": "scaffold-crate",
       "func": "cmd_scaffold_crate",
       "stable_mapping": "stable deterministic crate bootstrap -- writes a MISSING declared crate's Cargo.toml and its canonical src/lib.rs in a mode: port workspace, deriving both from the project descriptor alone with no content flag and no target flag. The manifest is a protected-root write and requires an active issue-scoped `write` grant at exactly that path, consumed through the same write_authorization reader write-set-check uses; the skeleton is inside allowed_roots, needs no grant, and is never overwritten, so a missing-crate pilot bootstraps without anyone holding raw Cargo.toml write scope. Refused (exit 2, nothing written) for an undeclared/ambiguous/absolute/escaping/glob crate name, a non-port mode, a target inside a canonical pipeline artifact location, a declared crate's specs/ tree or the pinned upstream checkout, a manifest no protected_roots covers or one allowed_roots already permits, no active grant (with each nearby record's status named), or a --grant-id mismatch; an existing manifest with identical bytes is `unchanged` and writes nothing. Emits a versioned receipt (docs/scaffold-receipt-schema.json) recording the issue, the grant consumed, both generated paths with before/after hashes, and every named check -- including Cargo's offline workspace-membership check and write_set.check_write_set's own verdict on the write just made (chainlink #115, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
+    },
+    {
+      "name": "generate-work-package",
+      "func": "cmd_generate_work_package",
+      "stable_mapping": "chainlink #122: reads a JSON/YAML Stage 7 plan and validated descriptor-backed closure, promotion, boundary, interaction and bridge sources, then derives and validates one canonical ci/manifest/<WP>.json. A same-issue exact-path write grant is required. Writes atomically, refuses conflicting content, records issue/grant/path/before-after hashes/result in the protected-writes ledger, permits identical no-op reruns, and prevents grant replay after deletion. --json returns the audit event or a structured refusal."
     },
     {
       "name": "doctor",
@@ -711,7 +716,7 @@
       "path": "scripts/write_set.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "chainlink #77, #103: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state. A protected root is ENFORCED rather than accounted for (#103): a file inside one is a violation unless a declaration vouches for that file, and the two location carve-outs #77 shipped (the `ci/` canonical prefix, and any file under a declared crate's specs/ tree) are replaced by recognizing a pipeline artifact through project_state's own discovery, so the protected surface is judged by the artifact system the pipeline actually runs. #114 adds the sanctioned case: this module is the only consumer of the issue-scoped write grants in ci/results/protected-writes.jsonl, consulted on the protected branch only, and it holds the writer's own refusal -- a ledger inside a declared protected root authorizes nothing (status `ledger-protected`), so a trail cannot vouch for its own presence in the surface it must stay outside of. Every authorized write is reported rather than excused (`authorized_writes`, plus its pattern's `authorized` count), and a --one-shot grant's write is reported `spent` as an attribution with the limit stated in `details`: a snapshot counts no edits, so the grant's TTL is what bounds it."
+      "summary": "chainlink #77, #103: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state. A protected root is ENFORCED rather than accounted for (#103): a file inside one is a violation unless a declaration vouches for that file, and the two location carve-outs #77 shipped (the `ci/` canonical prefix, and any file under a declared crate's specs/ tree) are replaced by recognizing a pipeline artifact through project_state's own discovery, so the protected surface is judged by the artifact system the pipeline actually runs. #114 adds the sanctioned case: this module is the conformance-report consumer of issue-scoped write grants; scaffold-crate and generate-work-package use the shared grant reader for their bounded writes in ci/results/protected-writes.jsonl, consulted on the protected branch only, and it holds the writer's own refusal -- a ledger inside a declared protected root authorizes nothing (status `ledger-protected`), so a trail cannot vouch for its own presence in the surface it must stay outside of. Every authorized write is reported rather than excused (`authorized_writes`, plus its pattern's `authorized` count), and a --one-shot grant's write is reported `spent` as an attribution with the limit stated in `details`: a snapshot counts no edits, so the grant's TTL is what bounds it."
     },
     {
       "path": "scripts/write_authorization.py",
@@ -730,6 +735,12 @@
       "role": "generator",
       "disposition": "runtime-required",
       "summary": "chainlink #121: pure Stage 7 work-package derivation. Resolves selected obligations, bridges, assumptions, dependencies, verifier assurance, promotion provenance, and gate hashes only from validated project artifacts; refuses missing, ambiguous, contradictory, duplicate, dangling, stale, or out-of-policy inputs; emits schema-checked canonical JSON bytes without writing files or authorization records."
+    },
+    {
+      "path": "scripts/generate_work_package.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "chainlink #122: Stage 7 command boundary. Loads canonical inputs through existing validators, verifies an active exact issue/path/write capability, derives and validates before writing ci/manifest/<WP>.json atomically, and appends a strict use-audit event that prevents replay after deletion; grant-reader ignores the audit event as authority."
     },
     {
       "path": "scripts/promote_evidence.py",
@@ -869,12 +880,12 @@
     {
       "path": "docs/write-grant-schema.json",
       "disposition": "runtime-required",
-      "summary": "chainlink #114: the versioned shape of one ci/results/protected-writes.jsonl line -- the issue-scoped capability record `ligature authorize-write` writes. Closed, and bundled so the build attestation states which record format the binary writes; the semantics JSON Schema cannot express (expires_at == issued_at + ttl_seconds, grant_id == sha256 of the binding) are recomputed by scripts/write_authorization."
+      "summary": "chainlink #114: the versioned shape of event: grant rows in ci/results/protected-writes.jsonl -- the issue-scoped capability record ligature authorize-write writes. The ledger also carries work-package-generation use-audit rows described by docs/work-package-generation-audit-schema.json; those are not capability records. Closed and bundled so the build attestation states which record format the binary writes; scripts/write_authorization recomputes the grant semantics."
     },
     {
       "path": "docs/scaffold-receipt-schema.json",
       "disposition": "runtime-required",
-      "summary": "chainlink #115: the versioned shape of `ligature scaffold-crate --json`'s receipt -- the issue, which capability record was consumed, both generated paths with before/after sha256 and per-file state (created/unchanged/preserved), and every named check's result plus write_set's own verdict. NOT a persisted artifact (the command writes no ledger line and no artifact), but closed like every other schema here after #104: a key nothing reads must not validate as if it were read. The receipt RECORDS the authority question rather than deciding it -- the capability lives in ci/results/protected-writes.jsonl and is honored only by `ligature write-set-check --issue N`."
+      "summary": "chainlink #115: the versioned shape of `ligature scaffold-crate --json`'s receipt -- the issue, which capability record was consumed, both generated paths with before/after sha256 and per-file state (created/unchanged/preserved), and every named check's result plus write_set's own verdict. NOT a persisted artifact (the command writes no ledger line and no artifact), but closed like every other schema here after #104: a key nothing reads must not validate as if it were read. The receipt RECORDS the authority question rather than deciding it -- the capability lives in ci/results/protected-writes.jsonl and is consumed by the generator that writes the protected path and reported by `ligature write-set-check --issue N`."
     },
     {
       "path": "docs/witness-result-schema.json",
@@ -883,6 +894,11 @@
     {
       "path": "docs/witness-spec-schema.json",
       "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/work-package-generation-audit-schema.json",
+      "disposition": "runtime-required",
+      "summary": "chainlink #122: strict schema for the protected-writes ledger work-package-generation event, recording the successful created/unchanged result, issue, grant, canonical path, before/after hashes and command result."
     },
     {
       "path": "docs/work-package-manifest-schema.json",
@@ -1275,6 +1291,11 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_generate_work_package.py",
+      "kind": "regression",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_promote_evidence.py",
       "kind": "regression",
       "disposition": "test-only"
@@ -1467,16 +1488,16 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 95,
+      "runtime-required": 97,
       "excluded": 1,
       "documentation": 14,
       "installed-template": 4,
-      "test-only": 76,
+      "test-only": 77,
       "vendored-runtime": 1
     },
-    "total_entries": 191,
-    "test_count": 62,
-    "registered_cli_command_count": 46
+    "total_entries": 194,
+    "test_count": 63,
+    "registered_cli_command_count": 47
   },
   "documentation_and_templates": [
     {

@@ -478,6 +478,7 @@ from validate_witness import validate_draft_data as validate_witness_draft_data 
 from validate_witness import validate_results as validate_witness_results  # noqa: E402
 from validate_witness import witness_dir_for as _witness_dir_for  # noqa: E402
 import write_authorization  # noqa: E402
+import generate_work_package  # noqa: E402
 from write_authorization import WriteAuthorizationError  # noqa: E402
 from scaffold_crate import ScaffoldError  # noqa: E402
 from gate_g20 import validate_witness_for_approval  # noqa: E402
@@ -916,8 +917,9 @@ def cmd_authorize_write(args: argparse.Namespace) -> int:
     `ci/results/protected-writes.jsonl` -- the grant itself, with the fields
     its authority is of: the exact path or bounded pattern, the operation,
     the issue, `issued_at`/`expires_at`, the one-shot flag, the issuer, the
-    grant id, and audit metadata. `write-set-check --issue N` consumes the
-    records active for that issue; nothing else does.
+    grant id, and audit metadata. `write-set-check` reports grants active for
+    that issue; authorized generators consume only the exact operation and
+    path they implement. Other ledger event kinds are ignored as authority.
 
     A human checkpoint in the `human` lane (`--issuer-kind human`, the
     default) on the same terms as `approve`/`accept-policy`/
@@ -1057,6 +1059,66 @@ def cmd_scaffold_crate(args: argparse.Namespace) -> int:
     else:
         print(scaffold_crate.render_report_text(report))
     return 1 if report.state == scaffold_crate.CHECK_FAILED else 0
+
+
+def cmd_generate_work_package(args: argparse.Namespace) -> int:
+    """Stage 7: derive and authorize one canonical work-package manifest."""
+    missing = [
+        flag for flag, value in (
+            ("--plan", args.plan), ("--issue", args.issue),
+            ("--toolchain", args.toolchain), ("--target", args.target),
+        ) if value is None
+    ]
+    if missing:
+        error = generate_work_package.GenerationError(
+            "missing-input", "required inputs are missing: " + ", ".join(missing), missing
+        )
+        if args.json:
+            print(canonical_json(generate_work_package.error_document(error)))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
+        result = generate_work_package.generate(
+            workspace=args.workspace,
+            descriptor_path=args.descriptor,
+            plan_path=args.plan,
+            issue=args.issue,
+            toolchain=args.toolchain,
+            target=args.target,
+            features=args.feature,
+            grant_id=args.grant_id,
+        )
+    except generate_work_package.GenerationError as error:
+        if args.json:
+            print(canonical_json(generate_work_package.error_document(error)))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
+    except (OSError, RuntimeError) as exc:
+        error = generate_work_package.GenerationError(
+            "filesystem-error", f"work-package generation could not safely access a required path: {exc}"
+        )
+        if args.json:
+            print(canonical_json(generate_work_package.error_document(error)))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(canonical_json(result.record))
+    else:
+        print(f"work package: {result.record['work_package']}")
+        print(f"issue: {result.record['issue']}")
+        print(f"manifest: {result.record['path']} ({result.record['result']})")
+        print(f"grant: {result.record['grant_id']}")
+        print(f"before: {result.record['before_hash'] or 'absent'}")
+        print(f"after: {result.record['after_hash']}")
+        print(f"audit: {write_authorization.GRANT_LEDGER_REL}")
+        print(f"command result: {result.record['command_result']}")
+        for finding in result.findings:
+            if getattr(finding, "severity", "error") == "info":
+                print(f"info: {finding}")
+    return 0
 
 
 def _require_crate_root_exists(crate: dict, workspace: Path) -> Path:
@@ -3559,6 +3621,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit the versioned scaffold receipt (docs/scaffold-receipt-schema.json)",
     )
     scaffold_crate_p.set_defaults(func=cmd_scaffold_crate)
+
+    generate_wp_p = sub.add_parser(
+        "generate-work-package",
+        help=(
+            "derive a canonical Stage 7 manifest from a plan and validated workspace artifacts; "
+            "requires an exact issue-scoped protected-write grant"
+        ),
+    )
+    generate_wp_p.add_argument("--plan", type=Path, default=None, help="required JSON or YAML Stage 7 plan")
+    generate_wp_p.add_argument("--issue", type=int, default=None, metavar="N", help="required Chainlink issue; must match the plan and write grant")
+    generate_wp_p.add_argument("--toolchain", default=None, metavar="VALUE", help="required pinned Rust toolchain for manifest provenance")
+    generate_wp_p.add_argument("--target", default=None, metavar="TRIPLE", help="required target triple; must agree with selected interaction scopes")
+    generate_wp_p.add_argument("--feature", action="append", default=[], metavar="NAME", help="enabled feature in this package configuration; repeatable")
+    generate_wp_p.add_argument("--grant-id", default=None, metavar="GW-ID", help="require this exact active grant id")
+    generate_wp_p.add_argument("--json", action="store_true", help="emit the protected-write audit result or a structured refusal")
+    generate_wp_p.set_defaults(func=cmd_generate_work_package)
 
     gate_p = sub.add_parser("gate", help="Cross-artifact gate runner: `gate <gate-id>` (docs/cli-contract.md §3)")
     gate_p.add_argument("gate_id", choices=sorted(_GATE_VERBS), metavar="GATE-ID")

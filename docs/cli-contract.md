@@ -29,6 +29,7 @@ ligature check [--json] [next]               # #56 -- consolidated gate run + ne
 ligature write-set-check [--json] [--issue N]  # #77, #103, #114 -- read-only write-set conformance
 ligature authorize-write --issue N --path P --op K --issuer <name>  # #114 -- record one issue-scoped capability for a sanctioned protected-root write
 ligature scaffold-crate --issue N --crate <name>  # #115 -- deterministic Cargo.toml + canonical src skeleton for a missing declared crate of a port-mode project
+ligature generate-work-package --plan <path> --issue N --toolchain <value> --target <triple> [--feature <name> ...]  # #122 -- derive and authorize ci/manifest/WP-*.json from validated workspace authority
 ligature accept-policy --reviewer <name> [--version <name>@<major>.<minor>]  # #78, #113 -- record a reviewed governance change
 ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
 ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
@@ -67,8 +68,32 @@ exists because #103's enforcement left a *sanctioned* protected-root write
 with no route out (§8). `scaffold-crate` (#115) is the generator that
 record then feeds: a port-mode pilot whose declared crate does not exist
 has no manifest, so nothing downstream can run, and the only supported
-bootstrap was a human hand-writing a protected-root file. None of them is
-a supervisory verb, and none changed the two-level grammar.
+bootstrap was a human hand-writing a protected-root file. `generate-work-package`
+(#122) consumes the same bounded capability to create the canonical Stage 7
+manifest from validated authority. None of them is a supervisory verb, and
+none changed the two-level grammar.
+
+`generate-work-package` (#122) is the Stage 7 producer for the canonical
+`ci/manifest/WP-*.json` consumed by validation and gates. It reads a JSON or
+YAML plan, validates descriptor-backed closure, promotion, boundary,
+interaction and bridge inputs with their existing validators, and derives
+the manifest using the field-to-source map in `work_package_manifest.py`.
+`--issue` must match both the plan and an active grant; `--toolchain`,
+`--target` and repeatable `--feature` provide configuration provenance, with
+target/features checked against selected interaction scopes. The output path
+is always `ci/manifest/<work_package>.json`; callers cannot supply a path or
+manifest bytes. A new file is atomically written only after the derived data
+passes `validate-work-package` and an exact-path `write` grant is proven.
+
+Successful runs append a strict `work-package-generation` event to
+`ci/results/protected-writes.jsonl`, recording issue, grant id, path,
+before/after hashes and command result. The grant reader ignores this event
+as authority. An identical rerun is recorded as `unchanged` without touching
+the manifest. A grant already recorded as creating a manifest cannot create
+it again if the file is later removed; a new write requires a new grant.
+Conflicting bytes, missing/expired/mismatched grants, invalid inputs and
+invalid audit history fail closed. `--json` prints either the audit record or
+a refusal object with a stable error code, message and required inputs.
 
 `scaffold-crate` is a top-level verb rather than a flag on `authorize-write`
 because the two own different halves of one operation and must not be
@@ -806,7 +831,9 @@ an intrusion.
 `ligature authorize-write` is the third route: a **tool-mediated,
 issue-scoped capability record** authorizing one bounded protected-root
 write, appended to `ci/results/protected-writes.jsonl`, which
-`write-set-check` -- and only `write-set-check` -- consumes.
+`write-set-check` consumes grants for conformance reporting, and
+`scaffold-crate`/`generate-work-package` consume grants for their own bounded
+generator writes; no command can use a grant outside its issue, path and op.
 
 | flag | what it binds |
 |---|---|
@@ -931,12 +958,21 @@ every append to its own capability trail is a boundary breach.
 | `status --json` / `check --json` | the same write-set state, through the same call | the same |
 | `authorize-write` | records the grant, exit 0 | records nothing, exit 2, one line naming the refused condition |
 | `scaffold-crate` | consumes the record covering this manifest and writes it | writes nothing, exit 2, one line naming the issuing command |
+| `generate-work-package` | consumes an active exact-path `write` grant and records the write | writes no manifest |
 
-`--issue` is the same flag with the same meaning on all four surfaces, so
+`--issue` is the same flag with the same meaning on all five surfaces, so
 none of them can report a different write-set verdict about the same
 workspace and the same run; a `--issue` no grant can name (anything that is
 not a positive integer, which `authorize-write` refuses) matches no record
 and yields the same fail-closed verdict rather than a permissive one.
+
+Stage 7 generation also consumes only an active exact-path `write` grant,
+but it additionally records the successful write in this same ledger. The
+grant remains the capability; the generation event is a use record that
+prevents a deleted output from being recreated by replaying an old grant.
+This use record does not make one-shot grants count writes for the general
+filesystem walk, and `write-set-check` continues to report grants using its
+existing status vocabulary.
 
 **The generator that record feeds (chainlink #115).** All of the above makes
 a sanctioned protected write *authorizable*; it says nothing about what the
@@ -1003,6 +1039,36 @@ the files are on disk, and the honest report is the one that says so.
 | `--crate NAME` | the crate, as this workspace's descriptor declares it: the `crate_dir` or its final segment, never anything else |
 | `--grant-id GW-ID` | optional, and a check rather than a filter: pins which record must authorize the manifest, and a mismatch is refused rather than silently substituted |
 | `--json` | the versioned receipt: issue, grant consumed, both generated paths with before/after hashes, and every check's result |
+
+### Stage 7 manifest generation (chainlink #122)
+
+`ligature generate-work-package --plan <path> --issue N --toolchain <value>
+--target <triple> [--feature <name> ...] [--grant-id GW-ID] [--json]` is the
+Stage 7 writer. The plan is a JSON or YAML `WorkPackageRequest`; it selects
+scope but cannot supply normative content. Descriptor-backed canonical
+closure profiles, promotion receipts, boundaries, interactions and bridges
+are loaded only after their existing validators accept them. The manifest
+deriver's field/source table is the content policy; the command runs
+`validate-work-package` over the result before attempting a write.
+
+The only output path is `ci/manifest/<work_package>.json`, where the package
+id comes from the plan. The plan's `issue` must equal `--issue`; the grant
+must be active for that same issue, have `op: write`, and name that exact
+canonical path as an exact grant. Pattern grants are not accepted. The target
+is atomically created, never replaced: an identical file is a no-op, while
+different existing bytes are left untouched. The grant id, issue, path,
+before/after hashes and successful command result are appended as a strict
+`work-package-generation` event in `ci/results/protected-writes.jsonl`.
+`write-set-check` ignores that event as a capability. A previous successful
+create prevents the same grant from recreating a deleted file; an identical
+rerun remains a no-op and is itself auditable.
+
+`--toolchain`, `--target` and repeatable `--feature` are provenance inputs;
+the target and features must agree with the selected interactions'
+`realization.config_scope`. The base commit is read from the workspace Git
+HEAD. `--json` prints the audit event on success; a refusal returns exit 2
+with `error.code`, `error.message` and `error.required_inputs`. The human
+surface names the refused input and points to the required grant command.
 
 **Implemented by #78.** A user-owned normative document (`docs/reliance-policy.md`)
 could not be drift-checked, and the ownership manifest recorded
@@ -1094,7 +1160,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 46/46)
+## 10. Legacy command → disposition (complete, 47/47)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -1106,6 +1172,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` (`out-of-set`) and files inside `protected_roots` that no declaration vouches for (`protected-write`), relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json`. The protected surface is reported per declared pattern, including patterns matching no file (#77, #103, §8). `--issue N` scopes the write grants it consumes to one issue; with no `--issue`, no grant is consulted. `authorized_writes[]` reports what a grant covered (including a `--one-shot` grant's `spent` attribution) and `grants[]` carries the whole ledger with each record's status, so the audit is a machine-readable surface rather than a claim (#114, §8) |
 | `authorize-write` | stable; records ONE issue-scoped capability authorizing a single sanctioned write into a declared `protected_roots` path, as an append-only entry in `ci/results/protected-writes.jsonl` -- the third route out of the dead end #103's enforcement left (widen `allowed_roots`, hand-edit outside every tool, or record a bound grant; §8, #114). The record binds the exact path or an explicitly bounded pattern, the operation (`write`|`delete`), the issue, `issued_at`/`expires_at`, the one-shot flag, the named issuer, the grant id (a hash of that binding, recomputed on read) and audit metadata. Refused, writing nothing, for a path no `protected_roots` pattern covers, one `allowed_roots` already permits, an absolute/escaping/vacuous/directory path, an undeclared `--issuer-kind supervisor`, a TTL outside `[1, 86400]`, an `--issued-at` in the future, `--one-shot` on a pattern, a replayed grant id, or a ledger that itself sits inside a protected root. A human checkpoint in the `human` lane; the `supervisor` lane needs the identity declared in `write_set.authorized_supervisors`. Exits 0/2 per docs/exit-code-contract.md |
 | `scaffold-crate` | stable; writes a MISSING crate's `Cargo.toml` and canonical `src/lib.rs`, deterministically and from the project descriptor alone, in a Mode P (`port`) workspace -- the generator half of `authorize-write`'s capability record (§8, #115). Exactly two files: the manifest, which is a protected-root write and requires an active issue-scoped `write` grant at exactly that path (read through the same `write_authorization` reader `write-set-check` consumes), and the skeleton, which is inside `allowed_roots`, needs no capability record, and is never overwritten once it exists. There is no flag for manifest content and no flag naming a target: both files are pure functions of the descriptor's declared `crate_dir`, and the command accepts only a descriptor-declared crate name. Refused, writing nothing, for a crate no `crates[]` declares (or one two of them declare alike), an absolute/escaping/glob name, a non-`port` mode, a target inside a canonical pipeline artifact location, a declared crate's `specs/` tree or the pinned upstream checkout, a manifest no `protected_roots` pattern covers or `allowed_roots` already permits, no active grant (with the status that stopped each nearby record named), a `--grant-id` mismatch, or an existing manifest whose bytes differ. Idempotent by hash: identical bytes are `unchanged` and nothing is written. Emits a versioned receipt (`docs/scaffold-receipt-schema.json`) recording the issue, the grant consumed, both generated paths with before/after hashes, and the result of every named check -- including offline Cargo workspace membership and `write_set.check_write_set`'s OWN verdict on the write just made. Exits 0/1/2 per docs/exit-code-contract.md |
+| `generate-work-package` | stable; reads a JSON/YAML Stage 7 plan and descriptor-backed canonical closure, promotion, boundary, interaction and bridge inputs, derives the manifest with scripts/work_package_manifest.py, and writes only `ci/manifest/<work_package>.json` after the derived document passes `validate-work-package` and an active exact-path `write` grant for the same issue/path is verified (#122). The issue must match the plan; toolchain/target/features are explicit and selected interaction configuration is checked. Refused, writing nothing, for an invalid/mismatched plan, invalid authoritative inputs, missing/expired/wrong-issue/wrong-operation/wrong-path/replayed grant, a conflicting target, a symlink/escaping target or invalid audit history. Identical bytes are `unchanged`. Each successful run appends a strict event with issue, grant id, path, before/after hashes and command result to `ci/results/protected-writes.jsonl`; this event is ignored by the grant reader and is used only to prevent replay after output deletion. `--json` emits that event or a structured error with stable code, message and required inputs; exits 0/2 per docs/exit-code-contract.md |
 | `validate` | alias → `validate boundary` |
 | `validate-interaction` | alias → `validate interaction` |
 | `validate-exemption` | alias → `validate exemption` |

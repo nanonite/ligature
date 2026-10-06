@@ -742,11 +742,7 @@ def _reliance_for_obligation(
     """The single authoritative ``required_assurance`` declared for
     ``obligation_id`` by the interaction specs' ``reliances[]``. Zero is
     missing; more than one *distinct* assurance is contradictory."""
-    found: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
-    for interaction in state.interactions:
-        for reliance in interaction.get("reliances") or ():
-            if reliance.get("obligation_id") == obligation_id:
-                found.append((interaction, reliance))
+    found = _matching_reliances(state, obligation_id)
     if not found:
         raise ManifestDerivationError(
             "missing-source",
@@ -769,6 +765,84 @@ def _resolve_obligation_assurance(
 ) -> dict[str, Any]:
     _, reliance = _reliance_for_obligation(state, obligation_id)
     return dict(reliance["required_assurance"])
+
+
+def _matching_reliances(
+    state: AuthoritativeState, obligation_id: str
+) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    return [
+        (interaction, reliance)
+        for interaction in state.interactions
+        for reliance in interaction.get("reliances") or ()
+        if reliance.get("obligation_id") == obligation_id
+    ]
+
+
+def _validate_interaction_config_scope(
+    state: AuthoritativeState, request: WorkPackageRequest
+) -> None:
+    _reject_duplicates(state.features, "feature")
+    obligation_ids = set(request.provided_obligations) | set(
+        request.required_obligations
+    )
+    for bridge_id in request.bridges:
+        bridge = _resolve_bridge_spec(state, bridge_id)
+        obligation_ids.add(str(bridge.get("callee_requirement")))
+    scopes: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for obligation_id in sorted(obligation_ids):
+        for interaction, _ in _matching_reliances(state, obligation_id):
+            realization = interaction.get("realization")
+            scope = (
+                realization.get("config_scope")
+                if isinstance(realization, Mapping)
+                else None
+            )
+            interaction_id = str(interaction.get("interaction_id"))
+            if not isinstance(scope, Mapping):
+                raise ManifestDerivationError(
+                    "missing-source",
+                    f"interaction {interaction_id!r} has no config_scope for selected "
+                    f"obligation {obligation_id!r}",
+                )
+            target = scope.get("target")
+            features = scope.get("features")
+            if not isinstance(target, str) or not target:
+                raise ManifestDerivationError(
+                    "missing-source",
+                    f"interaction {interaction_id!r} has no target in config_scope",
+                )
+            if isinstance(features, (str, bytes, Mapping)) or not isinstance(
+                features, Sequence
+            ):
+                raise ManifestDerivationError(
+                    "invalid-authoritative-state",
+                    f"interaction {interaction_id!r} config_scope.features must be an array",
+                )
+            if any(not isinstance(feature, str) or not feature for feature in features):
+                raise ManifestDerivationError(
+                    "invalid-authoritative-state",
+                    f"interaction {interaction_id!r} config_scope.features must contain non-empty strings",
+                )
+            _reject_duplicates(features, f"features for {interaction_id}")
+            scopes[interaction_id] = (target, tuple(sorted(features)))
+    if not scopes:
+        return
+    if len(set(scopes.values())) > 1:
+        detail = ", ".join(
+            f"{name}={scope!r}" for name, scope in sorted(scopes.items())
+        )
+        raise ManifestDerivationError(
+            "contradictory-source",
+            f"selected interactions disagree on target/features config_scope: {detail}",
+        )
+    expected = (state.target, tuple(sorted(state.features)))
+    actual = next(iter(scopes.values()))
+    if actual != expected:
+        raise ManifestDerivationError(
+            "contradictory-source",
+            f"provenance target/features {expected!r} do not match selected interaction "
+            f"config_scope {actual!r}",
+        )
 
 
 def _resolve_bridge_assurance(
@@ -1643,6 +1717,7 @@ def derive_manifest(
             f"closure profile declares owning_verifier {closure_owner!r} but the descriptor's "
             f"verifier_policy assigns {policy['owning']!r}",
         )
+    _validate_interaction_config_scope(state, request)
 
     provided = _derive_provided_guarantees(state, request, policy)
     required = _derive_required_guarantees(state, request, policy)

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/work-package-generation-audit-schema.json",
+  "title": "Stage 7 work-package generation audit event — v1.0",
+  "description": "One successful generate-work-package event appended to ci/results/protected-writes.jsonl (chainlink #122). Grant rows remain the only capability records: scripts/write_authorization.py ignores this event kind. The event records the concrete use of an exact issue-scoped grant so deleting a generated manifest cannot make the same grant usable for a second write. An identical no-op rerun is recorded as unchanged and does not mutate the manifest.",
+  "type": "object",
+  "required": [
+    "event",
+    "schema_version",
+    "issue",
+    "work_package",
+    "grant_id",
+    "path",
+    "before_hash",
+    "after_hash",
+    "result",
+    "command",
+    "command_result",
+    "recorded_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event": { "const": "work-package-generation" },
+    "schema_version": { "const": "1.0" },
+    "issue": { "type": "integer", "minimum": 1 },
+    "work_package": { "type": "string", "pattern": "^WP-[A-Z][A-Z0-9-]*$" },
+    "grant_id": { "type": "string", "pattern": "^GW-[0-9a-f]{12}$" },
+    "path": {
+      "type": "string",
+      "pattern": "^ci/manifest/WP-[A-Z][A-Z0-9-]*\\.json$",
+      "description": "Always derived from work_package; callers cannot choose a different path."
+    },
+    "before_hash": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      ]
+    },
+    "after_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "result": { "enum": ["created", "unchanged"] },
+    "command": { "const": "generate-work-package" },
+    "command_result": { "const": 0 },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    }
+  }
+}

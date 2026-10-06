@@ -85,9 +85,10 @@ this module already states about the TTL ceiling and the recomputed id,
 applied to the one precondition that had no reader half: the half that has to
 hold is always the half that reads a line somebody else appended.
 
-Read-only except for `authorize_write()`, which appends one line to the
-ledger and writes nothing else -- no descriptor, no artifact, no artifact
-directory.
+`authorize_write()` is the capability writer: it appends one `event: grant`
+line and writes nothing else. The same ledger may carry narrowly defined
+use-audit events from capability consumers, but those rows are never parsed
+as grants and never authorize anything.
 """
 from __future__ import annotations
 

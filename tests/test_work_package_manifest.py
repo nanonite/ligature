@@ -313,6 +313,18 @@ def test_provenance_configuration_must_match_selected_interactions():
     assert error.value.code == "contradictory-source"
 
 
+def test_function_paths_use_the_rust_identifier_for_hyphenated_cargo_crates():
+    descriptor = make_state().descriptor
+    descriptor["crates"] = [{"crate_dir": "crates/scheduler-core"}]
+
+    manifest = derive_manifest(
+        make_request(functions=("scheduler_core::TaskQueue::pop_ready",)),
+        make_state(descriptor=descriptor),
+    )
+
+    assert manifest["functions"] == ["scheduler_core::TaskQueue::pop_ready"]
+
+
 def test_assurance_that_conflicts_with_the_verifier_policy_is_refused():
     state = make_state()
     interaction = copy.deepcopy(state.interactions[0])
@@ -335,6 +347,17 @@ def test_duplicate_gate_integrity_paths_are_refused():
     ) as error:
         derive_manifest(make_request(), make_state(descriptor=descriptor))
     assert error.value.code == "duplicate-identifier"
+
+
+def test_virtual_adjudicator_pin_is_not_treated_as_a_workspace_gate_file():
+    descriptor = make_state().descriptor
+    descriptor["gate_integrity"] = [{"path": "@adjudicator"}]
+
+    manifest = derive_manifest(make_request(), make_state(descriptor=descriptor))
+
+    assert "@adjudicator" not in {
+        entry["runner"] for entry in manifest["gate_integrity"]
+    }
 
 
 def test_duplicate_features_are_refused():
@@ -380,6 +403,25 @@ def test_descriptor_write_roots_bound_the_plan():
             make_request(allowed_write_set=("tests/scheduler/",)),
             make_state(),
         )
+
+
+def test_identical_recursive_descriptor_protected_root_is_preserved():
+    state = make_state()
+    descriptor = copy.deepcopy(state.descriptor)
+    descriptor["write_set"]["protected_roots"].append("**/Cargo.toml")
+    request = make_request(
+        allowed_write_set=("crates/scheduler/src/lib.rs",),
+        protected_write_set=(
+            "crates/*/specs/**",
+            "ci/manifest/**",
+            "scripts/**",
+            "**/Cargo.toml",
+        )
+    )
+
+    manifest = derive_manifest(request, make_state(descriptor=descriptor))
+
+    assert "**/Cargo.toml" in manifest["write_policy"]["protected_write_set"]
 
 
 def test_stale_gate_hash_and_promotion_artifact_are_refused(tmp_path):

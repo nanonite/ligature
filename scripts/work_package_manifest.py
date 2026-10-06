@@ -176,6 +176,11 @@ _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 #: every manifest to pin them; a manifest this layer derives must therefore
 #: pin them too, from the same constant the validator uses.
 FIXED_GATE_RUNNERS = tuple(validate_work_package.WITNESS_RENDERER_INTEGRITY_PATHS)
+# The project descriptor uses this virtual entry for the packaged CLI's
+# own attested identity. It is checked by doctor/check against the bundle
+# attestation, not a workspace file, so a Stage 7 manifest cannot express
+# it as a G13 runner/hash pair.
+NON_FILE_GATE_PINS = frozenset({"@adjudicator"})
 
 
 class ManifestDerivationError(Exception):
@@ -990,7 +995,14 @@ def _derive_functions(
         "plan declares no functions; a work package must own at least one",
     )
     _reject_duplicates(request.functions, "function")
-    crate_names = {Path(crate["crate_dir"]).name for crate in descriptor["crates"]}
+    # Cargo package names may use hyphens, while Rust crate identifiers use
+    # underscores. The default crate scaffold from `init` is the common case
+    # (`black-box-fixture-core` -> `black_box_fixture_core`), so match the
+    # identifier a work-package function path can actually spell.
+    crate_names = {
+        Path(crate["crate_dir"]).name.replace("-", "_")
+        for crate in descriptor["crates"]
+    }
     functions = []
     for function in request.functions:
         _require_match(
@@ -1101,6 +1113,11 @@ def _segment_language_is_subset(candidate: str, container: str) -> bool:
 
 
 def _pattern_is_subset(candidate: str, container: str) -> bool:
+    # Equality is a valid subset proof for every pattern, including recursive
+    # forms such as **/Cargo.toml that the segment-by-segment fallback cannot
+    # otherwise consume from a non-terminal ** segment.
+    if candidate == container:
+        return True
     candidate_parts = validate_work_package._segments(candidate)
     container_parts = validate_work_package._segments(container)
     candidate_index = 0
@@ -1250,6 +1267,7 @@ def _derive_gate_integrity(state: AuthoritativeState) -> list[dict[str, str]]:
             "invalid-authoritative-state", "descriptor gate_integrity must be an array"
         )
     descriptor_runners: set[str] = set()
+    seen_descriptor_runners: set[str] = set()
     for entry in descriptor_entries:
         if not isinstance(entry, Mapping):
             raise ManifestDerivationError(
@@ -1262,10 +1280,13 @@ def _derive_gate_integrity(state: AuthoritativeState) -> list[dict[str, str]]:
                 "invalid-authoritative-state",
                 "descriptor gate_integrity entries need a string path",
             )
-        if runner in descriptor_runners:
+        if runner in seen_descriptor_runners:
             raise ManifestDerivationError(
                 "duplicate-identifier", f"duplicate gate_integrity runner: {runner}"
             )
+        seen_descriptor_runners.add(runner)
+        if runner in NON_FILE_GATE_PINS:
+            continue
         descriptor_runners.add(runner)
     if not isinstance(state.gate_hashes, Mapping):
         raise ManifestDerivationError(

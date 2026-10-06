@@ -1077,6 +1077,52 @@ The resulting canonical file is discovered by project-state, `check`,
 and `validate-work-package` enforce G1a/§10.1; later project checks retain
 their own gate results and fail-closed exit codes.
 
+#### Packaged workflow and common refusals (chainlink #124)
+
+Run generation from the initialized project root after its descriptor,
+closure profile, accepted promotion receipt, and selected crate artifacts
+are valid. The workspace must be the Git repository root and have a committed
+HEAD. The plan's `issue` and `work_package` must match the issue and the
+cluster's closure-profile membership; each selected interaction must agree
+with the requested target and feature set. Function paths use Rust crate
+identifiers, so a Cargo package named `black-box-fixture-core` is referenced
+as `black_box_fixture_core::...`.
+
+The normal sequence is:
+
+```text
+ligature authorize-write --issue N --path ci/manifest/<WP>.json --op write --issuer <human>
+ligature generate-work-package --plan <path> --issue N --toolchain <value> --target <triple> [--feature <name> ...] --json
+ligature validate-work-package ci/manifest/<WP>.json
+ligature doctor
+ligature check --json --issue N
+ligature write-set-check --json --issue N
+```
+
+`authorize-write` is a human checkpoint in its default lane. It must bind the
+same issue and exact canonical output path the generator will use. The
+manifest pins the actual bytes of every workspace file in descriptor
+`gate_integrity`; the virtual `@adjudicator` installation pin is checked by
+doctor/check and is not a workspace runner hash. G13 rechecks the manifest's
+file hashes before Stage 7 accepts it.
+
+| refusal code | common cause |
+|---|---|
+| `issue-mismatch` | the plan's `issue` differs from `--issue` |
+| `missing-or-invalid-grant` | no active exact-path `write` grant matches the issue and canonical output |
+| `invalid-closure-input`, `invalid-promotion-input` | an authoritative artifact is invalid, missing, or stale against its recorded hash |
+| `missing-source`, `contradictory-source` | the selected cluster, obligation, bridge, crate, or configuration cannot be resolved consistently |
+| `derived-manifest-invalid` | the candidate did not pass the same G1a/§10.1 checks as `validate-work-package` |
+| `target-conflict` | canonical output exists with different bytes; it is left untouched |
+| `grant-replayed` | a successful grant is being used to recreate a deleted manifest |
+| `ledger-invalid` | the protected-write audit history contains malformed grant or generation data |
+
+Machine-readable refusals include `error.code`, `error.message`, and
+`error.required_inputs`. A refused generation leaves no new manifest; an
+existing conflicting manifest stays byte-for-byte unchanged. `check` keeps
+its normal exit code for unrelated blocked gates, even when it discovers and
+loads the generated package.
+
 **Implemented by #78.** A user-owned normative document (`docs/reliance-policy.md`)
 could not be drift-checked, and the ownership manifest recorded
 `base_hash`/`expected_hash` for it that were never compared -- the

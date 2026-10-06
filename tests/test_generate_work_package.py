@@ -270,6 +270,310 @@ def integrated_workspace(tmp_path):
     return project
 
 
+@pytest.fixture(scope="module")
+def packaged_cli(tmp_path_factory):
+    output = tmp_path_factory.mktemp("ligature-zipapp")
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts/build_zipapp.py"), "--out", str(output)],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    executable = output / "ligature.pyz"
+    assert executable.is_file()
+    return executable
+
+
+class PackagedWorkspace:
+    """Clean target initialized and exercised only through ligature.pyz."""
+
+    def __init__(self, root: Path, executable: Path):
+        self.root = root
+        self.executable = executable
+        self.root.mkdir(parents=True)
+        self.descriptor_path = root / "project-descriptor.json"
+        self.plan_path = root.parent / "work-package-plan.json"
+        initialized = subprocess.run(
+            [
+                sys.executable,
+                str(executable),
+                "--workspace",
+                str(root),
+                "init",
+                "--mode",
+                "greenfield",
+                "--name",
+                "black-box-fixture",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert initialized.returncode == 0, initialized.stderr + initialized.stdout
+
+        descriptor = json.loads(self.descriptor_path.read_text())
+        crate_dir = "crates/black-box-fixture-core"
+        descriptor["crates"] = [
+            {
+                "crate_dir": crate_dir,
+                "contracts_crate": "contracts",
+                "specs_search_root": f"{crate_dir}/specs",
+            }
+        ]
+        descriptor["verifier_policy"]["clusters"]["scheduling"] = "creusot"
+        descriptor["compatibility_policy"] = {
+            "reliance_policy_path": "docs/reliance-policy.md"
+        }
+        descriptor["review"] = {
+            "reviewer": "black-box-test-reviewer",
+            "reviewed_at": "2026-10-06",
+        }
+        self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+
+        crate_root = root / crate_dir
+        crate_specs = crate_root / "specs"
+        for directory in (crate_specs / "_boundaries", crate_specs / "_interactions", crate_specs / "_bridges"):
+            directory.mkdir(parents=True, exist_ok=True)
+        (crate_root / "src").mkdir(parents=True, exist_ok=True)
+        (crate_root / "Cargo.toml").write_text(
+            "[package]\nname = \"black-box-fixture-core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+        )
+        (crate_root / "src/lib.rs").write_text("pub fn fixture() {}\n")
+
+        boundary = "scheduler_dispatch__to__task_queue_pop_ready.json"
+        shutil.copy2(
+            ROOT / f"tests/fixtures/promotions/valid/crates/scheduler/specs/_boundaries/{boundary}",
+            crate_specs / "_boundaries" / boundary,
+        )
+        shutil.copy2(
+            ROOT / "tests/fixtures/interactions/valid/specs/_interactions/I-SCHED-TQ-001.json",
+            crate_specs / "_interactions/I-SCHED-TQ-001.json",
+        )
+        shutil.copy2(
+            ROOT / "tests/fixtures/bridges/valid/specs/_bridges/BR-SCHED-TQ-001.json",
+            crate_specs / "_bridges/BR-SCHED-TQ-001.json",
+        )
+
+        closure_dir = root / "specs/_closure"
+        closure_dir.mkdir(parents=True, exist_ok=True)
+        profile = json.loads(
+            (ROOT / "tests/fixtures/closure/stale/specs/_closure/scheduler-core.json").read_text()
+        )
+        profile["cluster"] = "scheduling"
+        profile["work_packages"] = ["WP-BLACK-BOX-001"]
+        (closure_dir / "scheduling.json").write_text(json.dumps(profile, indent=2) + "\n")
+
+        accepted = self.run(
+            "accept-policy",
+            "--reviewer",
+            "black-box-test-reviewer",
+            "--version",
+            "fixture-policy@1.0",
+        )
+        assert accepted.returncode == 0, accepted.stderr + accepted.stdout
+
+        promotion_dir = root / "specs/_promotions"
+        promotion_dir.mkdir(parents=True, exist_ok=True)
+        promotion = json.loads(
+            (ROOT / "tests/fixtures/promotions/valid/specs/_promotions/scheduling.json").read_text()
+        )
+        promotion["policy_version"] = "fixture-policy@1.0"
+        for entry in promotion["artifact_manifest"]:
+            if entry["path"].startswith("crates/scheduler/"):
+                entry["path"] = f"{crate_dir}/specs/_boundaries/{boundary}"
+            digest = hashlib.sha256((root / entry["path"]).read_bytes()).hexdigest()
+            entry["hash"] = f"sha256:{digest}"
+        (promotion_dir / "scheduling.json").write_text(json.dumps(promotion, indent=2) + "\n")
+
+        request = make_request(
+            work_package="WP-BLACK-BOX-001",
+            issue="chainlink:124",
+            functions=("black_box_fixture_core::TaskQueue::pop_ready",),
+            depends_on=(),
+            allowed_write_set=(f"{crate_dir}/src/lib.rs",),
+            protected_write_set=(
+                *descriptor["write_set"]["protected_roots"],
+                ".codex/skills/**",
+                ".ligature/schemas/**",
+            ),
+        )
+        self.plan_path.write_text(json.dumps(dataclasses.asdict(request), indent=2) + "\n")
+
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "ligature-tests@example.invalid"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Ligature packaged test"], cwd=root, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "initialized fixture"], cwd=root, check=True)
+
+    @property
+    def manifest(self) -> Path:
+        return self.root / "ci/manifest/WP-BLACK-BOX-001.json"
+
+    def run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(self.executable),
+                "--workspace",
+                str(self.root),
+                "--descriptor",
+                str(self.descriptor_path),
+                *args,
+            ],
+            cwd=self.root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def authorize(self, path: str) -> dict:
+        result = self.run(
+            "authorize-write",
+            "--issue",
+            "124",
+            "--path",
+            path,
+            "--op",
+            "write",
+            "--issuer",
+            "black-box-test-reviewer",
+            "--one-shot",
+            "--json",
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        return json.loads(result.stdout)
+
+    def authorize_sources(self) -> None:
+        for file in sorted((self.root / "crates/black-box-fixture-core/specs").rglob("*.json")):
+            self.authorize(file.relative_to(self.root).as_posix())
+
+    def generate(self) -> subprocess.CompletedProcess[str]:
+        return self.run(
+            "generate-work-package",
+            "--plan",
+            str(self.plan_path),
+            "--issue",
+            "124",
+            "--toolchain",
+            "nightly-2026-05-01",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--feature",
+            "default",
+            "--json",
+        )
+
+
+@pytest.fixture
+def packaged_workspace(tmp_path, packaged_cli):
+    return PackagedWorkspace(tmp_path / "project", packaged_cli)
+
+
+def test_packaged_clean_init_generation_is_idempotent_and_reaches_all_surfaces(
+    packaged_workspace,
+):
+    project = packaged_workspace
+    project.authorize_sources()
+    grant = project.authorize("ci/manifest/WP-BLACK-BOX-001.json")
+
+    first = project.generate()
+    assert first.returncode == 0, first.stderr + first.stdout
+    first_record = json.loads(first.stdout)
+    first_bytes = project.manifest.read_bytes()
+    manifest = json.loads(first_bytes)
+    assert manifest["work_package"] == "WP-BLACK-BOX-001"
+    assert manifest["issue"] == "chainlink:124"
+    assert first_record["event"] == "work-package-generation"
+    assert first_record["result"] == "created"
+    assert first_record["grant_id"] == grant["grant_id"]
+    assert first_record["path"] == "ci/manifest/WP-BLACK-BOX-001.json"
+    assert first_record["before_hash"] is None
+    assert first_record["after_hash"] == "sha256:" + hashlib.sha256(first_bytes).hexdigest()
+    make_validator(AUDIT_SCHEMA).validate(first_record)
+    for entry in manifest["gate_integrity"]:
+        assert entry["runner"] != "@adjudicator"
+        runner = project.root / entry["runner"]
+        assert runner.is_file()
+        assert entry["hash"] == "sha256:" + hashlib.sha256(runner.read_bytes()).hexdigest()
+
+    second = project.generate()
+    assert second.returncode == 0, second.stderr + second.stdout
+    second_record = json.loads(second.stdout)
+    assert second_record["result"] == "unchanged"
+    assert second_record["before_hash"] == first_record["after_hash"]
+    assert second_record["after_hash"] == first_record["after_hash"]
+    assert project.manifest.read_bytes() == first_bytes
+    generation_rows = [
+        json.loads(line)
+        for line in (project.root / LEDGER_REL).read_text().splitlines()
+        if json.loads(line).get("event") == "work-package-generation"
+    ]
+    assert [row["result"] for row in generation_rows] == ["created", "unchanged"]
+
+    validated = project.run("validate-work-package", str(project.manifest))
+    assert validated.returncode == 0, validated.stderr + validated.stdout
+    assert "passes G1a and §10.1" in validated.stdout
+
+    doctor = project.run("doctor")
+    assert doctor.returncode == 0, doctor.stderr + doctor.stdout
+    assert "installation: current" in doctor.stdout
+
+    checked = project.run("check", "--json", "--issue", "124")
+    check = json.loads(checked.stdout)
+    assert checked.returncode == check["result"]["exit_code"]
+    assert any(run["gate_id"] == "g14" for run in check["gates"])
+    assert not any(
+        finding["gate_id"] == "g14" and "not schema-valid" in finding["reason"]
+        for finding in check["findings"]
+    )
+
+    write_set = project.run("write-set-check", "--json", "--issue", "124")
+    report = json.loads(write_set.stdout)
+    assert write_set.returncode == 0, write_set.stderr + write_set.stdout
+    assert report["write_set"]["state"] == "clean"
+    assert not report["write_set"]["violations"]
+
+
+def test_packaged_generation_reports_refusals_without_creating_a_manifest(
+    packaged_workspace,
+):
+    project = packaged_workspace
+    project.authorize_sources()
+
+    unauthorized = project.generate()
+    refusal = json.loads(unauthorized.stdout)
+    assert unauthorized.returncode == 2
+    assert refusal["error"]["code"] == "missing-or-invalid-grant"
+    assert "authorize-write" in refusal["error"]["required_inputs"][0]
+    assert not project.manifest.exists()
+
+    plan = json.loads(project.plan_path.read_text())
+    plan["unexpected_policy"] = True
+    project.plan_path.write_text(json.dumps(plan) + "\n")
+    invalid_plan = project.generate()
+    refusal = json.loads(invalid_plan.stdout)
+    assert invalid_plan.returncode == 2
+    assert refusal["error"]["code"] == "unsupported-field"
+    assert not project.manifest.exists()
+
+    plan.pop("unexpected_policy")
+    project.plan_path.write_text(json.dumps(plan) + "\n")
+    shutil.rmtree(project.root / "specs/_promotions")
+    missing_source = project.generate()
+    refusal = json.loads(missing_source.stdout)
+    assert missing_source.returncode == 2
+    assert refusal["error"]["code"] in {"missing-source", "invalid-promotion-input"}
+    assert not project.manifest.exists()
+
+    missing_manifest = project.run(
+        "validate-work-package", "ci/manifest/WP-BLACK-BOX-001.json"
+    )
+    assert missing_manifest.returncode == 1
+    assert "manifest not found" in missing_manifest.stderr
+
+
 def test_cli_help_and_missing_inputs_name_the_required_values():
     help_text = pipeline.registered_commands()["generate-work-package"].format_help()
     for required in (

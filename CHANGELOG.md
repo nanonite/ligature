@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Add a deterministic Stage 7 work-package manifest generator (#116)
+- Add clean-project black-box coverage for work-package generation (#124)
 - Integrate generated work packages with Stage 7 and Stage 8 gates (#123)
 - Add authorized Stage 7 work-package manifest generation (#122)
 - Define deterministic work-package manifest derivation (#121)

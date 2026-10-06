@@ -402,7 +402,12 @@
     {
       "name": "authorize-write",
       "func": "cmd_authorize_write",
-      "stable_mapping": "stable issue-scoped write-grant record -- authorizes one bounded write into a declared protected root as an append-only entry in ci/results/protected-writes.jsonl, consumed only by write-set-check/status/check run with the same --issue (chainlink #114, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
+      "stable_mapping": "stable issue-scoped write-grant record -- authorizes one bounded write into a declared protected root as an append-only entry in ci/results/protected-writes.jsonl, consumed only by write-set-check/status/check run with the same --issue, with each record's status reported in a closed vocabulary (chainlink #114, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
+    },
+    {
+      "name": "scaffold-crate",
+      "func": "cmd_scaffold_crate",
+      "stable_mapping": "stable deterministic crate bootstrap -- writes a MISSING declared crate's Cargo.toml and its canonical src/lib.rs in a mode: port workspace, deriving both from the project descriptor alone with no content flag and no target flag. The manifest is a protected-root write and requires an active issue-scoped `write` grant at exactly that path, consumed through the same write_authorization reader write-set-check uses; the skeleton is inside allowed_roots, needs no grant, and is never overwritten, so a missing-crate pilot bootstraps without anyone holding raw Cargo.toml write scope. Refused (exit 2, nothing written) for an undeclared/ambiguous/absolute/escaping/glob crate name, a non-port mode, a target inside a canonical pipeline artifact location, a declared crate's specs/ tree or the pinned upstream checkout, a manifest no protected_roots covers or one allowed_roots already permits, no active grant (with each nearby record's status named), or a --grant-id mismatch; an existing manifest with identical bytes is `unchanged` and writes nothing. Emits a versioned receipt (docs/scaffold-receipt-schema.json) recording the issue, the grant consumed, both generated paths with before/after hashes, and every named check -- including Cargo's offline workspace-membership check and write_set.check_write_set's own verdict on the write just made (chainlink #115, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
     },
     {
       "name": "doctor",
@@ -706,13 +711,19 @@
       "path": "scripts/write_set.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "chainlink #77, #103: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state. A protected root is ENFORCED rather than accounted for (#103): a file inside one is a violation unless a declaration vouches for that file, and the two location carve-outs #77 shipped (the `ci/` canonical prefix, and any file under a declared crate's specs/ tree) are replaced by recognizing a pipeline artifact through project_state's own discovery, so the protected surface is judged by the artifact system the pipeline actually runs. #114 adds the sanctioned case: this module is the only consumer of the issue-scoped write grants in ci/results/protected-writes.jsonl, consulted on the protected branch only, and it holds the writer's own refusal -- a ledger inside a declared protected root authorizes nothing (status `ledger-protected`), so a trail cannot vouch for its own presence in the surface it must stay outside of."
+      "summary": "chainlink #77, #103: read-only write-set conformance check -- the descriptor's allowed_roots/protected_roots evaluated against the workspace's actual files, behind `ligature write-set-check` and `status --json`'s write_set state. A protected root is ENFORCED rather than accounted for (#103): a file inside one is a violation unless a declaration vouches for that file, and the two location carve-outs #77 shipped (the `ci/` canonical prefix, and any file under a declared crate's specs/ tree) are replaced by recognizing a pipeline artifact through project_state's own discovery, so the protected surface is judged by the artifact system the pipeline actually runs. #114 adds the sanctioned case: this module is the only consumer of the issue-scoped write grants in ci/results/protected-writes.jsonl, consulted on the protected branch only, and it holds the writer's own refusal -- a ledger inside a declared protected root authorizes nothing (status `ledger-protected`), so a trail cannot vouch for its own presence in the surface it must stay outside of. Every authorized write is reported rather than excused (`authorized_writes`, plus its pattern's `authorized` count), and a --one-shot grant's write is reported `spent` as an attribution with the limit stated in `details`: a snapshot counts no edits, so the grant's TTL is what bounds it."
     },
     {
       "path": "scripts/write_authorization.py",
       "role": "shared-loader",
       "disposition": "runtime-required",
-      "summary": "chainlink #114: the record half of a sanctioned protected-root write -- `ligature authorize-write --issue N --path P --op K --issuer <name>` appends one issue-scoped capability record to ci/results/protected-writes.jsonl, binding the exact path or a bounded pattern, the operation, the issue, issued_at/expires_at, the one-shot flag, a named issuer and a grant id that is a hash of that binding. Every binding is recomputed on read (expiry relation, id, path classification, and the issuer against the descriptor's write_set.authorized_supervisors whitelist), so a record cannot be edited into a different authorization; a refusal writes nothing."
+      "summary": "chainlink #114: the record half of a sanctioned protected-root write -- `ligature authorize-write --issue N --path P --op K --issuer <name>` appends one issue-scoped capability record to ci/results/protected-writes.jsonl, binding the exact path or a bounded pattern, the operation, the issue, issued_at/expires_at, the one-shot flag, a named issuer and a grant id that is a hash of that binding. Every binding is recomputed on read (expiry relation, id, path classification, the window's other end -- a record whose issued_at is still ahead of the consumer's clock is reported not-yet-issued and authorizes nothing -- and the issuer against the descriptor's write_set.authorized_supervisors whitelist), so a record cannot be edited into a different authorization, and the closed status vocabulary it reports (active/expired/not-yet-issued/other-issue/unverified-issuer/duplicate/no-issue-named/ledger-protected) says why each record did or did not authorize instead of dropping it; a refusal writes nothing."
+    },
+    {
+      "path": "scripts/scaffold_crate.py",
+      "role": "generator",
+      "disposition": "runtime-required",
+      "summary": "chainlink #115: the generator half of the sanctioned-protected-write mechanism -- `ligature scaffold-crate --issue N --crate <name>` writes a missing declared crate's Cargo.toml and canonical src/lib.rs deterministically, from the project descriptor alone. Exactly two files, and they are not the same kind of write: the manifest is a protected-root write requiring an active issue-scoped grant at exactly that path (read through write_authorization's own ledger reader and status rules, so this verb cannot believe a grant is live when write-set-check would report it expired/not-yet-issued/other-issue/duplicate/unverified-issuer/ledger-protected), while the skeleton is inside allowed_roots, needs no grant, and is never overwritten. No content flag and no target flag exist: both files are pure functions of the declared crate_dir, so there is nothing for a caller to inject and the bytes are checkable by hash. Refuses an undeclared/ambiguous/escaping/glob crate name, a non-port mode, a target inside a canonical artifact location, a specs/ tree or the pinned upstream checkout (judged by write_set's own predicates), a manifest protected_roots does not cover or allowed_roots already permits, no active grant, or a --grant-id mismatch -- each refusal writing nothing. Idempotent (identical bytes are `unchanged`) and never overwrites a manifest with different bytes or an existing src/lib.rs. Re-derives every claim before reporting success: descriptor gate, manifest re-parsed as TOML and compared byte for byte, skeleton, write_set.check_write_set's OWN verdict on the write just made, and doctor's installation state (recorded rather than enforced beyond its descriptor gate). Writes no implementation code and no normative policy or spec content."
     },
     {
       "path": "scripts/promote_evidence.py",
@@ -853,6 +864,11 @@
       "path": "docs/write-grant-schema.json",
       "disposition": "runtime-required",
       "summary": "chainlink #114: the versioned shape of one ci/results/protected-writes.jsonl line -- the issue-scoped capability record `ligature authorize-write` writes. Closed, and bundled so the build attestation states which record format the binary writes; the semantics JSON Schema cannot express (expires_at == issued_at + ttl_seconds, grant_id == sha256 of the binding) are recomputed by scripts/write_authorization."
+    },
+    {
+      "path": "docs/scaffold-receipt-schema.json",
+      "disposition": "runtime-required",
+      "summary": "chainlink #115: the versioned shape of `ligature scaffold-crate --json`'s receipt -- the issue, which capability record was consumed, both generated paths with before/after sha256 and per-file state (created/unchanged/preserved), and every named check's result plus write_set's own verdict. NOT a persisted artifact (the command writes no ledger line and no artifact), but closed like every other schema here after #104: a key nothing reads must not validate as if it were read. The receipt RECORDS the authority question rather than deciding it -- the capability lives in ci/results/protected-writes.jsonl and is honored only by `ligature write-set-check --issue N`."
     },
     {
       "path": "docs/witness-result-schema.json",
@@ -1243,6 +1259,11 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_scaffold_crate.py",
+      "kind": "regression",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_promote_evidence.py",
       "kind": "regression",
       "disposition": "test-only"
@@ -1435,16 +1456,16 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 92,
+      "runtime-required": 94,
       "excluded": 1,
       "documentation": 14,
       "installed-template": 4,
-      "test-only": 74,
+      "test-only": 75,
       "vendored-runtime": 1
     },
-    "total_entries": 186,
-    "test_count": 60,
-    "registered_cli_command_count": 45
+    "total_entries": 189,
+    "test_count": 61,
+    "registered_cli_command_count": 46
   },
   "documentation_and_templates": [
     {

@@ -479,6 +479,7 @@ from validate_witness import validate_results as validate_witness_results  # noq
 from validate_witness import witness_dir_for as _witness_dir_for  # noqa: E402
 import write_authorization  # noqa: E402
 from write_authorization import WriteAuthorizationError  # noqa: E402
+from scaffold_crate import ScaffoldError  # noqa: E402
 from gate_g20 import validate_witness_for_approval  # noqa: E402
 from generate_witness import GenerationError  # noqa: E402
 from generate_witness import generate as generate_witness  # noqa: E402
@@ -534,6 +535,7 @@ from project_state import render_next_action_text  # noqa: E402
 from project_state import render_status_text  # noqa: E402
 from project_state import _rel  # noqa: E402
 import write_set  # noqa: E402
+import scaffold_crate  # noqa: E402
 from ligature_install import MANIFEST_RELATIVE_PATH  # noqa: E402
 from ligature_install import InstallError  # noqa: E402
 from ligature_install import accept_policy  # noqa: E402
@@ -957,7 +959,19 @@ def cmd_authorize_write(args: argparse.Namespace) -> int:
     print(f"issue: {grant.issue}")
     print(f"path: {grant.path} ({grant.path_kind})")
     print(f"op: {grant.op}")
-    print(f"one_shot: {'yes' if grant.one_shot else 'no'}")
+    if grant.one_shot:
+        # Said at the moment the grant is recorded, which is the only moment a
+        # reader can act on it: `spent` is an attribution the check reports, not
+        # a counter it keeps, so the operator issuing the grant is the one who
+        # has to know that a further sanctioned write needs a further record.
+        print(
+            "one_shot: yes -- one exact file rather than a standing grant. write-set-check reports "
+            "the write it authorizes as `spent`, which is an attribution and not a count: a "
+            "workspace snapshot counts no edits to that file, so what bounds this grant is its "
+            "TTL. Issue a further grant for further sanctioned writes"
+        )
+    else:
+        print("one_shot: no")
     print(f"issuer: {grant.issuer} ({grant.issuer_kind})")
     print(f"issued at: {grant.issued_at}")
     print(f"expires at: {grant.expires_at} (ttl {grant.ttl_seconds}s)")
@@ -967,6 +981,82 @@ def cmd_authorize_write(args: argparse.Namespace) -> int:
         "(this grant authorizes nothing outside its own issue, path, operation and TTL)"
     )
     return 0
+
+
+def cmd_scaffold_crate(args: argparse.Namespace) -> int:
+    """`ligature scaffold-crate --issue N --crate <name> [--grant-id GW-...]
+    [--json]` (docs/cli-contract.md §1, §8): write a missing crate's
+    `Cargo.toml` and its canonical `src/lib.rs`, deterministically, from the
+    project descriptor alone (chainlink #115).
+
+    A port-mode pilot whose declared crate does not exist yet has no manifest,
+    so every downstream command in the chain has nothing to read. #114 made
+    that write *authorizable*; this verb makes it *generatable*, which is the
+    other half: the fallback was a human hand-writing a protected-root file
+    under `authorize-write`, which stalls the worker and produces a manifest
+    nobody can reproduce.
+
+    **It writes at most two files, and they are not the same kind of write.**
+    The manifest is a protected-root write and requires an active issue-scoped
+    `write` grant at exactly that path, read through the same
+    `write_authorization` reader `write-set-check` consumes -- so this command
+    cannot believe a grant is live when the conformance check would report it
+    expired. The `src/lib.rs` skeleton is inside `allowed_roots`, needs no
+    grant, and is never overwritten once it exists: `<crate>/src/` belongs to
+    the implementing agent. That asymmetry is the acceptance criterion, made
+    literal -- a missing-crate pilot bootstraps without anyone being granted
+    raw `Cargo.toml` write scope, because the one protected write it does need
+    is bounded to one file, one operation, one issue and one expiry.
+
+    **There is no flag for manifest content.** Both files are pure functions
+    of the descriptor's declared crate entry plus two module constants; the
+    command accepts no text, no extra file, and no path of its own. It writes
+    no implementation code and no normative policy or spec content, and it
+    refuses a target that lands in a canonical pipeline artifact location, a
+    declared crate's `specs/` tree, or the pinned upstream checkout.
+
+    **Idempotent, or it fails clearly.** A manifest already holding exactly
+    the rendered bytes is reported `unchanged` and nothing is written. A
+    manifest already holding different bytes is refused, never overwritten --
+    a manifest is a build input somebody may depend on. An existing
+    `src/lib.rs` is `preserved` with its hashes.
+
+    Before reporting success it re-derives every claim and records each as a
+    named check in the receipt: the descriptor is still schema-valid (via
+    `doctor`'s own gate), the manifest parses as TOML and holds exactly the
+    rendered bytes, the skeleton exists and is non-empty, `write_set`'s own
+    `check_write_set` reports the write just made in `authorized_writes` under
+    *this* grant id, and `ligature_install.inspect()`'s installation verdict
+    is recorded. That last one is recorded rather than enforced beyond its
+    descriptor gate, because this command touches none of the files
+    `migrate`/`accept-policy` own.
+
+    Exit codes per docs/exit-code-contract.md: 0 scaffolded (or already
+    exactly so); 1 a blocking post-write check failed (the files are on disk
+    and the receipt names the check, because at that point the honest report
+    is the one that says so); 2 refused -- every refusal is about the request,
+    and a refusal writes nothing at all."""
+    try:
+        report = scaffold_crate.scaffold_crate(
+            args.workspace,
+            issue=args.issue,
+            crate=args.crate,
+            grant_id=args.grant_id,
+            descriptor_path=args.descriptor,
+        )
+    except (
+        ScaffoldError,
+        WriteAuthorizationError,
+        ProjectDescriptorError,
+        InstallError,
+    ) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(canonical_json(report.as_dict()))
+    else:
+        print(scaffold_crate.render_report_text(report))
+    return 1 if report.state == scaffold_crate.CHECK_FAILED else 0
 
 
 def _require_crate_root_exists(crate: dict, workspace: Path) -> Path:
@@ -2519,7 +2609,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "promote-evidence (mechanically promote a staged evidence draft to its target and record "
         "the move -- the Stage 0 promotion path approve() cannot provide, chainlink #79), "
         "record-assurance (assemble a work package's assurance report from verifier proof "
-        "certificates -- the achieved side gate-g14 reads, chainlink #87)"
+        "certificates -- the achieved side gate-g14 reads, chainlink #87), "
+        "scaffold-crate (deterministic Cargo.toml + canonical src skeleton for a missing "
+        "declared crate of a port-mode project, the manifest write authorized by an "
+        "issue-scoped grant -- chainlink #115)"
     )
     print("Not yet implemented:")
     for stage, ref in NOT_YET_IMPLEMENTED.items():
@@ -2824,10 +2917,15 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
                     "to record a grant: no grant read from it was honored"
                 )
             for entry in report.grants.entries:
+                # The issuer's own note travels with the grant in the audit
+                # view, so the text surface carries it too rather than making
+                # the reader open the ledger to learn why it was issued.
+                note = f" -- {entry['note']}" if entry["note"] else ""
                 print(
                     f"  grant {entry['grant_id']}: {entry['status']} -- issue {entry['issue']}, "
                     f"{entry['op']} {entry['path']} ({entry['path_kind']}), issuer "
-                    f"{entry['issuer']} [{entry['issuer_kind']}], expires {entry['expires_at']}"
+                    f"{entry['issuer']} [{entry['issuer_kind']}], ttl {entry['ttl_seconds']}s, "
+                    f"expires {entry['expires_at']}{note}"
                 )
             for rejected in report.grants.rejected:
                 print(f"  grant line {rejected['line']}: rejected -- {rejected['reason']}")
@@ -3296,7 +3394,10 @@ def build_parser() -> argparse.ArgumentParser:
             "issue this run is about (chainlink #114): a write grant authorizes its own issue "
             "only, so name it to consume the records in ci/results/protected-writes.jsonl issued "
             "for it. Omitted, no grant is consulted and a protected write with no other "
-            "declaration vouching for it is the blocking protected-write violation it always was"
+            "declaration vouching for it is the blocking protected-write violation it always was. "
+            "Every record read is reported with the status that says why it did or did not "
+            "authorize (active, expired, not-yet-issued, other-issue, unverified-issuer, "
+            "duplicate, no-issue-named, ledger-protected)"
         ),
     )
     write_set_p.set_defaults(func=cmd_write_set_check)
@@ -3374,9 +3475,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--one-shot",
         action="store_true",
         help=(
-            "bind a single exact file write rather than a standing grant for the TTL (refused on "
-            "a pattern path, which authorizes as many writes as its TTL allows). Reported as "
-            "`spent` once the file it authorized is present"
+            "bind one exact file rather than a standing grant for the TTL (refused on a pattern "
+            "path, which authorizes as many writes as its TTL allows). write-set-check reports the "
+            "write it authorized as `spent`: that is an attribution, not a counter -- a workspace "
+            "snapshot counts no edits to that file, so the TTL is what bounds the attribution. "
+            "Issue a further grant for further sanctioned writes; each is its own record"
         ),
     )
     authorize_write_p.add_argument(
@@ -3394,8 +3497,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TIMESTAMP",
         help=(
             "ISO-8601 timestamp with a UTC offset (2026-10-03T12:00:00+00:00) to record as "
-            "issued_at; defaults to now. Present so a re-run of the issuing command is idempotent "
-            "(the grant id is a hash of the binding) and an expiring grant is reproducible"
+            "issued_at; defaults to now, and a timestamp in the future is refused. Present so a "
+            "re-run of the issuing command is idempotent (the grant id is a hash of the binding) "
+            "and an expiring grant is reproducible"
         ),
     )
     authorize_write_p.add_argument(
@@ -3404,6 +3508,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit the grant record itself (the line appended to ci/results/protected-writes.jsonl)",
     )
     authorize_write_p.set_defaults(func=cmd_authorize_write)
+
+    scaffold_crate_p = sub.add_parser(
+        "scaffold-crate",
+        help=(
+            "Write a missing crate's Cargo.toml and canonical src/lib.rs, deterministically, "
+            "from the project descriptor (chainlink #115) -- the generator half of #114's "
+            "capability record. The manifest write is protected and requires an active "
+            "issue-scoped grant; the skeleton is inside allowed_roots and needs none"
+        ),
+    )
+    scaffold_crate_p.add_argument(
+        "--issue",
+        type=int,
+        required=True,
+        metavar="N",
+        help=(
+            "the issue this scaffold is for (positive integer, required): the capability record "
+            "authorizing the Cargo.toml write is scoped to one issue, so this is the same "
+            "--issue that record was issued for"
+        ),
+    )
+    scaffold_crate_p.add_argument(
+        "--crate",
+        required=True,
+        metavar="NAME",
+        help=(
+            "the crate to scaffold, as this workspace's project descriptor declares it -- either "
+            "the crate_dir (rust/date-creusot-core) or its final segment (date-creusot-core). "
+            "Refused when it names no declared crate, names two alike, is absolute, contains "
+            "'..' or a glob character, or resolves outside the workspace: the scaffold's content "
+            "and its grant target are both derived from the declaration, so an undeclared crate "
+            "has neither"
+        ),
+    )
+    scaffold_crate_p.add_argument(
+        "--grant-id",
+        default=None,
+        metavar="GW-ID",
+        help=(
+            "pin which capability record must authorize this scaffold. Optional, and a check "
+            "rather than a filter: when several records could cover the manifest, naming one "
+            "records the operator's intent, and a mismatch is refused rather than silently "
+            "substituted"
+        ),
+    )
+    scaffold_crate_p.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the versioned scaffold receipt (docs/scaffold-receipt-schema.json)",
+    )
+    scaffold_crate_p.set_defaults(func=cmd_scaffold_crate)
 
     gate_p = sub.add_parser("gate", help="Cross-artifact gate runner: `gate <gate-id>` (docs/cli-contract.md §3)")
     gate_p.add_argument("gate_id", choices=sorted(_GATE_VERBS), metavar="GATE-ID")

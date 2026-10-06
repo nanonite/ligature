@@ -124,8 +124,28 @@ the only consumer:
     in `authorized_writes` with its grant id, issuer, issue and expiry, and
     its pattern's `protected_surface` entry counts it under `authorized`, so
     a `clean` verdict over a protected root a grant was used on still says
-    so. An expired, replayed, other-issue or unverified-issuer grant
-    authorizes nothing and is reported with that status;
+    so. An expired, not-yet-issued, replayed, other-issue or unverified-issuer
+    grant authorizes nothing and is reported with that status;
+* **what a one-shot grant does, and the one thing it cannot do.** A
+    `--one-shot` grant binds one exact file (never a pattern), and the write
+    it covers is reported `spent` in `authorized_writes` rather than `active`
+    -- while the grant itself stays `active` in the ledger audit until it
+    expires, because until then it still covers the one path it names. That
+    attribution is this check's whole enforcement of it. What a one-shot
+    grant cannot do is count. A workspace snapshot observes which files
+    exist, not how many times each was written, so this check cannot tell the
+    write a one-shot grant authorized from a later edit to the same file, and
+    says so in `details` rather than letting `spent` imply a counter it never
+    kept.
+    The outer bound is the grant's TTL, which is why a one-shot grant is
+    reported with its expiry like any other and why a file that needs further
+    sanctioned writes needs a further grant (each is its own record, and the
+    ledger is append-only). This is the same kind of residual
+    `protected_unvouched` is reported under, stated rather than assumed --
+    and it is why this check cannot be the thing that enforces a one-shot
+    count: enforcing one would mean writing the observation down, and
+    `check`'s `mutated_workspace: const false` guarantee is not available to
+    spend on it;
 * **a trail inside a protected root is not a capability record.** A
     declared `protected_roots` pattern covering `ci/results/` is a workspace
     `authorize-write` refuses to record a grant in, so a record read out of
@@ -249,11 +269,16 @@ class AuthorizedWrite:
     grant whose authority made it clean.
 
     `status` is `active` for a standing grant and `spent` for a `--one-shot`
-    one: a one-shot grant authorized the single write it names and
-    authorizes nothing further, which a snapshot of the workspace can say
-    (the file it authorized is present) even though it cannot count the
-    edits made to that file afterwards. That limit is the same one
-    `protected_unvouched` is reported under, and it is stated rather than
+    one. `spent` is an attribution, not a counter: it says the write this
+    grant names was attributed to it, and it is the whole of what a
+    `--one-shot` grant enforces here. A snapshot of the workspace observes
+    which files exist, not how many times each was written, so nothing here
+    can tell the write a one-shot grant authorized from a later edit to the
+    same file -- which is why the entry also carries the grant's own TTL
+    (`expires_at`, the outer bound on how long the attribution stands) and
+    why `_grant_details` says the limit in `details` instead of leaving
+    `spent` to imply a counter this check never kept. That limit is the same
+    one `protected_unvouched` is reported under, and it is stated rather than
     assumed.
     """
 
@@ -287,9 +312,16 @@ class AuthorizedWrite:
 class GrantAudit:
     """The write-grant ledger as this run consumed it (chainlink #114): where
     it is, whether it could be read, the issue the run named, every usable
-    record with its status (`active`, `expired`, `other-issue`,
-    `unverified-issuer`, `duplicate`, `no-issue-named`, `ledger-protected`),
-    and the lines that claim to be grants and are not usable.
+    record with its status (`active`, `expired`, `not-yet-issued`,
+    `other-issue`, `unverified-issuer`, `duplicate`, `no-issue-named`,
+    `ledger-protected`), and the lines that claim to be grants and are not
+    usable.
+
+    Every record's own audit metadata travels with it -- the TTL and the
+    issuer's `note` -- so the report answers "who authorized this, for what,
+    and when does it stop" without the consumer having to open the ledger
+    file. `note` is metadata here exactly as it is in the record: reported,
+    never read back as authority.
 
     Carried in full whether or not any grant authorized anything: a ledger
     nobody looked at is how an authorization surface goes stale unnoticed.
@@ -659,6 +691,21 @@ def _grant_details(audit: GrantAudit, authorized: list[AuthorizedWrite]) -> str:
             f"{len(authorized)} protected write(s) authorized by {len(grant_ids)} active write "
             f"grant(s) [{listed}{more}] for issue {audit.issue} (recorded in {audit.ledger})"
         )
+        # The one-shot residual, stated here rather than left to `spent`: a
+        # report that said only "spent" would read as a counter this check
+        # kept, and it keeps none -- a file walk sees which files exist, not
+        # how often each was written. Naming the limit in the same sentence as
+        # the attribution is the whole of the difference between an honest
+        # `spent` and an implied guarantee, and it is reported on every
+        # surface that carries `details`.
+        spent = [entry for entry in authorized if entry.status == "spent"]
+        if spent:
+            clauses.append(
+                f"{len(spent)} of those write(s) were authorized by a --one-shot grant, reported "
+                "spent: the write each grant names is attributed to it, and a workspace snapshot "
+                "counts no edits to that file afterwards, so the attribution stands until the "
+                "grant expires -- issue a further grant if the file needs more sanctioned writes"
+            )
     if audit.state == "unreadable":
         # The reason travels with the clause: "the ledger is unreadable" is a
         # condition to fix, and dropping the cause would leave the report
@@ -744,7 +791,15 @@ def _grant_audit(
                 "issuer": grant.issuer,
                 "issuer_kind": grant.issuer_kind,
                 "issued_at": grant.issued_at,
+                "ttl_seconds": grant.ttl_seconds,
                 "expires_at": grant.expires_at,
+                # The issuer's own justification, carried through to the audit
+                # view because it is recorded in the ledger and is the one
+                # field a reader of the report would otherwise have to open the
+                # file to see. Read as metadata only -- no prose field is ever
+                # consulted when deciding whether a grant authorizes a write,
+                # which is why it is also excluded from `grant_id`.
+                "note": grant.note,
                 "line": grant.line,
                 "status": status,
             }
@@ -760,10 +815,16 @@ def _grant_audit(
 
 
 def _authorized_write(grant: write_authorization.Grant, rel: str) -> AuthorizedWrite:
-    """The report entry for one protected write a grant covered. A one-shot
-    grant is `spent` the moment the file it authorized is present: it
-    authorized that single write and nothing further, which is the most a
-    snapshot can honestly say."""
+    """The report entry for one protected write a grant covered.
+
+    A one-shot grant's entry is `spent` rather than `active`: the write it
+    names is attributed to it. That is an attribution, not a consumed count --
+    a file walk cannot see how many times a file was written -- so the entry
+    keeps carrying the grant's expiry, and `_grant_details` states the limit
+    wherever a one-shot grant authorized something. The grant itself is
+    reported `active` in the ledger audit until it expires, because until
+    then it still covers the one path it names.
+    """
     return AuthorizedWrite(
         path=rel,
         grant_id=grant.grant_id,

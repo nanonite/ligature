@@ -37,6 +37,87 @@ PRECONDITION_RULE_SOURCES = {
 }
 
 
+class ScaffoldCrateConsistencyTest(unittest.TestCase):
+    """The facts #115 states about its own write surface, asserted against the
+    documents rather than against the code that also says them.
+
+    Each of these is a claim a reader could reasonably take the other way, and
+    which the product would still satisfy if the documents disagreed with each
+    other: that the verb needs an *existing* capability record (it does not
+    record one itself), that `src/lib.rs` needs none, that both files are pure
+    functions of the declared `crate_dir` (so no content flag exists), and that
+    the descriptor's own write-set predicates -- not a private copy -- decide
+    which targets are refusable. A consumer reading the contract, the skill and
+    the trust boundaries must be able to reconcile them without reading the
+    module.
+    """
+
+    SOURCES = {
+        "docs/cli-contract.md": ROOT / "docs" / "cli-contract.md",
+        "docs/mode-p-cli-flow.md": ROOT / "docs" / "mode-p-cli-flow.md",
+        "docs/ligature-skill.template.md": ROOT / "docs" / "ligature-skill.template.md",
+        "docs/trust-and-compatibility-boundaries.md": (
+            ROOT / "docs" / "trust-and-compatibility-boundaries.md"
+        ),
+    }
+
+    def _normalized(self, rel: str) -> str:
+        return " ".join(self.SOURCES[rel].read_text().split())
+
+    def test_every_document_that_names_the_verb_says_it_needs_an_existing_grant(self):
+        for rel in (
+            "docs/cli-contract.md",
+            "docs/mode-p-cli-flow.md",
+            "docs/trust-and-compatibility-boundaries.md",
+        ):
+            text = self._normalized(rel)
+            with self.subTest(document=rel):
+                self.assertIn("scaffold-crate", text)
+                # The protected write's authority is the recorded capability,
+                # not the verb's own say-so -- stated in each document that
+                # names it, so a reader cannot conclude the verb self-authorizes.
+                self.assertRegex(text, r"(requires an active|active issue-scoped|requires an `authorize-write` record)")
+
+    def test_every_document_that_names_the_verb_says_the_skeleton_needs_no_grant(self):
+        for rel in (
+            "docs/cli-contract.md",
+            "docs/mode-p-cli-flow.md",
+            "docs/ligature-skill.template.md",
+        ):
+            with self.subTest(document=rel):
+                self.assertRegex(
+                    self._normalized(rel),
+                    r"(needs no (capability record|grant)|requires no grant|needs none)",
+                )
+
+    def test_the_skill_template_does_not_tell_an_agent_to_run_the_verb_itself(self):
+        """The skill is agent-facing. It may say the verb exists and that a
+        re-run is idempotent; it must not read as the granted authority for the
+        protected write, which is `authorize-write`'s human checkpoint."""
+        text = self._normalized("docs/ligature-skill.template.md")
+        index = text.index("scaffold-crate")
+        passage = text[max(0, index - 900): index + 900]
+        self.assertIn("ask the human to run", passage)
+
+    def test_the_cli_contract_states_there_is_no_content_or_target_flag(self):
+        text = self._normalized("docs/cli-contract.md")
+        self.assertIn("There is no `--content`/`--manifest`/`--path` flag", text)
+        self.assertIn("pure functions of the descriptor's declared `crate_dir`", text)
+
+    def test_the_cli_contract_states_the_vet_is_reported_not_only_awaited(self):
+        """`doctor`'s verdict is recorded rather than enforced beyond its
+        descriptor gate -- the one documented reason a success does not imply a
+        clean installation, so it has to be in the contract rather than only in
+        the module's docstring."""
+        text = self._normalized("docs/cli-contract.md")
+        self.assertIn("recorded rather than enforced beyond its descriptor gate", text)
+
+    def test_the_trust_boundaries_row_says_the_authority_is_not_its_own(self):
+        text = self._normalized("docs/trust-and-compatibility-boundaries.md")
+        self.assertIn("`scaffold-crate` (#115) |", text)
+        self.assertIn("**None of its own.**", text)
+
+
 class CheckReadOnlyConsistencyTest(unittest.TestCase):
     """Round-1 defect: docs/cli-contract.md said `check` "orchestrates
     [extract-c-static/check-bridges/render-witness] internally as

@@ -104,6 +104,17 @@ progress.
    `authorize-write` yourself: it is a human checkpoint like `approve`, and
    it is the one command that can turn a `protected-write` finding
    non-blocking. Never hand-edit `ci/results/protected-writes.jsonl` either.
+   If the write you need is a **missing crate's `Cargo.toml`** — a port-mode
+   pilot whose declared crate does not exist yet, so nothing downstream can
+   run — ask the human to run `ligature scaffold-crate --issue <N> --crate
+   <name>` once the grant for that one path exists (#115). You may re-run it
+   (it is idempotent: a manifest already holding exactly the same bytes is
+   reported `unchanged` and nothing is written), and you may write
+   `<crate>/src/` yourself afterwards — that is where implementation belongs,
+   and it is inside `allowed_roots`. Do not hand-write the manifest, and do not
+   expect `scaffold-crate` to produce anything else: it emits exactly a
+   `Cargo.toml` and a `src/lib.rs`, derives both from the project descriptor,
+   and takes no content of any kind.
 6. **There is no supervisory start.** The agent drives the loop; the
    binary stays a passive oracle. `check` is read-only and never runs a
    writing operation on its own — it only recommends one through
@@ -141,7 +152,8 @@ progress.
 | `ligature status [--json] [--issue N]` | current project state (artifact lifecycles, obligations, clusters, findings, gate integrity, write-set conformance; `--issue N` scopes the write grants the write-set state honors, #114) |
 | `ligature check [--json] [next] [--issue N]` | read-only consolidated gate run + exactly one recommended next action; `--issue N` scopes the write grants its write-set finding honors, so all three read-only surfaces agree about the same run (#114) |
 | `ligature write-set-check [--json] [--issue N]` | read-only write-set conformance: files outside `allowed_roots` (`out-of-set`) and files written into `protected_roots` that no declaration vouches for (`protected-write`), both blocking; the protected surface reported per declared pattern. `--issue N` also consumes the write grants recorded for that issue (#114) |
-| `ligature authorize-write --issue N --path P --op K --issuer <name>` | record one issue-scoped capability authorizing a single sanctioned write into a declared protected root, in `ci/results/protected-writes.jsonl` — the sanctioned-route exception to rule 5 (#114). A human checkpoint in the `human` lane (never run it yourself); the `supervisor` lane needs the identity declared in the descriptor's `write_set.authorized_supervisors`. A grant cannot widen `allowed_roots`, authorize another operation, outlive its TTL, or cover another issue or path |
+| `ligature authorize-write --issue N --path P --op K --issuer <name>` | record one issue-scoped capability authorizing a single sanctioned write into a declared protected root, in `ci/results/protected-writes.jsonl` — the sanctioned-route exception to rule 5 (#114). A human checkpoint in the `human` lane (never run it yourself); the `supervisor` lane needs the identity declared in the descriptor's `write_set.authorized_supervisors`. A grant cannot widen `allowed_roots`, authorize another operation, outlive its TTL (nor begin before it — a record whose window has not opened is reported `not-yet-issued` and authorizes nothing), or cover another issue or path |
+| `ligature scaffold-crate --issue N --crate <name>` | write a missing crate's `Cargo.toml` and canonical `src/lib.rs`, deterministically and from the project descriptor (#115) — the generator the capability record feeds. Mode P only, and only for a crate the descriptor's `crates[]` declares. Writes exactly those two files: the manifest needs an active grant for that one path; the skeleton is inside `allowed_roots` and needs none, so a missing crate bootstraps without anyone holding raw `Cargo.toml` scope. Idempotent (identical bytes are `unchanged`), never overwrites a manifest with different bytes or an existing `src/lib.rs`, takes no content of any kind, and writes no implementation or normative spec content — that belongs to a work package (#115) |
 | `ligature validate <kind> <target>` | deterministic per-artifact check (G1a/G1b/G2+) |
 | `ligature gate <gate-id> [args...]` | deterministic cross-artifact gate |
 | `ligature draft <stage> <template> <target>` | Stage 0/3 one-shot LLM draft (advisory; human review required). Run `ligature draft --help` for the complete template list — every shipped template, what it drafts, and which command promotes it — rather than guessing a name |

@@ -241,6 +241,19 @@ class GrantFixture(unittest.TestCase):
             **overrides,
         )
 
+    def _future_record(self, **overrides) -> dict:
+        """A well-formed record whose window has not opened yet: structurally
+        valid and self-consistent (`expires_at == issued_at + ttl_seconds`,
+        id recomputed), so the only thing standing between it and an
+        authorization is the instant it names -- which is exactly the state
+        `authorize-write` refuses to produce and the reader must report."""
+        issued = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
+        return self._valid_record(
+            issued_at=issued.isoformat(),
+            expires_at=(issued + timedelta(seconds=3600)).isoformat(),
+            **overrides,
+        )
+
 
 class AuthorizedWriteIsCleanTest(GrantFixture):
     """The positive case: a protected write the issue is authorized to make
@@ -996,6 +1009,186 @@ class SupervisorWhitelistTest(GrantFixture):
         self.assertTrue(list(validator.iter_errors(document)))
 
 
+class OneShotLifecycleTest(GrantFixture):
+    """What a `--one-shot` grant does, what it cannot do, and the two ends of
+    the window it lives in -- the integration half of chainlink #114.
+
+    The distinction this class pins is the one a reader of the report cannot
+    check for himself: `spent` is an *attribution* -- the write a grant names
+    was attributed to it -- and not a consumed count. A workspace snapshot
+    sees which files exist, not how often each was written, so the check
+    cannot tell that write from a later edit to the same file. It says so
+    instead of letting the word imply a counter it never kept, and what does
+    bound the attribution is the grant's TTL.
+
+    The window's other end is closed too. `expires_at == issued_at +
+    ttl_seconds` alone would call a future-dated line unexpired, so a grant
+    nobody has issued yet would authorize a write; both halves hold -- the
+    producer refuses to record such a grant, and the consumer reports one it
+    reads as `not-yet-issued` and honors as nothing.
+    """
+
+    def one_shot_grant(self, path: str = "ci/manifest/WP-114.json", *extra: str) -> str:
+        return self.granted(
+            "--issue", "114", "--path", path, "--op", "write",
+            "--issuer", "operator", "--one-shot", *extra,
+        )
+
+    def test_a_one_shot_write_is_clean_reported_spent_and_states_its_limit(self):
+        self.init_workspace()
+        self.write("ci/manifest/WP-114.json", "{}")
+        grant_id = self.one_shot_grant()
+        code, doc = self.write_set_check("--issue", "114")
+        self.assertEqual(code, 0)
+        entry = doc["write_set"]["authorized_writes"][0]
+        self.assertEqual((entry["grant_id"], entry["status"], entry["one_shot"]),
+                         (grant_id, "spent", True))
+        # the entry carries the bound that DOES apply, so a consumer can act on
+        # it without parsing prose
+        self.assertEqual(entry["expires_at"], self.ledger_records()[0]["expires_at"])
+        details = doc["write_set"]["details"]
+        self.assertIn("one-shot", details)
+        self.assertIn("counts no edits", details)
+        self.assertIn("until the grant expires", details)
+        # and the same sentence is in the human-readable report, since the text
+        # surface prints the same `details`
+        _, out, _ = self.run_cli("write-set-check", "--issue", "114")
+        self.assertIn("counts no edits", out)
+
+    def test_a_later_edit_to_the_same_file_is_the_stated_residual(self):
+        """Pinned deliberately, because it is the limit rather than an
+        oversight: the second write is still attributed to the one-shot grant,
+        the report still calls the grant `spent`, and the report still states
+        that it counts no edits. A future change to this behavior has to
+        change what the report says in the same commit -- which is the point of
+        stating it where the verdict is observed."""
+        self.init_workspace()
+        self.write("ci/manifest/WP-114.json", "{}")
+        self.one_shot_grant()
+        self.assertEqual(self.write_set_check("--issue", "114")[0], 0)
+        self.write("ci/manifest/WP-114.json", '{"edited": true}')
+        code, doc = self.write_set_check("--issue", "114")
+        self.assertEqual(code, 0)
+        self.assertEqual(doc["write_set"]["authorized_writes"][0]["status"], "spent")
+        self.assertIn("counts no edits", doc["write_set"]["details"])
+        # the second file is still refused: one exact file, not its directory
+        self.write("ci/manifest/WP-114b.json", "{}")
+        self.assertEqual(self.write_set_check("--issue", "114")[0], 1)
+
+    def test_a_one_shot_grant_cannot_be_re_issued_as_a_second_write(self):
+        """Replay, from the writer's side. The id is a hash of the binding, so
+        an identical re-issue -- same request at the same instant -- is refused
+        and records nothing: a retry of the issuing command is idempotent
+        rather than a way to stack one-shot grants. Both calls name the same
+        `--issued-at`, so the case does not depend on which second the suite
+        happens to run in."""
+        self.init_workspace()
+        self.write("ci/manifest/WP-114.json", "{}")
+        issued = (datetime.now(timezone.utc) - timedelta(seconds=60)).replace(
+            microsecond=0
+        ).isoformat()
+        self.one_shot_grant("ci/manifest/WP-114.json", "--issued-at", issued)
+        code, _, err = self.authorize(
+            "--issue", "114", "--path", "ci/manifest/WP-114.json", "--op", "write",
+            "--issuer", "operator", "--one-shot", "--issued-at", issued,
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("is a replay", err)
+        self.assertEqual(len(self.ledger_records()), 1)
+
+    def test_a_repeated_one_shot_line_is_a_duplicate_and_honors_one_path(self):
+        """Replay, from the reader's side: append-only, so a repeated id is
+        `duplicate` with the last line live -- and the pair authorizes one
+        write at the path it names, never two."""
+        self.init_workspace()
+        self.write("ci/manifest/WP-114.json", "{}")
+        record = self._unexpired_record(path="ci/manifest/WP-114.json", one_shot=True)
+        self.append_ledger(record)
+        self.append_ledger(record)
+        code, doc = self.write_set_check("--issue", "114")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [e["status"] for e in doc["write_set"]["grants"]["entries"]], ["duplicate", "active"]
+        )
+        self.assertEqual(
+            [e["path"] for e in doc["write_set"]["authorized_writes"]], ["ci/manifest/WP-114.json"]
+        )
+        # two copies of the record are still one authorization, at one path
+        self.write("ci/manifest/WP-114b.json", "{}")
+        code, doc = self.write_set_check("--issue", "114")
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [v["path"] for v in doc["write_set"]["violations"]], ["ci/manifest/WP-114b.json"]
+        )
+
+    def test_an_expired_one_shot_grant_authorizes_nothing(self):
+        self.init_workspace()
+        self.write("ci/manifest/WP-114.json", "{}")
+        self.append_ledger(self._valid_record(path="ci/manifest/WP-114.json", one_shot=True))
+        code, doc = self.write_set_check("--issue", "114")
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [v["path"] for v in doc["write_set"]["violations"]], ["ci/manifest/WP-114.json"]
+        )
+        self.assertEqual(
+            [e["status"] for e in doc["write_set"]["grants"]["entries"]],
+            [write_authorization.STATUS_EXPIRED],
+        )
+
+    def test_a_window_that_has_not_opened_yet_authorizes_nothing(self):
+        self.init_workspace()
+        self.write("ci/manifest/WP-114.json", "{}")
+        self.append_ledger(self._future_record(path="ci/manifest/WP-114.json"))
+        code, doc = self.write_set_check("--issue", "114")
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [v["path"] for v in doc["write_set"]["violations"]], ["ci/manifest/WP-114.json"]
+        )
+        self.assertEqual(
+            [e["status"] for e in doc["write_set"]["grants"]["entries"]],
+            [write_authorization.STATUS_NOT_YET_ISSUED],
+        )
+        # reported, not dropped: the record is in the audit with the status
+        # that says why it did not authorize
+        self.assertEqual(len(doc["write_set"]["grants"]["entries"]), 1)
+        self.assertEqual(doc["write_set"]["grants"]["rejected"], [])
+        self.assertEqual(doc["write_set"]["authorized_writes"], [])
+
+    def test_a_future_issued_at_is_refused_by_the_producer_and_writes_nothing(self):
+        self.init_workspace()
+        future = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
+        code, _, err = self.authorize(
+            "--issue", "114", "--path", "ci/manifest/WP-114.json", "--op", "write",
+            "--issuer", "operator", "--issued-at", future.isoformat(),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("is in the future", err)
+        self.assertFalse(self.ledger.exists(), "a refusal must not create the ledger")
+
+    def test_the_window_verdicts_are_deterministic_across_repeated_runs(self):
+        """No sleeping, no clock race: a grant inside its window, one past it
+        and one short of it all reach the same verdict on a re-run, and the
+        report is byte-identical, because expiry is arithmetic against the
+        run's own clock rather than an observation over time."""
+        self.init_workspace()
+        self.write("ci/manifest/WP-114.json", "{}")
+        self.write("ci/manifest/WP-115.json", "{}")
+        self.append_ledger(self._unexpired_record(path="ci/manifest/WP-114.json"))
+        self.append_ledger(self._valid_record(path="ci/manifest/WP-115.json"))
+        self.append_ledger(self._future_record(path="ci/manifest/WP-116.json"))
+        first = None
+        for _ in range(3):
+            code, out, _ = self.run_cli("write-set-check", "--json", "--issue", "114")
+            self.assertEqual(code, 1)
+            if first is None:
+                first = out
+            self.assertEqual(out, first)
+        self.assertEqual(
+            [e["status"] for e in json.loads(first)["write_set"]["grants"]["entries"]],
+            ["active", "expired", "not-yet-issued"],
+        )
+
+
 class GrantRecordTest(GrantFixture):
     """The record itself: the audit line, its versioned shape, and the help
     text that documents the rules it enforces."""
@@ -1093,6 +1286,37 @@ class GrantRecordTest(GrantFixture):
         code, out, _ = self.run_cli("write-set-check", "--issue", "114")
         self.assertIn(f"grant ledger: readable ({LEDGER_REL})", out)
 
+    def test_the_audit_view_carries_the_records_own_metadata(self):
+        """The issuer's note and the TTL reach the report, so "who authorized
+        this, for what, and until when" is answerable without opening the
+        ledger file -- on the machine-readable surface and the text one. The
+        note is still metadata only: it authorizes nothing, and it cannot make
+        a grant invalid either (that is the `grant_id` half, pinned above)."""
+        self.init_workspace()
+        self.write("ci/manifest/WP-114.json", "{}")
+        self.granted(
+            "--issue", "114", "--path", "ci/manifest/WP-114.json", "--op", "write",
+            "--issuer", "operator", "--ttl", "120",
+            "--note", "sanctioned for the 114 repro",
+        )
+        _, doc = self.write_set_check("--issue", "114")
+        entry = doc["write_set"]["grants"]["entries"][0]
+        self.assertEqual(entry["ttl_seconds"], 120)
+        self.assertEqual(entry["note"], "sanctioned for the 114 repro")
+        _, out, _ = self.run_cli("write-set-check", "--issue", "114")
+        self.assertIn("ttl 120s", out)
+        self.assertIn("-- sanctioned for the 114 repro", out)
+        # a grant recorded without one reports null rather than inventing text
+        self.granted(
+            "--issue", "114", "--path", "ci/manifest/WP-115.json", "--op", "write",
+            "--issuer", "operator",
+        )
+        _, doc = self.write_set_check("--issue", "114")
+        self.assertEqual(
+            [e["note"] for e in doc["write_set"]["grants"]["entries"]],
+            ["sanctioned for the 114 repro", None],
+        )
+
     def test_the_text_output_names_every_binding(self):
         self.init_workspace()
         code, out, _ = self.run_cli(
@@ -1113,6 +1337,27 @@ class GrantRecordTest(GrantFixture):
             with self.subTest(expected=expected):
                 self.assertIn(expected, out)
 
+    def test_the_text_output_states_what_a_one_shot_grant_does_not_bound(self):
+        """Said at the moment the grant is recorded, which is the only moment a
+        reader can act on it -- and with the actionable half, because the limit
+        is a fact an operator needs before issuing the grant rather than after
+        the check reports it."""
+        self.init_workspace()
+        code, out, _ = self.run_cli(
+            "authorize-write", "--issue", "114", "--path", "ci/manifest/WP-114.json",
+            "--op", "write", "--issuer", "operator", "--one-shot",
+        )
+        self.assertEqual(code, 0)
+        for expected in (
+            "one_shot: yes",
+            "attribution and not a count",
+            "counts no edits",
+            "what bounds this grant is its TTL",
+            "Issue a further grant",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, out)
+
     def test_help_documents_the_rules_the_command_enforces(self):
         parser = pipeline.build_parser()
         subparsers = [
@@ -1127,6 +1372,8 @@ class GrantRecordTest(GrantFixture):
             "cannot widen allowed_roots",
             "authorized_supervisors",
             "outlive its TTL",
+            "a timestamp in the future is refused",
+            "that is an attribution, not a counter",
             "no prose",
             "bounded pattern",
             "only operation write-set-check consumes",
@@ -1276,11 +1523,11 @@ class GrantAuditReportTest(GrantFixture):
         """`grants[].entries[].status` is a machine-readable field, so its
         vocabulary is a contract rather than whatever string a given branch
         happened to return. One workspace is walked through every rung --
-        active, expired, other-issue, no-issue-named, duplicate,
-        unverified-issuer, ledger-protected -- and the set it produced is
-        asserted equal to the declared one: a rung nobody can reach is a
-        promise the vocabulary cannot keep, and a rung outside it is a value
-        no consumer was told to expect."""
+        active, expired, not-yet-issued, other-issue, no-issue-named,
+        duplicate, unverified-issuer, ledger-protected -- and the set it
+        produced is asserted equal to the declared one: a rung nobody can
+        reach is a promise the vocabulary cannot keep, and a rung outside it
+        is a value no consumer was told to expect."""
         self.init_workspace()
 
         def statuses(*args) -> set[str]:
@@ -1288,14 +1535,20 @@ class GrantAuditReportTest(GrantFixture):
             return {e["status"] for e in doc["write_set"]["grants"]["entries"]}
 
         seen: set[str] = set()
-        self.append_ledger(self._unexpired_record(path="ci/manifest/WP-114.json"))
+        duplicate = self._unexpired_record(path="ci/manifest/WP-114.json")
+        self.append_ledger(duplicate)
         seen |= statuses("--issue", "114")                      # active
         seen |= statuses("--issue", "113")                      # other-issue
         seen |= statuses()                                     # no-issue-named
-        self.append_ledger(self._unexpired_record(path="ci/manifest/WP-114.json"))
+        # Reuse the exact binding: fresh records receive a new `issued_at`
+        # and grant id, so appending a newly rendered record would not be a
+        # duplicate.
+        self.append_ledger(duplicate)
         seen |= statuses("--issue", "114")                      # duplicate
         self.append_ledger(self._valid_record(path="ci/manifest/WP-115.json"))
         seen |= statuses("--issue", "114")                      # expired
+        self.append_ledger(self._future_record(path="ci/manifest/WP-117.json"))
+        seen |= statuses("--issue", "114")                      # not-yet-issued
         self.declare_supervisor("declared-bot")
         self.append_ledger(
             self._unexpired_record(

@@ -35,7 +35,7 @@
     "grant_id": {
       "type": "string",
       "pattern": "^GW-[0-9a-f]{12}$",
-      "description": "`GW-` plus the first 12 hex digits of the sha256 over the canonical JSON of the fields the grant's authority is OF -- issue, path, path_kind, op, one_shot, issuer, issuer_kind, issued_at, ttl_seconds (never `note` or `logged_at`, which authorize nothing and must not be able to invalidate a real record either). Recomputed on read: a record edited in place to authorize a different path, issue, operation, issuer or expiry under a preserved id is rejected, which is what makes the ledger an audit trail rather than an editable permission file. Also the anti-replay key -- `authorize-write` refuses to record an id the ledger already holds, so re-running the issuing command with the same `--issued-at` is idempotent."
+      "description": "`GW-` plus the first 12 hex digits of the sha256 over the canonical JSON of the fields the grant's authority is OF -- issue, path, path_kind, op, one_shot, issuer, issuer_kind, issued_at, ttl_seconds (never `note`, which authorizes nothing and must not be able to invalidate a real record either, and there is no separate append timestamp to include: `issued_at` says when the grant was issued, and a second clock reading would be one more value a hand-written line could disagree with for no gain). Recomputed on read: a record edited in place to authorize a different path, issue, operation, issuer or expiry under a preserved id is rejected, which is what makes the ledger an audit trail rather than an editable permission file. Also the anti-replay key -- `authorize-write` refuses to record an id the ledger already holds, so re-running the issuing command with the same `--issued-at` is idempotent."
     },
     "issue": {
       "type": "integer",
@@ -60,7 +60,7 @@
     },
     "one_shot": {
       "type": "boolean",
-      "description": "`true` binds a single exact file write rather than a standing grant for the TTL, and is refused on `path_kind: pattern` (a pattern authorizes as many writes as its TTL allows). Reported as `spent` once the file it authorized is present: it authorized that one write and nothing further, which is the most a workspace snapshot can honestly say -- it cannot count edits to that file afterwards, and says so rather than implying it can."
+      "description": "`true` binds one exact file rather than a standing grant for the TTL, and is refused on `path_kind: pattern` (a pattern authorizes as many writes as its TTL allows). `write-set-check` reports the write it authorized with status `spent` in `authorized_writes[]` instead of `active` (the grant itself stays `active` in the report's ledger audit until it expires, because until then it still covers the one path it names): an attribution, NOT a consumed count. A workspace snapshot observes which files exist, not how many times each was written, so the check cannot tell the write a one-shot grant authorized from a later edit to the same file -- it says so in `details` rather than letting `spent` imply a counter it never kept, and the grant's own `expires_at` is the bound on how long the attribution stands. A file needing further sanctioned writes needs a further grant: each is its own append-only record."
     },
     "issuer": {
       "type": "string",
@@ -75,7 +75,7 @@
     "issued_at": {
       "type": "string",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\+\\d{2}:\\d{2}|Z)$",
-      "description": "ISO-8601 with an explicit UTC offset; a naive timestamp is refused, because 'expired' is not decidable against a clock with no offset. `--issued-at` sets it explicitly so a re-run of the issuing command produces the same `grant_id` (idempotent) and so an expiring grant is reproducible without waiting."
+      "description": "ISO-8601 with an explicit UTC offset; a naive timestamp is refused, because 'expired' is not decidable against a clock with no offset. `--issued-at` sets it explicitly so a re-run of the issuing command produces the same `grant_id` (idempotent) and so an expiring grant is reproducible without waiting; a timestamp in the future is refused, because a grant cannot be issued for a time that has not happened. The CONSUMER decides the other end of the window against its own clock: a record whose `issued_at` is still ahead of it is reported `not-yet-issued` and authorizes nothing, so a hand-appended future-dated line is not 'unexpired' merely because it satisfies `expires_at == issued_at + ttl_seconds`."
     },
     "ttl_seconds": {
       "type": "integer",
@@ -86,7 +86,7 @@
     "expires_at": {
       "type": "string",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\+\\d{2}:\\d{2}|Z)$",
-      "description": "`issued_at + ttl_seconds`, recomputed on read together with `ttl_seconds`'s own bounds: a record claiming more time than it was granted is rejected ('a grant cannot outlive its TTL'), as is one naming a TTL no issuer could have been granted, and an expired one authorizes nothing while being reported as `expired` rather than dropped. `write-set-check` treats `now >= expires_at` as expired."
+      "description": "`issued_at + ttl_seconds`, recomputed on read together with `ttl_seconds`'s own bounds: a record claiming more time than it was granted is rejected ('a grant cannot outlive its TTL'), as is one naming a TTL no issuer could have been granted, and an expired one authorizes nothing while being reported as `expired` rather than dropped. `write-set-check` treats `now >= expires_at` as expired (the boundary is inclusive, decided against the run's own clock -- no sleeping and no clock race, which is what lets a re-run of the same command report the same verdict for the same bytes)."
     },
     "note": {
       "type": ["string", "null"],

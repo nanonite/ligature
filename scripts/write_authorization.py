@@ -40,7 +40,11 @@ to a bridge's `callee_shape`):
   * it cannot outlive its TTL -- `expires_at` is `issued_at + ttl_seconds`,
     `ttl_seconds` is bounded at both ends (positive, and no more than
     `MAX_TTL_SECONDS`), the reader recomputes both, and an expired record
-    authorizes nothing (it is reported as `expired` rather than dropped);
+    authorizes nothing (it is reported as `expired` rather than dropped); nor
+    can it start early -- a record whose window has not opened yet (`issued_at`
+    after the clock the checking run decides against) is reported
+    `not-yet-issued` and authorizes nothing, and `authorize-write` refuses to
+    record one at all;
   * it cannot authorize another issue or path -- the issue must equal the
     one the checking run names, and the path is bound exactly (or to an
     explicitly bounded pattern);
@@ -151,6 +155,16 @@ PATH_KIND_PATTERN = "pattern"
 #:   * `no-issue-named` -- the run named no `--issue`, and a grant authorizes
 #:     its own issue only.
 #:   * `other-issue` -- a record issued for a different issue.
+#:   * `not-yet-issued` -- `issued_at` is after the clock this run decides
+#:     against, so the window a grant authorizes has not opened yet. The
+#:     other end of expiry, and reported rather than assumed away: without it
+#:     a future-dated line is "unexpired" by the only relation the reader
+#:     recomputes (`now < expires_at`), and a grant nobody has issued yet
+#:     would authorize a write. `authorize-write` refuses to record one (a
+#:     grant cannot be issued for a time that has not happened) and the reader
+#:     holds the same rule, because the half that has to hold is the half that
+#:     reads a line somebody else appended. Ahead of `expired` because a
+#:     record in this state is not yet, rather than no longer, in its window.
 #:   * `expired` -- `now >= expires_at`, recomputed from the binding.
 #:   * `unverified-issuer` -- a supervisor the descriptor does not declare.
 #:   * `active` -- authorizes.
@@ -158,6 +172,7 @@ STATUS_LEDGER_PROTECTED = "ledger-protected"
 STATUS_DUPLICATE = "duplicate"
 STATUS_NO_ISSUE = "no-issue-named"
 STATUS_OTHER_ISSUE = "other-issue"
+STATUS_NOT_YET_ISSUED = "not-yet-issued"
 STATUS_EXPIRED = "expired"
 STATUS_UNVERIFIED_ISSUER = "unverified-issuer"
 STATUS_ACTIVE = "active"
@@ -166,6 +181,7 @@ GRANT_STATUSES = (
     STATUS_DUPLICATE,
     STATUS_NO_ISSUE,
     STATUS_OTHER_ISSUE,
+    STATUS_NOT_YET_ISSUED,
     STATUS_EXPIRED,
     STATUS_UNVERIFIED_ISSUER,
     STATUS_ACTIVE,
@@ -181,9 +197,12 @@ _GRANT_ID_HEX_DIGITS = 12
 
 #: The fields a grant's authority is *of*. Every one is recomputed on read
 #: (types, vocabulary, the expiry relation, and the id), so none of them is
-#: stored-and-trusted. `note` and `logged_at` are audit metadata and are
-#: deliberately absent from both this list and the id: prose that never
-#: authorizes anything must not be able to invalidate a real record either.
+#: stored-and-trusted. `note` is the one field outside this list, and it is
+#: audit metadata only: prose that never authorizes anything must not be able
+#: to invalidate a real record either. The record carries nothing else -- no
+#: `logged_at`, no separate append timestamp -- because `issued_at` already
+#: says when the grant was issued, and a second clock reading would be one
+#: more value a hand-written line could disagree with for no gain.
 _BINDING_FIELDS = (
     "issue",
     "path",
@@ -307,8 +326,9 @@ def grant_id_for(binding: dict) -> str:
     of, so a record cannot be edited into a different authorization while
     keeping its id (the reader recomputes this and rejects a disagreement).
 
-    Deliberately excludes `note` and `logged_at`: audit metadata that
-    authorizes nothing should not be able to change an id either.
+    Deliberately excludes `note`, the only field outside the binding:
+    audit metadata that authorizes nothing should not be able to change an id
+    either.
     """
     canonical = json.dumps(
         {field: binding[field] for field in _BINDING_FIELDS},
@@ -532,8 +552,9 @@ class GrantLedger:
     # ledger that sits inside a declared protected root is not an authorization
     # at all whatever else is true of it, a replayed entry is a duplicate
     # whatever else is true of it, an entry for another issue is not this run's
-    # business, an expired entry is expired whether or not it names this issue,
-    # and an unverified issuer is last because it is the property only the
+    # business, an entry whose window has not opened yet is not authority yet,
+    # an expired entry is expired whether or not it names this issue, and an
+    # unverified issuer is last because it is the property only the
     # descriptor's whitelist can settle.
     @staticmethod
     def _status(
@@ -552,6 +573,9 @@ class GrantLedger:
             return STATUS_NO_ISSUE
         if grant.issue != issue:
             return STATUS_OTHER_ISSUE
+        issued = _parse_timestamp(grant.issued_at)
+        if issued is not None and now < issued:
+            return STATUS_NOT_YET_ISSUED
         expires = _parse_timestamp(grant.expires_at)
         if expires is not None and now >= expires:
             return STATUS_EXPIRED
@@ -769,6 +793,10 @@ def authorize_write(
     * `ttl_seconds` is a positive integer no larger than
       `MAX_TTL_SECONDS` -- a grant is never standing by default and never
       standing for longer than a day on request;
+    * an explicit `issued_at` must not be in the future -- the window a grant
+      authorizes has to have opened before the record means anything, and the
+      reader reports one that has not as `not-yet-issued` rather than
+      honoring it;
     * the ledger must not itself sit inside a declared protected root;
     * an identical grant (`grant_id` is a hash of the binding, so an exact
       re-run with the same `--issued-at` produces the same id) must not
@@ -879,8 +907,9 @@ def authorize_write(
             "record, whoever appended its lines"
         )
 
+    now = datetime.now(timezone.utc)
     if issued_at is None:
-        moment = datetime.now(timezone.utc)
+        moment = now
     else:
         parsed = _parse_timestamp(issued_at)
         if parsed is None:
@@ -889,6 +918,19 @@ def authorize_write(
                 "(e.g. 2026-10-03T12:00:00+00:00)"
             )
         moment = parsed.astimezone(timezone.utc)
+        # `--issued-at` exists so a re-run is idempotent and an expiring grant
+        # is reproducible without waiting; a timestamp in the future serves
+        # neither, and would record a window that has not opened yet -- which
+        # the reader reports as `not-yet-issued` and honors as nothing, because
+        # a grant nobody has issued yet cannot authorize a write. One clock
+        # reading, taken once and used for both halves of that decision, so
+        # the refusal cannot disagree with the status it exists to prevent.
+        if moment > now:
+            raise WriteAuthorizationError(
+                f"--issued-at {issued_at!r} is in the future (now {now.replace(microsecond=0).isoformat()}): "
+                "a grant cannot be issued for a time that has not happened, and a window that has not "
+                "opened yet authorizes nothing. Re-run without --issued-at to record it now"
+            )
     issued_text = moment.replace(microsecond=0).isoformat()
     expires_text = (moment + timedelta(seconds=ttl_seconds)).replace(microsecond=0).isoformat()
 

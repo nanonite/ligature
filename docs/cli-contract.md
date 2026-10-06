@@ -28,6 +28,7 @@ ligature status [--json]                     # #56 -- project-state query
 ligature check [--json] [next]               # #56 -- consolidated gate run + next action
 ligature write-set-check [--json] [--issue N]  # #77, #103, #114 -- read-only write-set conformance
 ligature authorize-write --issue N --path P --op K --issuer <name>  # #114 -- record one issue-scoped capability for a sanctioned protected-root write
+ligature scaffold-crate --issue N --crate <name>  # #115 -- deterministic Cargo.toml + canonical src skeleton for a missing declared crate of a port-mode project
 ligature accept-policy --reviewer <name> [--version <name>@<major>.<minor>]  # #78, #113 -- record a reviewed governance change
 ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
 ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
@@ -63,8 +64,22 @@ promote without it; `write-set-check` (#77/#103) and `authorize-write`
 (#114) are the write-set pair — one read-only conformance report, one
 record of the capability that report consumes — and `authorize-write`
 exists because #103's enforcement left a *sanctioned* protected-root write
-with no route out (§8). None of them is a supervisory verb, and none
-changed the two-level grammar.
+with no route out (§8). `scaffold-crate` (#115) is the generator that
+record then feeds: a port-mode pilot whose declared crate does not exist
+has no manifest, so nothing downstream can run, and the only supported
+bootstrap was a human hand-writing a protected-root file. None of them is
+a supervisory verb, and none changed the two-level grammar.
+
+`scaffold-crate` is a top-level verb rather than a flag on `authorize-write`
+because the two own different halves of one operation and must not be
+fusable: `authorize-write` decides *whether* a protected write is authorized
+and records that fact; `scaffold-crate` writes the bytes and verifies them
+against the record. Folding the generator into the issuer would put the
+content of a crate manifest on the same command as the human checkpoint that
+authorizes writing it, which is the arrangement #114 was opened to avoid.
+It is also the reason the verb carries no `--content` flag: the manifest is a
+pure function of the descriptor, so there is nothing for a caller to supply
+and nothing for a checkpoint to police (§8).
 
 `report` is **not** uniformly read-only — see §6's own write column. This
 was wrongly stated as a blanket "read-only" property in an earlier
@@ -798,9 +813,9 @@ write, appended to `ci/results/protected-writes.jsonl`, which
 | `--issue N` | the issue this grant is scoped to (positive integer, required) |
 | `--path P` | the exact workspace-relative path, or an explicitly bounded pattern |
 | `--op K` | `write` (create or replace the content -- the only operation the check consumes) or `delete` (recorded for the audit trail; a file's absence is not observable here) |
-| `--ttl S` / `--one-shot` | `expires_at = issued_at + S` (default 900s, ceiling 86400s); `--one-shot` binds one exact file instead of a standing grant |
+| `--ttl S` / `--one-shot` | `expires_at = issued_at + S` (default 900s, ceiling 86400s); `--one-shot` binds one exact file instead of a standing grant, and is reported `spent` — an attribution, not a consumed count (see below) |
 | `--issuer NAME` / `--issuer-kind human\|supervisor` | the named issuer, and which lane it issued in |
-| `--note` / `--issued-at` | audit metadata only, and the timestamp the expiry is computed from |
+| `--note` / `--issued-at` | audit metadata only, and the timestamp the expiry is computed from (a timestamp in the future is refused: a grant cannot be issued for a time that has not happened) |
 
 What a grant cannot do, each of them recomputed on read rather than trusted
 from the record's own field -- the same discipline #112 applied to a
@@ -819,7 +834,15 @@ bridge's `callee_shape`:
   (`1 <= ttl_seconds <= 86400`), so a hand-written line naming a year of
   authority with a self-consistent `expires_at` is rejected as well as a
   hand-edited one; an expired record authorizes nothing (it is reported as
-  `expired`, not dropped).
+  `expired`, not dropped). The other end of the window is closed too: a
+  record whose `issued_at` is still ahead of the clock the checking run
+  decides against is reported `not-yet-issued` and authorizes nothing — the
+  only relation the reader recomputes (`now < expires_at`) would otherwise
+  call a future-dated line unexpired — and `authorize-write` refuses to
+  record one in the first place. Both boundaries are inclusive and both are
+  decided by arithmetic against the run's own clock, so expiry and
+  non-issue are deterministic: the same command over the same bytes reports
+  the same verdict, with nothing to sleep for and no clock race.
 * **not cover another issue or path.** A grant authorizes its own issue
   only, which is why `write-set-check`, `status` and `check` all take
   `--issue N` and all honor the same records; with no `--issue`, no grant is
@@ -847,14 +870,35 @@ and it cannot invalidate a real record either.
 **Reported, not excused.** A protected write an active grant covered is
 clean *and* leaves `authorized_writes[]` in `write-set-check --json` with its
 grant id, issue, operation, issuer, expiry and status (`active`, or `spent`
-for a one-shot grant whose file is present), counts under its pattern's
+for a `--one-shot` grant), counts under its pattern's
 `protected_surface[].authorized`, and is named in `details`. The ledger
 itself is carried in `grants[]` with every record's status
-(`active`/`expired`/`other-issue`/`unverified-issuer`/`duplicate`/
-`no-issue-named`/`ledger-protected`) and every line that claims to be a grant
-and is not usable with the reason -- including when the ledger cannot be read
-at all, which yields no grant rather than an unproven one, and names the
-reason in `grants.error` rather than only the word `unreadable`.
+(`active`/`expired`/`not-yet-issued`/`other-issue`/`unverified-issuer`/
+`duplicate`/`no-issue-named`/`ledger-protected`) and every line that claims
+to be a grant and is not usable with the reason -- including when the ledger
+cannot be read at all, which yields no grant rather than an unproven one,
+and names the reason in `grants.error` rather than only the word
+`unreadable`.
+
+**What `spent` is, and what it is not.** A `--one-shot` grant binds one
+exact file (never a pattern), and the write it authorizes is reported
+`spent` rather than `active` in `authorized_writes[]`. The *grant* stays
+`active` in `grants[].entries[]` until it expires, because until then it
+still covers the one path it names -- `spent` is about the write, not about
+the grant. That attribution is the whole of what a one-shot grant enforces.
+A workspace snapshot observes which files exist, not how many times each was
+written, so `write-set-check` cannot tell the write a one-shot grant
+authorized from a later edit to the same file -- and it says so, in
+`details`, on every surface that carries it, rather than letting the word
+`spent` imply a counter it never kept. The bound that does apply is the
+grant's own TTL: the attribution stands until the grant expires, which is
+why a one-shot entry carries its `expires_at` like any other and why a file
+needing further sanctioned writes needs a further grant (each its own
+append-only record). This is the same kind of residual `protected_unvouched`
+is reported under, and it is a deliberate limit rather than an oversight:
+enforcing a one-shot *count* would mean writing the observation down, and
+`check`'s machine-readable `mutated_workspace: const false` guarantee
+(`schemas/consolidated-check.schema.json`) is not available to spend on it.
 
 **A trail inside a protected root is not a capability record.** A declared
 `protected_roots` pattern covering `ci/results/` is a workspace
@@ -886,12 +930,79 @@ every append to its own capability trail is a boundary breach.
 | `write-set-check` | an active grant for that issue authorizes its own path/op | the pre-#114 verdict; `details` says no grant was consulted |
 | `status --json` / `check --json` | the same write-set state, through the same call | the same |
 | `authorize-write` | records the grant, exit 0 | records nothing, exit 2, one line naming the refused condition |
+| `scaffold-crate` | consumes the record covering this manifest and writes it | writes nothing, exit 2, one line naming the issuing command |
 
 `--issue` is the same flag with the same meaning on all four surfaces, so
 none of them can report a different write-set verdict about the same
 workspace and the same run; a `--issue` no grant can name (anything that is
 not a positive integer, which `authorize-write` refuses) matches no record
 and yields the same fail-closed verdict rather than a permissive one.
+
+**The generator that record feeds (chainlink #115).** All of the above makes
+a sanctioned protected write *authorizable*; it says nothing about what the
+bytes should be. A port-mode pilot whose declared crate does not exist yet has
+no `Cargo.toml`, so `extract-c-static`, `validate` and `gate g14` all have
+nothing to read, and until #115 the only supported bootstrap was a human
+writing a `protected_roots` file by hand under `authorize-write` -- which
+stalls the worker and yields a manifest nobody can reproduce.
+`ligature scaffold-crate --issue N --crate <name>` is the missing half.
+
+**It writes exactly two files, and they are not the same kind of write.** The
+manifest (`<crate_dir>/Cargo.toml`) is a protected-root write and requires an
+active issue-scoped `write` grant at exactly that path, read through
+`write_authorization`'s own ledger reader and status rules -- the same ones
+`write-set-check` consumes, so the verb cannot believe a grant is live when the
+conformance check would report it `expired`, `not-yet-issued`, `other-issue`,
+`duplicate`, `unverified-issuer` or `ledger-protected`. The source skeleton
+(`<crate_dir>/src/lib.rs`) is inside `allowed_roots`, needs no capability record
+at all, and is never overwritten once it exists. **That asymmetry is the
+acceptance criterion, made literal:** a missing-crate pilot bootstraps without
+anyone holding raw `Cargo.toml` write scope, because the one protected write it
+does need is bounded to one file, one operation, one issue and one expiry --
+and the `src/lib.rs` write needs none.
+
+**Nothing is supplied.** There is no `--content`/`--manifest`/`--path` flag and
+no way to name a target other than a declared crate: both files are pure
+functions of the descriptor's declared `crate_dir` plus two module constants
+(`version = 0.1.0`, `edition = 2021`), with no clock, no ambient file and no
+neighbouring crate read into the decision. So a caller has nothing to inject, a
+checkpoint has nothing extra to police, and the emitted bytes are checkable by
+a consumer rather than asserted in prose. The verb writes no implementation
+code and no normative policy or spec content, and refuses outright a target
+that lands in a canonical pipeline artifact location, a declared crate's
+`specs/` tree, or the pinned upstream checkout -- judged by `write_set`'s own
+predicates, so the refusal cannot disagree with the conformance check about
+which paths are spec artifacts.
+
+**Idempotent, or it fails clearly.** A manifest already on disk holding exactly
+the rendered bytes is reported `unchanged` and nothing is written; the second
+run's `before_hash` equals the first's `after_hash`, which is what makes
+determinism checkable. A manifest already on disk with *different* bytes is
+refused, never overwritten -- a manifest is a build input somebody may depend
+on. An existing `src/lib.rs` is reported `preserved` with its hashes and left
+alone, because that content belongs to the implementing agent.
+
+**Verified, not asserted.** Before reporting success the verb re-derives every
+claim it makes and records each as a named check in its receipt
+(`docs/scaffold-receipt-schema.json`): `descriptor` (via `doctor`'s own gate,
+read against the file this run used, #109's discipline), `manifest` (re-parsed
+as TOML and compared byte for byte with what the renderer claims to have
+written), `source-skeleton`, `write-set` (`write_set.check_write_set`'s **own**
+verdict, including whether it attributes this write to *this* grant id -- the
+proof the capability record actually covered the write rather than merely
+existing), and `doctor` (`ligature_install.inspect()`). Four are blocking;
+`doctor` is recorded rather than enforced beyond its descriptor gate, because
+this verb writes none of the files `migrate`/`accept-policy` own, and making a
+pre-existing condition fail a bootstrap would hide which command fixes it. A
+blocking check that fails exits 1 with the receipt still printed: at that point
+the files are on disk, and the honest report is the one that says so.
+
+| flag | what it binds |
+|---|---|
+| `--issue N` | the issue this scaffold is for (positive integer, required) -- the same issue the authorizing record was issued for |
+| `--crate NAME` | the crate, as this workspace's descriptor declares it: the `crate_dir` or its final segment, never anything else |
+| `--grant-id GW-ID` | optional, and a check rather than a filter: pins which record must authorize the manifest, and a mismatch is refused rather than silently substituted |
+| `--json` | the versioned receipt: issue, grant consumed, both generated paths with before/after hashes, and every check's result |
 
 **Implemented by #78.** A user-owned normative document (`docs/reliance-policy.md`)
 could not be drift-checked, and the ownership manifest recorded
@@ -983,7 +1094,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 45/45)
+## 10. Legacy command → disposition (complete, 46/46)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -992,8 +1103,9 @@ set of names matches `pipeline.registered_commands()` exactly.
 
 | legacy command | disposition |
 |---|---|
-| `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` (`out-of-set`) and files inside `protected_roots` that no declaration vouches for (`protected-write`), relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json`. The protected surface is reported per declared pattern, including patterns matching no file (#77, #103, §8). `--issue N` scopes the write grants it consumes to one issue; with no `--issue`, no grant is consulted (#114, §8) |
-| `authorize-write` | stable; records ONE issue-scoped capability authorizing a single sanctioned write into a declared `protected_roots` path, as an append-only entry in `ci/results/protected-writes.jsonl` -- the third route out of the dead end #103's enforcement left (widen `allowed_roots`, hand-edit outside every tool, or record a bound grant; §8, #114). The record binds the exact path or an explicitly bounded pattern, the operation (`write`|`delete`), the issue, `issued_at`/`expires_at`, the one-shot flag, the named issuer, the grant id (a hash of that binding, recomputed on read) and audit metadata. Refused, writing nothing, for a path no `protected_roots` pattern covers, one `allowed_roots` already permits, an absolute/escaping/vacuous/directory path, an undeclared `--issuer-kind supervisor`, a TTL outside `[1, 86400]`, `--one-shot` on a pattern, a replayed grant id, or a ledger that itself sits inside a protected root. A human checkpoint in the `human` lane; the `supervisor` lane needs the identity declared in `write_set.authorized_supervisors`. Exits 0/2 per docs/exit-code-contract.md |
+| `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` (`out-of-set`) and files inside `protected_roots` that no declaration vouches for (`protected-write`), relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json`. The protected surface is reported per declared pattern, including patterns matching no file (#77, #103, §8). `--issue N` scopes the write grants it consumes to one issue; with no `--issue`, no grant is consulted. `authorized_writes[]` reports what a grant covered (including a `--one-shot` grant's `spent` attribution) and `grants[]` carries the whole ledger with each record's status, so the audit is a machine-readable surface rather than a claim (#114, §8) |
+| `authorize-write` | stable; records ONE issue-scoped capability authorizing a single sanctioned write into a declared `protected_roots` path, as an append-only entry in `ci/results/protected-writes.jsonl` -- the third route out of the dead end #103's enforcement left (widen `allowed_roots`, hand-edit outside every tool, or record a bound grant; §8, #114). The record binds the exact path or an explicitly bounded pattern, the operation (`write`|`delete`), the issue, `issued_at`/`expires_at`, the one-shot flag, the named issuer, the grant id (a hash of that binding, recomputed on read) and audit metadata. Refused, writing nothing, for a path no `protected_roots` pattern covers, one `allowed_roots` already permits, an absolute/escaping/vacuous/directory path, an undeclared `--issuer-kind supervisor`, a TTL outside `[1, 86400]`, an `--issued-at` in the future, `--one-shot` on a pattern, a replayed grant id, or a ledger that itself sits inside a protected root. A human checkpoint in the `human` lane; the `supervisor` lane needs the identity declared in `write_set.authorized_supervisors`. Exits 0/2 per docs/exit-code-contract.md |
+| `scaffold-crate` | stable; writes a MISSING crate's `Cargo.toml` and canonical `src/lib.rs`, deterministically and from the project descriptor alone, in a Mode P (`port`) workspace -- the generator half of `authorize-write`'s capability record (§8, #115). Exactly two files: the manifest, which is a protected-root write and requires an active issue-scoped `write` grant at exactly that path (read through the same `write_authorization` reader `write-set-check` consumes), and the skeleton, which is inside `allowed_roots`, needs no capability record, and is never overwritten once it exists. There is no flag for manifest content and no flag naming a target: both files are pure functions of the descriptor's declared `crate_dir`, and the command accepts only a descriptor-declared crate name. Refused, writing nothing, for a crate no `crates[]` declares (or one two of them declare alike), an absolute/escaping/glob name, a non-`port` mode, a target inside a canonical pipeline artifact location, a declared crate's `specs/` tree or the pinned upstream checkout, a manifest no `protected_roots` pattern covers or `allowed_roots` already permits, no active grant (with the status that stopped each nearby record named), a `--grant-id` mismatch, or an existing manifest whose bytes differ. Idempotent by hash: identical bytes are `unchanged` and nothing is written. Emits a versioned receipt (`docs/scaffold-receipt-schema.json`) recording the issue, the grant consumed, both generated paths with before/after hashes, and the result of every named check -- including offline Cargo workspace membership and `write_set.check_write_set`'s OWN verdict on the write just made. Exits 0/1/2 per docs/exit-code-contract.md |
 | `validate` | alias → `validate boundary` |
 | `validate-interaction` | alias → `validate interaction` |
 | `validate-exemption` | alias → `validate exemption` |

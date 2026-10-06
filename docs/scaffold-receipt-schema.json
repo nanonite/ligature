@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/scaffold-receipt-schema.json",
+  "title": "Crate scaffold receipt — v1.0",
+  "description": "The `ligature scaffold-crate --json` output (chainlink #115). NOT a persisted artifact: this command writes no ledger line, no artifact and no artifact directory, so the receipt exists only as this document's stdout and whatever a caller chooses to keep. It is described and versioned like every other artifact schema in this pipeline (docs/trust-and-compatibility-boundaries.md §1) because a consumer parsing it is parsing a published shape, not reading a private dict. What the receipt RECORDS is the authority question, not this schema: the capability that authorized the protected write lives in `ci/results/protected-writes.jsonl` and is consumed by `ligature write-set-check --issue N`, which is the only command that honors it. `grant` here is an attribution -- which record this run consumed -- and the `write_set` block is that command's own verdict about the file this run wrote, carried so one reader does not have to re-run it to learn whether the write was covered. Closed (`additionalProperties: false`) with chainlink #104's discipline: a key nothing reads must not validate as if it were read. The receipts of `checks[].state` and `generated[].state` are decided by the generator (`scripts/scaffold_crate.py`), and every blocking one is re-derived from the filesystem rather than asserted -- a check that says `ok` about a file that is not there is the failure mode this closes.",
+  "type": "object",
+  "required": [
+    "event",
+    "schema_version",
+    "issue",
+    "crate",
+    "crate_dir",
+    "mode",
+    "outcome",
+    "state",
+    "grant",
+    "generated",
+    "checks",
+    "write_set"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event": {
+      "type": "string",
+      "const": "crate-scaffold",
+      "description": "Distinguishes this receipt from the write-grant record (`event: \"grant\"`), which travels in `ci/results/protected-writes.jsonl` and is a capability record rather than a report."
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "A breaking change to the receipt's shape takes a new value; the receipt is not a durable artifact, so no migration path is implied."
+    },
+    "issue": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The issue this scaffold was for, and required. It is the same `--issue` the authorizing grant was issued for -- a capability record authorizes its own issue only -- so a scaffold cannot be performed for work nobody scoped a grant to."
+    },
+    "crate": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "description": "The Cargo package name, which is `crate_dir`'s final segment verbatim. Never lowercased, hyphenated or otherwise rewritten: the renderer emits the crate's own name, so a normalization would make the manifest's bytes depend on a transformation the descriptor never performed. The pattern is Cargo's own package-name shape, refused at classification time rather than emitted broken."
+    },
+    "crate_dir": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000*?\\[\\]{}]+$",
+      "description": "The workspace-relative crate directory this workspace's project descriptor declares, and the ONLY path input the command takes. Absolute, escaping and glob-bearing values are refused rather than resolved, and the value is read from the declaration rather than from the request, so `--crate rust/foo` and `--crate foo` produce the same manifest."
+    },
+    "mode": {
+      "type": "string",
+      "const": "port",
+      "description": "Always `port`. #115's scope is the missing crate of a Mode P port pilot, whose manifest is a declared protected root with no route out of it; a greenfield workspace's crates come from its own layout, so the verb refuses rather than guessing."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["scaffolded", "unchanged"],
+      "description": "About the MANIFEST alone: `scaffolded` when this run created it, `unchanged` when it already held exactly the rendered bytes (the idempotent case -- nothing was written). A pre-existing `src/lib.rs` is reported `preserved` under `generated[]` and deliberately does not appear here, because a file this command never overwrote is not a second successful write."
+    },
+    "state": {
+      "type": "string",
+      "enum": ["ok", "failed"],
+      "description": "`ok` when every blocking check passed. `failed` means a blocking check failed AFTER the files were written, which the CLI reports as exit 1 with this receipt still printed: at that point the files are on disk, and the honest report is the one that says which check disagreed. Both halves are recorded rather than asserted -- each blocking check re-reads the filesystem and re-parses the bytes it claims to have written."
+    },
+    "grant": {
+      "type": "object",
+      "description": "WHICH capability record this run consumed, and nothing this run decided about it. The record itself lives in `ci/results/protected-writes.jsonl` and is recomputed there on every read; `write-set-check --issue N` is the only command that honors it. This block is an attribution, so a consumer reading it must not treat it as authorization for anything -- ask `write-set-check`.",
+      "required": ["grant_id", "ledger", "line", "path", "path_kind", "op", "issue", "issuer", "issuer_kind", "issued_at", "expires_at", "one_shot"],
+      "additionalProperties": false,
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "pattern": "^GW-[0-9a-f]{12}$",
+          "description": "The id of the record found active for this issue at exactly this manifest's path, read through `write_authorization`'s own reader and status rules -- the same ones `write-set-check` consumes, so this command cannot believe a grant is live when the conformance check would report it `expired`, `not-yet-issued`, `other-issue`, `duplicate`, `unverified-issuer`, `no-issue-named` or `ledger-protected`. The writer's own docstring states the recomputations (expiry relation, id, path classification, supervisor whitelist); the consumer does the enforcing."
+        },
+        "ledger": {
+          "type": "string",
+          "const": "ci/results/protected-writes.jsonl",
+          "description": "Where the capability record lives. Not a parameter: a trail inside a declared protected root authorizes nothing, and `authorize-write` refuses to record one there."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Which line of the append-only ledger the record is, so a reader can open exactly that line."
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The path the record binds. It equals the manifest's `generated[].path` for this run, but is carried because the record may bind a bounded pattern covering it -- an authorization is about what the record says, not about what this run needed."
+        },
+        "path_kind": {
+          "type": "string",
+          "enum": ["exact", "pattern"],
+          "description": "`exact` for the one-file bootstrap grant this command is meant to be issued; `pattern` when the record binds an explicitly bounded glob that covers the manifest, which the writer allows and the reader recomputes on every read."
+        },
+        "op": {
+          "type": "string",
+          "const": "write",
+          "description": "Always `write`. A `delete` grant exists in the record vocabulary but authorizes removing a path, which can never create the manifest this command writes -- so a `delete`-only record is refused here rather than consumed and reported."
+        },
+        "issue": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The record's own issue, which equals the receipt's `issue` (a grant authorizes its own issue only, and the reader is called with it)."
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The named identity that issued the record. `--issuer` is required in `authorize-write` with no default, so a grant with no named issuer is not a capability record."
+        },
+        "issuer_kind": {
+          "type": "string",
+          "enum": ["human", "supervisor"],
+          "description": "Which lane issued it: a human checkpoint (`approve`/`accept-policy`/`record-ruling`'s terms), or a supervisor the descriptor declares in `write_set.authorized_supervisors` and the reader re-verifies every time it honors the record."
+        },
+        "issued_at": {
+          "type": "string",
+          "description": "When the record was issued, ISO-8601 with a UTC offset. The receipt does not read it as authority: the reader recomputes the whole window against the consuming run's own clock."
+        },
+        "expires_at": {
+          "type": "string",
+          "description": "`issued_at + ttl_seconds`, recomputed on read; an expired record is reported `expired` and authorizes nothing rather than being dropped. Carried so a consumer knows when the attribution this receipt records stops standing."
+        },
+        "one_shot": {
+          "type": "boolean",
+          "description": "Whether the record binds one exact file rather than a standing grant for its TTL. Carried, not acted on here: `write-set-check` reports the write a one-shot grant authorized as `spent`, which is an attribution and not a consumed count (a workspace snapshot counts no edits to a file)."
+        }
+      }
+    },
+    "generated": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "Exactly the two files this command may write, in a fixed order (manifest, then source skeleton) -- the whole of its write surface, and the reason it can never write implementation code or normative policy/spec content. There is no flag that adds a third path, no flag that supplies content, and no code path that emits into `specs/`, `docs/`, `evidence/` or `ci/`.",
+      "items": {
+        "type": "object",
+        "required": ["path", "role", "state", "before_hash", "after_hash", "size_bytes", "protected", "protected_by", "grant_id"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The workspace-relative path written or left alone."
+          },
+          "role": {
+            "type": "string",
+            "enum": ["manifest", "source-skeleton"],
+            "description": "`manifest` is the protected-root write; `source-skeleton` is the canonical crate entry point inside `allowed_roots`. The two are not the same kind of write, which is why one needs a capability record and the other does not."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["created", "unchanged", "preserved"],
+            "description": "`created` -- this run wrote it. `unchanged` -- the manifest already held exactly the rendered bytes and nothing was written (the idempotent re-run). `preserved` -- the source skeleton already existed and was left untouched, because `<crate>/src/` is inside `allowed_roots` and its content belongs to the implementing agent. A manifest in `preserved` is not a reachable state: an existing manifest with DIFFERENT bytes is refused outright, never overwritten."
+          },
+          "before_hash": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "`sha256:` plus the hex digest of the bytes on disk before this run, or `null` when the file did not exist. Reported rather than assumed: it is the evidence that nothing outside the two declared targets moved."
+          },
+          "after_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "The digest AFTER the run, read back off disk rather than computed from the rendered string. Two runs over an unchanged workspace therefore produce the same `after_hash`, and the second run's `before_hash` equals the first's `after_hash` -- which is what makes the command's determinism checkable by a consumer instead of asserted in prose."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The file's size after the run. A `source-skeleton` at 0 is a failed write, not an empty scaffold: the check that reads it says so."
+          },
+          "protected": {
+            "type": "boolean",
+            "description": "Whether this file sits inside a declared `protected_roots` pattern. `true` for the manifest, `false` for the skeleton -- and the asymmetry is the point: a missing-crate pilot bootstraps without anyone holding raw `Cargo.toml` write scope, because the one protected write it needs is bounded to one file, one operation, one issue and one expiry."
+          },
+          "protected_by": {
+            "type": ["string", "null"],
+            "description": "The declared `protected_roots` pattern covering this file, or `null` when `protected` is false. Which pattern authorized the write, rather than merely that some declaration does."
+          },
+          "grant_id": {
+            "type": ["string", "null"],
+            "pattern": "^GW-[0-9a-f]{12}$",
+            "description": "The capability record that authorized this write, or `null` when none was required -- which is the source skeleton's case, and the reason a worker bootstrapping a missing crate never needs `Cargo.toml` scope."
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 6,
+      "description": "Every verification this run performed, each named, each with the reason it did or did not pass. The set is fixed rather than configurable: `descriptor`, `manifest`, `workspace`, `source-skeleton`, `write-set` and `doctor`. Five are blocking; `doctor` is recorded and not enforced beyond its descriptor gate, because this command writes none of the files `ligature migrate` / `ligature accept-policy` own and making a pre-existing condition fail a bootstrap would hide which command fixes it.",
+      "items": {
+        "type": "object",
+        "required": ["name", "state", "blocking", "details"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["descriptor", "manifest", "workspace", "source-skeleton", "write-set", "doctor"],
+            "description": "Which verification this is. `descriptor` is the installer-gated schema check of the file this run read (the same one `doctor` fails closed on, chainlink #109). `manifest` re-parses the emitted bytes as TOML and compares every value it claims to have written. `workspace` asks `cargo metadata --no-deps --offline` to parse the generated package and verify Cargo workspace membership without resolving dependencies, compiling code, writing a lockfile, or using the network. `source-skeleton` re-reads the entry point. `write-set` is `write_set.check_write_set`'s OWN verdict about the write just made -- the proof that the capability record actually covered it rather than merely existing. `doctor` is `ligature_install.inspect()`."
+          },
+          "state": {
+            "type": "string",
+            "enum": ["ok", "failed"],
+            "description": "The check's outcome. `ok` is always re-derived from the filesystem or from the named checker's own call, never asserted from the fact that this run wrote the file."
+          },
+          "blocking": {
+            "type": "boolean",
+            "description": "Whether a failure of this check fails the command (`state: \"failed\"`, CLI exit 1) or is only recorded. True for all but `doctor`, whose descriptor gate alone blocks."
+          },
+          "details": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why it passed or failed, carrying the evidence: the parsed `[package]`/`[lib]` values, Cargo's package and workspace root, the hashes, the grant id the write-set check attributed the write to, and the installation status. A check whose details could not say what it looked at would be a report of nothing."
+          }
+        }
+      }
+    },
+    "write_set": {
+      "type": "object",
+      "description": "`ligature write-set-check`'s own verdict for this workspace and issue, carried verbatim from `write_set.check_write_set` rather than re-derived. Not this command's opinion about the boundary: the conformance check is the only surface that reports it, and a reader who wants the authoritative verdict should run that command -- this block exists so the scaffold receipt and the conformance report cannot be read as disagreeing about the same write.",
+      "required": ["state", "details", "protected_pattern", "protected_surface", "authorized_writes"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "The conformance check's verdict: `clean`, `violations`, or `unknown`. `unknown` is a blocking failure of the `write-set` check -- the write set could not be evaluated, so this run cannot claim the write was accounted for."
+        },
+        "details": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The check's own `details` line, verbatim, including its protected-surface and write-grant clauses."
+        },
+        "protected_pattern": {
+          "type": "string",
+          "description": "The declared `protected_roots` pattern covering this manifest."
+        },
+        "protected_surface": {
+          "type": ["object", "null"],
+          "description": "That pattern's entry from the check's per-pattern protected-surface audit -- how many files it covers and how many no declaration vouches for -- or `null` when the pattern is not among the declared ones the check reports (which a blocking `write-set` failure already reports).",
+          "required": ["pattern", "files", "violations", "unattributed", "authorized"],
+          "additionalProperties": false,
+          "properties": {
+            "pattern": { "type": "string" },
+            "files": { "type": "integer", "minimum": 0, "description": "How many workspace files the pattern matched. Zero means it protects nothing on disk, which is reported rather than passing as a clean check (chainlink #103)." },
+            "violations": { "type": "integer", "minimum": 0, "description": "Blocking `protected-write` findings under this pattern." },
+            "unattributed": { "type": "integer", "minimum": 0, "description": "Non-blocking protected-surface audit entries: files in locations the pipeline writes nothing into, whose provenance this check cannot decide. Reported rather than called a breach it cannot prove." },
+            "authorized": { "type": "integer", "minimum": 0, "description": "Protected writes an active capability record covered. This scaffold's manifest counts here -- the one number that says the grant was used rather than merely present." }
+          }
+        },
+        "authorized_writes": {
+          "type": "array",
+          "description": "Every protected write an active grant covered for this issue, verbatim from the check. Reported, never excused: a `clean` verdict over a protected root a grant was used on still says so. Each entry names the grant id, so the one this run consumed is identifiable among them.",
+          "items": {
+            "type": "object",
+            "required": ["path", "grant_id", "issue", "op", "issuer", "issuer_kind", "issued_at", "expires_at", "one_shot", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string", "description": "The protected-root path a grant covered." },
+              "grant_id": { "type": "string", "pattern": "^GW-[0-9a-f]{12}$" },
+              "issue": { "type": "integer", "minimum": 1 },
+              "op": { "type": "string", "description": "The observed operation; only `write` is consumable by a file walk." },
+              "issuer": { "type": "string", "minLength": 1 },
+              "issuer_kind": { "type": "string", "enum": ["human", "supervisor"] },
+              "issued_at": { "type": "string" },
+              "expires_at": { "type": "string" },
+              "one_shot": { "type": "boolean" },
+              "status": {
+                "type": "string",
+                "enum": ["active", "spent"],
+                "description": "`active` for a standing grant; `spent` for a `--one-shot` one. `spent` is an ATTRIBUTION -- the write this grant names was attributed to it -- not a consumed count: a workspace snapshot observes which files exist, not how many times each was written, so the check cannot tell the write a one-shot grant authorized from a later edit to the same file, and the grant's `expires_at` is the bound that does apply."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

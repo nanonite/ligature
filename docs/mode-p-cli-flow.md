@@ -120,6 +120,7 @@ Two corrections to a natural first reading of this table:
 | `check [--json]` | any state, including before `init` — reports exit 2, `conditions: [invalid_input]`, `next_action: null` | none | read-only | — |
 | `write-set-check [--json] [--issue N]` | any state with a schema-valid descriptor (before `init`: `unknown`, exit 2) | a `project-descriptor.json` with a `write_set`; `--issue N` additionally consumes the write grants recorded for that issue (chainlink #114) | read-only | — |
 | `authorize-write --issue N --path P --op K --issuer <name>` | any state with a schema-valid descriptor declaring the `protected_roots` pattern the path falls in | a `project-descriptor.json` with a non-empty `write_set.protected_roots`; `write_set.authorized_supervisors` for `--issuer-kind supervisor` | human checkpoint (default), or an automation identity the descriptor whitelists | one append-only entry in `ci/results/protected-writes.jsonl`; refuses (exit 2, nothing written) for a path no `protected_roots` covers, one `allowed_roots` already permits, an absolute/escaping/vacuous/directory path, an undeclared supervisor, a TTL outside `[1, 86400]`, `--one-shot` on a pattern, a replayed grant id, or a ledger inside a protected root (chainlink #114) |
+| `scaffold-crate --issue N --crate <name>` | Stage P0+, when a **declared** crate of this `mode: port` workspace does not exist yet | an active issue-scoped `write` grant at `<crate_dir>/Cargo.toml` (recorded by `authorize-write`), a `project-descriptor.json` whose `crates[]` declares the crate, and a `protected_roots` pattern covering its manifest | reads an existing capability record; records none of its own | at most two files: `<crate_dir>/Cargo.toml` (protected, grant-authorized, never overwritten with different bytes) and `<crate_dir>/src/lib.rs` (`allowed_roots`, no grant needed, never overwritten). Refuses (exit 2, nothing written) for an undeclared/ambiguous/escaping/glob crate name, a non-`port` mode, a target inside a pipeline artifact location, a `specs/` tree or the pinned upstream checkout, a manifest `protected_roots` does not cover or `allowed_roots` already permits, no active grant, or a `--grant-id` mismatch. Idempotent (`unchanged`, nothing written) on identical bytes. Records Cargo's offline workspace-membership check with the descriptor, doctor and write-set results, and exits 1 with the receipt if a blocking post-write check failed (chainlink #115) |
 | `draft <kind>` | Stage 0/3 | a valid `<crate>/specs/` layout per the descriptor | LLM-side | writes `<target>.draft` only. Every shipped template is listed by `ligature draft --help`, and an unregistered name is refused with that list (chainlink #105) |
 | `approve draft \| pair \| exemption-pair` | Stage 3, one draft must exist (evidence excluded -- it carries no `review` block, and `promote-evidence` is its path) | a staged `.draft` file | human checkpoint | promotes a draft to its target path; with no draft beside the target it refuses in one line naming the draft and `ligature draft` instead of crashing (chainlink #102), and the paired verbs name every absent draft because they promote all-or-none |
 | `promote-evidence` | Stage 0, one evidence draft must exist | a staged `evidence/<id>.json.draft` | mechanical (no `--reviewer`; evidence is non-normative) | renames the draft to its target + an audit entry (chainlink #79) |
@@ -559,7 +560,7 @@ grant: GW-c71ec0d81471
 issue: 114
 path: ci/manifest/WP-114.json (exact)
 op: write
-one_shot: yes
+one_shot: yes -- one exact file rather than a standing grant. write-set-check reports the write it authorizes as `spent`, which is an attribution and not a count: a workspace snapshot counts no edits to that file, so what bounds this grant is its TTL. Issue a further grant for further sanctioned writes
 issuer: operator (human)
 issued at: 2026-10-03T12:00:00+00:00
 expires at: 2026-10-03T12:15:00+00:00 (ttl 900s)
@@ -584,7 +585,9 @@ So a grant cannot widen `allowed_roots` (`authorize-write` refuses a path no
 `protected_roots` pattern covers, refuses a path `allowed_roots` already
 permits, and the ledger is consulted on the protected branch only),
 cannot authorize another operation (`op` is a closed vocabulary, and only
-`write` is consumable by a file walk), cannot outlive its TTL, cannot cover
+`write` is consumable by a file walk), cannot outlive its TTL (nor begin before it: a
+record whose window has not opened yet is reported `not-yet-issued` and authorizes
+nothing), cannot cover
 another issue or path (it is scoped to one issue, which is why
 `status`/`check`/`write-set-check` all take `--issue N` and all honor the
 same records -- with no `--issue`, no grant is consulted and the verdict is
@@ -597,12 +600,89 @@ audit metadata that no check ever reads back as authority.
 
 An authorized write is reported, not excused: it appears in
 `authorized_writes[]` with its grant id, issuer, issue, expiry and status
-(`spent` for a one-shot grant whose file is present), counts under its
-pattern's `protected_surface[].authorized`, and is named in `details`. The
-ledger is carried too, with every record's status and every line that
-claims to be a grant and is not usable -- so a workspace whose grants all
-expired says so instead of reporting the protected write as unauthorized and
-leaving the reader to guess.
+(`spent` for a one-shot grant -- an attribution, not a consumed count: the
+write it names was attributed to that grant, and a read-only check counts no
+edits to the file afterwards, so `details` says so rather than letting the
+word imply a counter it never kept), counts under its pattern's
+`protected_surface[].authorized`, and is named in `details`. The ledger is
+carried too, with every record's status and every line that claims to be a
+grant and is not usable -- so a workspace whose grants all expired says so
+instead of reporting the protected write as unauthorized and leaving the
+reader to guess.
+
+### The capability record had nothing to generate (chainlink #115)
+
+The record above makes a sanctioned protected write *authorizable*. It says
+nothing about what the bytes should be, and for one write that gap stalls the
+whole pilot: a Mode P project whose declared crate does not exist yet has no
+`Cargo.toml`, so `extract-c-static`, `validate` and `gate g14` all have nothing
+to read, and nothing in `crates[]` will ever be created on its own. The only
+supported bootstrap was a human hand-writing a `protected_roots` file under
+`authorize-write` — non-deterministic, unstaged, and indistinguishable in the
+audit trail from any other protected write.
+
+`ligature scaffold-crate --issue N --crate <name>` is the other half:
+
+```
+$ ligature authorize-write --issue 115 --path rust/date-creusot-core/Cargo.toml \
+      --op write --issuer operator --one-shot
+grant: GW-8c3ec5254cff
+…
+
+$ ligature scaffold-crate --issue 115 --crate date-creusot-core
+crate: date-creusot-core
+crate dir: rust/date-creusot-core
+mode: port
+issue: 115
+grant: GW-8c3ec5254cff (write, operator (human), expires …, ledger line 1)
+manifest: rust/date-creusot-core/Cargo.toml (created) -- protected by '**/Cargo.toml', authorized by GW-8c3ec5254cff
+  absent -> sha256:4b4f72a8… (683 bytes)
+source-skeleton: rust/date-creusot-core/src/lib.rs (created) -- allowed_roots: no capability record required
+  absent -> sha256:a1f39940… (760 bytes)
+check descriptor: ok (blocking)
+check manifest: ok (blocking)
+check source-skeleton: ok (blocking)
+check write-set: ok (blocking)
+check doctor: ok (recorded)
+write set: clean
+outcome: scaffolded
+state: ok
+```
+
+**Two files, and only one of them is a protected write.** The manifest needs
+the capability record; the `src/lib.rs` skeleton is inside `allowed_roots` and
+needs none. So the missing-crate pilot bootstraps **without anyone holding raw
+`Cargo.toml` write scope** — the one protected write it does need is bounded to
+one file, one operation, one issue and one expiry, and it is consumed by the
+same `write_authorization` reader `write-set-check` uses, so the verb cannot
+believe a grant is live when the conformance check would call it `expired`,
+`other-issue` or `ledger-protected`.
+
+**Nothing is supplied.** There is no content flag and no target flag: both
+files are pure functions of the descriptor's declared `crate_dir`, so the bytes
+are reproducible and a caller has nothing to inject. The verb accepts only a
+descriptor-declared crate name (the `crate_dir` or its final segment) and
+refuses an undeclared, ambiguous, absolute, escaping or glob-bearing one, a
+non-`port` mode, and any target inside a canonical pipeline artifact location,
+a declared crate's `specs/` tree, or the pinned upstream checkout — judged by
+`write_set`'s own predicates, so the refusal cannot disagree with the
+conformance check.
+
+**Idempotent, or it fails clearly.** A manifest already holding exactly the
+rendered bytes is `unchanged` and nothing is written — the second run's
+`before_hash` is the first's `after_hash`, which is how determinism becomes
+checkable rather than asserted. A manifest holding *different* bytes is
+refused outright, never overwritten; an existing `src/lib.rs` is `preserved`,
+because that content belongs to the implementing agent.
+
+**Verified before success.** The `write-set` check is `write_set.check_write_set`'s
+own verdict, including whether it attributes the write just made to *this*
+grant id — the proof that the record covered the write rather than merely
+existing. `doctor`'s verdict is recorded rather than enforced beyond its
+descriptor gate, because this verb writes none of the files `migrate` /
+`accept-policy` own. A blocking check that fails exits 1 with the receipt still
+printed: the files are on disk at that point, and the honest report is the one
+that says so.
 
 ### The normative user-owned document that nothing drift-checked (chainlink #78)
 

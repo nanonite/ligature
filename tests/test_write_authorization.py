@@ -23,12 +23,14 @@ What is pinned here, in the order the issue states it:
     boundedness, the TTL's bounds, the `expires_at == issued_at + ttl`
     relation and the id -- with a deterministic reason per refusal;
   * the statuses the reader reports for a record it will not honor
-    (expired, other-issue, duplicate, unverified-issuer, no-issue-named);
+    (expired, not-yet-issued, other-issue, duplicate, unverified-issuer,
+    no-issue-named);
   * every refusal `authorize_write()` owes the caller, each of which
     writes nothing at all: a widening path, a path `allowed_roots` already
-    permits, an undeclared supervisor, a TTL outside its bounds, a
-    one-shot on a pattern, a replayed grant, a ledger that sits inside a
-    protected root or outside the workspace, and a damaged ledger;
+    permits, an undeclared supervisor, a TTL outside its bounds, an
+    `issued_at` in the future, a one-shot on a pattern, a replayed grant, a
+    ledger that sits inside a protected root or outside the workspace, and a
+    damaged ledger;
   * the append: one line, field for field the record `as_record()`
     defines, an existing line never rewritten, and a retry of the issuing
     command idempotent rather than a way to stack grants.
@@ -45,7 +47,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -527,6 +529,49 @@ class LedgerStatusTest(WorkspaceFixture):
         self.assertEqual(self.statuses(ledger, issue=114, now=later), ["expired"])
         self.assertEqual(ledger.active_grants(issue=114, now=later), [])
 
+    def test_a_window_that_has_not_opened_yet_is_not_yet_issued(self):
+        """The other end of expiry, at the reader. `expires_at == issued_at +
+        ttl_seconds` alone would call a future-dated line unexpired, so a
+        grant nobody has issued yet would authorize a write; the run's own
+        clock closes that end too, and the record is reported rather than
+        dropped."""
+        ledger = self.ledger_with(valid_record())
+        before = datetime.fromisoformat(ISSUED) - timedelta(seconds=1)
+        self.assertEqual(self.statuses(ledger, issue=114, now=before), ["not-yet-issued"])
+        self.assertEqual(ledger.active_grants(issue=114, now=before), [])
+        self.assertIsNone(ledger.authorizing("ci/manifest/WP-114.json", "write", issue=114, now=before))
+        # both boundaries are inclusive: the window is [issued_at, expires_at)
+        self.assertEqual(self.statuses(ledger, issue=114, now=self.now()), ["active"])
+
+    def test_not_yet_issued_is_decided_before_expired_and_after_this_runs_business(self):
+        """Its place in the fixed order, stated as the two neighbours that
+        could otherwise swallow it: a record for another issue is not this
+        run's business at all, and a record whose window has not opened is
+        not yet, rather than no longer, in its window -- so it is reported
+        ahead of `expired` and of the descriptor-only `unverified-issuer`."""
+        future = valid_record(
+            issued_at="2026-10-06T12:00:00+00:00",
+            ttl_seconds=1,
+            issuer="ci-bot",
+            issuer_kind="supervisor",
+        )
+        far_later = datetime.fromisoformat(ISSUED) + timedelta(days=2)
+        self.assertEqual(
+            self.statuses(self.ledger_with(future), issue=114, now=far_later), ["not-yet-issued"]
+        )
+        self.assertEqual(
+            self.statuses(
+                self.ledger_with(valid_record(**{**future, "issue": 113})), issue=114, now=far_later
+            ),
+            ["other-issue"],
+        )
+        self.assertEqual(
+            self.statuses(
+                self.ledger_with(future), issue=114, supervisors=frozenset(), now=far_later
+            ),
+            ["not-yet-issued"],
+        )
+
     def test_a_repeated_id_leaves_the_last_entry_authorizing(self):
         """Append-only, so re-issuing supersedes rather than edits -- and
         neither copy becomes two authorizations."""
@@ -740,6 +785,24 @@ class AuthorizeWriteTest(WorkspaceFixture):
         self.assertEqual(
             self.issue(issued_at="2026-10-03T14:00:00+02:00").issued_at, ISSUED
         )
+
+    def test_an_issued_at_in_the_future_is_refused(self):
+        """The other end of the window, at the producer. `--issued-at` exists
+        so a re-run is idempotent and an expiring grant reproducible without
+        waiting; a timestamp that has not happened yet serves neither, and
+        would record a window the consumer reports `not-yet-issued` and honors
+        as nothing. The refusal is what keeps the writer half honest; the
+        reader half is `LedgerStatusTest`'s."""
+        for offset in (1, 60, 86_400):
+            future = (datetime.now(timezone.utc) + timedelta(seconds=offset)).replace(
+                microsecond=0
+            )
+            with self.subTest(seconds_ahead=offset):
+                message = self.assertRefused(
+                    "is in the future", issued_at=future.isoformat()
+                )
+                # and it names the way out, not only the refusal
+                self.assertIn("Re-run without --issued-at", message)
 
     def test_a_grant_cannot_widen_allowed_roots(self):
         """Two refusals, and the more specific one first: a path

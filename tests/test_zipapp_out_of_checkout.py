@@ -17,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +27,16 @@ import build_zipapp  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
 DESCRIPTOR_SCHEMA = json.loads((ROOT / "schemas" / "project-descriptor.schema.json").read_text())
+#: The write-grant record schema (#114). Read from the checkout here, and
+#: asserted to be in the built archive below: the bundle's file list is
+#: derived from docs/implementation-inventory.json, so a schema that is not
+#: inventory-tracked does not ship -- and a shipped binary whose grant records
+#: nobody can validate is an audit trail with no published shape.
+GRANT_SCHEMA = json.loads((ROOT / "docs" / "write-grant-schema.json").read_text())
+#: The scaffold receipt schema (#115). Same reasoning as the grant schema above:
+#: a published shape a consumer parses must ship, and the bundle's file list
+#: comes from the inventory -- so a receipt schema nobody tracks does not ship.
+SCAFFOLD_SCHEMA = json.loads((ROOT / "docs" / "scaffold-receipt-schema.json").read_text())
 
 
 # A revision from before init grew the re-pin guard (#65): building a
@@ -97,6 +109,196 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
             [(v["path"], v["kind"]) for v in document["violations"]],
             [("ci/manifest/PROBE.json", "protected-write")],
         )
+
+    def test_the_write_grant_flow_runs_end_to_end_through_the_packaged_binary(self):
+        """chainlink #114 end to end through the packaged artifact and
+        `python3 -I` with no source tree: the sanctioned protected-root write,
+        the grant that authorizes it, the fail-closed paths around it, and the
+        record the binary wrote on disk.
+
+        #103's enforcement shipped in three releases before `write-set-check`
+        reported the probe below at all, and #114's remedy is only real if it
+        works in the artifact users actually run -- including the bundled
+        `docs/write-grant-schema.json`, which the bundle takes from the
+        inventory rather than a hand-maintained list. So this test asserts
+        that schema is in the archive, and that the line the packaged binary
+        appended validates against it."""
+        with zipfile.ZipFile(self.artifact) as zf:
+            bundled = {n for n in zf.namelist() if not n.endswith("/")}
+        self.assertIn(
+            "ligature_data/docs/write-grant-schema.json",
+            bundled,
+            "the write-grant schema must ship: the bundle is derived from the inventory",
+        )
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor = self.workspace / "project-descriptor.json"
+        declared = json.loads(descriptor.read_text())
+        declared["write_set"] = {
+            "allowed_roots": ["rust/*/src/", "rust/*/tests/"],
+            "protected_roots": ["rust/*/specs/**", "ci/manifest/**"],
+        }
+        descriptor.write_text(json.dumps(declared, indent=2) + "\n")
+        probe = self.workspace / "ci" / "manifest" / "WP-114.json"
+        probe.write_text("{}")
+
+        def violations(issue=None):
+            args = ["--workspace", str(self.workspace), "write-set-check", "--json"]
+            if issue is not None:
+                args += ["--issue", str(issue)]
+            document = json.loads(self.run_artifact(*args).stdout)["write_set"]
+            return [(v["path"], v["kind"]) for v in document["violations"]], document
+
+        # 1. before: the sanctioned write is the blocking finding it always was
+        before, _ = violations(114)
+        self.assertEqual(before, [("ci/manifest/WP-114.json", "protected-write")])
+
+        # 2. the grant: one append-only line, and the record it wrote is the
+        #    one the command printed and the bundled schema accepts
+        issued = self.run_artifact(
+            "--workspace", str(self.workspace), "authorize-write", "--issue", "114",
+            "--path", "ci/manifest/WP-114.json", "--op", "write", "--issuer", "operator",
+            "--one-shot", "--json",
+        )
+        self.assertEqual(issued.returncode, 0, issued.stdout + issued.stderr)
+        record = json.loads(issued.stdout)
+        ledger = self.workspace / "ci" / "results" / "protected-writes.jsonl"
+        lines = ledger.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), record)
+        validator = make_validator(GRANT_SCHEMA)
+        self.assertEqual(
+            [e.message for e in validator.iter_errors(record)], [],
+            "the packaged binary wrote a record its own bundled schema rejects",
+        )
+
+        # 3. after: clean, and reported as the sanctioned write it is -- with
+        #    the one-shot limit stated rather than implied
+        after, document = violations(114)
+        self.assertEqual(after, [])
+        entry = document["authorized_writes"][0]
+        self.assertEqual((entry["grant_id"], entry["status"], entry["one_shot"]),
+                         (record["grant_id"], "spent", True))
+        self.assertEqual(document["grants"]["entries"][0]["status"], "active")
+        self.assertIn("counts no edits", document["details"])
+
+        # 4. the fail-closed paths, same artifact: no issue named, another
+        #    issue, and a grant that has not been issued yet
+        for scope in (None, 113):
+            with self.subTest(issue=scope):
+                self.assertEqual(violations(scope)[0], before)
+        future = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0).isoformat()
+        refused = self.run_artifact(
+            "--workspace", str(self.workspace), "authorize-write", "--issue", "114",
+            "--path", "ci/manifest/WP-115.json", "--op", "write", "--issuer", "operator",
+            "--issued-at", future,
+        )
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        self.assertIn("is in the future", refused.stderr)
+        self.assertNotIn("Traceback", refused.stderr)
+        self.assertEqual(len(ledger.read_text().splitlines()), 1)
+
+    def test_a_missing_crate_bootstraps_through_the_packaged_binary(self):
+        """chainlink #115 end to end through the packaged artifact and
+        `python3 -I` with no source tree: a port-mode pilot whose declared crate
+        does not exist yet, bootstrapped with a capability record scoped to that
+        one manifest and nothing else.
+
+        #114's remedy is only real in the artifact users actually run, and #115
+        is the half that turns it from "a human hand-wrote a protected file" into
+        a reproducible bootstrap. So this test asserts the bundled
+        `docs/scaffold-receipt-schema.json` is in the archive, that the receipt
+        the packaged binary emitted validates against it, and -- the acceptance
+        criterion itself -- that the `src/lib.rs` write needed no capability
+        record at all, so nobody was granted raw `Cargo.toml` scope to get here.
+        """
+        with zipfile.ZipFile(self.artifact) as zf:
+            bundled = {n for n in zf.namelist() if not n.endswith("/")}
+        self.assertIn(
+            "ligature_data/docs/scaffold-receipt-schema.json",
+            bundled,
+            "the scaffold receipt schema must ship: the bundle is derived from the inventory",
+        )
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor = self.workspace / "project-descriptor.json"
+        declared = json.loads(descriptor.read_text())
+        # `init --mode port` already declares crates/<name>-core; make its
+        # manifest a protected root, as a real project does.
+        declared["write_set"] = {
+            "allowed_roots": ["crates/*/src/", "crates/*/tests/"],
+            "protected_roots": ["crates/*/specs/**", "ci/manifest/**", "**/Cargo.toml"],
+        }
+        descriptor.write_text(json.dumps(declared, indent=2) + "\n")
+        crate = declared["crates"][0]["crate_dir"]
+        manifest_rel = f"{crate}/Cargo.toml"
+
+        # 1. before: nothing exists, and the write this command would make is
+        #    not authorized -- the refusal names the issuing command.
+        refused = self.run_artifact(
+            "--workspace", str(self.workspace), "scaffold-crate", "--issue", "115", "--crate", crate,
+        )
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        self.assertIn("no active write grant covers", refused.stderr)
+        self.assertIn("authorize-write --issue 115", refused.stderr)
+        self.assertNotIn("Traceback", refused.stderr)
+        self.assertFalse((self.workspace / manifest_rel).exists())
+
+        # 2. the grant, for that one manifest and nothing else.
+        issued = self.run_artifact(
+            "--workspace", str(self.workspace), "authorize-write", "--issue", "115",
+            "--path", manifest_rel, "--op", "write", "--issuer", "operator",
+            "--one-shot", "--json",
+        )
+        self.assertEqual(issued.returncode, 0, issued.stdout + issued.stderr)
+        grant = json.loads(issued.stdout)
+
+        # 3. the scaffold: two files, one grant, and a receipt the bundled
+        #    schema accepts.
+        done = self.run_artifact(
+            "--workspace", str(self.workspace), "scaffold-crate", "--issue", "115",
+            "--crate", crate, "--json",
+        )
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        receipt = json.loads(done.stdout)
+        self.assertEqual(
+            [e.message for e in make_validator(SCAFFOLD_SCHEMA).iter_errors(receipt)], [],
+            "the packaged binary emitted a receipt its own bundled schema rejects",
+        )
+        manifest_entry, skeleton_entry = receipt["generated"]
+        self.assertEqual((manifest_entry["role"], manifest_entry["state"]), ("manifest", "created"))
+        self.assertTrue(manifest_entry["protected"])
+        self.assertEqual(manifest_entry["grant_id"], grant["grant_id"])
+        self.assertEqual((skeleton_entry["role"], skeleton_entry["state"]),
+                         ("source-skeleton", "created"))
+        self.assertFalse(skeleton_entry["protected"])
+        self.assertIsNone(skeleton_entry["grant_id"])
+        self.assertTrue((self.workspace / manifest_rel).is_file())
+        self.assertTrue((self.workspace / crate / "src" / "lib.rs").is_file())
+        self.assertEqual(receipt["write_set"]["state"], "clean")
+
+        # 4. idempotent: a re-run is `unchanged` and writes nothing.
+        again = self.run_artifact(
+            "--workspace", str(self.workspace), "scaffold-crate", "--issue", "115",
+            "--crate", crate, "--json",
+        )
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(json.loads(again.stdout)["outcome"], "unchanged")
+        self.assertEqual(len(self.workspace.joinpath("ci/results/protected-writes.jsonl")
+                             .read_text().splitlines()), 1)
+
+        # 5. the fail-closed paths, same artifact: an undeclared crate, and a
+        #    crate this workspace has no authority for.
+        for name, fragment in (
+            ("not-a-crate", "is not a crate this workspace's project descriptor declares"),
+            ("../escape", "escapes the workspace"),
+        ):
+            with self.subTest(crate=name):
+                proc = self.run_artifact(
+                    "--workspace", str(self.workspace), "scaffold-crate",
+                    "--issue", "115", "--crate", name,
+                )
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                self.assertIn(fragment, proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
 
     def test_version_verify_runs_without_the_source_tree(self):
         proc = self.run_artifact("version", "--verify")

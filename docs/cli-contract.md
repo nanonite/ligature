@@ -1050,6 +1050,9 @@ closure profiles, promotion receipts, boundaries, interactions and bridges
 are loaded only after their existing validators accept them. The manifest
 deriver's field/source table is the content policy; the command runs
 `validate-work-package` over the result before attempting a write.
+That validation uses the same descriptor-declared canonical boundary
+directories as the `validate-work-package` CLI, so trusted assumptions must
+resolve inside the project's declared crates before a file can be written.
 
 The only output path is `ci/manifest/<work_package>.json`, where the package
 id comes from the plan. The plan's `issue` must equal `--issue`; the grant
@@ -1069,6 +1072,10 @@ the target and features must agree with the selected interactions'
 HEAD. `--json` prints the audit event on success; a refusal returns exit 2
 with `error.code`, `error.message` and `error.required_inputs`. The human
 surface names the refused input and points to the required grant command.
+The resulting canonical file is discovered by project-state, `check`,
+`write-set-check`, and Stage 8's G14 manifest loader. The generation command
+and `validate-work-package` enforce G1a/§10.1; later project checks retain
+their own gate results and fail-closed exit codes.
 
 **Implemented by #78.** A user-owned normative document (`docs/reliance-policy.md`)
 could not be drift-checked, and the ownership manifest recorded

@@ -39,6 +39,7 @@ from atomic_write import write_atomically
 from manifest_input import ManifestInputError, read_manifest_text
 from project_descriptor import (
     boundary_dir_for,
+    boundary_dirs_for_descriptor,
     bridge_dir_for,
     exemption_dir_for,
     interaction_dir_for,
@@ -620,7 +621,12 @@ def generate(
                 "valid canonical closure, promotion, interaction, boundary, and bridge inputs"
             ],
         ) from exc
-    findings = work_package_manifest.validate_derived_manifest(manifest, workspace)
+    findings = work_package_manifest.validate_derived_manifest(
+        manifest,
+        workspace,
+        specs_search_root=workspace,
+        allowed_boundary_dirs=boundary_dirs_for_descriptor(state.descriptor, workspace),
+    )
     errors = [finding for finding in findings if _is_error(finding)]
     if errors:
         raise GenerationError(

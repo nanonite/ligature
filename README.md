@@ -64,7 +64,7 @@ your own port workspace and run it there. Requires Python ≥ 3.10 with
 `jsonschema` and `PyYAML` installed.
 
 1. Get `ligature.pyz`. Either copy the published build from
-   [`releases/v1.0/`](releases/v1.0/) (check it with
+   [`releases/v1.2.2/`](releases/v1.2.2/) (check it with
    `sha256sum -c SHA256SUMS`; `PROVENANCE.json` records the exact source
    commit), or build it yourself from this checkout:
 

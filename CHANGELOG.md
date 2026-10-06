@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-06
+
 ### Added
 - Add a deterministic Stage 7 work-package manifest generator (#116)
 - Add clean-project black-box coverage for work-package generation (#124)

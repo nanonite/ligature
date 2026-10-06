@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- 114c: finish write-grant audit, one-shot, documentation, and black-box coverage (#120)
 - Make migrate --upgrade refresh managed gate_integrity hashes deterministically (#117)
 - `migrate --upgrade` now refreshes the manifest's `gate_hashes` (the pins `gate_integrity` checks) from the actually installed managed files, updates only managed installation metadata, preserves the user-owned descriptor and normative policy content, keeps a locally modified managed file's old pin instead of silently adopting the drifted bytes as the new pin, and `migrate --json` emits a machine-readable audit result with old/new version, changed paths, hashes, and required human action — after which `doctor`, `status --json`, `check --json` and `write-set-check` read the same state, and rerunning is safe and idempotent (#117)
 - Add issue-scoped authorize-write capability records for sanctioned protected-root writes (#114)

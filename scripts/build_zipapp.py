@@ -3,7 +3,7 @@
 
 Runtime contract: a stdlib `zipapp` targeting a system Python interpreter,
 deliberately not PyInstaller/Nuitka. This repository has no runtime
-dependency beyond jsonschema/PyYAML and no packaging config; a zipapp is the
+dependency beyond jsonschema/PyYAML (and tomli on Python 3.10) and no packaging config; a zipapp is the
 smallest build that fits that style. The cost -- a compatible interpreter on
 the target machine -- is not hidden: every build records its
 `required_python` and `doctor`/`version --verify` check it (see

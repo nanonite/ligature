@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/cargo-verus-profile-audit-schema.json",
+  "title": "Cargo-Verus crate profile audit event — v1.0",
+  "description": "A successful configure-crate --profile cargo-verus event. It records the exact issue-scoped write authorization, crate and profile configuration, before/after hashes for the selected manifest, workspace manifest, declared crate manifests and Cargo.lock, plus passing validation commands. Git retains the reviewable diff, durable history, and rollback; the event does not duplicate them.",
+  "type": "object",
+  "required": [
+    "event",
+    "schema_version",
+    "profile",
+    "profile_version",
+    "transition",
+    "issue",
+    "grant_id",
+    "issuer",
+    "issuer_kind",
+    "crate",
+    "crate_dir",
+    "path",
+    "verus_version",
+    "rust_toolchain",
+    "vstd_version",
+    "before_hash",
+    "after_hash",
+    "crate_manifest_hashes",
+    "cargo_lock_hashes",
+    "changed_fields",
+    "result",
+    "validation",
+    "recorded_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event": { "const": "cargo-verus-profile-configuration" },
+    "schema_version": { "const": "1.0" },
+    "profile": { "const": "cargo-verus" },
+    "profile_version": { "const": "1.0" },
+    "transition": { "enum": ["initial", "unchanged", "verus-toolchain-repin"] },
+    "issue": { "type": "integer", "minimum": 1 },
+    "grant_id": { "type": "string", "pattern": "^GW-[0-9a-f]{12}$" },
+    "issuer": { "type": "string", "minLength": 1 },
+    "issuer_kind": { "enum": ["human", "supervisor"] },
+    "crate": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$" },
+    "crate_dir": { "type": "string", "minLength": 1 },
+    "path": { "type": "string", "pattern": "^.+/Cargo\\.toml$" },
+    "verus_version": { "type": "string", "minLength": 1 },
+    "rust_toolchain": { "type": "string", "minLength": 1 },
+    "vstd_version": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+){2,3}(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$" },
+    "before_hash": { "$ref": "#/$defs/hash" },
+    "after_hash": { "$ref": "#/$defs/hash" },
+    "crate_manifest_hashes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["path", "before_hash", "after_hash", "result"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string", "pattern": "^(?:.+/)?Cargo\\.toml$" },
+          "before_hash": { "$ref": "#/$defs/hash" },
+          "after_hash": { "$ref": "#/$defs/hash" },
+          "result": { "enum": ["updated", "unchanged"] }
+        }
+      }
+    },
+    "cargo_lock_hashes": {
+      "type": "object",
+      "required": ["before_hash", "after_hash", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "before_hash": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "after_hash": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "result": { "const": "preserved" }
+      }
+    },
+    "changed_fields": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["path", "before", "after"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "enum": [
+              "dependencies.vstd.version",
+              "package.metadata.verus.verify",
+              "lints.rust.unexpected_cfgs.check-cfg"
+            ]
+          },
+          "before": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "string" },
+              { "type": "boolean" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          },
+          "after": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "boolean" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          }
+        }
+      }
+    },
+    "result": { "enum": ["updated", "unchanged"] },
+    "validation": {
+      "type": "object",
+      "required": ["cargo_metadata", "cargo_check", "verus_verify", "verus_build", "cargo_test", "crate_manifests_preserved", "cargo_lock_preserved"],
+      "additionalProperties": false,
+      "properties": {
+        "cargo_metadata": { "const": "cargo metadata --no-deps --format-version 1 passed" },
+        "cargo_check": { "const": "cargo check passed" },
+        "verus_verify": { "const": "cargo verus verify passed" },
+        "verus_build": { "const": "cargo verus build passed" },
+        "cargo_test": { "const": "cargo test passed" },
+        "crate_manifests_preserved": { "const": "passed" },
+        "cargo_lock_preserved": { "const": "passed" }
+      }
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

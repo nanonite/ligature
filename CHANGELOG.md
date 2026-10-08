@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-08
+
+### Added
+- Add typed, deterministic Cargo profile updates for existing crates, including the pinned `cargo-verus` profile (#125)
+
 ## [1.2.2] - 2026-10-06
 
 ### Added

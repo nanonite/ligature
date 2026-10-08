@@ -115,6 +115,22 @@ progress.
    expect `scaffold-crate` to produce anything else: it emits exactly a
    `Cargo.toml` and a `src/lib.rs`, derives both from the project descriptor,
    and takes no content of any kind.
+   For changes to an existing workspace-root Cargo profile, do not hand-edit
+   `Cargo.toml`: ask the human to authorize the exact `Cargo.toml` path, then
+   run `ligature configure-cargo-profile --issue <N> --profile <name>` with
+   explicit typed settings. This command merges only the named settings,
+   validates the TOML and Cargo metadata, and audits the grant, profile, and
+   validation. Git owns the diff, history, and rollback; the Ligature audit
+   does not duplicate them.
+   For an **existing declared crate** in a port workspace, request a grant for
+   that crate's exact `Cargo.toml` and run `ligature configure-crate --issue
+   <N> --crate <name> --profile cargo-verus`. This selects a typed Verus
+   configuration for one crate: it pins the installed toolchain's exact
+   `vstd`, enables Verus verification metadata, and declares `cfg(verus_only)`.
+   The audit records before/after hashes for the selected, workspace, and other
+   declared crate manifests plus `Cargo.lock`. It checks that sibling crate
+   manifests and the lockfile are preserved. Use `scaffold-crate` only when the
+   declared crate has no manifest yet.
 6. **There is no supervisory start.** The agent drives the loop; the
    binary stays a passive oracle. `check` is read-only and never runs a
    writing operation on its own — it only recommends one through
@@ -154,6 +170,8 @@ progress.
 | `ligature write-set-check [--json] [--issue N]` | read-only write-set conformance: files outside `allowed_roots` (`out-of-set`) and files written into `protected_roots` that no declaration vouches for (`protected-write`), both blocking; the protected surface reported per declared pattern. `--issue N` also consumes the write grants recorded for that issue (#114) |
 | `ligature authorize-write --issue N --path P --op K --issuer <name>` | record one issue-scoped capability authorizing a single sanctioned write into a declared protected root, in `ci/results/protected-writes.jsonl` — the sanctioned-route exception to rule 5 (#114). A human checkpoint in the `human` lane (never run it yourself); the `supervisor` lane needs the identity declared in the descriptor's `write_set.authorized_supervisors`. A grant cannot widen `allowed_roots`, authorize another operation, outlive its TTL (nor begin before it — a record whose window has not opened is reported `not-yet-issued` and authorizes nothing), or cover another issue or path |
 | `ligature scaffold-crate --issue N --crate <name>` | write a missing crate's `Cargo.toml` and canonical `src/lib.rs`, deterministically and from the project descriptor (#115) — the generator the capability record feeds. Mode P only, and only for a crate the descriptor's `crates[]` declares. Writes exactly those two files: the manifest needs an active grant for that one path; the skeleton is inside `allowed_roots` and needs none, so a missing crate bootstraps without anyone holding raw `Cargo.toml` scope. Idempotent (identical bytes are `unchanged`), never overwrites a manifest with different bytes or an existing `src/lib.rs`, takes no content of any kind, and writes no implementation or normative spec content — that belongs to a work package (#115) |
+| `ligature configure-cargo-profile --issue N --profile <name> [typed settings...]` | merge explicit typed profile settings into the workspace-root `Cargo.toml`; requires a human-issued exact-path grant. Preserves unrelated TOML bytes and values, validates via Cargo metadata, and records only authorization, profile settings, and validation in the protected-write audit. Git retains diffs/history/rollback |
+| `ligature configure-crate --issue N --crate <name> --profile cargo-verus` | configure an existing declared crate's Verus Cargo profile in a port workspace. Requires a human-issued exact-path grant for that crate's `Cargo.toml`, preserves unrelated manifest values and sibling crate manifests, validates Cargo/Verus commands, and audits before/after hashes. Git retains diff/history/rollback (#125) |
 | `ligature validate <kind> <target>` | deterministic per-artifact check (G1a/G1b/G2+) |
 | `ligature gate <gate-id> [args...]` | deterministic cross-artifact gate |
 | `ligature draft <stage> <template> <target>` | Stage 0/3 one-shot LLM draft (advisory; human review required). Run `ligature draft --help` for the complete template list — every shipped template, what it drafts, and which command promotes it — rather than guessing a name |

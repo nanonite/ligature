@@ -8,3 +8,4 @@
 
 jsonschema>=4.10,<5
 PyYAML>=6.0,<7
+tomli>=2.0,<3; python_version < "3.11"

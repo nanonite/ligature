@@ -12,6 +12,7 @@ failing to resolve its own schemas/prompts.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,8 @@ GRANT_SCHEMA = json.loads((ROOT / "docs" / "write-grant-schema.json").read_text(
 #: a published shape a consumer parses must ship, and the bundle's file list
 #: comes from the inventory -- so a receipt schema nobody tracks does not ship.
 SCAFFOLD_SCHEMA = json.loads((ROOT / "docs" / "scaffold-receipt-schema.json").read_text())
+CARGO_PROFILE_SCHEMA = json.loads((ROOT / "docs" / "cargo-profile-audit-schema.json").read_text())
+CARGO_VERUS_PROFILE_SCHEMA = json.loads((ROOT / "docs" / "cargo-verus-profile-audit-schema.json").read_text())
 
 
 # A revision from before init grew the re-pin guard (#65): building a
@@ -299,6 +302,162 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
                 self.assertIn(fragment, proc.stderr)
                 self.assertNotIn("Traceback", proc.stderr)
+
+    def test_typed_cargo_profile_configuration_runs_in_the_packaged_binary(self):
+        """The new profile editor and its strict audit schema ship together."""
+        with zipfile.ZipFile(self.artifact) as zf:
+            bundled = {name for name in zf.namelist() if not name.endswith("/")}
+        self.assertIn("configure_cargo_profile.py", bundled)
+        self.assertIn("ligature_data/docs/cargo-profile-audit-schema.json", bundled)
+        self.assertEqual(self.init_port().returncode, 0)
+
+        descriptor = self.workspace / "project-descriptor.json"
+        declared = json.loads(descriptor.read_text())
+        declared["write_set"] = {
+            "allowed_roots": ["crates/*/src/", "crates/*/tests/"],
+            "protected_roots": ["**/Cargo.toml"],
+        }
+        descriptor.write_text(json.dumps(declared, indent=2) + "\n")
+        manifest = self.workspace / "Cargo.toml"
+        source = self.workspace / "src" / "lib.rs"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("pub fn marker() {}\n")
+        manifest.write_text(
+            "[package]\n"
+            'name = "profile-pilot"\n'
+            'version = "0.1.0"\n'
+            'edition = "2021"\n'
+            "\n"
+            "[profile.release]\n"
+            "opt-level = 1 # keep this comment\n"
+            "debug = false\n"
+        )
+        original = manifest.read_text()
+
+        issued = self.run_artifact(
+            "--workspace", str(self.workspace), "authorize-write",
+            "--issue", "121", "--path", "Cargo.toml", "--op", "write",
+            "--issuer", "operator", "--one-shot", "--json",
+        )
+        self.assertEqual(issued.returncode, 0, issued.stdout + issued.stderr)
+        grant = json.loads(issued.stdout)
+
+        configured = self.run_artifact(
+            "--workspace", str(self.workspace), "configure-cargo-profile",
+            "--issue", "121", "--profile", "release", "--grant-id", grant["grant_id"],
+            "--opt-level", "3", "--lto", "thin", "--json",
+        )
+        self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        record = json.loads(configured.stdout)
+        self.assertEqual(
+            [error.message for error in make_validator(CARGO_PROFILE_SCHEMA).iter_errors(record)],
+            [],
+        )
+        self.assertEqual(record["grant_id"], grant["grant_id"])
+        self.assertEqual(record["profile"], "release")
+        self.assertEqual(record["changes"], {"opt-level": 3, "lto": "thin"})
+        self.assertEqual(record["validation"]["cargo_metadata"], "passed")
+        self.assertNotIn("git_commit", record)
+        self.assertNotIn("diff", record)
+        self.assertIn("opt-level = 3 # keep this comment", manifest.read_text())
+        self.assertIn("debug = false", manifest.read_text())
+        self.assertTrue(manifest.read_text().startswith(original[: original.index("[profile.release]")]))
+        self.assertFalse((self.workspace / "Cargo.lock").exists())
+
+    def test_cargo_verus_crate_profile_runs_from_the_packaged_binary(self):
+        """The crate-scoped command and its schema ship in the isolated zipapp."""
+        with zipfile.ZipFile(self.artifact) as zf:
+            bundled = {name for name in zf.namelist() if not name.endswith("/")}
+        self.assertIn("configure_crate_profile.py", bundled)
+        self.assertIn("ligature_data/docs/cargo-verus-profile-audit-schema.json", bundled)
+        self.assertEqual(self.init_port().returncode, 0)
+
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor["crates"] = [{
+            "crate_dir": "rust/demo-core",
+            "contracts_crate": "contracts",
+            "specs_search_root": "rust",
+        }]
+        descriptor["write_set"] = {
+            "allowed_roots": ["rust/*/src/", "rust/*/tests/"],
+            "protected_roots": ["**/Cargo.toml"],
+        }
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+
+        crate = self.workspace / "rust/demo-core"
+        crate.mkdir(parents=True)
+        manifest = crate / "Cargo.toml"
+        manifest.write_text(
+            '[package]\nname = "demo-core"\nversion = "0.1.0"\nedition = "2021"\n'
+        )
+        (self.workspace / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["rust/demo-core"]\nresolver = "2"\n'
+        )
+        (self.workspace / "Cargo.lock").write_text("# preserved\nversion = 4\n")
+
+        fake_bin = self.workspace / "fake-bin"
+        fake_bin.mkdir()
+        cargo = fake_bin / "cargo"
+        cargo.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys, tomllib\n"
+            "args = sys.argv[1:]\n"
+            "if args and args[0] == 'metadata':\n"
+            "    manifest = pathlib.Path(args[args.index('--manifest-path') + 1]).resolve()\n"
+            "    data = tomllib.loads(manifest.read_text())\n"
+            "    package = data['package']\n"
+            "    print(json.dumps({'workspace_root': str(pathlib.Path.cwd()), 'packages': [{\n"
+            "        'name': package['name'], 'version': package['version'],\n"
+            "        'id': package['name'] + '@' + package['version'],\n"
+            "        'manifest_path': str(manifest), 'metadata': package.get('metadata', {})\n"
+            "    }]}))\n"
+        )
+        cargo.chmod(0o755)
+        rustc = fake_bin / "rustc"
+        rustc.write_text(
+            "#!/usr/bin/env python3\n"
+            "print('rustc 1.88.0 (fake)')\n"
+            "print('host: x86_64-unknown-linux-gnu')\n"
+            "print('release: 1.88.0')\n"
+        )
+        rustc.chmod(0o755)
+        verus = fake_bin / "verus"
+        verus.write_text(
+            "#!/usr/bin/env python3\n"
+            "print('{\"version\": \"0.2025.10.0\", \"toolchain\": \"1.88.0-x86_64-unknown-linux-gnu\"}')\n"
+        )
+        verus.chmod(0o755)
+        vstd = fake_bin / "vstd"
+        vstd.mkdir()
+        (vstd / "Cargo.toml").write_text(
+            '[package]\nname = "vstd"\nversion = "0.2025.10.0"\nedition = "2021"\n'
+        )
+
+        issued = self.run_artifact(
+            "--workspace", str(self.workspace), "authorize-write",
+            "--issue", "125", "--path", "rust/demo-core/Cargo.toml",
+            "--op", "write", "--issuer", "operator", "--json",
+        )
+        self.assertEqual(issued.returncode, 0, issued.stdout + issued.stderr)
+        grant = json.loads(issued.stdout)["grant_id"]
+        original_lock = (self.workspace / "Cargo.lock").read_bytes()
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
+        try:
+            configured = self.run_artifact(
+                "--workspace", str(self.workspace), "configure-crate",
+                "--issue", "125", "--crate", "demo-core",
+                "--profile", "cargo-verus", "--grant-id", grant, "--json",
+            )
+        finally:
+            os.environ["PATH"] = old_path
+        self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        record = json.loads(configured.stdout)
+        self.assertEqual(list(make_validator(CARGO_VERUS_PROFILE_SCHEMA).iter_errors(record)), [])
+        self.assertEqual(record["path"], "rust/demo-core/Cargo.toml")
+        self.assertEqual(record["validation"]["cargo_lock_preserved"], "passed")
+        self.assertEqual((self.workspace / "Cargo.lock").read_bytes(), original_lock)
 
     def test_version_verify_runs_without_the_source_tree(self):
         proc = self.run_artifact("version", "--verify")

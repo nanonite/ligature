@@ -107,6 +107,7 @@ rather than rewritten.
 | `authorize-write` (#114) | one append-only capability record in `ci/results/protected-writes.jsonl`, authorizing a single write into a declared `protected_roots` path — the only thing besides a pipeline artifact that can make a `write-set-check` protected-write finding non-blocking | `--issuer NAME` (required, human identity) plus the record's own binding: `--issue N`, `--path P`, `--op write\|delete`, `--ttl` (a grant never outlives `issued_at + ttl`, and never starts before `issued_at` either — §8), `--one-shot` (one exact file; §8's closing paragraphs say what it does not bound). In the `human` lane (the default) it is a human checkpoint exactly like `approve`/`accept-policy`/`record-ruling`, and an agent must ask the human to run it — #103's enforcement left a protected write that is genuinely *sanctioned* with only two routes, both worse than the defect: widen `allowed_roots`, which deletes the boundary, or hand-edit a file outside every tool, which the audit trail cannot tell apart from an intrusion. In the `supervisor` lane the identity must be declared in the descriptor's `write_set.authorized_supervisors` whitelist, and grant consumers re-verify that on every use, so withdrawing the identity withdraws the grant on the next run. Nothing else is authority: no prose field is ever read when deciding whether a grant authorizes a write, and a grant cannot widen `allowed_roots`, authorize a different operation, outlive its TTL (or begin before it), or cover a different issue or path. The ledger is an audit trail, not a signature — see §8's closing paragraph for what that forecloses and what it does not |
 | `generate-work-package` (#122) | one canonical `ci/manifest/<WP>.json` plus one successful-use audit row in `ci/results/protected-writes.jsonl` | a JSON/YAML plan, validated descriptor-backed sources, explicit toolchain/target/features, and an active exact-path `write` grant for the same issue; it cannot choose another path or edit conflicting existing bytes |
 | `scaffold-crate` (#115) | at most two files for a **declared** crate of a `mode: port` workspace: `<crate_dir>/Cargo.toml` (protected) and `<crate_dir>/src/lib.rs` (`allowed_roots`) — nothing else: no descriptor, no ledger line, no artifact, no artifact directory | **None of its own.** It records no capability, so it cannot widen its own authority: the protected manifest write requires an `authorize-write` record already active for exactly that path and issue, consumed through the same reader `write-set-check` uses, and the command refuses (exit 2, nothing written) when there is not one — naming the issuing command. The `src/lib.rs` write needs no record because `allowed_roots` already permits it, and is never overwritten once present. Both files are pure functions of the descriptor's declared `crate_dir` (there is no content flag and no target flag), so a caller can inject nothing and determinism is checkable by hash: identical bytes are `unchanged`, different bytes are refused rather than rewritten. It writes no implementation code and no normative policy or spec content — those belong to a work package through the ordinary worker/human path — and its `doctor` check is recorded rather than enforced beyond the descriptor gate, since it owns none of the files `migrate`/`accept-policy` do |
+| `configure-crate` (#125) | one existing declared crate's `Cargo.toml` under `mode: port` | An active exact-path `write` grant for the same issue and manifest. The command applies only the typed `cargo-verus` profile, validates Cargo/Verus metadata and commands, and records before/after SHA-256 hashes plus validation. It refuses missing crates, conflicting dependency sources, unapproved toolchain repins, or validation failures; failed validation restores the original manifest and `Cargo.lock`. Other declared crate manifests are checked for byte preservation |
 
 `report pilot-cluster` writes nothing (stdout only) and belongs in §4's
 read-only list in every respect except that it shares the `report` verb
@@ -231,6 +232,26 @@ package's question, decided by Stage 7 and the gates, not by this command's
 `cargo` opinion (there is no `cargo` here at all — the `manifest` check
 re-parses the emitted bytes as TOML and compares them, which is a weaker
 guarantee than a build and is reported as exactly that).
+
+**Existing Cargo profile edits have a dedicated writer.**
+`configure-cargo-profile` updates only the typed settings named for one
+workspace-root `[profile.<name>]` table, requires an active exact-path grant
+for `Cargo.toml`, and validates both the TOML merge and Cargo's manifest
+metadata. Its audit event records the issuer, issue, profile, requested
+values, and validation result. It does not copy diffs, commits, or rollback
+content into Ligature's ledger: Git provides those operations. If Cargo
+validation fails, the command restores the original file before refusing.
+
+**Existing crate manifests use a crate-scoped profile command.**
+`configure-crate --issue N --crate <name> --profile cargo-verus` selects one
+existing crate named by the port descriptor, and the grant must cover exactly
+that crate's `Cargo.toml`. The profile adds only the exact toolchain-matched
+`vstd` pin, `package.metadata.verus.verify = true`, and the
+`cfg(verus_only)` lint entry. Its audit records before/after hashes for that
+manifest, the workspace manifest, every other existing declared crate manifest,
+and `Cargo.lock`. It reports successful Cargo metadata/check, Verus verify/build,
+Cargo test, sibling-manifest preservation, and lockfile preservation. The
+printed diff and durable history remain in Git.
 
 ## 9. Witnesses and differential agreement falsify, never prove
 

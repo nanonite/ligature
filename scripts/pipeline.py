@@ -392,6 +392,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adjudicator  # noqa: E402
 import resources  # noqa: E402
+import configure_cargo_profile  # noqa: E402
+import configure_crate_profile  # noqa: E402
 from extract_c_static import ExtractionError  # noqa: E402
 from extract_c_static import extract_crate as extract_c_static_crate  # noqa: E402
 from gate_g14 import gate_workspace as gate_g14_workspace  # noqa: E402
@@ -1059,6 +1061,71 @@ def cmd_scaffold_crate(args: argparse.Namespace) -> int:
     else:
         print(scaffold_crate.render_report_text(report))
     return 1 if report.state == scaffold_crate.CHECK_FAILED else 0
+
+
+def cmd_configure_cargo_profile(args: argparse.Namespace) -> int:
+    """Merge typed Cargo profile settings into the root Cargo.toml."""
+    changes = {
+        "inherits": args.inherits,
+        "opt-level": args.opt_level,
+        "debug": args.debug,
+        "split-debuginfo": args.split_debuginfo,
+        "strip": args.strip,
+        "debug-assertions": args.debug_assertions,
+        "overflow-checks": args.overflow_checks,
+        "lto": args.lto,
+        "panic": args.panic,
+        "incremental": args.incremental,
+        "codegen-units": args.codegen_units,
+        "rpath": args.rpath,
+    }
+    changes = {key: value for key, value in changes.items() if value is not None}
+    try:
+        record = configure_cargo_profile.configure_profile(
+            args.workspace,
+            issue=args.issue,
+            profile=args.profile,
+            changes=changes,
+            descriptor_path=args.descriptor,
+            grant_id=args.grant_id,
+        )
+    except configure_cargo_profile.ProfileConfigurationError as error:
+        if args.json:
+            print(canonical_json(configure_cargo_profile.error_document(error)))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(canonical_json(record))
+    else:
+        print(configure_cargo_profile.render_text(record))
+    return 0
+
+
+def cmd_configure_crate(args: argparse.Namespace) -> int:
+    """Apply one declared typed Cargo profile to an existing crate manifest."""
+    try:
+        record, diff = configure_crate_profile.configure_crate_profile(
+            args.workspace,
+            issue=args.issue,
+            crate=args.crate,
+            profile=args.profile,
+            descriptor_path=args.descriptor,
+            grant_id=args.grant_id,
+        )
+    except configure_crate_profile.CrateProfileError as error:
+        if args.json:
+            print(canonical_json(configure_crate_profile.error_document(error)))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        if diff:
+            print(diff, file=sys.stderr, end="")
+        print(canonical_json(record))
+    else:
+        print(configure_crate_profile.render_text(record, diff))
+    return 0
 
 
 def cmd_generate_work_package(args: argparse.Namespace) -> int:
@@ -3621,6 +3688,107 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit the versioned scaffold receipt (docs/scaffold-receipt-schema.json)",
     )
     scaffold_crate_p.set_defaults(func=cmd_scaffold_crate)
+
+    configure_crate_p = sub.add_parser(
+        "configure-crate",
+        help=(
+            "apply a declared typed profile to an existing crate manifest; "
+            "the cargo-verus profile requires an exact issue-scoped write grant"
+        ),
+    )
+    configure_crate_p.add_argument(
+        "--issue", type=int, required=True, metavar="N",
+        help="issue the exact crate Cargo.toml write grant is scoped to",
+    )
+    configure_crate_p.add_argument(
+        "--crate", required=True, metavar="NAME",
+        help="existing crate declared in project-descriptor.json (crate_dir or unique basename)",
+    )
+    configure_crate_p.add_argument(
+        "--profile", required=True, choices=["cargo-verus"], metavar="PROFILE",
+        help="versioned typed profile to apply; v1 supports cargo-verus",
+    )
+    configure_crate_p.add_argument(
+        "--grant-id", default=None, metavar="GW-ID",
+        help="require this exact active issue/path write-grant id",
+    )
+    configure_crate_p.add_argument(
+        "--json", action="store_true",
+        help="emit the versioned profile audit event or a structured refusal",
+    )
+    configure_crate_p.set_defaults(func=cmd_configure_crate)
+
+    cargo_profile_p = sub.add_parser(
+        "configure-cargo-profile",
+        help=(
+            "merge typed Cargo profile settings into the workspace-root Cargo.toml; "
+            "requires an exact issue-scoped write grant"
+        ),
+    )
+    cargo_profile_p.add_argument(
+        "--issue", type=int, required=True, metavar="N",
+        help="issue the exact Cargo.toml write grant is scoped to",
+    )
+    cargo_profile_p.add_argument(
+        "--profile", required=True, metavar="NAME",
+        help="Cargo profile table to update, such as release, dev, test, or a custom name",
+    )
+    cargo_profile_p.add_argument(
+        "--inherits", default=None, metavar="NAME",
+        help="set a custom profile's inherited profile",
+    )
+    cargo_profile_p.add_argument(
+        "--opt-level", default=None, type=configure_cargo_profile.parse_opt_level,
+        metavar="0|1|2|3|s|z", help="Cargo optimization level (integer or size mode)",
+    )
+    cargo_profile_p.add_argument(
+        "--debug", default=None, type=configure_cargo_profile.parse_debug,
+        metavar="BOOL|0|1|2", help="debug info as a boolean or Cargo debug level 0, 1, or 2",
+    )
+    cargo_profile_p.add_argument(
+        "--split-debuginfo", default=None,
+        help="Cargo split-debuginfo mode",
+    )
+    cargo_profile_p.add_argument(
+        "--strip", default=None, type=configure_cargo_profile.parse_bool_or_string_option,
+        help="strip setting: off/on or none/debuginfo/symbols",
+    )
+    cargo_profile_p.add_argument(
+        "--debug-assertions", default=None, action=argparse.BooleanOptionalAction,
+        help="set or clear debug assertions",
+    )
+    cargo_profile_p.add_argument(
+        "--overflow-checks", default=None, action=argparse.BooleanOptionalAction,
+        help="set or clear integer overflow checks",
+    )
+    cargo_profile_p.add_argument(
+        "--lto", default=None, type=configure_cargo_profile.parse_bool_or_string_option,
+        help="link-time optimization: off/on, thin, or fat",
+    )
+    cargo_profile_p.add_argument(
+        "--panic", default=None, help="panic strategy: unwind or abort",
+    )
+    cargo_profile_p.add_argument(
+        "--incremental", default=None, action=argparse.BooleanOptionalAction,
+        help="set or clear incremental compilation",
+    )
+    cargo_profile_p.add_argument(
+        "--codegen-units", default=None, type=int, metavar="N",
+        help="number of code generation units (1 through 256)",
+    )
+    cargo_profile_p.add_argument(
+        "--rpath", default=None, action=argparse.BooleanOptionalAction,
+        help="set or clear runtime path embedding",
+    )
+    cargo_profile_p.add_argument(
+        "--grant-id", default=None, metavar="GW-ID",
+        help="require this exact active grant id; it must authorize Cargo.toml for this issue",
+    )
+    cargo_profile_p.add_argument(
+        "--json", action="store_true",
+        help="emit the typed profile audit event or a structured refusal",
+    )
+    cargo_profile_p.set_defaults(func=cmd_configure_cargo_profile)
 
     generate_wp_p = sub.add_parser(
         "generate-work-package",

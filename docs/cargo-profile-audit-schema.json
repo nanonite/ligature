@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/cargo-profile-audit-schema.json",
+  "title": "Cargo profile configuration audit event — v1.0",
+  "description": "A successful configure-cargo-profile use of an exact issue-scoped Cargo.toml write grant. It records authorization, the typed profile values, and validation results. Git remains the diff, history, and rollback authority; this event does not copy Git history or file diffs.",
+  "type": "object",
+  "required": [
+    "event",
+    "schema_version",
+    "issue",
+    "grant_id",
+    "issuer",
+    "issuer_kind",
+    "path",
+    "profile",
+    "changes",
+    "result",
+    "validation",
+    "recorded_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event": { "const": "cargo-profile-configuration" },
+    "schema_version": { "const": "1.0" },
+    "issue": { "type": "integer", "minimum": 1 },
+    "grant_id": { "type": "string", "pattern": "^GW-[0-9a-f]{12}$" },
+    "issuer": { "type": "string", "minLength": 1 },
+    "issuer_kind": { "enum": ["human", "supervisor"] },
+    "path": { "const": "Cargo.toml" },
+    "profile": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
+    "changes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "inherits": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$" },
+        "opt-level": {
+          "oneOf": [
+            { "type": "integer", "enum": [0, 1, 2, 3] },
+            { "type": "string", "enum": ["s", "z"] }
+          ]
+        },
+        "debug": {
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "integer", "enum": [0, 1, 2] }
+          ]
+        },
+        "split-debuginfo": { "enum": ["off", "packed", "unpacked"] },
+        "strip": {
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "string", "enum": ["none", "debuginfo", "symbols"] }
+          ]
+        },
+        "debug-assertions": { "type": "boolean" },
+        "overflow-checks": { "type": "boolean" },
+        "lto": {
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "string", "enum": ["thin", "fat"] }
+          ]
+        },
+        "panic": { "enum": ["unwind", "abort"] },
+        "incremental": { "type": "boolean" },
+        "codegen-units": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "rpath": { "type": "boolean" }
+      }
+    },
+    "result": { "enum": ["updated", "unchanged"] },
+    "validation": {
+      "type": "object",
+      "required": [
+        "toml_parse",
+        "requested_profile_values",
+        "unrelated_settings_preserved",
+        "cargo_metadata",
+        "cargo_validator"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "toml_parse": { "const": "passed" },
+        "requested_profile_values": { "const": "passed" },
+        "unrelated_settings_preserved": { "const": "passed" },
+        "cargo_metadata": { "const": "passed" },
+        "cargo_validator": {
+          "const": "cargo metadata --no-deps --format-version 1 --offline"
+        }
+      }
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    }
+  }
+}

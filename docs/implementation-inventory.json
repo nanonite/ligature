@@ -409,6 +409,16 @@
       "func": "cmd_scaffold_crate",
       "stable_mapping": "stable deterministic crate bootstrap -- writes a MISSING declared crate's Cargo.toml and its canonical src/lib.rs in a mode: port workspace, deriving both from the project descriptor alone with no content flag and no target flag. The manifest is a protected-root write and requires an active issue-scoped `write` grant at exactly that path, consumed through the same write_authorization reader write-set-check uses; the skeleton is inside allowed_roots, needs no grant, and is never overwritten, so a missing-crate pilot bootstraps without anyone holding raw Cargo.toml write scope. Refused (exit 2, nothing written) for an undeclared/ambiguous/absolute/escaping/glob crate name, a non-port mode, a target inside a canonical pipeline artifact location, a declared crate's specs/ tree or the pinned upstream checkout, a manifest no protected_roots covers or one allowed_roots already permits, no active grant (with each nearby record's status named), or a --grant-id mismatch; an existing manifest with identical bytes is `unchanged` and writes nothing. Emits a versioned receipt (docs/scaffold-receipt-schema.json) recording the issue, the grant consumed, both generated paths with before/after hashes, and every named check -- including Cargo's offline workspace-membership check and write_set.check_write_set's own verdict on the write just made (chainlink #115, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
     },
+      {
+        "name": "configure-cargo-profile",
+        "func": "cmd_configure_cargo_profile",
+        "stable_mapping": "separate workspace-root profile command: merges caller-selected typed settings into one workspace-root Cargo.toml [profile.<name>] table without reserializing unrelated TOML. Requires an active exact issue/path/write grant for Cargo.toml, revalidates the full TOML value tree and Cargo metadata, and restores the original file if Cargo validation fails. Successful and unchanged runs append a strict cargo-profile-configuration event recording grant/issuer, issue, profile, requested values and validation results; the event does not copy Git diffs, commits or rollback content. One-shot grants are consumed by one changed configuration."
+      },
+      {
+        "name": "configure-crate",
+        "func": "cmd_configure_crate",
+        "stable_mapping": "chainlink #125: `--crate` selects one existing descriptor-declared crate in a port workspace; the typed cargo-verus profile updates only its Cargo.toml. Requires an active exact issue/path/write grant, derives the exact vstd version from the installed Verus distribution, checks the Rust toolchain match, opts the package into verification, and declares cfg(verus_only). Preserves unrelated manifest values, sibling crate manifests, and Cargo.lock; validates Cargo metadata/check, Verus verify/build, and Cargo test. Successful and unchanged audit events record authorization, profile transition, before/after hashes for the selected, workspace, and other declared crate manifests plus Cargo.lock, and validation; Git retains the printed diff/history/rollback."
+      },
     {
       "name": "generate-work-package",
       "func": "cmd_generate_work_package",
@@ -730,6 +740,18 @@
       "disposition": "runtime-required",
       "summary": "chainlink #115: the generator half of the sanctioned-protected-write mechanism -- `ligature scaffold-crate --issue N --crate <name>` writes a missing declared crate's Cargo.toml and canonical src/lib.rs deterministically, from the project descriptor alone. Exactly two files, and they are not the same kind of write: the manifest is a protected-root write requiring an active issue-scoped grant at exactly that path (read through write_authorization's own ledger reader and status rules, so this verb cannot believe a grant is live when write-set-check would report it expired/not-yet-issued/other-issue/duplicate/unverified-issuer/ledger-protected), while the skeleton is inside allowed_roots, needs no grant, and is never overwritten. No content flag and no target flag exist: both files are pure functions of the declared crate_dir, so there is nothing for a caller to inject and the bytes are checkable by hash. Refuses an undeclared/ambiguous/escaping/glob crate name, a non-port mode, a target inside a canonical artifact location, a specs/ tree or the pinned upstream checkout (judged by write_set's own predicates), a manifest protected_roots does not cover or allowed_roots already permits, no active grant, or a --grant-id mismatch -- each refusal writing nothing. Idempotent (identical bytes are `unchanged`) and never overwrites a manifest with different bytes or an existing src/lib.rs. Re-derives every claim before reporting success: descriptor gate, manifest re-parsed as TOML and compared byte for byte, skeleton, write_set.check_write_set's OWN verdict on the write just made, and doctor's installation state (recorded rather than enforced beyond its descriptor gate). Writes no implementation code and no normative policy or spec content."
     },
+      {
+        "path": "scripts/configure_cargo_profile.py",
+        "role": "generator",
+        "disposition": "runtime-required",
+        "summary": "Separate workspace-root profile helper: authorized typed profile editing for the workspace-root Cargo.toml. Applies only named settings in one [profile.<name>] table and proves all unrelated parsed TOML values were preserved. Uses the issue-scoped exact Cargo.toml write grant; Cargo metadata validates the candidate and a failed validation restores the previous bytes. Emits an audit event with issuer, grant, issue, profile, typed changes, result and validator status, leaving Git diffs/history/rollback outside the Ligature audit."
+      },
+      {
+        "path": "scripts/configure_crate_profile.py",
+        "role": "generator",
+        "disposition": "runtime-required",
+        "summary": "chainlink #125: applies the typed cargo-verus profile to one existing descriptor-declared crate in a port workspace. Reuses #115 crate resolution and exact protected-write grants, pins the installed Verus distribution's vstd version after checking the Rust toolchain, updates only the declared profile fields, and validates with Cargo and Verus. Hashes the selected manifest before/after and verifies sibling crate manifests plus Cargo.lock are preserved; failed validation restores the manifest and lockfile."
+      },
     {
       "path": "scripts/work_package_manifest.py",
       "role": "generator",
@@ -887,6 +909,16 @@
       "disposition": "runtime-required",
       "summary": "chainlink #115: the versioned shape of `ligature scaffold-crate --json`'s receipt -- the issue, which capability record was consumed, both generated paths with before/after sha256 and per-file state (created/unchanged/preserved), and every named check's result plus write_set's own verdict. NOT a persisted artifact (the command writes no ledger line and no artifact), but closed like every other schema here after #104: a key nothing reads must not validate as if it were read. The receipt RECORDS the authority question rather than deciding it -- the capability lives in ci/results/protected-writes.jsonl and is consumed by the generator that writes the protected path and reported by `ligature write-set-check --issue N`."
     },
+      {
+        "path": "docs/cargo-profile-audit-schema.json",
+        "disposition": "runtime-required",
+        "summary": "Closed schema for the separate workspace-root configure-cargo-profile authorization/profile/validation event in ci/results/protected-writes.jsonl. The event records typed settings and successful validators but no Git diff, commit history, or rollback copy. Grant rows remain the only capability records."
+      },
+      {
+        "path": "docs/cargo-verus-profile-audit-schema.json",
+        "disposition": "runtime-required",
+        "summary": "chainlink #125: strict schema for configure-crate's cargo-verus event in ci/results/protected-writes.jsonl, including exact grant provenance, profile transition, selected crate/path, before/after hashes for the workspace and all existing declared crate manifests plus Cargo.lock, toolchain/vstd versions, and passing Cargo/Verus plus preservation checks. The event does not duplicate Git diff/history/rollback."
+      },
     {
       "path": "docs/witness-result-schema.json",
       "disposition": "runtime-required"
@@ -1285,6 +1317,16 @@
       "kind": "regression",
       "disposition": "test-only"
     },
+      {
+        "path": "tests/test_configure_cargo_profile.py",
+        "kind": "regression",
+        "disposition": "test-only"
+      },
+      {
+        "path": "tests/test_configure_crate_profile.py",
+        "kind": "regression",
+        "disposition": "test-only"
+      },
     {
       "path": "tests/test_work_package_manifest.py",
       "kind": "unit",
@@ -1488,16 +1530,16 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 97,
+        "runtime-required": 101,
       "excluded": 1,
       "documentation": 14,
       "installed-template": 4,
-      "test-only": 77,
+        "test-only": 79,
       "vendored-runtime": 1
     },
-    "total_entries": 194,
-    "test_count": 63,
-    "registered_cli_command_count": 47
+      "total_entries": 200,
+      "test_count": 65,
+      "registered_cli_command_count": 49
   },
   "documentation_and_templates": [
     {

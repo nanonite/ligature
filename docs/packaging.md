@@ -10,7 +10,7 @@ python3 ligature.pyz <verb> [args...]
 ```
 
 This is a deliberate choice, not a default. The project has no runtime
-dependency beyond `jsonschema`/`PyYAML` and no `pyproject.toml`/`setup.py`;
+dependency beyond `jsonschema`/`PyYAML` (and `tomli` on Python 3.10) and no `pyproject.toml`/`setup.py`;
 a zipapp is the smallest build that fits that minimal-dependency style.
 PyInstaller/Nuitka-style self-contained binaries were rejected because they
 would bundle an interpreter and a much larger toolchain for a project that

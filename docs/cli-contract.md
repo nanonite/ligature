@@ -29,6 +29,8 @@ ligature check [--json] [next]               # #56 -- consolidated gate run + ne
 ligature write-set-check [--json] [--issue N]  # #77, #103, #114 -- read-only write-set conformance
 ligature authorize-write --issue N --path P --op K --issuer <name>  # #114 -- record one issue-scoped capability for a sanctioned protected-root write
 ligature scaffold-crate --issue N --crate <name>  # #115 -- deterministic Cargo.toml + canonical src skeleton for a missing declared crate of a port-mode project
+ligature configure-crate --issue N --crate <name> --profile cargo-verus  # #125 -- configure an existing declared crate's Verus Cargo profile
+ligature configure-cargo-profile --issue N --profile <name> [typed settings...]  # merge authorized Cargo profile settings into the workspace-root manifest
 ligature generate-work-package --plan <path> --issue N --toolchain <value> --target <triple> [--feature <name> ...]  # #122 -- derive and authorize ci/manifest/WP-*.json from validated workspace authority
 ligature accept-policy --reviewer <name> [--version <name>@<major>.<minor>]  # #78, #113 -- record a reviewed governance change
 ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
@@ -105,6 +107,30 @@ authorizes writing it, which is the arrangement #114 was opened to avoid.
 It is also the reason the verb carries no `--content` flag: the manifest is a
 pure function of the descriptor, so there is nothing for a caller to supply
 and nothing for a checkpoint to police (§8).
+
+`configure-cargo-profile` changes only typed keys named on the command line
+in one workspace-root `[profile.<name>]` table. It requires an active
+exact-path `write` grant for `Cargo.toml`, preserves all other TOML bytes and
+parsed values, validates the result with Cargo metadata, and records a strict
+authorization/profile/validation event in
+`ci/results/protected-writes.jsonl`. Git remains the source for the file's
+diff, history, and rollback; Ligature does not copy those into its audit. A
+one-shot grant cannot authorize a second changed profile operation.
+
+`configure-crate --profile cargo-verus` updates the existing `Cargo.toml` of
+one descriptor-declared crate in a port workspace. It requires an active
+exact-path `write` grant for that crate manifest. The typed profile pins the
+exact `vstd` version shipped with the selected Verus toolchain, opts the crate
+into Verus verification, and declares `cfg(verus_only)` for Rust's cfg lint.
+It preserves unrelated TOML values and other declared crate manifests, restores
+the original `Cargo.lock` after validation, and runs Cargo metadata/check,
+`cargo verus verify`, `cargo verus build`, and `cargo test`. Its strict audit
+event records before/after hashes for the selected manifest, workspace and
+other declared crate manifests, plus `Cargo.lock`, and validation outcomes; the
+normal diff is printed for review, while Git retains durable history and
+rollback.
+Toolchain version changes require an explicit transition from the last
+successful profile event.
 
 `report` is **not** uniformly read-only — see §6's own write column. This
 was wrongly stated as a blanket "read-only" property in an earlier
@@ -959,8 +985,11 @@ every append to its own capability trail is a boundary breach.
 | `authorize-write` | records the grant, exit 0 | records nothing, exit 2, one line naming the refused condition |
 | `scaffold-crate` | consumes the record covering this manifest and writes it | writes nothing, exit 2, one line naming the issuing command |
 | `generate-work-package` | consumes an active exact-path `write` grant and records the write | writes no manifest |
+| `configure-cargo-profile` | consumes an active exact-path `write` grant for root `Cargo.toml`, validates the typed profile merge with Cargo, and records the authorization/profile/validation event | writes no profile setting |
+| `configure-crate` | consumes an active exact-path `write` grant for the declared crate's `Cargo.toml`, validates the cargo-verus profile and records manifest hashes | writes no profile setting |
 
-`--issue` is the same flag with the same meaning on all five surfaces, so
+`--issue` is the same flag with the same meaning on every write-authorization
+surface, so
 none of them can report a different write-set verdict about the same
 workspace and the same run; a `--issue` no grant can name (anything that is
 not a positive integer, which `authorize-write` refuses) matches no record
@@ -1213,7 +1242,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 47/47)
+## 10. Legacy command → disposition (complete, 49/49)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -1226,6 +1255,8 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `authorize-write` | stable; records ONE issue-scoped capability authorizing a single sanctioned write into a declared `protected_roots` path, as an append-only entry in `ci/results/protected-writes.jsonl` -- the third route out of the dead end #103's enforcement left (widen `allowed_roots`, hand-edit outside every tool, or record a bound grant; §8, #114). The record binds the exact path or an explicitly bounded pattern, the operation (`write`|`delete`), the issue, `issued_at`/`expires_at`, the one-shot flag, the named issuer, the grant id (a hash of that binding, recomputed on read) and audit metadata. Refused, writing nothing, for a path no `protected_roots` pattern covers, one `allowed_roots` already permits, an absolute/escaping/vacuous/directory path, an undeclared `--issuer-kind supervisor`, a TTL outside `[1, 86400]`, an `--issued-at` in the future, `--one-shot` on a pattern, a replayed grant id, or a ledger that itself sits inside a protected root. A human checkpoint in the `human` lane; the `supervisor` lane needs the identity declared in `write_set.authorized_supervisors`. Exits 0/2 per docs/exit-code-contract.md |
 | `scaffold-crate` | stable; writes a MISSING crate's `Cargo.toml` and canonical `src/lib.rs`, deterministically and from the project descriptor alone, in a Mode P (`port`) workspace -- the generator half of `authorize-write`'s capability record (§8, #115). Exactly two files: the manifest, which is a protected-root write and requires an active issue-scoped `write` grant at exactly that path (read through the same `write_authorization` reader `write-set-check` consumes), and the skeleton, which is inside `allowed_roots`, needs no capability record, and is never overwritten once it exists. There is no flag for manifest content and no flag naming a target: both files are pure functions of the descriptor's declared `crate_dir`, and the command accepts only a descriptor-declared crate name. Refused, writing nothing, for a crate no `crates[]` declares (or one two of them declare alike), an absolute/escaping/glob name, a non-`port` mode, a target inside a canonical pipeline artifact location, a declared crate's `specs/` tree or the pinned upstream checkout, a manifest no `protected_roots` pattern covers or `allowed_roots` already permits, no active grant (with the status that stopped each nearby record named), a `--grant-id` mismatch, or an existing manifest whose bytes differ. Idempotent by hash: identical bytes are `unchanged` and nothing is written. Emits a versioned receipt (`docs/scaffold-receipt-schema.json`) recording the issue, the grant consumed, both generated paths with before/after hashes, and the result of every named check -- including offline Cargo workspace membership and `write_set.check_write_set`'s OWN verdict on the write just made. Exits 0/1/2 per docs/exit-code-contract.md |
 | `generate-work-package` | stable; reads a JSON/YAML Stage 7 plan and descriptor-backed canonical closure, promotion, boundary, interaction and bridge inputs, derives the manifest with scripts/work_package_manifest.py, and writes only `ci/manifest/<work_package>.json` after the derived document passes `validate-work-package` and an active exact-path `write` grant for the same issue/path is verified (#122). The issue must match the plan; toolchain/target/features are explicit and selected interaction configuration is checked. Refused, writing nothing, for an invalid/mismatched plan, invalid authoritative inputs, missing/expired/wrong-issue/wrong-operation/wrong-path/replayed grant, a conflicting target, a symlink/escaping target or invalid audit history. Identical bytes are `unchanged`. Each successful run appends a strict event with issue, grant id, path, before/after hashes and command result to `ci/results/protected-writes.jsonl`; this event is ignored by the grant reader and is used only to prevent replay after output deletion. `--json` emits that event or a structured error with stable code, message and required inputs; exits 0/2 per docs/exit-code-contract.md |
+| `configure-cargo-profile` | stable; merges only typed profile keys named by the caller into the workspace-root `[profile.<name>]` table in `Cargo.toml`. Requires an active exact-path `write` grant for issue N and `Cargo.toml`; invalid fields, wrong-issue or pattern grants, invalid TOML, and Cargo metadata failures are refused. Failed Cargo validation restores the original file. Unrelated TOML text and values are preserved. Successful and unchanged runs append a strict event (`docs/cargo-profile-audit-schema.json`) recording issuer, issue, profile, typed values, result, and validator status. The event contains no Git diff, commit history, or rollback copy; those remain Git's job. A one-shot grant authorizes at most one changed profile operation. Exits 0/2 per docs/exit-code-contract.md |
+| `configure-crate` | stable; `--crate` selects one existing descriptor-declared crate and `--profile cargo-verus` applies the typed Verus configuration to only that crate's `Cargo.toml` in a port workspace. Requires an active exact-path grant for the same issue and manifest. Derives an exact `vstd` pin from the Verus distribution and refuses a Rust toolchain mismatch, foreign dependency source, or unapproved repin. Preserves unrelated manifest values and sibling crate manifests, restores `Cargo.lock`, and validates with Cargo metadata/check, Verus verify/build, and Cargo test. Successful and unchanged events validate against `docs/cargo-verus-profile-audit-schema.json`, recording authorization, profile transition, before/after manifest hashes and validator status; Git retains the printed diff, history and rollback. Exits 0/2 per docs/exit-code-contract.md (#125) |
 | `validate` | alias → `validate boundary` |
 | `validate-interaction` | alias → `validate interaction` |
 | `validate-exemption` | alias → `validate exemption` |
@@ -1271,7 +1302,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C). `--upgrade` also refreshes the manifest's `gate_hashes` (the pins `gate_integrity` checks) from the actually installed managed files, updates only managed installation metadata, preserves the user-owned descriptor and normative policy, keeps a locally modified managed file's old pin instead of adopting the drifted bytes, and `--json` emits the machine-readable audit result (old/new version, changed paths, hashes, required human action) so `doctor`, `status --json`, `check --json` and `write-set-check` all read the same post-migration state (#117) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 45 has a nested home, an internal-operation classification,
+every one of the 46 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

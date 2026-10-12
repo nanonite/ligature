@@ -2,7 +2,7 @@
 """`ligature scaffold-crate`: a sanctioned, deterministic crate bootstrap (chainlink #115).
 
 `protected_roots` is enforced (#103), and a crate's own `Cargo.toml` is one of
-the patterns every real project declares -- `**/Cargo.toml`, `.github/**`,
+the patterns the project declares -- `crates/*/Cargo.toml`, `.github/**`,
 `rust-toolchain.toml`, `build.rs`. #114 gave a protected write that is
 *genuinely required* a route out of that dead end (an issue-scoped capability
 record, `write_authorization`), but it left the *shape* of the work

@@ -38,12 +38,14 @@
       "scripts/**",
       "docs/*-schema.json",
       "docs/reliance-policy.md",
-      "**/Cargo.toml",
-      "**/build.rs",
+      "Cargo.toml",
+      "crates/*/Cargo.toml",
+      "crates/*/build.rs",
       "tests/harnesses/**",
       ".github/**",
       "rust-toolchain.toml",
-      "**/kani.toml"
+      "kani.toml",
+      "crates/*/kani.toml"
     ]
   },
   "gate_integrity": [

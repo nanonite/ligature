@@ -29,7 +29,7 @@ VSTD_VERSION = "0.2025.10.0"
 
 
 class CrateProfileFixture:
-    def setup(self):
+    def setup(self, *, standalone=False):
         self._tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self._tmp.name).resolve()
         self.descriptor_path = self.workspace / "project-descriptor.json"
@@ -47,7 +47,7 @@ class CrateProfileFixture:
         ]
         descriptor["write_set"] = {
             "allowed_roots": ["rust/*/src/", "rust/*/tests/"],
-            "protected_roots": ["**/Cargo.toml"],
+            "protected_roots": ["rust/*/Cargo.toml"],
         }
         self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
         self.crate.mkdir(parents=True)
@@ -69,10 +69,11 @@ class CrateProfileFixture:
         self.sibling.write_text(
             '[package]\nname = "sibling"\nversion = "0.1.0"\nedition = "2021"\n'
         )
-        (self.workspace / "Cargo.toml").write_text(
-            '[workspace]\nmembers = ["rust/demo-core", "rust/sibling"]\nresolver = "2"\n'
-        )
-        self.lock = self.workspace / "Cargo.lock"
+        if not standalone:
+            (self.workspace / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["rust/demo-core", "rust/sibling"]\nresolver = "2"\n'
+            )
+        self.lock = (self.crate if standalone else self.workspace) / "Cargo.lock"
         self.lock.write_bytes(b"# preserved lockfile\nversion = 4\n")
         self.install_fake_toolchain()
 
@@ -85,24 +86,31 @@ class CrateProfileFixture:
             code = pipeline.main(["--workspace", str(self.workspace), "--descriptor", str(self.descriptor_path), *args])
         return code, out.getvalue(), err.getvalue()
 
-    def install_fake_toolchain(self, *, vstd_version=VSTD_VERSION, rust_release="1.88.0"):
+    def install_fake_toolchain(self, *, vstd_version=VSTD_VERSION, rust_release="1.88.0", nested_verus_version=False):
         self.bin_dir.mkdir(exist_ok=True)
         cargo = self.bin_dir / "cargo"
         cargo.write_text(
             "#!/usr/bin/env python3\n"
-            "import json, pathlib, sys, tomllib\n"
+            "import json, os, pathlib, sys, tomllib\n"
             "args = sys.argv[1:]\n"
+            "manifest = pathlib.Path(args[args.index('--manifest-path') + 1]).resolve() if '--manifest-path' in args else None\n"
+            "project_root = pathlib.Path.cwd().resolve()\n"
+            "project_manifest = project_root / 'Cargo.toml'\n"
+            "if project_manifest.is_file() and '[workspace]' in project_manifest.read_text():\n"
+            "    cargo_root = project_root\n"
+            "else:\n"
+            "    cargo_root = manifest.parent if manifest is not None else project_root\n"
+            "cargo_root = pathlib.Path(os.environ.get('LIGATURE_FAKE_CARGO_ROOT', str(cargo_root))).resolve()\n"
             "if args and args[0] == 'metadata':\n"
-            "    manifest = pathlib.Path(args[args.index('--manifest-path') + 1]).resolve()\n"
             "    data = tomllib.loads(manifest.read_text())\n"
             "    package = data['package']\n"
-            "    print(json.dumps({'workspace_root': str(pathlib.Path.cwd()), 'packages': [{\n"
+            "    print(json.dumps({'workspace_root': str(cargo_root), 'packages': [{\n"
             "        'name': package['name'], 'version': package['version'],\n"
             "        'id': package['name'] + '@' + package['version'],\n"
               "        'manifest_path': str(manifest), 'metadata': package.get('metadata', {})\n"
               "    }]}))\n"
               "else:\n"
-              "    pathlib.Path.cwd().joinpath('Cargo.lock').write_text('# changed by fake cargo\\n')\n"
+              "    cargo_root.joinpath('Cargo.lock').write_text('# changed by fake cargo\\n')\n"
               "    if args and args[0] == 'check' and pathlib.Path.cwd().joinpath('FAIL_CHECK').exists():\n"
               "        print('injected cargo check failure', file=sys.stderr)\n"
               "        sys.exit(1)\n"
@@ -121,7 +129,8 @@ class CrateProfileFixture:
         rustc.chmod(0o755)
 
         verus = self.bin_dir / "verus"
-        version_json = json.dumps({"version": VERUS_VERSION, "toolchain": TOOLCHAIN})
+        version_info = {"version": VERUS_VERSION, "toolchain": TOOLCHAIN}
+        version_json = json.dumps({"verus": version_info} if nested_verus_version else version_info)
         verus.write_text(
             "#!/usr/bin/env python3\n"
             f"print({version_json!r})\n"
@@ -141,8 +150,11 @@ class CrateProfileFixture:
         assert code == 0, err
         return json.loads(out)["grant_id"]
 
-    def configure(self, *args, issue=ISSUE, crate="demo-core"):
-        with patch.dict(os.environ, {"PATH": f"{self.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}):
+    def configure(self, *args, issue=ISSUE, crate="demo-core", env=None):
+        environment = {"PATH": f"{self.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+        if env:
+            environment.update(env)
+        with patch.dict(os.environ, environment):
             return self.run(
                 "configure-crate", "--issue", str(issue), "--crate", crate,
                 "--profile", "cargo-verus", *args, "--json",
@@ -153,6 +165,16 @@ class CrateProfileFixture:
 def workspace():
     fixture = CrateProfileFixture()
     fixture.setup()
+    try:
+        yield fixture
+    finally:
+        fixture.teardown()
+
+
+@pytest.fixture
+def standalone_workspace():
+    fixture = CrateProfileFixture()
+    fixture.setup(standalone=True)
     try:
         yield fixture
     finally:
@@ -209,6 +231,120 @@ def test_initial_profile_hashes_only_the_selected_crate_and_preserves_other_mani
     }
     assert f"--- {MANIFEST_REL}" in err
     assert len(events(workspace.ledger)) == 2
+
+
+def test_standalone_declared_crate_needs_no_project_cargo_manifest_and_preserves_its_lockfile(standalone_workspace):
+    before = standalone_workspace.manifest.read_bytes()
+    lock_before = standalone_workspace.lock.read_bytes()
+    assert not (standalone_workspace.workspace / "Cargo.toml").exists()
+    grant = standalone_workspace.grant()
+
+    code, output, err = standalone_workspace.configure("--grant-id", grant)
+
+    assert code == 0, output + err
+    record = json.loads(output)
+    parsed = tomllib.loads(standalone_workspace.manifest.read_text())
+    assert parsed["dependencies"]["vstd"] == {"version": f"={VSTD_VERSION}"}
+    assert parsed["package"]["metadata"]["verus"]["verify"] is True
+    assert record["path"] == MANIFEST_REL
+    assert record["before_hash"] == "sha256:" + hashlib.sha256(before).hexdigest()
+    assert standalone_workspace.lock.read_bytes() == lock_before
+    assert not (standalone_workspace.workspace / "Cargo.lock").exists()
+    assert record["cargo_lock_hashes"] == {
+        "before_hash": "sha256:" + hashlib.sha256(lock_before).hexdigest(),
+        "after_hash": "sha256:" + hashlib.sha256(lock_before).hexdigest(),
+        "result": "preserved",
+    }
+
+
+def test_standalone_declared_crate_accepts_nested_verus_version_json(standalone_workspace):
+    standalone_workspace.install_fake_toolchain(nested_verus_version=True)
+    before = standalone_workspace.manifest.read_bytes()
+    grant = standalone_workspace.grant()
+
+    code, output, err = standalone_workspace.configure("--grant-id", grant)
+
+    assert code == 0, output + err
+    record = json.loads(output)
+    assert record["verus_version"] == VERUS_VERSION
+    assert record["rust_toolchain"] == TOOLCHAIN
+    assert record["before_hash"] == "sha256:" + hashlib.sha256(before).hexdigest()
+    assert tomllib.loads(standalone_workspace.manifest.read_text())["dependencies"]["vstd"] == {
+        "version": f"={VSTD_VERSION}"
+    }
+
+
+def test_nix_verus_wrapper_resolves_vstd_from_wrapped_distribution(standalone_workspace):
+    wrapper = standalone_workspace.bin_dir / "verus"
+    adjacent_vstd_manifest = standalone_workspace.bin_dir / "vstd" / "Cargo.toml"
+    adjacent_vstd_manifest.unlink()
+    adjacent_vstd_manifest.parent.rmdir()
+
+    distribution = standalone_workspace.workspace / "nix-store-source"
+    distribution.mkdir()
+    actual_verus = distribution / "verus"
+    version_json = json.dumps({"verus": {"version": VERUS_VERSION, "toolchain": TOOLCHAIN}})
+    actual_verus.write_text(
+        "#!/usr/bin/env python3\n"
+        f"print({version_json!r})\n"
+    )
+    actual_verus.chmod(0o755)
+    vstd = distribution / "vstd"
+    vstd.mkdir()
+    (vstd / "Cargo.toml").write_text(
+        f'[package]\nname = "vstd"\nversion = "{VSTD_VERSION}"\nedition = "2021"\n'
+    )
+    wrapper.write_text(f'#!/bin/sh\nexec "{actual_verus}" "$@"\n')
+    wrapper.chmod(0o755)
+
+    before = standalone_workspace.manifest.read_bytes()
+    grant = standalone_workspace.grant()
+    code, output, err = standalone_workspace.configure("--grant-id", grant)
+
+    assert code == 0, output + err
+    record = json.loads(output)
+    assert record["vstd_version"] == VSTD_VERSION
+    assert record["verus_version"] == VERUS_VERSION
+    assert record["rust_toolchain"] == TOOLCHAIN
+    assert record["before_hash"] == "sha256:" + hashlib.sha256(before).hexdigest()
+    assert tomllib.loads(standalone_workspace.manifest.read_text())["dependencies"]["vstd"] == {
+        "version": f"={VSTD_VERSION}"
+    }
+
+
+def test_nested_verus_json_missing_toolchain_refuses_without_manifest_write(standalone_workspace):
+    standalone_workspace.install_fake_toolchain()
+    verus = standalone_workspace.bin_dir / "verus"
+    verus.write_text(
+        "#!/usr/bin/env python3\n"
+        f"print({json.dumps(json.dumps({'verus': {'version': VERUS_VERSION}}))})\n"
+    )
+    verus.chmod(0o755)
+    before = standalone_workspace.manifest.read_bytes()
+    grant = standalone_workspace.grant()
+
+    code, output, err = standalone_workspace.configure("--grant-id", grant)
+
+    assert code == 2, output + err
+    assert json.loads(output)["error"]["code"] == "verus-version-unavailable"
+    assert standalone_workspace.manifest.read_bytes() == before
+    assert len(events(standalone_workspace.ledger)) == 1
+
+
+def test_cargo_metadata_root_must_be_an_ancestor_of_the_declared_crate(workspace):
+    original_manifest = workspace.manifest.read_bytes()
+    original_lock = workspace.lock.read_bytes()
+    workspace.grant()
+
+    code, output, _ = workspace.configure(
+        env={"LIGATURE_FAKE_CARGO_ROOT": str(workspace.workspace / "rust/sibling")}
+    )
+
+    assert code == 2
+    assert json.loads(output)["error"]["code"] == "cargo-root-not-ancestor"
+    assert workspace.manifest.read_bytes() == original_manifest
+    assert workspace.lock.read_bytes() == original_lock
+    assert len(events(workspace.ledger)) == 1
 
 
 def test_idempotent_rerun_records_identical_hashes_and_no_diff(workspace):

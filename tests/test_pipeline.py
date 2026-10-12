@@ -307,9 +307,9 @@ class CmdDraftEndToEndTest(unittest.TestCase):
         returned rc == 0 from cmd_draft; only a separate, manual
         validate_data() call in this test ever caught it) before
         _select_draft_validate_fn wired the check into cmd_draft itself.
-        The draft must still be written -- this is fast local feedback
-        for correction, not a promotion refusal; only approve() decides
-        what gets promoted."""
+        Invalid model output must not be left behind with the ordinary
+        in-review `.draft` suffix.
+        """
         stub = self._write_stub_backend({
             "schema_version": "1.0",
             "id": "E-9002",
@@ -326,9 +326,7 @@ class CmdDraftEndToEndTest(unittest.TestCase):
         self.assertEqual(rc, 1)
 
         draft_path = target.with_suffix(".json.draft")
-        self.assertTrue(draft_path.exists(), "invalid draft must still be retained for correction")
-        data = json.loads(draft_path.read_text())
-        self.assertNotIn("origin", data)
+        self.assertFalse(draft_path.exists(), "invalid output must never be staged")
 
 
 class DraftTemplateRegistryTest(unittest.TestCase):
@@ -1376,8 +1374,8 @@ class CmdDraftInteractionEndToEndTest(unittest.TestCase):
         plan.md §5.2) must be rejected by cmd_draft's own immediate
         validation, not just by a later manual check -- proves the
         positive test's rc == 0 is a real pass, not a vacuously
-        permissive check. The draft must still be written (fast local
-        feedback for correction, not a promotion refusal)."""
+        permissive check. Invalid output must not be left behind as a
+        staged draft."""
         stub = self._write_stub_backend({
             "schema_version": "1.0",
             "caller": {"concept": "Scheduler", "method": "dispatch"},
@@ -1402,7 +1400,7 @@ class CmdDraftInteractionEndToEndTest(unittest.TestCase):
         self.assertEqual(rc, 1)
 
         draft_path = target.with_suffix(".json.draft")
-        self.assertTrue(draft_path.exists(), "invalid draft must still be retained for correction")
+        self.assertFalse(draft_path.exists(), "invalid output must never be staged")
 
 
 class InteractionTemplateSchemaContractTest(unittest.TestCase):
@@ -3929,6 +3927,31 @@ class CmdApproveIntegrationTest(unittest.TestCase):
         rc = self._run("approve", str(target), "--reviewer", "alice")
         self.assertEqual(rc, 0)
         self.assertTrue(target.exists())
+
+    def test_approve_interaction_with_dangling_evidence_link_is_refused(self):
+        """G4 resolves interaction evidence_links against the real
+        workspace evidence directory during approval. This reproduces the
+        P2 report's inform-edge case, where R2 coverage cannot mask the
+        dangling evidence reference."""
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        target.with_suffix(".json.draft").write_text(json.dumps({
+            "schema_version": "1.0",
+            "interaction_id": "I-SCHED-TQ-001",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["import-only"],
+            "eligibility": "inform",
+            "rationale": "dispatch imports the pop_ready interface",
+            "evidence_links": ["E-999"],
+            "protocol_class": "pairwise",
+            "realization": REALIZATION,
+        }))
+
+        rc = self._run("approve", str(target), "--reviewer", "alice")
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(target.exists(), "an interaction with a dangling evidence id was promoted")
+        self.assertTrue(target.with_suffix(".json.draft").exists(), "failed approval must retain the reviewable draft")
 
     def test_approve_boundary_required_interaction_with_no_coverage_is_refused(self):
         """Chainlink #46 (R2), end to end through approve: no covering

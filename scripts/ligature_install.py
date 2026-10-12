@@ -281,6 +281,14 @@ def _render_descriptor(mode: str, name: str) -> str:
         {"crate_dir": f"crates/{name}-core", "contracts_crate": "contracts", "specs_search_root": "crates"}
     ]
     data["gate_integrity"] = [{"path": p} for p in _GATE_PINNED_PATHS]
+    from project_descriptor import write_set_overlap_diagnostics
+
+    overlaps = write_set_overlap_diagnostics(data)
+    if overlaps:
+        raise InstallError(
+            "init descriptor template has overlapping allowed_roots/protected_roots patterns:\n"
+            + "\n".join(f"  - {line}" for line in overlaps)
+        )
     return json.dumps(data, indent=2) + "\n"
 
 

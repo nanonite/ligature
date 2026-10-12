@@ -648,8 +648,7 @@ def check_record_certificates(
     # record_assurance uses for gate_g9's bridge half.
     from record_assurance import (  # noqa: E402
         RecordAssuranceError,
-        certificate_path_for,
-        read_certificate,
+        read_proof_target,
     )
 
     findings: list[Finding] = []
@@ -664,63 +663,99 @@ def check_record_certificates(
             evidence = record.get("evidence") if isinstance(record, dict) else None
             scope = evidence.get("scope") if isinstance(evidence, dict) else None
             targets = scope.get("proof_targets") if isinstance(scope, dict) else None
-            if not isinstance(targets, str) or not targets.strip():
+            harness = evidence.get("harness") if isinstance(evidence, dict) else None
+            verus_hash = scope.get("verus_output_sha256") if isinstance(scope, dict) else None
+            verus_version = scope.get("verus_version") if isinstance(scope, dict) else None
+            if harness == "verus" and (not isinstance(verus_hash, str) or not verus_hash):
                 findings.append(
                     Finding(
                         "G14", record_ref,
-                        "the recorded achievement names no proof certificate "
+                        "the recorded Verus achievement has no `verus_output_sha256` in "
+                        "evidence.scope, so G14 cannot confirm it is re-reading the same official "
+                        "Verus JSON that record-assurance checked; re-record from "
+                        f"`verus --output-json` with `ligature record-assurance {work_package}`",
+                    )
+                )
+                continue
+            if not isinstance(targets, str) or not targets.strip():
+                if harness == "verus":
+                    remediation = (
+                        f"Re-record it from Verus JSON with `ligature record-assurance "
+                        f"{work_package} --verus-json <output.json> --verus-function "
+                        f"{obligation}=<func-details-key>`"
+                    )
+                else:
+                    remediation = (
+                        f"Re-record it from verifier evidence with `ligature record-assurance "
+                        f"{work_package} --proof {obligation}=<path>`"
+                    )
+                findings.append(
+                    Finding(
+                        "G14", record_ref,
+                        "the recorded achievement names no proof evidence "
                         "(evidence.scope.proof_targets is absent or empty) -- record-assurance "
-                        "always writes one, so this record points at nothing this gate could "
+                        "always writes it, so this record points at nothing this gate could "
                         "re-open, and an achievement nothing can be re-checked against is a JSON "
-                        "file saying so, not achieved assurance (chainlink #92). Re-record it "
-                        f"from the certificate with `ligature record-assurance {work_package} "
-                        f"--proof {obligation}=<path>`",
+                        "file saying so, not achieved assurance (chainlink #92). " + remediation,
                     )
                 )
                 continue
             for target in targets.split(","):
                 target = target.strip()
                 if not target:
+                    if harness == "verus":
+                        remediation = (
+                            f"Re-record it from Verus JSON with `ligature record-assurance "
+                            f"{work_package} --verus-json <output.json> --verus-function "
+                            f"{obligation}=<func-details-key>`"
+                        )
+                    else:
+                        remediation = (
+                            f"Re-record it from verifier evidence with `ligature record-assurance "
+                            f"{work_package} --proof {obligation}=<path>`"
+                        )
                     findings.append(
                         Finding(
                             "G14", record_ref,
                             "the recorded achievement's evidence.scope.proof_targets carries an "
-                            "empty certificate path between its commas -- record-assurance never "
+                            "empty proof target between its commas -- record-assurance never "
                             "joins one that way, so part of this record names nothing to re-open "
-                            "(chainlink #92). Re-record it from the certificate with `ligature "
-                            f"record-assurance {work_package} --proof {obligation}=<path>`",
+                            "(chainlink #92). " + remediation,
                         )
                     )
                     continue
                 try:
-                    certificate = certificate_path_for(workspace, target, obligation)
-                except RecordAssuranceError as e:
-                    findings.append(
-                        Finding(
-                            "G14", record_ref,
-                            f"the recorded achievement names proof certificate {target!r}, which "
-                            "fails the check record-assurance applies before recording it: "
-                            f"{e}. A certificate this gate cannot even re-open (missing, outside "
-                            "the workspace, or not under this obligation's concept directory) is "
-                            "a claim, never achieved assurance (chainlink #92). Re-record it "
-                            f"with `ligature record-assurance {work_package} "
-                            f"--proof {obligation}=<path>`",
-                        )
+                    read_proof_target(
+                        workspace,
+                        target,
+                        obligation,
+                        expected_verus_hash=verus_hash if isinstance(verus_hash, str) else None,
+                        expected_harness=harness if isinstance(harness, str) else None,
+                        expected_verus_version=(
+                            verus_version if isinstance(verus_version, str) else None
+                        ),
                     )
-                    continue
-                try:
-                    read_certificate(certificate, workspace, obligation)
                 except RecordAssuranceError as e:
+                    if target.startswith("verus-json:"):
+                        remediation = (
+                            f"Re-run Verus and record assurance with `ligature record-assurance "
+                            f"{work_package} --verus-json <output.json> --verus-function "
+                            f"{obligation}=<func-details-key>`."
+                        )
+                    else:
+                        remediation = (
+                            f"Re-run the verifier and record assurance for {work_package} with "
+                            f"`--proof {obligation}=<path>`."
+                        )
                     findings.append(
                         Finding(
                             "G14", record_ref,
-                            f"the recorded achievement names proof certificate {target!r}, which "
+                            f"the recorded achievement names proof evidence {target!r}, which "
                             f"does not re-establish {obligation} when re-read: {e}. "
-                            "record-assurance counted the proved goals before recording; a "
-                            "certificate that no longer carries them (or never did) cannot back "
-                            "the record it was recorded from (chainlink #92). Re-run the "
-                            "verifier and re-record with `ligature record-assurance "
-                            f"{work_package} --proof {obligation}=<path>`",
+                            "record-assurance re-checks each Creusot certificate or Verus "
+                            "per-function JSON result before recording; G14 applies the same "
+                            "reader and fails closed if that evidence changed or no longer binds "
+                            "the named obligation (chainlink #92/#129). " + remediation,
                         )
                     )
     return findings
@@ -822,14 +857,25 @@ def check_record_derivation(
                     "from the provenance block of the run that produced the proof"
                 )
             if mismatches:
+                if harness == "verus":
+                    remediation = (
+                        f"Re-record it with `ligature record-assurance {work_package} "
+                        f"--verus-json <output.json> --verus-function "
+                        f"{obligation}=<func-details-key>` so the fields come from the "
+                        "manifest and Verus result again"
+                    )
+                else:
+                    remediation = (
+                        f"Re-record it with `ligature record-assurance {work_package} "
+                        f"--proof {obligation}=<path>` so the fields come from the manifest "
+                        "and certificate again"
+                    )
                 findings.append(
                     Finding(
                         "G14", record_ref,
                         "the recorded achievement disagrees with the manifest it would have "
                         "been derived from: " + "; ".join(mismatches)
-                        + " (chainlink #92). Re-record it with `ligature record-assurance "
-                        f"{work_package} --proof {obligation}=<path>` so the fields come from "
-                        "the manifest and certificate again",
+                        + " (chainlink #92). " + remediation,
                     )
                 )
     return findings

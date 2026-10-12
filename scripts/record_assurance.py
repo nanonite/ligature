@@ -26,20 +26,19 @@ pipeline can know: WHICH certificate discharges WHICH obligation.
 
 What is derived, from where
 ---------------------------
-  * `claim`, `evidence`, `support` -- read from the verifier's own proof
-    certificate (why3find `proof.json`, the versioned "proof witness"
-    `cargo creusot` leaves next to the Coma program it discharged). A goal
-    counts as proved only when its certificate node carries a prover
-    result; a `null` node is a stuck/incomplete subgoal -- why3find's own
-    semantics are "the goal is marked stuck and all its parent goals are
-    marked incomplete" -- so one anywhere means the certificate does not
-    establish the obligation, and nothing is written.
+  * `claim`, `evidence`, `support` -- read from verifier output. Creusot
+    uses why3find `proof.json`. Verus uses its official `--output-json`
+    result, with each guarantee bound to a named function by a
+    `#[verifier::proof_note("ligature:<obligation>")]`. Verus must report
+    whole-crate success, and the named function's JSON must contain that
+    exact note in `obligation_proof_notes` but not `failed_proof_notes`.
+    Aggregate verified/error counts alone never establish a guarantee.
   * `evidence.kind` / `evidence.verifier` / `evidence.harness` -- the
     manifest's own `definition_of_done.provided_guarantees[].harness`,
     through `bridge_harness.EVIDENCE_KIND_BY_VERIFIER`'s single mapping.
-    Only `creusot` has a certificate reader here: an evidence kind is
-    derived from evidence actually read, never asserted from a harness
-    name this command cannot follow.
+    `creusot` and `verus` have readers for their own formats; an evidence
+    kind is derived from evidence actually read, never asserted from a
+    harness name this command cannot follow.
   * `config` -- the manifest's provenance block (toolchain, target,
     features), which is where a work package already declares how it was
     built.
@@ -54,8 +53,9 @@ What is derived, from where
     guarantee that declares `minimum_scope` is therefore REFUSED, with
     satisfies()'s own reasons printed, rather than satisfied by copying.
 
-The declaration a human does make -- `--proof Obligation=path` -- is
-checked, not trusted:
+The declaration a human does make is checked, not trusted. Creusot uses
+`--proof Obligation=path`; Verus uses `--verus-function Obligation=function`
+with one shared `--verus-json` result file:
 
   * the obligation must be one this manifest actually provides (a record
     for anything else satisfies nothing and belongs to no report);
@@ -66,6 +66,9 @@ checked, not trusted:
   * the certificate must not be older than the Coma program it
     certifies (`<dir>.coma`), because a certificate written before the
     program it claims to discharge says nothing about the file on disk.
+  * Verus function names must exactly match a key in `func-details`, and
+    the corresponding proof-note marker must be present as proved; G14
+    hashes and re-reads the same JSON result.
 
 Report placement and the feature-ledger collision
 -------------------------------------------------
@@ -79,13 +82,15 @@ gate-g14 reported a non-schema-valid report at
 collision; anything else at that path is refused rather than destroyed.
 
 Exit codes follow docs/exit-code-contract.md: 0 recorded, 1 the evidence
-does not establish the obligation (stuck goals, a stale certificate, a
-record satisfies() would not accept -- the check ran and found a real
-problem), 2 invalid input (a malformed `--proof`, a missing or misplaced
-manifest, an evidence path that is not a proof certificate).
+does not establish the obligation (stuck goals, unsuccessful Verus run,
+missing proof note, a stale certificate, a record satisfies() would not
+accept -- the check ran and found a real problem), 2 invalid input (a
+malformed mapping, a missing or misplaced manifest, or input that is not
+recognized verifier output).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -106,12 +111,12 @@ from validate_work_package import load_validator as load_work_package_validator 
 PROOF_FILE_NAME = "proof.json"
 COMA_SUFFIX = ".coma"
 
-# The only harness whose proof evidence this reader can follow. Not
-# "every harness that maps to an evidence kind" (bridge_harness knows
-# kani/verus too): recording a kani or verus result from a why3find
-# certificate would be inventing evidence, which is the one thing this
-# module exists not to do.
-SUPPORTED_HARNESSES = ("creusot",)
+# A harness is supported only when this module has a reader for its actual
+# output format. Verus uses its official `--output-json` result, never a
+# why3find certificate; Kani remains unsupported here.
+SUPPORTED_HARNESSES = ("creusot", "verus")
+VERUS_TARGET_PREFIX = "verus-json:"
+VERUS_NOTE_PREFIX = "ligature:"
 
 CLAIM_KIND = "postcondition-holds"
 
@@ -154,6 +159,9 @@ class Certificate:
     relative: str
     proved: int
     goal_count: int
+    evidence_format: str = "why3find"
+    content_hash: str | None = None
+    verifier_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +321,38 @@ def parse_proof_specs(specs: list[str]) -> dict[str, list[str]]:
     return mapping
 
 
+def parse_verus_function_specs(specs: list[str]) -> dict[str, list[str]]:
+    """Parse repeatable ``--verus-function OBLIGATION=FUNCTION`` values.
+
+    The function is the exact key in Verus's official ``func-details`` JSON
+    object. Multiple functions may be attached to one obligation; every one
+    must report that obligation's dedicated proof note as established.
+    """
+    mapping: dict[str, list[str]] = {}
+    for spec in specs:
+        obligation, sep, function = spec.partition("=")
+        obligation, function = obligation.strip(), function.strip()
+        if not sep or not obligation or not function:
+            raise InvalidRecordInput(
+                f"--verus-function {spec!r} is not of the form "
+                "<obligation>=<function-name> (e.g. "
+                "--verus-function Scheduler.C001=scheduler::check_invariant)"
+            )
+        if not OBLIGATION_RE.match(obligation):
+            raise InvalidRecordInput(
+                f"--verus-function obligation {obligation!r} does not match the "
+                "`<Concept>.C<n>` obligation id grammar"
+            )
+        if "," in function or "#" in function:
+            raise InvalidRecordInput(
+                f"--verus-function name {function!r} contains a reserved delimiter"
+            )
+        functions = mapping.setdefault(obligation, [])
+        if function not in functions:
+            functions.append(function)
+    return mapping
+
+
 def certificate_path_for(workspace: Path, spec: str, obligation_id: str) -> Path:
     """Resolve one `--proof` path to the proof.json that is the evidence,
     refusing anything that is not one. The concept anchor is checked here:
@@ -347,6 +387,51 @@ def certificate_path_for(workspace: Path, spec: str, obligation_id: str) -> Path
             "not, so it cannot be shown to be about this obligation"
         )
     return path
+
+
+def verus_json_path_for(workspace: Path, spec: str) -> Path:
+    """Resolve an official Verus ``--output-json`` file inside workspace."""
+    raw = Path(spec)
+    path = (raw if raw.is_absolute() else workspace / raw).resolve()
+    if not _contains(workspace, path):
+        raise InvalidRecordInput(
+            f"Verus JSON path {spec!r} resolves outside the workspace -- verifier evidence "
+            "must be part of the workspace that records it"
+        )
+    if not path.is_file():
+        raise InvalidRecordInput(
+            f"Verus JSON result is not a file: {_relative(path, workspace)}"
+        )
+    if path.suffix.lower() != ".json":
+        raise InvalidRecordInput(
+            f"{_relative(path, workspace)} is not a JSON result file from Verus `--output-json`"
+        )
+    relative = _relative(path, workspace)
+    if "," in relative or "#" in relative:
+        raise InvalidRecordInput(
+            f"Verus JSON path {relative!r} contains a reserved target delimiter"
+        )
+    return path
+
+
+def verus_target(workspace: Path, path: Path, function: str) -> str:
+    """Stable workspace-relative target stored for G14's independent reread."""
+    relative = _relative(path, workspace)
+    if "," in relative or "#" in relative or not function or "," in function or "#" in function:
+        raise InvalidRecordInput("Verus JSON proof target contains a reserved delimiter")
+    return f"{VERUS_TARGET_PREFIX}{relative}#{function}"
+
+
+def parse_verus_target(target: str) -> tuple[str, str]:
+    if not target.startswith(VERUS_TARGET_PREFIX):
+        raise InvalidRecordInput(f"{target!r} is not a Verus JSON proof target")
+    path, separator, function = target[len(VERUS_TARGET_PREFIX):].rpartition("#")
+    if not separator or not path or not function or "," in target:
+        raise InvalidRecordInput(
+            f"{target!r} is not a valid Verus target; expected "
+            "verus-json:<workspace-relative-json-path>#<function-name>"
+        )
+    return path, function
 
 
 def read_certificate(path: Path, workspace: Path, obligation_id: str) -> Certificate:
@@ -434,6 +519,163 @@ def read_certificate(path: Path, workspace: Path, obligation_id: str) -> Certifi
     )
 
 
+def read_verus_function_result(
+    path: Path, workspace: Path, obligation_id: str, function: str
+) -> Certificate:
+    """Read Verus's official JSON and bind one obligation to one function.
+
+    The top-level result must describe a successful whole-crate run. The
+    per-function entry must contain the obligation's exact Ligature
+    ``proof_note`` in ``obligation_proof_notes`` and must not list it among
+    ``failed_proof_notes``. Verus's documented ``func-details`` format
+    exposes proof notes per function; the note is the stable bridge between
+    a Ligature guarantee and the specific Verus proof obligation.
+    """
+    relative = _relative(path, workspace)
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidRecordInput(
+            f"{relative} is not a readable Verus `--output-json` result: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise InvalidRecordInput(f"{relative} is not a Verus JSON object")
+
+    verification = data.get("verification-results")
+    if not isinstance(verification, dict):
+        raise InvalidRecordInput(
+            f"{relative} has no official `verification-results` object; expected Verus "
+            "`--output-json` output"
+        )
+    if verification.get("is-verifying-entire-crate") is not True:
+        raise EvidenceNotEstablished(
+            f"{relative} is not a whole-crate Verus run -- a function-filtered or partial "
+            "result cannot establish a work-package guarantee"
+        )
+    if verification.get("success") is not True:
+        raise EvidenceNotEstablished(
+            f"{relative} does not report whole-crate Verus success "
+            f"(success={verification.get('success')!r}, errors={verification.get('errors')!r})"
+        )
+    errors = verification.get("errors")
+    verified = verification.get("verified")
+    if (
+        type(errors) is not int
+        or type(verified) is not int
+        or verified < 0
+    ):
+        raise InvalidRecordInput(
+            f"{relative} has malformed whole-crate verification counts"
+        )
+    if errors != 0:
+        raise EvidenceNotEstablished(
+            f"{relative} reports Verus errors={errors}; a successful whole-crate result "
+            "must have zero errors"
+        )
+    build = data.get("verus-build")
+    version = build.get("version") if isinstance(build, dict) else None
+    if not isinstance(version, str) or not version:
+        version = data.get("verus-version") or data.get("version")
+    if not isinstance(version, str) or not version:
+        times = data.get("times-ms")
+        timing_build = times.get("verus-build") if isinstance(times, dict) else None
+        version = timing_build.get("version") if isinstance(timing_build, dict) else None
+    if not isinstance(version, str) or not version:
+        version = None
+
+    function_details = data.get("func-details")
+    if not isinstance(function_details, dict):
+        raise InvalidRecordInput(
+            f"{relative} has no official `func-details` function map"
+        )
+    details = function_details.get(function)
+    if not isinstance(details, dict):
+        raise EvidenceNotEstablished(
+            f"{relative} has no per-function result for {function!r}; use the exact function "
+            "key printed in Verus's `func-details` JSON"
+        )
+    proved_notes = details.get("obligation_proof_notes")
+    failed_notes = details.get("failed_proof_notes")
+    if not isinstance(proved_notes, list) or not all(isinstance(note, str) for note in proved_notes):
+        raise InvalidRecordInput(
+            f"{relative} has malformed `obligation_proof_notes` for {function!r}"
+        )
+    if not isinstance(failed_notes, list) or not all(isinstance(note, str) for note in failed_notes):
+        raise InvalidRecordInput(
+            f"{relative} has malformed `failed_proof_notes` for {function!r}"
+        )
+
+    required_note = f"{VERUS_NOTE_PREFIX}{obligation_id}"
+    if required_note in failed_notes:
+        raise EvidenceNotEstablished(
+            f"{relative} reports {required_note!r} as a failed proof note in {function!r}"
+        )
+    if required_note not in proved_notes:
+        raise EvidenceNotEstablished(
+            f"{relative} does not bind {function!r} to {obligation_id}: expected the exact "
+            f"Verus proof note {required_note!r} in `obligation_proof_notes`"
+        )
+    target = verus_target(workspace, path, function)
+    return Certificate(
+        path=path,
+        relative=target,
+        proved=1,
+        goal_count=1,
+        evidence_format="verus-json",
+        content_hash="sha256:" + hashlib.sha256(raw).hexdigest(),
+        verifier_version=version,
+    )
+
+
+def read_proof_target(
+    workspace: Path,
+    target: str,
+    obligation_id: str,
+    expected_verus_hash: str | None = None,
+    expected_harness: str | None = None,
+    expected_verus_version: str | None = None,
+) -> Certificate:
+    """Re-open one stored target, dispatching by its explicit evidence kind."""
+    if target.startswith(VERUS_TARGET_PREFIX):
+        if expected_harness not in (None, "verus"):
+            raise InvalidRecordInput(
+                f"{target!r} is Verus JSON evidence but the achieved record names "
+                f"harness {expected_harness!r}"
+            )
+        path_spec, function = parse_verus_target(target)
+        path = verus_json_path_for(workspace, path_spec)
+        certificate = read_verus_function_result(path, workspace, obligation_id, function)
+        if expected_verus_hash is None:
+            raise InvalidRecordInput(
+                f"{target!r} has no recorded Verus output hash; the evidence cannot be matched "
+                "to the result G14 re-opened"
+            )
+        if expected_verus_hash is not None and certificate.content_hash != expected_verus_hash:
+            raise EvidenceNotEstablished(
+                f"{_relative(path, workspace)} changed after the Verus evidence was recorded "
+                f"for {obligation_id} -- expected {expected_verus_hash}, found "
+                f"{certificate.content_hash}; re-run Verus and record assurance again"
+            )
+        if expected_verus_version is not None and certificate.verifier_version != expected_verus_version:
+            raise EvidenceNotEstablished(
+                f"{_relative(path, workspace)} reports Verus version "
+                f"{certificate.verifier_version!r}, not the recorded "
+                f"{expected_verus_version!r}"
+            )
+        return certificate
+    if expected_harness == "verus":
+        raise InvalidRecordInput(
+            f"{target!r} is a why3find certificate but the achieved record names harness 'verus'"
+        )
+    if expected_verus_hash is not None:
+        raise InvalidRecordInput(
+            "a Verus output hash was recorded for a non-Verus proof target"
+        )
+    path = certificate_path_for(workspace, target, obligation_id)
+    return read_certificate(path, workspace, obligation_id)
+
+
 def _record_for(
     guarantee: dict, certificates: list[Certificate], provenance: dict
 ) -> tuple[dict, str]:
@@ -455,6 +697,12 @@ def _record_for(
             f"(supported: {', '.join(SUPPORTED_HARNESSES)}) -- an evidence kind must be derived "
             "from evidence that was actually read, never asserted from a name"
         )
+    expected_format = "verus-json" if harness == "verus" else "why3find"
+    if not certificates or any(certificate.evidence_format != expected_format for certificate in certificates):
+        raise InvalidRecordInput(
+            f"{obligation_id}: harness {harness!r} requires {expected_format} evidence; "
+            "the supplied proof input uses another verifier format"
+        )
     evidence_kind = EVIDENCE_KIND_BY_VERIFIER[harness]
     accepted = required.get("accepted_evidence_kinds") or []
     if evidence_kind not in accepted:
@@ -470,6 +718,21 @@ def _record_for(
             f"require {CLAIM_KIND!r}, so a proven postcondition is not what this guarantee asks "
             "for"
         )
+    scope = {"proof_targets": ",".join(sorted({c.relative for c in certificates}))}
+    if harness == "verus":
+        hashes = {certificate.content_hash for certificate in certificates}
+        versions = {
+            certificate.verifier_version
+            for certificate in certificates
+            if certificate.verifier_version
+        }
+        if len(hashes) != 1 or None in hashes:
+            raise InvalidRecordInput(
+                f"{obligation_id}: Verus functions must resolve from one unchanged JSON result file"
+            )
+        scope["verus_output_sha256"] = next(iter(hashes))
+        if len(versions) == 1:
+            scope["verus_version"] = next(iter(versions))
     record = {
         "schema_version": "1.0",
         "claim": {"kind": CLAIM_KIND, "result": "pass"},
@@ -477,7 +740,7 @@ def _record_for(
             "kind": evidence_kind,
             "verifier": harness,
             "harness": harness,
-            "scope": {"proof_targets": ",".join(sorted({c.relative for c in certificates}))},
+            "scope": scope,
         },
         "trust": {"assumptions": []},
         "support": {"status": "supported"},
@@ -559,7 +822,13 @@ def _bridge_records_for(workspace: Path, manifest: dict, base: dict) -> list[dic
     return entries
 
 
-def record_assurance(workspace: Path, target: str, proof_specs: list[str]) -> RecordOutcome:
+def record_assurance(
+    workspace: Path,
+    target: str,
+    proof_specs: list[str],
+    verus_json: str | None = None,
+    verus_function_specs: list[str] | None = None,
+) -> RecordOutcome:
     """Assemble and write one work package's assurance report.
 
     Every refusal happens BEFORE the write: a failure means no mutation,
@@ -570,7 +839,23 @@ def record_assurance(workspace: Path, target: str, proof_specs: list[str]) -> Re
         )
     workspace = workspace.resolve()
     work_package, manifest, _manifest_path = resolve_manifest(workspace, target)
-    declared = parse_proof_specs(proof_specs)
+    declared = parse_proof_specs(proof_specs) if proof_specs else {}
+    verus_functions = parse_verus_function_specs(verus_function_specs or [])
+    if not declared and not verus_functions:
+        raise InvalidRecordInput(
+            "no proof evidence given -- pass --proof for each Creusot obligation, or "
+            "--verus-json with --verus-function for each Verus obligation"
+        )
+    if verus_functions and not verus_json:
+        raise InvalidRecordInput("--verus-function requires --verus-json <output.json>")
+    if verus_json and not verus_functions:
+        raise InvalidRecordInput("--verus-json requires at least one --verus-function mapping")
+    if set(declared) & set(verus_functions):
+        overlap = sorted(set(declared) & set(verus_functions))
+        raise InvalidRecordInput(
+            f"obligations {overlap!r} have both --proof and --verus-function evidence"
+        )
+    verus_path = verus_json_path_for(workspace, verus_json) if verus_json else None
 
     guarantees = manifest["definition_of_done"]["provided_guarantees"]
     provided = {entry["obligation_id"]: entry for entry in guarantees}
@@ -579,7 +864,7 @@ def record_assurance(workspace: Path, target: str, proof_specs: list[str]) -> Re
             f"{work_package} declares the same obligation twice -- which body meets the contract "
             "would depend on file order"
         )
-    unknown = sorted(set(declared) - set(provided))
+    unknown = sorted((set(declared) | set(verus_functions)) - set(provided))
     if unknown:
         raise InvalidRecordInput(
             f"{', '.join(unknown)} is not a provided guarantee of {work_package} (it provides "
@@ -593,19 +878,41 @@ def record_assurance(workspace: Path, target: str, proof_specs: list[str]) -> Re
     certificates_by_obligation: dict[str, list[Certificate]] = {}
     records: dict[str, dict] = {}
     kinds: dict[str, str] = {}
-    for obligation_id in sorted(declared, key=lambda obligation_id: order[obligation_id]):
-        certificates = [
-            read_certificate(
-                certificate_path_for(workspace, spec, obligation_id), workspace, obligation_id
-            )
-            for spec in declared[obligation_id]
-        ]
+    requested = set(declared) | set(verus_functions)
+    for obligation_id in sorted(requested, key=lambda obligation_id: order[obligation_id]):
         guarantee = provided[obligation_id]
+        harness = guarantee["harness"]
+        if harness == "verus":
+            if obligation_id in declared:
+                raise InvalidRecordInput(
+                    f"{obligation_id}: harness is verus; use --verus-json with "
+                    "--verus-function instead of --proof"
+                )
+            if verus_path is None:
+                raise InvalidRecordInput(
+                    f"{obligation_id}: Verus evidence requires --verus-json <output.json>"
+                )
+            certificates = [
+                read_verus_function_result(verus_path, workspace, obligation_id, function)
+                for function in verus_functions[obligation_id]
+            ]
+        else:
+            if obligation_id in verus_functions:
+                raise InvalidRecordInput(
+                    f"{obligation_id}: harness is {harness!r}; "
+                    "--verus-function can only map Verus guarantees"
+                )
+            certificates = [
+                read_certificate(
+                    certificate_path_for(workspace, spec, obligation_id), workspace, obligation_id
+                )
+                for spec in declared[obligation_id]
+            ]
         record, evidence_kind = _record_for(guarantee, certificates, provenance)
         result = satisfies(guarantee["required_assurance"], record)
         if not result:
             raise EvidenceNotEstablished(
-                f"{obligation_id}: the record this certificate yields would not satisfy the "
+                f"{obligation_id}: the record this verifier evidence yields would not satisfy the "
                 "manifest's own required_assurance -- "
                 + "; ".join(result.reasons)
                 + ". A requirement this reader cannot honestly state (for instance a "

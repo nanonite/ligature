@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- Ingest official per-function Verus JSON assurance results for `record-assurance` and G14 (#129)
+
+### Fixed
+- Resolve interaction evidence links and warn/block on ungrounded reliances at the documented gates (#130)
+- Keep invalid generated drafts out of ordinary `.draft` staging (#131)
+- Include generated bridge harnesses in write-set auditing and clarify global `--workspace` placement (#132)
+- Reject overlapping init write-set globs before later work-package gates (#133)
+
+## [1.3.3] - 2026-10-08
+
+### Fixed
+- Resolve the exact `vstd` version through literal Verus shell-wrapper targets, including the Nix package layout (#124)
+
+## [1.3.2] - 2026-10-08
+
+### Fixed
+- Read Verus version and toolchain fields from the nested JSON response used by the pinned CLI (#127)
+
+## [1.3.1] - 2026-10-08
+
+### Fixed
+- Allow `configure-crate` to configure standalone crates at the descriptor-declared path without a project-root `Cargo.toml` (#126)
+
 ## [1.3.0] - 2026-10-08
 
 ### Added

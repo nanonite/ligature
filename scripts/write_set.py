@@ -195,7 +195,7 @@ _SKIP_DIRS = frozenset({".git", "__pycache__"})
 # agent writes; these are where the pipeline writes, so files there are
 # accounted for by the pipeline rather than by the write set.
 _CANONICAL_PREFIXES = (
-    "ci/",               # work-package manifests, results, harnesses
+    "ci/results/",       # pipeline reports and generated check results
     "evidence/",         # evidence records (plan.md §11)
     "docs/witnesses/",   # contact-sheet projection
 )
@@ -433,10 +433,9 @@ def _is_canonical(rel: str) -> bool:
 
     Only ever an accounting for a file OUTSIDE every protected root (the
     protected branch below runs first, so a declared protected root is
-    never excused by this heuristic). Chainlink #103: `ci/` being a
-    canonical prefix is exactly what made `ci/manifest/PROBE.json` -- a
-    file inside the pilot's `ci/manifest/**` protected root -- pass with no
-    line of output at all."""
+    never excused by this heuristic). The canonical prefix is limited to
+    `ci/results/`; generated `ci/harness/` files are audited against the
+    descriptor's roots rather than being waved through as pipeline output."""
     if any(rel.startswith(prefix) for prefix in _CANONICAL_PREFIXES):
         return True
     # Workspace-level pipeline spec artifacts: specs/_<kind>/...

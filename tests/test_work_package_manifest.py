@@ -405,23 +405,23 @@ def test_descriptor_write_roots_bound_the_plan():
         )
 
 
-def test_identical_recursive_descriptor_protected_root_is_preserved():
+def test_descriptor_protected_root_is_preserved():
     state = make_state()
     descriptor = copy.deepcopy(state.descriptor)
-    descriptor["write_set"]["protected_roots"].append("**/Cargo.toml")
+    descriptor["write_set"]["protected_roots"].append("crates/*/Cargo.toml")
     request = make_request(
         allowed_write_set=("crates/scheduler/src/lib.rs",),
         protected_write_set=(
             "crates/*/specs/**",
             "ci/manifest/**",
             "scripts/**",
-            "**/Cargo.toml",
+            "crates/*/Cargo.toml",
         )
     )
 
     manifest = derive_manifest(request, make_state(descriptor=descriptor))
 
-    assert "**/Cargo.toml" in manifest["write_policy"]["protected_write_set"]
+    assert "crates/*/Cargo.toml" in manifest["write_policy"]["protected_write_set"]
 
 
 def test_stale_gate_hash_and_promotion_artifact_are_refused(tmp_path):

@@ -591,6 +591,46 @@ def _candidate_manifest(
     return candidate, expected_data, fields, transition
 
 
+def _wrapped_verus_executable(verus_binary: Path) -> Path | None:
+    """Recover a literal Verus target from a simple shell wrapper.
+
+    Nix exposes Verus through a small shell wrapper whose final command is
+    ``exec /nix/store/.../verus \"$@\"``. The wrapped executable is in the
+    distribution directory that also contains vstd. Parse only this literal,
+    non-expanding form; never evaluate wrapper shell text.
+    """
+    try:
+        if verus_binary.stat().st_size > 1024 * 1024:
+            return None
+        raw = verus_binary.read_bytes()
+    except OSError:
+        return None
+    if not raw.startswith(b"#!"):
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    for line in text.splitlines():
+        try:
+            words = shlex.split(line.strip(), comments=False, posix=True)
+        except ValueError:
+            continue
+        if len(words) != 3 or words[0] != "exec" or words[2] != "$@":
+            continue
+        candidate = Path(words[1])
+        if candidate.name != "verus" or not candidate.is_absolute():
+            continue
+        try:
+            candidate = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if candidate != verus_binary and candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def _read_toolchain(verus_binary: Path, workspace: Path) -> tuple[str, str, str]:
     try:
         result = subprocess.run(
@@ -614,6 +654,13 @@ def _read_toolchain(verus_binary: Path, workspace: Path) -> tuple[str, str, str]
         lowered = {str(key).lower().replace("_", ""): value for key, value in document.items()}
         version = lowered.get("version", "")
         toolchain = lowered.get("toolchain", "")
+        nested_verus = lowered.get("verus")
+        if isinstance(nested_verus, dict):
+            nested = {str(key).lower().replace("_", ""): value for key, value in nested_verus.items()}
+            if not version:
+                version = nested.get("version", "")
+            if not toolchain:
+                toolchain = nested.get("toolchain", "")
     if not version:
         for line in result.stdout.splitlines():
             key, sep, value = line.partition(":")
@@ -644,15 +691,26 @@ def _read_toolchain(verus_binary: Path, workspace: Path) -> tuple[str, str, str]
         actual = rust_release + ("-" + rust_host if rust_host else "")
         raise CrateProfileError("verifier-version-mismatch", f"workspace rustc is {actual!r}, but Verus {version!r} requires {toolchain!r}")
 
-    roots = (
-        verus_binary.parent / "vstd" / "Cargo.toml",
-        verus_binary.parent / "source" / "vstd" / "Cargo.toml",
-        verus_binary.parent.parent / "vstd" / "Cargo.toml",
-        verus_binary.parent.parent / "source" / "vstd" / "Cargo.toml",
+    binaries = [verus_binary]
+    wrapped = _wrapped_verus_executable(verus_binary)
+    if wrapped is not None:
+        binaries.append(wrapped)
+    roots = tuple(
+        candidate
+        for binary in binaries
+        for candidate in (
+            binary.parent / "vstd" / "Cargo.toml",
+            binary.parent / "source" / "vstd" / "Cargo.toml",
+            binary.parent.parent / "vstd" / "Cargo.toml",
+            binary.parent.parent / "source" / "vstd" / "Cargo.toml",
+        )
     )
     vstd_manifest = next((path for path in roots if path.is_file()), None)
     if vstd_manifest is None:
-        raise CrateProfileError("vstd-version-unavailable", "cannot derive the exact vstd version from a Cargo.toml shipped beside the Verus binary")
+        raise CrateProfileError(
+            "vstd-version-unavailable",
+            "cannot derive the exact vstd version from the Verus distribution beside the selected executable or its literal shell-wrapper target",
+        )
     try:
         vstd_doc = _toml_load(vstd_manifest.read_text(encoding="utf-8"), str(vstd_manifest))
     except OSError as exc:
@@ -818,7 +876,23 @@ def _metadata(workspace: Path, manifest: Path) -> dict[str, Any]:
     packages = [item for item in document["packages"] if isinstance(item, dict) and Path(str(item.get("manifest_path", ""))).resolve() == target_path]
     if len(packages) != 1:
         raise CrateProfileError("crate-not-in-workspace", f"Cargo metadata did not identify exactly one package for {manifest}")
-    return {"document": document, "package": packages[0], "workspace_root": Path(document["workspace_root"]).resolve()}
+    cargo_root = Path(document["workspace_root"]).resolve()
+    project_root = workspace.resolve()
+    try:
+        cargo_root.relative_to(project_root)
+    except ValueError as exc:
+        raise CrateProfileError(
+            "cargo-root-outside-project",
+            f"Cargo metadata resolved workspace root {cargo_root} outside the Ligature project {project_root}",
+        ) from exc
+    try:
+        target_path.relative_to(cargo_root)
+    except ValueError as exc:
+        raise CrateProfileError(
+            "cargo-root-not-ancestor",
+            f"Cargo metadata root {cargo_root} is not an ancestor of the declared crate manifest {target_path}",
+        ) from exc
+    return {"document": document, "package": packages[0], "workspace_root": cargo_root}
 
 
 def _prior_event(events: list[dict[str, Any]], path: str, crate: str) -> dict[str, Any] | None:
@@ -885,6 +959,62 @@ def _restore_lock(lock_path: Path, original: bytes | None) -> None:
         atomic_write.write_atomically(lock_path, text)
 
 
+def _snapshot_cargo_locks(workspace: Path, manifest_path: Path) -> dict[Path, bytes | None]:
+    """Snapshot lockfiles at every possible Cargo root for this declared crate.
+
+    Cargo's root may be the Ligature project root or any nested ancestor of the
+    crate. Capture those candidates before metadata runs because Cargo may
+    refresh a lockfile while resolving the selected manifest.
+    """
+    project_root = workspace.resolve()
+    crate_root = manifest_path.resolve().parent
+    try:
+        crate_root.relative_to(project_root)
+    except ValueError as exc:
+        raise CrateProfileError(
+            "unsafe-cargo-lock",
+            f"declared crate directory {crate_root} is outside the Ligature project {project_root}",
+        ) from exc
+
+    snapshots: dict[Path, bytes | None] = {}
+    candidate_root = crate_root
+    while True:
+        if (candidate_root / "Cargo.toml").is_file():
+            lock_path = candidate_root / "Cargo.lock"
+            if lock_path.is_symlink():
+                raise CrateProfileError("unsafe-cargo-lock", f"Cargo.lock is a symlink: {lock_path}")
+            if lock_path.exists():
+                if not lock_path.is_file():
+                    raise CrateProfileError("unsafe-cargo-lock", f"Cargo.lock is not a regular file: {lock_path}")
+                original = lock_path.read_bytes()
+                try:
+                    original.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise CrateProfileError("unsafe-cargo-lock", f"Cargo.lock is not UTF-8 and cannot be safely restored: {lock_path}") from exc
+            else:
+                original = None
+            snapshots[lock_path] = original
+        if candidate_root == project_root:
+            break
+        candidate_root = candidate_root.parent
+    return snapshots
+
+
+def _restore_changed_cargo_locks(snapshots: dict[Path, bytes | None]) -> None:
+    """Undo only lockfile changes made before Cargo's root was established."""
+    for lock_path, original in snapshots.items():
+        if lock_path.is_symlink():
+            raise CrateProfileError("unsafe-cargo-lock", f"Cargo.lock became a symlink: {lock_path}")
+        if lock_path.exists():
+            if not lock_path.is_file():
+                raise CrateProfileError("unsafe-cargo-lock", f"Cargo.lock is not a regular file: {lock_path}")
+            current = lock_path.read_bytes()
+        else:
+            current = None
+        if current != original:
+            _restore_lock(lock_path, original)
+
+
 def configure_crate_profile(
     workspace_root: Path,
     *,
@@ -943,6 +1073,7 @@ def configure_crate_profile(
     original_ledger_size = 0
     lock_path: Path | None = None
     lock_before: bytes | None = None
+    lock_snapshots: dict[Path, bytes | None] = {}
     try:
         fcntl.flock(ledger_fd, fcntl.LOCK_EX)
         ledger_stat = os.stat(ledger_path, follow_symlinks=False)
@@ -953,25 +1084,16 @@ def configure_crate_profile(
         ledger, events = _read_ledger(ledger_fd, ledger_path)
         grant = _authorize(ledger, descriptor, target.manifest_rel, issue, grant_id)
         crate_manifests_before = _crate_manifest_snapshot(workspace, descriptor)
-        lock_path = workspace / "Cargo.lock"
-        if lock_path.is_symlink():
-            raise CrateProfileError("unsafe-cargo-lock", f"Cargo.lock is a symlink: {lock_path}")
-        if lock_path.exists():
-            if not lock_path.is_file():
-                raise CrateProfileError("unsafe-cargo-lock", f"Cargo.lock is not a regular file: {lock_path}")
-            lock_before = lock_path.read_bytes()
-            try:
-                lock_before.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise CrateProfileError("unsafe-cargo-lock", "Cargo.lock is not UTF-8 and cannot be safely restored") from exc
-
+        lock_snapshots = _snapshot_cargo_locks(workspace, manifest_path)
         metadata = _metadata(workspace, manifest_path)
-        if metadata["workspace_root"] != workspace:
-            raise CrateProfileError(
-                "workspace-root-mismatch",
-                f"Cargo metadata resolved workspace root {metadata['workspace_root']}, but --workspace selected {workspace}",
-            )
-        workspace_cargo = metadata["workspace_root"] / "Cargo.toml"
+        cargo_root = metadata["workspace_root"]
+        # Cargo keeps Cargo.lock at its own workspace root. For a standalone
+        # declared crate this is the crate directory, not Ligature's project
+        # root, which does not need a Cargo.toml.
+        lock_path = cargo_root / "Cargo.lock"
+        lock_before = lock_snapshots[lock_path]
+
+        workspace_cargo = cargo_root / "Cargo.toml"
         try:
             workspace_data = _toml_load(workspace_cargo.read_text(encoding="utf-8"), str(workspace_cargo))
         except OSError as exc:
@@ -1003,8 +1125,8 @@ def configure_crate_profile(
         validation: dict[str, str] = {}
         try:
             post_metadata = _metadata(workspace, manifest_path)
-            if post_metadata["workspace_root"] != workspace:
-                raise CrateProfileError("workspace-root-mismatch", "Cargo workspace root changed during validation")
+            if post_metadata["workspace_root"] != cargo_root:
+                raise CrateProfileError("cargo-root-changed", "Cargo workspace root changed during validation")
             verus_metadata = post_metadata["package"].get("metadata", {})
             if not isinstance(verus_metadata, dict) or verus_metadata.get("verus", {}).get("verify") is not True:
                 raise CrateProfileError("cargo-metadata-profile-missing", "cargo metadata did not expose package.metadata.verus.verify=true")
@@ -1119,6 +1241,11 @@ def configure_crate_profile(
                 _restore_lock(lock_path, lock_before)
             except CrateProfileError:
                 pass
+        elif lock_snapshots:
+            try:
+                _restore_changed_cargo_locks(lock_snapshots)
+            except CrateProfileError:
+                pass
         if updated_file and original is not None and rendered_text is not None:
             try:
                 if manifest_path.read_bytes() == rendered_text.encode("utf-8"):
@@ -1130,6 +1257,11 @@ def configure_crate_profile(
         if lock_path is not None:
             try:
                 _restore_lock(lock_path, lock_before)
+            except CrateProfileError:
+                pass
+        elif lock_snapshots:
+            try:
+                _restore_changed_cargo_locks(lock_snapshots)
             except CrateProfileError:
                 pass
         if updated_file and original is not None and rendered_text is not None:

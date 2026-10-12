@@ -35,7 +35,8 @@ ligature generate-work-package --plan <path> --issue N --toolchain <value> --tar
 ligature accept-policy --reviewer <name> [--version <name>@<major>.<minor>]  # #78, #113 -- record a reviewed governance change
 ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
 ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
-ligature record-assurance <work-package> --proof <obligation>=<path> [...]  # #87 -- assemble a work package's assurance report from verifier proof certificates
+ligature record-assurance <work-package> --proof <obligation>=<path> [...]  # #87 -- assemble a work package's assurance report from verifier evidence
+ligature record-assurance <work-package> --verus-json <output.json> --verus-function <obligation>=<func-details-key> [...]  # #129 -- ingest Verus's official per-function JSON results
 ligature validate <artifact-kind> <target>   # deterministic, per-artifact
 ligature gate <gate-id> [args...]            # deterministic, cross-artifact
 ligature draft <artifact-kind> <target>      # Stage 0/3, one-shot LLM
@@ -122,6 +123,10 @@ one descriptor-declared crate in a port workspace. It requires an active
 exact-path `write` grant for that crate manifest. The typed profile pins the
 exact `vstd` version shipped with the selected Verus toolchain, opts the crate
 into Verus verification, and declares `cfg(verus_only)` for Rust's cfg lint.
+The selected package is matched to the descriptor's `crate_dir`; Cargo's
+workspace root may be any ancestor of that crate inside the Ligature project,
+including the project root or the nested crate directory. A standalone nested
+crate does not need a project-root `Cargo.toml`.
 It preserves unrelated TOML values and other declared crate manifests, restores
 the original `Cargo.lock` after validation, and runs Cargo metadata/check,
 `cargo verus verify`, `cargo verus build`, and `cargo test`. Its strict audit
@@ -130,7 +135,13 @@ other declared crate manifests, plus `Cargo.lock`, and validation outcomes; the
 normal diff is printed for review, while Git retains durable history and
 rollback.
 Toolchain version changes require an explicit transition from the last
-successful profile event.
+successful profile event. Verus version discovery accepts the CLI's version
+and toolchain fields either at the JSON top level or nested under `verus`.
+For package layouts that expose `verus` through a shell wrapper, discovery
+follows only a literal absolute `exec <verus-path> \"$@\"` target (including the
+Nix package wrapper) and reads the exact version from that distribution's
+`vstd/Cargo.toml`; it never guesses `vstd` from the Verus release tag or
+evaluates wrapper shell text.
 
 `report` is **not** uniformly read-only — see §6's own write column. This
 was wrongly stated as a blanket "read-only" property in an earlier
@@ -139,10 +150,13 @@ per-report-id truth, not a category label that doesn't hold for three of
 the four report-ids.
 
 `--workspace` and `--descriptor` remain global flags on every subcommand,
-unchanged from today's `build_parser()`. A subcommand that accepts a
-global flag must act on it: a flag accepted and then ignored is worse
-than one rejected, because the operator reads the verdict as being about
-the file they named (#109).
+unchanged from today's `build_parser()`. Put them before the subcommand,
+for example `ligature --workspace <dir> check-bridges`; argparse rejects
+`ligature check-bridges --workspace <dir>`. The root and `check-bridges`
+help output state this placement. A subcommand that accepts a global flag
+must act on it: a flag accepted and then ignored is worse than one rejected,
+because the operator reads the verdict as being about the file they named
+(#109, #132).
 
 `record-assurance` (#87) is a top-level verb rather than a flag on
 `gate g14` because the two are the two halves of one artifact with three
@@ -155,25 +169,43 @@ that manifest's own `report.emit` path from the verifier's own proof
 certificates, so `gate g14` can check whether obligations are discharged
 instead of reporting "recorded no achieved assurance" for a workspace
 whose proofs are complete (the date-creusot pilot, chainlink #87). Every
-field of the record is derived from the certificate and the manifest --
+field of the record is derived from the verifier evidence and the manifest --
 never asserted -- and the one thing the caller does declare, which
-certificate is about which obligation (`--proof <obligation>=<path>`,
-repeatable), is checked rather than trusted: the obligation must be one
-the manifest provides, and the certificate must sit under a directory
-named for that obligation's own concept. It writes nothing on a refusal
+evidence is about which obligation, is checked rather than trusted. For
+Creusot, use repeatable `--proof <obligation>=<path>` mappings and the
+certificate must sit under a directory named for that obligation's own
+concept. For Verus guarantees, pass the official `verus --output-json`
+result with `--verus-json <path>` and one repeatable
+`--verus-function <obligation>=<func-details-key>` mapping per guarantee.
+The function key must exactly match an entry in Verus's `func-details`,
+and that function must carry
+`#[verifier::proof_note("ligature:<obligation>")]`. Verus JSON is
+accepted only when `verification-results.success` is true, the run is
+marked as whole-crate, and its error count is zero; the function's
+`obligation_proof_notes` must contain the exact marker and
+`failed_proof_notes` must not. Aggregate `verified` counts never bind an
+obligation to a proof. The report records the JSON path and SHA-256;
+`gate g14` re-opens the same official JSON and checks the hash and
+function marker again (#129). These records establish Verus evidence for
+the named guarantees; CG3's separate `creusot_owned` disjunct remains
+limited to Creusot ownership. It writes nothing on a refusal
 and exits 0 (recorded) / 1 (the evidence does not establish the
 obligation) / 2 (invalid input), per docs/exit-code-contract.md.
 
 `gate g14` re-opens what `record-assurance` wrote rather than taking it
 on declaration (chainlink #92): every obligation record's
-`evidence.scope.proof_targets` is resolved and re-read as the why3find
-certificate it claims to be -- workspace containment, the obligation's
-concept directory, a non-empty `proofs` section with no stuck subgoal
-and at least one proved goal, nothing older than its Coma program -- and
+`evidence.scope.proof_targets` is resolved and re-read in the verifier's
+own format. A Creusot target is checked as the why3find certificate it
+claims to be -- workspace containment, the obligation's concept
+directory, a non-empty `proofs` section with no stuck subgoal and at
+least one proved goal, nothing older than its Coma program. A Verus
+target is checked as the official whole-crate `--output-json` result,
+with its recorded hash, exact function key, and obligation proof note
+checked again. Both formats must still establish the obligation -- and
 every derived field (`evidence.kind`/`verifier`/`harness` from the
 manifest's own `harness`, `config` from its `provenance`) is re-derived
-from that manifest and must agree. A record that names no certificate,
-whose certificate cannot be re-opened or no longer establishes the
+from that manifest and must agree. A record that names no proof evidence,
+whose evidence cannot be re-opened or no longer establishes the
 obligation, or that its manifest contradicts blocks the cluster with a
 finding naming the field, exit 1; no degradation record excuses these
 (`failed_conditions` holds closure-condition keys only), and the check
@@ -268,7 +300,7 @@ arguments and each command's own flags carry over unchanged.
 | artifact-kind | legacy flat command | notes |
 |---|---|---|
 | `boundary` | `validate` | bare `validate` was ambiguous once other kinds existed; `boundary` names what it actually checks (G1a/G1b/G2+) |
-| `interaction` | `validate-interaction` | includes computed eligibility, G2++, G15, R2 |
+| `interaction` | `validate-interaction` | includes computed eligibility, G2++, G4 evidence-link resolution, G5 grounding warning, G15, R2 |
 | `exemption` | `validate-exemption` | |
 | `protocol-debt` | `validate-protocol-debt` | |
 | `bridge` | `validate-bridge` | G1a/G1b/G2 |
@@ -280,6 +312,19 @@ arguments and each command's own flags carry over unchanged.
 | `witness` | `validate-witness` | G1a/G1b/G2 |
 | `gold-set` | `validate-gold-set` | |
 | `closure` | `validate-closure` | G1a/G1b/G17 |
+
+Interaction `evidence_links` resolve against workspace-level `evidence/*.json`
+records that pass G1a/G1b and have a unique canonical ID. A missing or
+invalid evidence record is a blocking G4 finding during validation,
+approval, and promotion acceptance; a bare ID in an interaction is not
+treated as evidence.
+
+G5 warns during draft and validation when an interaction declares reliances
+but has no resolvable evidence link. Promotion acceptance blocks the same
+ungrounded reliances. Since the schema stores `evidence_links` on the
+interaction rather than on each reliance, the mechanical check treats the
+linked records as shared context for that interaction's reliances; reviewers
+still assess whether the claims support each obligation.
 
 For the two path-taking kinds, `work-package` and `promotion`, the
 positional `manifest`/`receipt` path is checked before anything else the
@@ -296,7 +341,9 @@ A staged `<target>.json.draft` (what `draft` writes, promoted by
 `approve`) is **not** an artifact under review: for every kind `draft`
 can stage, the `validate` that owns that kind skips `*.draft` in
 discovery, so a staged draft is neither reported nor counted until it is
-approved. `validate interaction` and `validate boundary` have done so
+approved. `draft` writes its output only after the immediate G1a/G1b
+check passes, so a failed candidate never becomes a staged draft (#131).
+`validate interaction` and `validate boundary` have done so
 since chainlink #90, `validate evidence` since #79, and `validate
 closure` since #98; chainlink #110 extended the same rule to the five
 that were still collecting their own — `validate bridge`, `validate
@@ -507,8 +554,11 @@ Three commands are data-refresh/dispatch steps that a `gate` depends on:
 `extract-c-static` (feeds `gate r1-g16`), `check-bridges` (feeds
 `gate g9`), `render-witness` (feeds `gate g18`/`g19` and the `report`
 generators). All three write to the workspace (`ci/results/c_static/`,
-`ci/results/bridge_checks/`, a witness's declared `output.path`
-respectively).
+`ci/harness/` plus `ci/results/bridge_checks/`, and a witness's declared
+`output.path` respectively). Generated bridge harnesses under
+`ci/harness/` are part of the write-set audit: unless `allowed_roots` covers
+them, `write-set-check` reports them as out-of-set; if `protected_roots`
+covers them, the existing issue-scoped grant rules apply (#132).
 
 **`check` is strictly read-only (see `docs/trust-and-compatibility-
 boundaries.md` §4, `schemas/consolidated-check.schema.json`'s
@@ -740,7 +790,7 @@ than merely declared: it reports the files in the workspace that are
 outside every `allowed_roots` pattern and not otherwise accounted for by
 the ownership manifest, a declared user-owned document, a pipeline
 artifact, a declared crate's `specs/` tree, or a canonical pipeline
-location (`ci/`, `evidence/`, workspace-level `specs/_<kind>/`,
+location (`ci/results/`, `evidence/`, workspace-level `specs/_<kind>/`,
 `docs/witnesses/`) -- the date-creusot pilot's `rust/rogue/evil.rs`
 repro, which every v1.0 command reported nothing for. It also reports the
 files inside `protected_roots` that nothing vouches for (the
@@ -759,6 +809,14 @@ refused rather than hashed against someone else's file -- the discipline
 `validate_work_package.check_gate_integrity` already applies to
 work-package manifests.
 
+Descriptor loading also rejects any `allowed_roots` / `protected_roots`
+glob pair whose languages intersect, using the same exact pattern
+intersection checker as Stage 7 G13. This runs before later work-package
+gates; `init` checks the rendered descriptor template before writing it.
+The shipped port and greenfield templates scope Cargo/build/Kani files to
+the workspace root or `crates/*`, so those protected patterns do not
+overlap the source and test roots (#133).
+
 **`protected_roots` is enforced (#103).** #77 shipped the protected half
 as an *accounted-for* category, and two location carve-outs made it
 invisible rather than merely soft: any file under `ci/` (a canonical
@@ -775,28 +833,12 @@ so cannot vouch for its own path out of it), or a **pipeline artifact** --
 a file the pipeline's own artifact system recognizes, by the same
 discriminators `status` uses (the kind's identity field; the
 `work_package` / `definition_of_done` keys for a work-package manifest).
-Both carve-outs are gone. The two violation classes are reported
-separately, each labelled, because only the second is a breach of the
-installed skill's authority boundary 5:
-
-as an *accounted-for* category, and two location carve-outs made it
-invisible rather than merely soft: any file under `ci/` (a canonical
-pipeline location) and any file under a declared crate's `specs/` tree
-passed for free. The date-creusot pilot planted three files inside its own
-`protected_roots` -- `ci/manifest/PROBE.json` and two spec-tree probes --
-and `write-set-check` reported `write set: clean`, `violations: []`, exit
-0, output byte-identical to the no-probe baseline, in three consecutive
-releases (1.1.0 through 1.2.1). A file inside a `protected_roots` pattern
-is now a **violation** unless a declaration vouches for that specific
-file: product-managed in the ownership manifest, a declared user-owned
-document, the ownership manifest itself (which records the managed set and
-so cannot vouch for its own path out of it), or a **pipeline artifact** --
-a file the pipeline's own artifact system recognizes, by the same
-discriminators `status` uses (the kind's identity field; the
-`work_package` / `definition_of_done` keys for a work-package manifest).
-Both carve-outs are gone. The two violation classes are reported
-separately, each labelled, because only the second is a breach of the
-installed skill's authority boundary 5:
+The broad carve-outs are gone: only `ci/results/` remains a canonical
+pipeline-output prefix, and no canonical path excuses a file inside
+`protected_roots`. `ci/harness/` is audited as an ordinary write-set path,
+so a generated harness outside all declared roots is reported. The two
+violation classes are reported separately, each labelled, because only the
+second is a breach of the installed skill's authority boundary 5:
 
 | class | meaning | blocking |
 |---|---|---|
@@ -1284,7 +1326,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `accept-policy` | stable; records a reviewed change to the normative reliance-policy document as the manifest's reviewed `base_hash` (the explicit accept path for governance drift; `--policy-path` defaults to the descriptor's `compatibility_policy.reliance_policy_path`, and a disagreeing explicit path is refused) (#78, §8). `--version <name>@<major>.<minor>` stamps the document's single `Policy version:` marker line first — that line and nothing else — so the template `init` installs can reach an accepted state, and be re-versioned, without a hand-edit of a `protected_root`; a human checkpoint like `approve` and `accept-promotion` (#113, §8) |
 | `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1) |
 | `record-ruling` | stable; records an explicit human verdict (`ratified`\|`rejected`) over an exact artifact set in `ci/results/human_rulings.jsonl` -- the human-ruling gate `accept-promotion` enforces: no receipt is minted until every artifact in the accepted set carries a `ratified` ruling over its current content (#82, §5) |
-| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from the verifier's proof certificates (`proof.json`) and writes it atomically -- the achieved side `gate g14` reads, and the producer the obligation half of `docs/assurance-report-schema.json` never had (#87, §1). Every record field is derived (certificate + manifest provenance); the caller's only declaration, `--proof <obligation>=<path>`, is checked (obligation provided by this manifest; certificate under a directory named for the obligation's concept; certificate not older than its Coma program) and a certificate with a stuck subgoal records nothing. A feature ledger already sitting at that path is replaced with a warning naming the collision; unrecognizable content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
+| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads, and the producer the obligation half of `docs/assurance-report-schema.json` never had (#87, §1). Creusot uses `--proof <obligation>=<path>` and why3find `proof.json`; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function <obligation>=<func-details-key>` mappings (#129). Verus requires whole-crate success and an exact `#[verifier::proof_note("ligature:<obligation>")]` in that function's `obligation_proof_notes`, absent from `failed_proof_notes`; aggregate counts do not prove individual guarantees. Every record field is derived from evidence and manifest provenance. A feature ledger already sitting at that path is replaced with a warning naming the collision; unrecognizable content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
 | `select-pilot-cluster` | alias → `report pilot-cluster` |
 | `measure-gold-set` | alias → `report gold-set-measurement` |
 | `generate-feature-ledger` | alias → `report feature-ledger` |

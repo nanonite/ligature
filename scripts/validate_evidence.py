@@ -33,11 +33,10 @@ no human checkpoint, matching evidence's non-normative status. That
 promotion path lives in scripts/promote_evidence.py, not here; this
 module owns validation and file discovery only.
 
-Deliberately out of scope here: G4/G5 (evidence tracing to
-obligations/grounding) -- neither is named in chainlink #20's own
-description, and both would need cross-referencing interaction
-`evidence_links` (#16) to evidence ids, a deeper cross-artifact-type
-concern like R2's, not this schema's.
+This validator owns only the evidence record's G1a/G1b shape and naming.
+G4/G5 cross-reference interaction ``evidence_links`` against these valid,
+uniquely named workspace records in ``validate_interaction.py`` (chainlink
+#130), where the interaction and its reliance declarations are available.
 """
 from __future__ import annotations
 

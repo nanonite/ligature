@@ -636,7 +636,7 @@ crate dir: rust/date-creusot-core
 mode: port
 issue: 115
 grant: GW-8c3ec5254cff (write, operator (human), expires …, ledger line 1)
-manifest: rust/date-creusot-core/Cargo.toml (created) -- protected by '**/Cargo.toml', authorized by GW-8c3ec5254cff
+manifest: rust/date-creusot-core/Cargo.toml (created) -- protected by 'rust/*/Cargo.toml', authorized by GW-8c3ec5254cff
   absent -> sha256:4b4f72a8… (683 bytes)
 source-skeleton: rust/date-creusot-core/src/lib.rs (created) -- allowed_roots: no capability record required
   absent -> sha256:a1f39940… (760 bytes)

@@ -746,12 +746,12 @@ write_policy:
     - "scripts/**"
     - "docs/*-schema.json"
     - "docs/reliance-policy.md"
-    - "**/Cargo.toml"
-    - "**/build.rs"
+    - "crates/*/Cargo.toml"
+    - "crates/*/build.rs"
     - "tests/harnesses/**"
     - ".github/**"
     - "rust-toolchain.toml"
-    - "**/kani.toml"
+    - "crates/*/kani.toml"
     - "Justfile"
   on_conflict: raise_change_request
 
@@ -913,7 +913,7 @@ Implemented (chainlink #20): `docs/evidence-schema.json` + `scripts/validate_evi
 
 Both artifact types are **workspace-level, not crate-scoped** — plan.md §7's own `artifact_manifest` worked example places `evidence/E-0143.json` and `specs/_conflicts/EC-004.json` with no crate prefix, siblings of `docs/reliance-policy.md`. This required two real fixes beyond just "call `validate_workspace()` once instead of looping over crates": `pipeline.py`'s `_require_target_in_workspace` and `_select_validate_fn` were both structured around crate membership (`raise` if a target isn't under any declared crate's directory), which would have incorrectly refused a legitimate conflict-resolution target in any project whose `crate_dir` isn't literally `"."` — every prior M3 fixture happened to use exactly that convention, which would have hidden the gap. Fixed by recognizing the workspace-level canonical directory as a second, independent form of in-bounds target, checked before (not nested inside) the crate-anchored logic. Verified directly against a `crate_dir: "crate_a"` descriptor (not `"."`), approving a conflict-resolution target that sits outside that crate's directory entirely.
 
-Deliberately out of scope: G4/G5 (evidence tracing to obligations / ungrounded obligations) — neither is named in chainlink #20's own description, and both would need cross-referencing interaction `evidence_links` (#16) to evidence ids, a deeper cross-artifact-type concern like R2's own, not this schema's; tracked in `pipeline.py`'s `NOT_YET_IMPLEMENTED`.
+G4/G5 cross-artifact tracing is implemented in `scripts/validate_interaction.py` (chainlink #130), rather than in the evidence schema validator: G4 rejects links that do not resolve to a unique, valid workspace evidence record; G5 warns when an interaction with declared reliances has no resolvable evidence link, then blocks promotion acceptance. Because `evidence_links` is interaction-scoped in §5.1, the mechanical check treats the interaction's linked records as shared grounding context for all its reliances. Whether a claim is semantically relevant to each obligation remains part of human review.
 
 An external review (2026-09-02) found four further gaps, all reproduced directly before being fixed:
 

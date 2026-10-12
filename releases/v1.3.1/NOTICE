@@ -1,0 +1,14 @@
+ligature
+=======
+
+This distribution is a self-contained zipapp built from the ligature
+workspace. It embeds an attestation of its own contents
+(ligature_data/BUILD_ATTESTATION.json); `ligature version --verify` and
+`ligature doctor` recompute and check that attestation, and a target
+repository's gate_integrity pins the content hash of the executable that
+initialized it.
+
+Third-party components bundled with, or invoked by, this distribution are
+listed in THIRD_PARTY_NOTICES.txt. This project does not ship a LICENSE
+file; treat this artifact's licensing status as undetermined until one is
+added by the project owners.

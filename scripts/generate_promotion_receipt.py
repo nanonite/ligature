@@ -365,8 +365,9 @@ def _locate_artifact(descriptor: dict, workspace_root: Path, resolved: Path) -> 
 
 
 def _crate_context(crate: dict, workspace_root: Path, cache: dict[str, dict]) -> dict:
-    """Real per-crate cross-file context -- interactions_by_id, G15's
-    protocol-debt coverage, R2's boundary/exemption coverage -- built
+    """Real per-crate cross-file context -- interactions_by_id, G4/G5's
+    workspace evidence ids, G15's protocol-debt coverage, R2's
+    boundary/exemption coverage -- built
     from the SAME functions pipeline.py's own cmd_validate_interaction/
     cmd_validate_exemption/cmd_validate_protocol_debt use, not
     re-derived ad hoc. Memoized per crate_dir since multiple accepted
@@ -376,9 +377,13 @@ def _crate_context(crate: dict, workspace_root: Path, cache: dict[str, dict]) ->
         return cache[crate_dir]
     crate_root = (workspace_root / crate_dir).resolve()
     specs_search_root = workspace_root / crate["specs_search_root"]
-    interactions_by_id = load_interactions_by_id(interaction_dir_for(crate, workspace_root))
+    evidence_ids = valid_evidence_ids(evidence_dir_for(workspace_root))
+    interactions_by_id = load_interactions_by_id(
+        interaction_dir_for(crate, workspace_root), evidence_ids
+    )
     context = {
         "specs_search_root": specs_search_root,
+        "evidence_ids": evidence_ids,
         "interactions_by_id": interactions_by_id,
         "valid_debt_interaction_ids": valid_interaction_ids_from_crate(
             crate_root, protocol_debt_dir_for(crate, workspace_root), interactions_by_id
@@ -404,8 +409,8 @@ def _validate_accepted_artifact(
     evidence_ids_cache: dict[str, set[str]],
 ) -> list:
     """Validate an accepted artifact against its own real, kind-specific
-    validator WITH real cross-file context -- G2/G2+/G2++/G15/R2/G11 all
-    run for real here, fail-closed, the same as Stage 4
+    validator WITH real cross-file context -- G2/G2+/G2++/G4/G5/G15/R2/G11
+    all run for real here, fail-closed, the same as Stage 4
     (pipeline.py's own cmd_validate_*) and approve(). External review,
     high severity, fourth pass: the previous version called each
     validator with no crate/workspace context at all, degrading every
@@ -438,7 +443,8 @@ def _validate_accepted_artifact(
         return _validate_interaction_data(
             path, data, _load_interaction_validator(),
             context["valid_debt_interaction_ids"], context["covering_boundary_edges"],
-            context["valid_exemption_interaction_ids"],
+            context["valid_exemption_interaction_ids"], context["evidence_ids"],
+            True,  # G5 ungrounded obligations block promotion acceptance.
         )
     if kind == "exemption":
         return _validate_exemption_data(

@@ -22,7 +22,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,8 +45,8 @@ PILOT_WRITE_SET = {
         "scripts/**",
         "docs/*-schema.json",
         "docs/reliance-policy.md",
-        "**/Cargo.toml",
-        "**/build.rs",
+        "rust/*/Cargo.toml",
+        "rust/*/build.rs",
         "tests/harnesses/**",
         ".github/**",
         "rust-toolchain.toml",
@@ -356,17 +356,37 @@ class ProtectedWriteTest(WriteSetFixture):
         code, doc = self.write_set_check()
         self.assertEqual(doc["write_set"]["protected_unvouched"], ["scripts/evil.py.draft"])
 
-    def test_a_protected_file_also_under_an_allowed_root_is_not_a_violation(self):
-        """`allowed_roots` wins an overlap: a path the descriptor
-        explicitly permits is never also a protected write."""
+    def test_bridge_harness_is_out_of_set_unless_its_path_is_declared(self):
+        """`ci/harness/` is generated output, but it is not a blanket
+        write-set exemption when the descriptor names no root for it."""
+        self.init_workspace()
+        self.write("ci/harness/BR-SCHED-TQ-001.creusot.rs", "// generated\n")
+        code, doc = self.write_set_check()
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["write_set"]["state"], "violations")
+        self.assertEqual(
+            [(v["path"], v["kind"]) for v in doc["write_set"]["violations"]],
+            [("ci/harness/BR-SCHED-TQ-001.creusot.rs", "out-of-set")],
+        )
+
+    def test_descriptor_allowed_protected_glob_overlap_is_rejected_early(self):
+        """A write-set overlap is invalid descriptor state, not a later
+        precedence rule that a Stage 7 manifest must discover."""
         self.init_workspace()
         descriptor = json.loads(self.descriptor_path.read_text())
         descriptor["write_set"]["protected_roots"].append("rust/*/src/**")
         self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
-        self.write("rust/date-creusot-core/src/lib.rs", "pub fn ok() {}\n")
-        code, doc = self.write_set_check()
-        self.assertEqual(code, 0)
-        self.assertEqual(doc["write_set"]["state"], "clean")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = pipeline.main([
+                "--workspace", str(self.workspace), "--descriptor", str(self.descriptor_path),
+                "write-set-check", "--json",
+            ])
+        doc = json.loads(out.getvalue())
+        self.assertEqual(code, 2)
+        self.assertEqual(doc["descriptor"]["state"], "present-invalid")
+        self.assertEqual(doc["write_set"]["state"], "unknown")
+        self.assertIn("overlaps", err.getvalue())
 
     def test_a_file_nested_below_a_protected_specs_dir_is_audited_not_violated(self):
         """The one boundary of the decidable half. The artifact

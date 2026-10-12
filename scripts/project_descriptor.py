@@ -342,6 +342,31 @@ def schema_diagnostics(data: dict) -> list[str]:
     return lines
 
 
+def write_set_overlap_diagnostics(data: dict) -> list[str]:
+    """Find allowed/protected glob intersections in the descriptor.
+
+    Reuse the work-package validator's exact glob-language intersection
+    engine, so P0 and G13 cannot disagree about whether two patterns can
+    name the same path. The import is local because validate_work_package
+    imports this module for descriptor helpers.
+    """
+    write_set = data.get("write_set") if isinstance(data, dict) else None
+    if not isinstance(write_set, dict):
+        return []
+    allowed = write_set.get("allowed_roots")
+    protected = write_set.get("protected_roots")
+    if not isinstance(allowed, list) or not isinstance(protected, list):
+        return []
+    from validate_work_package import _patterns_can_overlap
+
+    return [
+        f"write_set.allowed_roots pattern {a!r} overlaps write_set.protected_roots pattern {p!r}"
+        for a in allowed
+        for p in protected
+        if isinstance(a, str) and isinstance(p, str) and _patterns_can_overlap(a, p)
+    ]
+
+
 def read_descriptor_text(path: Path) -> str:
     """Read `path` as text, or raise `ProjectDescriptorError` naming it.
 
@@ -411,6 +436,13 @@ def load_project_descriptor(path: Path) -> dict:
             f"project descriptor {path} is invalid:\n"
             + "\n".join(f"  - {line}" for line in diagnostics),
             diagnostics=diagnostics,
+        )
+    overlap_diagnostics = write_set_overlap_diagnostics(data)
+    if overlap_diagnostics:
+        raise ProjectDescriptorError(
+            f"project descriptor {path} has conflicting write_set patterns:\n"
+            + "\n".join(f"  - {line}" for line in overlap_diagnostics),
+            diagnostics=overlap_diagnostics,
         )
     return data
 

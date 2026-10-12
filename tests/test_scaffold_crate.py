@@ -72,8 +72,8 @@ PILOT_WRITE_SET = {
         "scripts/**",
         "docs/*-schema.json",
         "docs/reliance-policy.md",
-        "**/Cargo.toml",
-        "**/build.rs",
+        "rust/*/Cargo.toml",
+        "rust/*/build.rs",
         "tests/harnesses/**",
         ".github/**",
         "rust-toolchain.toml",
@@ -302,7 +302,7 @@ class BootstrapWithoutCargoTomlScopeTest(ScaffoldFixture):
         entry = next(e for e in receipt["generated"] if e["role"] == "manifest")
         self.assertEqual(entry["state"], "created")
         self.assertTrue(entry["protected"])
-        self.assertEqual(entry["protected_by"], "**/Cargo.toml")
+        self.assertEqual(entry["protected_by"], "rust/*/Cargo.toml")
         self.assertEqual(entry["grant_id"], grant_id)
 
         # The skeleton needs no capability record -- the asymmetry is the point.
@@ -750,7 +750,7 @@ class InvalidTargetTest(ScaffoldFixture):
         self.init_workspace()
         self.edit_descriptor(
             lambda d: d["write_set"].__setitem__(
-                "protected_roots", [p for p in d["write_set"]["protected_roots"] if p != "**/Cargo.toml"]
+                "protected_roots", [p for p in d["write_set"]["protected_roots"] if p != "rust/*/Cargo.toml"]
             )
         )
         self.assertRefused(

@@ -13,10 +13,12 @@ from validate_interaction import (  # noqa: E402
     find_interaction_files,
     load_interactions_by_id,
     load_validator,
+    load_draft_validator,
     main,
     validate,
     validate_crate,
     validate_data,
+    validate_draft_data,
 )
 
 INTERACTION_PATH = Path("crates/scheduler/specs/_interactions/I-SCHED-TQ-001.json")
@@ -72,6 +74,8 @@ def run(
     valid_debt_interaction_ids: set[str] | None = None,
     covering_boundary_edges=_AUTO,
     valid_exemption_interaction_ids: set[str] | None = _AUTO,
+    evidence_ids: set[str] | None | str = _AUTO,
+    block_ungrounded_obligations: bool = False,
 ):
     """`covering_boundary_edges` defaults to the edge implied by `data`'s
     own caller/callee, and `valid_exemption_interaction_ids` defaults to
@@ -93,9 +97,11 @@ def run(
         }
     if valid_exemption_interaction_ids == _AUTO:
         valid_exemption_interaction_ids = set()
+    if evidence_ids == _AUTO:
+        evidence_ids = {"E-0143"}
     return validate_data(
         path, data, load_validator(), valid_debt_interaction_ids, covering_boundary_edges,
-        valid_exemption_interaction_ids,
+        valid_exemption_interaction_ids, evidence_ids, block_ungrounded_obligations,
     )
 
 
@@ -148,6 +154,71 @@ class ValidInteractionTest(unittest.TestCase):
         data["eligibility"] = "ignore"
         findings = run(data, path=Path("crates/scheduler/specs/_interactions/I-SCHED-TQ-003.json"))
         self.assertEqual(findings, [], [str(f) for f in findings])
+
+
+class EvidenceLinkResolutionTest(unittest.TestCase):
+    def test_dangling_evidence_link_is_a_g4_error(self):
+        findings = run(load_valid(), evidence_ids=set())
+        g4 = [finding for finding in findings if finding.gate == "G4"]
+        self.assertEqual(len(g4), 1)
+        self.assertEqual(g4[0].severity, "error")
+        self.assertIn("no valid workspace evidence record", g4[0].reason)
+
+    def test_link_to_a_valid_evidence_id_passes(self):
+        self.assertEqual(run(load_valid(), evidence_ids={"E-0143"}), [])
+
+    def test_missing_evidence_context_is_visible_as_info(self):
+        findings = run(load_valid(), evidence_ids=None)
+        info_findings = [finding for finding in findings if finding.severity == "info"]
+        self.assertEqual({finding.gate for finding in info_findings}, {"G4", "G5"})
+        self.assertTrue(all("no workspace evidence context" in finding.reason for finding in info_findings))
+
+
+class G5GroundingTest(unittest.TestCase):
+    def test_reliance_without_resolvable_evidence_warns(self):
+        data = load_valid()
+        data["evidence_links"] = []
+
+        findings = run(data)
+
+        g5 = [finding for finding in findings if finding.gate == "G5"]
+        self.assertEqual(len(g5), 1)
+        self.assertEqual(g5[0].severity, "warning")
+        self.assertIn("TaskQueue.C003", g5[0].reason)
+
+    def test_reliance_without_resolvable_evidence_blocks_promotion_mode(self):
+        data = load_valid()
+        data["evidence_links"] = ["E-999"]
+
+        findings = run(data, evidence_ids=set(), block_ungrounded_obligations=True)
+
+        g5 = [finding for finding in findings if finding.gate == "G5"]
+        self.assertEqual(len(g5), 1)
+        self.assertEqual(g5[0].severity, "error")
+
+    def test_valid_link_grounds_all_reliances_declared_by_the_interaction(self):
+        data = load_valid()
+        data["reliances"].append({
+            **load_valid_reliance(),
+            "obligation_id": "Scheduler.C001",
+        })
+
+        findings = run(data, evidence_ids={"E-0143"})
+
+        self.assertFalse([finding for finding in findings if finding.gate == "G5"])
+
+    def test_draft_warns_when_reliance_has_no_evidence_link(self):
+        data = load_valid()
+        data.pop("review")
+        data["evidence_links"] = []
+
+        findings = validate_draft_data(
+            INTERACTION_PATH, data, load_draft_validator(), evidence_ids=set()
+        )
+
+        g5 = [finding for finding in findings if finding.gate == "G5"]
+        self.assertEqual(len(g5), 1)
+        self.assertEqual(g5[0].severity, "warning")
 
 
 class G1aFailureTest(unittest.TestCase):
@@ -436,6 +507,26 @@ class StrictInteractionLookupTest(unittest.TestCase):
             lookup = load_interactions_by_id(directory)
             self.assertEqual(lookup, {})
             self.assertEqual(lookup.duplicate_ids, {"I-SCHED-TQ-001"})
+
+    def test_unresolved_evidence_links_are_not_real(self):
+        """Approved-only lookups infer the surrounding workspace evidence
+        set, so a missing evidence record cannot make an interaction look
+        valid to downstream consumers that omit optional context."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            directory = workspace / "crates" / "scheduler" / "specs" / "_interactions"
+            directory.mkdir(parents=True)
+            (directory / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
+            lookup = load_interactions_by_id(directory)
+            self.assertEqual(lookup, {})
+
+    def test_explicit_valid_evidence_links_allow_approved_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "_interactions"
+            directory.mkdir()
+            (directory / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
+            lookup = load_interactions_by_id(directory, {"E-0143"})
+            self.assertEqual(set(lookup), {"I-SCHED-TQ-001"})
 
 
 class RealizationTest(unittest.TestCase):
@@ -783,7 +874,9 @@ class ValidateCrateTest(unittest.TestCase):
             canonical = crate_root / "specs" / "_interactions"
             canonical.mkdir(parents=True)
             (canonical / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
-            findings = validate_crate(crate_root, canonical, set(), self._COVERING_EDGE, set())
+            findings = validate_crate(
+                crate_root, canonical, set(), self._COVERING_EDGE, set(), {"E-0143"}
+            )
         self.assertEqual(findings, [], [str(f) for f in findings])
 
     def test_mislocated_but_otherwise_valid_artifact_is_rejected_by_location_alone(self):
@@ -821,7 +914,9 @@ class ValidateCrateTest(unittest.TestCase):
             data["interaction_id"] = "I-SCHED-TQ-002"
             data["eligibility"] = "ignore"
             (stray / "I-SCHED-TQ-002.json").write_text(json.dumps(data))
-            findings = validate_crate(crate_root, canonical, set(), self._COVERING_EDGE, set())
+            findings = validate_crate(
+                crate_root, canonical, set(), self._COVERING_EDGE, set(), {"E-0143"}
+            )
         self.assertTrue(any("not directly under the canonical directory" in f.reason for f in findings))
         self.assertFalse(any(f.path.name == "I-SCHED-TQ-001.json" for f in findings))
 
@@ -845,12 +940,31 @@ class StandaloneCliMainTest(unittest.TestCase):
             "review": {"reviewer": "alice", "reviewed_at": "2026-08-30"},
         }))
 
+    def _write_evidence_record(self, workspace: Path) -> None:
+        evidence_dir = workspace / "evidence"
+        evidence_dir.mkdir(exist_ok=True)
+        source = ROOT / "tests" / "fixtures" / "evidence" / "valid" / "evidence" / "E-0143.json"
+        (evidence_dir / "E-0143.json").write_text(source.read_text())
+
     def test_main_passes_for_valid_fixture_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             specs = Path(tmp) / "specs"
             d = specs / "_interactions"
             d.mkdir(parents=True)
             (d / "I-SCHED-TQ-001.json").write_text(json.dumps(load_valid()))
+            self._write_covering_boundary(specs)
+            self._write_evidence_record(Path(tmp))
+            rc = main([tmp])
+        self.assertEqual(rc, 0)
+
+    def test_main_warns_but_does_not_block_an_ungrounded_reliance(self):
+        interaction = load_valid()
+        interaction["evidence_links"] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            specs = Path(tmp) / "specs"
+            directory = specs / "_interactions"
+            directory.mkdir(parents=True)
+            (directory / "I-SCHED-TQ-001.json").write_text(json.dumps(interaction))
             self._write_covering_boundary(specs)
             rc = main([tmp])
         self.assertEqual(rc, 0)
@@ -895,6 +1009,7 @@ class StandaloneCliMainTest(unittest.TestCase):
             (specs / "_interactions" / "I-SCHED-TQ-001.json").write_text(json.dumps(interaction))
             (specs / "_protocol_debt" / "I-SCHED-TQ-001.json").write_text(json.dumps(debt))
             self._write_covering_boundary(specs)
+            self._write_evidence_record(Path(tmp))
             rc = main([tmp])
         self.assertEqual(rc, 0)
 

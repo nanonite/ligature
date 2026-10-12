@@ -32,7 +32,7 @@ class ProfileFixture:
         descriptor = json.loads(self.descriptor_path.read_text())
         descriptor["write_set"] = {
             "allowed_roots": ["rust/*/src/", "rust/*/tests/"],
-            "protected_roots": ["Cargo.toml", "**/Cargo.toml", "ci/manifest/**"],
+            "protected_roots": ["Cargo.toml", "crates/*/Cargo.toml", "ci/manifest/**"],
         }
         self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
         (self.workspace / "src").mkdir()

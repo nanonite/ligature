@@ -202,6 +202,112 @@ class RecordAssuranceTestCase(unittest.TestCase):
         return manifests, closure, reports, findings
 
 
+class VerusRecordAssuranceTest(RecordAssuranceTestCase):
+    """#129: ingest Verus's official `--output-json` per-function map and
+    re-open the same result from G14."""
+
+    FUNCTION = "scheduler::check_dispatch"
+    OBLIGATION = "Scheduler.C001"
+    VERUS_VERSION = "0.2026.10.01"
+
+    def setUp(self):
+        super().setUp()
+        self.provided = [
+            guarantee(
+                self.OBLIGATION,
+                harness="verus",
+                evidence=("verus-deductive-check",),
+            )
+        ]
+        self.write_manifest()
+        self.verus_path = self.root / "ci" / "results" / "verus-output.json"
+        self.write_verus_json()
+
+    def write_verus_json(
+        self,
+        *,
+        success=True,
+        proved_notes=None,
+        failed_notes=(),
+        function=FUNCTION,
+    ):
+        self.verus_path.parent.mkdir(parents=True, exist_ok=True)
+        self.verus_path.write_text(
+            json.dumps(
+                {
+                    "func-details": {
+                        function: {
+                            "obligation_proof_notes": (
+                                [f"ligature:{self.OBLIGATION}"] if proved_notes is None else proved_notes
+                            ),
+                            "failed_proof_notes": list(failed_notes),
+                        }
+                    },
+                    "verification-results": {
+                        "success": success,
+                        "verified": 149,
+                        "errors": 0 if success else 1,
+                        "is-verifying-entire-crate": True,
+                    },
+                    "verus-build": {"version": self.VERUS_VERSION},
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+
+    def record(self):
+        return record_assurance(
+            self.root,
+            WORK_PACKAGE,
+            [],
+            verus_json="ci/results/verus-output.json",
+            verus_function_specs=[f"{self.OBLIGATION}={self.FUNCTION}"],
+        )
+
+    def test_per_function_json_records_verus_and_g14_reopens_it(self):
+        outcome = self.record()
+        self.assertEqual([entry.obligation_id for entry in outcome.recorded], [self.OBLIGATION])
+        record = self.report()["obligation_records"][0]["record"]
+        self.assertEqual(record["evidence"]["kind"], "verus-deductive-check")
+        self.assertEqual(record["evidence"]["verifier"], "verus")
+        self.assertEqual(
+            record["evidence"]["scope"]["proof_targets"],
+            f"verus-json:ci/results/verus-output.json#{self.FUNCTION}",
+        )
+        self.assertEqual(record["evidence"]["scope"]["verus_version"], self.VERUS_VERSION)
+
+        manifests, closure, reports, findings = self.gate_view()
+        self.assertEqual(findings, [])
+        self.assertEqual(gate_g14.check_record_certificates(self.root, closure, reports), [])
+        self.assertEqual(
+            gate_g14.check_record_derivation(closure, manifests, reports), []
+        )
+
+    def test_aggregate_success_without_the_exact_function_note_is_not_evidence(self):
+        self.write_verus_json(proved_notes=[])
+        with self.assertRaises(EvidenceNotEstablished) as caught:
+            self.record()
+        self.assertIn("does not bind", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_a_failed_verus_run_is_not_evidence_even_with_a_note(self):
+        self.write_verus_json(success=False)
+        with self.assertRaises(EvidenceNotEstablished) as caught:
+            self.record()
+        self.assertIn("does not report whole-crate Verus success", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_g14_rejects_verus_json_changed_after_recording(self):
+        self.record()
+        self.write_verus_json(proved_notes=[f"ligature:{self.OBLIGATION}", "edited"])
+        _manifests, closure, reports, findings = self.gate_view()
+        self.assertEqual(findings, [])
+        recheck = gate_g14.check_record_certificates(self.root, closure, reports)
+        self.assertEqual(len(recheck), 1)
+        self.assertIn("changed after the Verus evidence was recorded", recheck[0].reason)
+
+
 class TheIssuesBaselineTest(RecordAssuranceTestCase):
     """Before recording, gate-g14 reports exactly what chainlink #87
     quotes: no report at the manifest's own path, and one 'recorded no
@@ -362,7 +468,7 @@ class InvalidInputExitTwoTest(RecordAssuranceTestCase):
         self.assertFalse(self.report_exists(), "a refusal must leave nothing behind")
 
     def test_no_proof_specs(self):
-        self.assert_invalid([], "no --proof given")
+        self.assert_invalid([], "no proof evidence given")
 
     def test_malformed_spec(self):
         self.assert_invalid(["Weekday.C1"], "<obligation>=<path>")

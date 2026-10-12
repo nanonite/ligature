@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Interaction (I) validation: G1a (schema), G1b (naming + COMPUTED
 eligibility + reliance-obligation uniqueness), G2++ (declared assurance
-requirement present), G15 (non-pairwise protocol coverage), R2 (eligible
-edge covered by a boundary or reviewed exemption).
+requirement present), G4 (evidence_links resolve to valid workspace
+records), G5 (declared reliances have evidence grounding), G15
+(non-pairwise protocol coverage), R2 (eligible edge covered
+by a boundary or reviewed exemption).
 
 plan.md §5.1/§5.2/§5.3/§8.1, gate table §12, chainlink #16/#17/#19/#46.
-Phases run in order -- G1b/G2++/G15/R2 on a schema-invalid document isn't
-meaningful.
+Phases run in order -- G1b/G2++/G4/G5/G15/R2 on a schema-invalid document
+isn't meaningful.
 
   G1a   -- draft-2020-12 JSON Schema validation against
            docs/interaction-schema.json, including §8.1's claim /
@@ -27,6 +29,11 @@ meaningful.
            that it has. `inform`/`ignore` edges have nothing to declare
            and are exempt (reliances is schema-optional precisely for
            that case).
+  G5    -- every declared reliance needs at least one resolvable evidence
+           link on its interaction. Draft and validation runs warn;
+           Stage 4.5 promotion acceptance blocks. The schema scopes
+           evidence_links to the interaction, so all its reliances share
+           that evidence context.
   G15   -- non-pairwise protocol without artifact or valid debt record
            blocks promotion (plan.md gate table, §12). A "protocol
            artifact" has no schema yet (docs/protocol-debt-schema.json's
@@ -80,6 +87,7 @@ from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
+from validate_evidence import valid_evidence_ids  # noqa: E402
 
 SCHEMA_PATH = resources.resource_path("docs", "interaction-schema.json")
 
@@ -206,6 +214,86 @@ def check_reliance_obligation_uniqueness(path: Path, data: dict) -> list[Finding
                 )
             )
     return findings
+
+
+def check_evidence_links(
+    path: Path, data: dict, evidence_ids: set[str] | None
+) -> list[Finding]:
+    """G4: every interaction evidence link resolves to one valid record.
+
+    The evidence records are workspace-level. Callers without that context
+    get a visible info finding instead of a silent pass; normal workspace
+    and crate scans supply the valid, uniquely named evidence-id set.
+    """
+    links = data.get("evidence_links") or []
+    if not links:
+        return []
+    if evidence_ids is None:
+        return [Finding(
+            "G4", path,
+            "evidence_links were not resolved because this validator run has no workspace evidence context",
+            severity="info",
+        )]
+    missing = sorted(set(links) - evidence_ids)
+    return [
+        Finding(
+            "G4", path,
+            f"evidence_links references {evidence_id!r}, but no valid workspace evidence record has that id",
+        )
+        for evidence_id in missing
+    ]
+
+
+def check_g5_grounding(
+    path: Path,
+    data: dict,
+    evidence_ids: set[str] | None,
+    block: bool = False,
+) -> list[Finding]:
+    """G5: every declared reliance needs at least one resolvable evidence
+    link on its interaction. The schema puts evidence_links on the
+    interaction, not on each reliance, so its links ground the interaction's
+    reliances collectively. Draft/Stage 4 feedback is a warning; promotion
+    acceptance passes ``block=True`` and refuses ungrounded obligations."""
+    reliances = data.get("reliances") or []
+    if not reliances:
+        return []
+
+    links = set(data.get("evidence_links") or [])
+    if evidence_ids is None:
+        if block:
+            return [
+                Finding(
+                    "G5", path,
+                    f"obligation {reliance['obligation_id']!r} could not be grounded because "
+                    "this promotion check has no workspace evidence context",
+                    severity="error",
+                )
+                for reliance in reliances
+            ]
+        if links:
+            return [Finding(
+                "G5", path,
+                "obligation grounding was not checked because this validator run has no workspace evidence context",
+                severity="info",
+            )]
+        valid_links: set[str] = set()
+    else:
+        valid_links = links & evidence_ids
+
+    if valid_links:
+        return []
+
+    severity = "error" if block else "warning"
+    return [
+        Finding(
+            "G5", path,
+            f"obligation {reliance['obligation_id']!r} has no resolvable evidence_links; "
+            "link at least one valid workspace evidence record to ground the interaction's reliances",
+            severity=severity,
+        )
+        for reliance in reliances
+    ]
 
 
 def check_g2_plus_plus(path: Path, data: dict) -> list[Finding]:
@@ -350,7 +438,9 @@ class InteractionLookup(dict[str, dict]):
         self.duplicate_ids: set[str] = set()
 
 
-def load_interactions_by_id(interactions_dir: Path) -> InteractionLookup:
+def load_interactions_by_id(
+    interactions_dir: Path, evidence_ids: set[str] | None = None
+) -> InteractionLookup:
     """Load only approved, fully valid canonical interactions.
 
     This lookup is used for the protocol-debt cross-reference in both
@@ -359,7 +449,15 @@ def load_interactions_by_id(interactions_dir: Path) -> InteractionLookup:
     duplicate interaction as real.  Invalid candidates are omitted and an
     ID appearing in more than one direct child is omitted even when one of
     those candidates would otherwise validate.
+
+    Unless the caller supplies an explicit evidence set, resolve the
+    workspace's valid evidence records from this interaction directory's
+    enclosing workspace/crate tree. An approved interaction with dangling
+    ``evidence_links`` must not enter downstream cross-reference lookups
+    merely because a caller omitted optional context.
     """
+    if evidence_ids is None:
+        evidence_ids = _evidence_ids_for_root(interactions_dir)
     result = InteractionLookup()
     if not interactions_dir.is_dir():
         return result
@@ -386,7 +484,9 @@ def load_interactions_by_id(interactions_dir: Path) -> InteractionLookup:
         # the cross-file coverage gate; the loader is establishing the
         # intrinsic validity of a target before another artifact may refer
         # to it.
-        findings = validate_data(path, data, validator, {interaction_id})
+        findings = validate_data(
+            path, data, validator, {interaction_id}, evidence_ids=evidence_ids
+        )
         if any(getattr(finding, "severity", "error") == "error" for finding in findings):
             continue
         review = data.get("review")
@@ -417,13 +517,19 @@ def load_draft_validator() -> Draft202012Validator:
     return make_validator_without_required(load_schema(), "review")
 
 
-def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
+def validate_draft_data(
+    path: Path,
+    data: dict,
+    validator: Draft202012Validator,
+    evidence_ids: set[str] | None = None,
+) -> list[Finding]:
     """Stage 0/3 immediate feedback (plan.md §6.1). `validator` must come
     from load_draft_validator(), not load_validator() -- `review` isn't
     required yet at draft time. Includes computed-eligibility and
     reliance-obligation-uniqueness (both G1b, self-contained, no
     cross-file lookup -- plan.md's own "cheap ... eligibility checks"
-    language). Deliberately excludes G2++ (declared-assurance) and G15
+    language). G5 reports an ungrounded reliance as a warning. Deliberately
+    excludes G2++ (declared-assurance) and G15
     (protocol coverage) -- both are plan.md gate-table entries distinct
     from G1a/G1b, and G15 specifically needs cross-file protocol-debt
     context this function is never given. External review, high
@@ -440,6 +546,7 @@ def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator)
     findings.extend(check_naming(path, data))
     findings.extend(check_computed_eligibility(path, data))
     findings.extend(check_reliance_obligation_uniqueness(path, data))
+    findings.extend(check_g5_grounding(path, data, evidence_ids))
     return findings
 
 
@@ -450,6 +557,8 @@ def validate_data(
     valid_debt_interaction_ids: set[str] | None = None,
     covering_boundary_edges: set[tuple] | None = None,
     valid_exemption_interaction_ids: set[str] | None = None,
+    evidence_ids: set[str] | None = None,
+    block_ungrounded_obligations: bool = False,
 ) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
@@ -459,6 +568,8 @@ def validate_data(
     findings.extend(check_naming(path, data))
     findings.extend(check_computed_eligibility(path, data))
     findings.extend(check_reliance_obligation_uniqueness(path, data))
+    findings.extend(check_evidence_links(path, data, evidence_ids))
+    findings.extend(check_g5_grounding(path, data, evidence_ids, block_ungrounded_obligations))
     findings.extend(check_g2_plus_plus(path, data))
     findings.extend(check_g15_protocol_coverage(path, data, valid_debt_interaction_ids))
     findings.extend(check_r2_coverage(path, data, covering_boundary_edges, valid_exemption_interaction_ids))
@@ -471,6 +582,8 @@ def validate_file(
     valid_debt_interaction_ids: set[str] | None = None,
     covering_boundary_edges: set[tuple] | None = None,
     valid_exemption_interaction_ids: set[str] | None = None,
+    evidence_ids: set[str] | None = None,
+    block_ungrounded_obligations: bool = False,
 ) -> list[Finding]:
     try:
         text = path.read_text()
@@ -481,7 +594,8 @@ def validate_file(
     except json.JSONDecodeError as e:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
     return validate_data(
-        path, data, validator, valid_debt_interaction_ids, covering_boundary_edges, valid_exemption_interaction_ids
+        path, data, validator, valid_debt_interaction_ids, covering_boundary_edges,
+        valid_exemption_interaction_ids, evidence_ids, block_ungrounded_obligations,
     )
 
 
@@ -525,7 +639,27 @@ def find_interaction_files(root: Path) -> list[Path]:
     ]
 
 
-def _standalone_debt_coverage(root: Path) -> dict[Path, set[str]]:
+def _evidence_ids_for_root(root: Path) -> set[str]:
+    """Find evidence beside an explicit workspace root or its crate tree.
+
+    The standalone validator accepts either a workspace root or a crate
+    root. A descriptor identifies the workspace directly; otherwise a
+    parent with a `crates/` directory is the only inferred workspace root.
+    """
+    root = root.resolve()
+    for candidate in (root, *root.parents):
+        if (
+            (candidate / "project-descriptor.json").is_file()
+            or (candidate / "crates").is_dir()
+            or (candidate == root and (candidate / "evidence").is_dir())
+        ):
+            return valid_evidence_ids(candidate / "evidence")
+    return valid_evidence_ids(root / "evidence")
+
+
+def _standalone_debt_coverage(
+    root: Path, evidence_ids: set[str]
+) -> dict[Path, set[str]]:
     """Resolve G15 coverage from canonical sibling directories below root.
 
     The standalone command receives a workspace or crate root, not an
@@ -543,7 +677,7 @@ def _standalone_debt_coverage(root: Path) -> dict[Path, set[str]]:
     for interactions_dir in interaction_dirs:
         resolved_interactions_dir = interactions_dir.resolve()
         coverage_by_interaction_dir[resolved_interactions_dir] = set()
-        interactions_by_id = load_interactions_by_id(interactions_dir)
+        interactions_by_id = load_interactions_by_id(interactions_dir, evidence_ids)
         debt_dir = interactions_dir.parent / "_protocol_debt"
         if debt_dir.is_dir():
             coverage_by_interaction_dir[resolved_interactions_dir].update(
@@ -552,7 +686,9 @@ def _standalone_debt_coverage(root: Path) -> dict[Path, set[str]]:
     return coverage_by_interaction_dir
 
 
-def _standalone_r2_coverage(root: Path) -> tuple[dict[Path, set[tuple]], dict[Path, set[str]]]:
+def _standalone_r2_coverage(
+    root: Path, evidence_ids: set[str]
+) -> tuple[dict[Path, set[tuple]], dict[Path, set[str]]]:
     """Resolve R2 coverage from canonical sibling directories below root
     -- mirrors _standalone_debt_coverage exactly, for R2's two coverage
     sources instead of G15's one. A missing `_boundaries`/`_exemptions`
@@ -577,7 +713,7 @@ def _standalone_r2_coverage(root: Path) -> tuple[dict[Path, set[tuple]], dict[Pa
             )
         exemption_dir = interactions_dir.parent / "_exemptions"
         if exemption_dir.is_dir():
-            interactions_by_id = load_interactions_by_id(interactions_dir)
+            interactions_by_id = load_interactions_by_id(interactions_dir, evidence_ids)
             exemption_ids_by_dir[resolved_interactions_dir].update(
                 valid_exemption_interaction_ids_from_crate(root, exemption_dir, interactions_by_id)
             )
@@ -597,6 +733,7 @@ def validate(
     valid_debt_interaction_ids: set[str] | None = None,
     covering_boundary_edges: set[tuple] | None = None,
     valid_exemption_interaction_ids: set[str] | None = None,
+    evidence_ids: set[str] | None = None,
 ) -> list[Finding]:
     """Recursive, unanchored scan for the standalone CLI: finds every
     `_interactions` directory anywhere under `root`. External review,
@@ -620,12 +757,14 @@ def validate(
     CLI entrypoint is given enough context to fail closed.
     """
     validator = load_validator()
+    if evidence_ids is None:
+        evidence_ids = _evidence_ids_for_root(root)
     coverage_by_interaction_dir = None
     if valid_debt_interaction_ids is None:
-        coverage_by_interaction_dir = _standalone_debt_coverage(root)
+        coverage_by_interaction_dir = _standalone_debt_coverage(root, evidence_ids)
     r2_by_interaction_dir = None
     if covering_boundary_edges is None or valid_exemption_interaction_ids is None:
-        r2_by_interaction_dir = _standalone_r2_coverage(root)
+        r2_by_interaction_dir = _standalone_r2_coverage(root, evidence_ids)
     findings: list[Finding] = []
     for path in find_interaction_files(root):
         if coverage_by_interaction_dir is None:
@@ -640,7 +779,7 @@ def validate(
             boundary_edges_by_dir, exemption_ids_by_dir = r2_by_interaction_dir
             edges = boundary_edges_by_dir.get(interaction_dir, set())
             exemption_ids = exemption_ids_by_dir.get(interaction_dir, set())
-        findings.extend(validate_file(path, validator, coverage, edges, exemption_ids))
+        findings.extend(validate_file(path, validator, coverage, edges, exemption_ids, evidence_ids))
     return findings
 
 
@@ -650,6 +789,7 @@ def validate_crate(
     valid_debt_interaction_ids: set[str],
     covering_boundary_edges: set[tuple],
     valid_exemption_interaction_ids: set[str],
+    evidence_ids: set[str] | None = None,
 ) -> list[Finding]:
     """The descriptor-driven scan pipeline.py's cmd_validate_interaction
     uses: discovers every interaction-shaped candidate anywhere under
@@ -688,7 +828,7 @@ def validate_crate(
         findings.extend(
             validate_file(
                 path, validator, valid_debt_interaction_ids, covering_boundary_edges,
-                valid_exemption_interaction_ids,
+                valid_exemption_interaction_ids, evidence_ids,
             )
         )
     return findings
@@ -719,16 +859,22 @@ def main(argv: list[str]) -> int:
     # fail-closed for G15.
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
+    warnings = [f for f in findings if f.severity == "warning"]
 
     if infos:
         print(f"INFO: {len(infos)} non-blocking finding(s)")
         for f in infos:
             print(f"  - {f}")
 
+    if warnings:
+        print(f"WARNING: {len(warnings)} non-blocking finding(s)")
+        for f in warnings:
+            print(f"  - {f}")
+
     if not errors:
         print(pass_line(
             discovered, "interactions",
-            "G1a/G1b (incl. computed eligibility), G15 protocol coverage, and R2 coverage",
+            "G1a/G1b (incl. computed eligibility), G4 evidence-link resolution, G5 grounding, G15 protocol coverage, and R2 coverage",
             args.root,
         ))
         return 0

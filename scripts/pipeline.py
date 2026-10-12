@@ -557,9 +557,12 @@ ROOT = resources.resource_root()
 PROMPTS = ROOT / "prompts"
 
 NOT_YET_IMPLEMENTED = {
-    "G4/G5 evidence tracing/grounding": "not yet implemented -- required/bug-compat evidence tracing to "
-    "nothing (G4) and ungrounded obligations (G5) both need cross-referencing interaction evidence_links "
-    "(#16) to evidence ids (#20), which exist individually but aren't cross-referenced against each other yet",
+    "G4/G5 evidence tracing/grounding": "implemented for interaction-level traceability -- G4 rejects "
+    "evidence_links that do not resolve to valid workspace evidence during validation, approval, and "
+    "promotion acceptance; G5 "
+    "warns on ungrounded reliances during drafting/validation and blocks them at promotion acceptance. "
+    "Because evidence_links are interaction-scoped, one valid link grounds that interaction's reliances "
+    "collectively; semantic evidence-to-obligation matching remains a human review",
     "emission": "M3's I-schema is now complete (#16-#20); emission (Stage 5) itself is still not built",
     "attach": "M3's I-schema is now complete (#16-#20); attach (Stage 6) itself is still not built",
     "manifest generation": "#14's schema+validator exist (`validate-work-package`); M3's I-schema is now "
@@ -1227,12 +1230,15 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
     # into the scan so an eligible interaction with neither a covering
     # boundary nor a reviewed exemption is rejected.
     descriptor = load_project_descriptor(args.descriptor)
+    evidence_ids = valid_evidence_ids(_evidence_dir_for(args.workspace))
     findings_total = []
     discovered = 0
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
         specs_search_root = args.workspace / crate["specs_search_root"]
-        interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
+        interactions_by_id = load_interactions_by_id(
+            _interaction_dir_for(crate, args.workspace), evidence_ids
+        )
         valid_debt_interaction_ids = valid_interaction_ids_from_crate(
             crate_root, _protocol_debt_dir_for(crate, args.workspace), interactions_by_id
         )
@@ -1246,20 +1252,32 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
         findings_total.extend(
             validate_interaction_crate(
                 crate_root, _interaction_dir_for(crate, args.workspace), valid_debt_interaction_ids,
-                covering_boundary_edges, valid_exemption_interaction_ids,
+                covering_boundary_edges, valid_exemption_interaction_ids, evidence_ids,
             )
         )
 
-    if not findings_total:
+    errors = [f for f in findings_total if getattr(f, "severity", "error") == "error"]
+    warnings = [f for f in findings_total if getattr(f, "severity", "error") == "warning"]
+    infos = [f for f in findings_total if getattr(f, "severity", "error") == "info"]
+    if infos:
+        print(f"INFO: {len(infos)} non-blocking finding(s)")
+        for f in infos:
+            print(f"  - {f}")
+    if warnings:
+        print(f"WARNING: {len(warnings)} non-blocking finding(s)")
+        for f in warnings:
+            print(f"  - {f}")
+
+    if not errors:
         print(pass_line(
             discovered, "interactions",
-            "G1a/G1b (incl. computed eligibility), G15 protocol coverage, and R2 coverage",
+            "G1a/G1b (incl. computed eligibility), G4 evidence-link resolution, G5 grounding, G15 protocol coverage, and R2 coverage",
             args.workspace,
         ))
         return 0
 
-    print(f"FAIL: {len(findings_total)} finding(s)")
-    for f in findings_total:
+    print(f"FAIL: {len(errors)} finding(s)")
+    for f in errors:
         print(f"  - {f}")
     return 1
 
@@ -1272,11 +1290,14 @@ def cmd_validate_exemption(args: argparse.Namespace) -> int:
     # -- fail-closed the same way cmd_validate_protocol_debt's own
     # interaction cross-reference already is.
     descriptor = load_project_descriptor(args.descriptor)
+    evidence_ids = valid_evidence_ids(_evidence_dir_for(args.workspace))
     findings_total = []
     discovered = 0
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
-        interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
+        interactions_by_id = load_interactions_by_id(
+            _interaction_dir_for(crate, args.workspace), evidence_ids
+        )
         discovered += _count_exemptions(crate_root)
         findings_total.extend(
             validate_exemption_crate(crate_root, _exemption_dir_for(crate, args.workspace), interactions_by_id)
@@ -1300,11 +1321,14 @@ def cmd_validate_protocol_debt(args: argparse.Namespace) -> int:
     # <crate_dir>/specs/_protocol_debt, plus the same interaction
     # cross-reference cmd_validate_interaction's G15 check relies on.
     descriptor = load_project_descriptor(args.descriptor)
+    evidence_ids = valid_evidence_ids(_evidence_dir_for(args.workspace))
     findings_total = []
     discovered = 0
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
-        interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, args.workspace))
+        interactions_by_id = load_interactions_by_id(
+            _interaction_dir_for(crate, args.workspace), evidence_ids
+        )
         discovered += _count_protocol_debt(crate_root)
         findings_total.extend(
             validate_protocol_debt_crate(
@@ -1819,21 +1843,25 @@ def cmd_draft(args: argparse.Namespace) -> int:
         raw = invoke_llm_backend(backend, prompt)
 
     data = parse_llm_json_output(raw)
-    draft_path = stage_draft(data, args.target)
-    print(f"staged draft: {draft_path}")
 
     # plan.md §6.1: generated output is immediately run through G1a/G1b
-    # for fast local feedback, full Stage 4 adjudication unchanged. The
-    # draft stays on disk either way -- this is feedback for correction,
-    # not a promotion decision (only approve() writes the target path).
+    # for fast local feedback, full Stage 4 adjudication unchanged. Failed
+    # candidates never reach disk, so the ordinary .draft suffix continues
+    # to mean "ready for human review", not "generation failed".
     validate_fn = _select_draft_validate_fn(args.target, args.workspace, descriptor)
     findings = validate_fn(args.target, data)
     errors = [f for f in findings if getattr(f, "severity", "error") == "error"]
     infos = [f for f in findings if getattr(f, "severity", "error") == "info"]
+    warnings = [f for f in findings if getattr(f, "severity", "error") == "warning"]
 
     if infos:
         print(f"INFO: {len(infos)} non-blocking finding(s)")
         for f in infos:
+            print(f"  - {f}")
+
+    if warnings:
+        print(f"WARNING: {len(warnings)} non-blocking finding(s)")
+        for f in warnings:
             print(f"  - {f}")
 
     if errors:
@@ -1842,6 +1870,8 @@ def cmd_draft(args: argparse.Namespace) -> int:
             print(f"  - {f}")
         return 1
 
+    draft_path = stage_draft(data, args.target)
+    print(f"staged draft: {draft_path}")
     print("OK: generated draft passes G1a/G1b immediate checks")
     return 0
 
@@ -2016,7 +2046,8 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
             validator = load_interaction_validator()
             crate_root = (workspace / crate["crate_dir"]).resolve()
             specs_search_root = _specs_search_root_for(target, workspace, descriptor)
-            interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
+            evidence_ids = valid_evidence_ids(_evidence_dir_for(workspace))
+            interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace), evidence_ids)
             valid_debt_interaction_ids = valid_interaction_ids_from_crate(
                 crate_root, _protocol_debt_dir_for(crate, workspace), interactions_by_id
             )
@@ -2028,15 +2059,19 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
             )
             return lambda path, data: validate_interaction_data(
                 path, data, validator, valid_debt_interaction_ids, covering_boundary_edges,
-                valid_exemption_interaction_ids,
+                valid_exemption_interaction_ids, evidence_ids,
             )
         if resolved_parent == _exemption_dir_for(crate, workspace):
             validator = load_exemption_validator()
-            interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
+            interactions_by_id = load_interactions_by_id(
+                _interaction_dir_for(crate, workspace), valid_evidence_ids(_evidence_dir_for(workspace))
+            )
             return lambda path, data: validate_exemption_data(path, data, validator, interactions_by_id)
         if resolved_parent == _protocol_debt_dir_for(crate, workspace):
             validator = load_protocol_debt_validator()
-            interactions_by_id = load_interactions_by_id(_interaction_dir_for(crate, workspace))
+            interactions_by_id = load_interactions_by_id(
+                _interaction_dir_for(crate, workspace), valid_evidence_ids(_evidence_dir_for(workspace))
+            )
             return lambda path, data: validate_protocol_debt_data(path, data, validator, interactions_by_id)
         if resolved_parent == _bridge_dir_for(crate, workspace):
             validator = load_bridge_validator()
@@ -2207,7 +2242,10 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
             return lambda path, data: validate_boundary_draft_data(path, data, validator)
         if resolved_parent == _interaction_dir_for(crate, workspace):
             validator = load_interaction_draft_validator()
-            return lambda path, data: validate_interaction_draft_data(path, data, validator)
+            evidence_ids = valid_evidence_ids(_evidence_dir_for(workspace))
+            return lambda path, data: validate_interaction_draft_data(
+                path, data, validator, evidence_ids
+            )
         if resolved_parent == _exemption_dir_for(crate, workspace):
             validator = load_exemption_draft_validator()
             return lambda path, data: validate_exemption_draft_data(path, data, validator)
@@ -2306,7 +2344,8 @@ def _select_pair_validate_fn(
                 "and filename stems to match; refusing to grant candidate G15 coverage"
             )
 
-        interactions_by_id = load_interactions_by_id(interaction_dir)
+        evidence_ids = valid_evidence_ids(_evidence_dir_for(workspace))
+        interactions_by_id = load_interactions_by_id(interaction_dir, evidence_ids)
 
         candidate_id = interaction_id
         if isinstance(candidate_id, str) and candidate_id in interactions_by_id.duplicate_ids:
@@ -2341,7 +2380,7 @@ def _select_pair_validate_fn(
 
         interaction_findings = validate_interaction_data(
             interaction_target, candidate_interaction, interaction_validator, interaction_coverage,
-            covering_boundary_edges, valid_exemption_interaction_ids,
+            covering_boundary_edges, valid_exemption_interaction_ids, evidence_ids,
         )
         interaction_errors = [
             finding for finding in interaction_findings if getattr(finding, "severity", "error") == "error"
@@ -2426,7 +2465,8 @@ def _select_interaction_exemption_pair_validate_fn(
                 "and filename stems to match; refusing to grant candidate R2 coverage"
             )
 
-        interactions_by_id = load_interactions_by_id(interaction_dir)
+        evidence_ids = valid_evidence_ids(_evidence_dir_for(workspace))
+        interactions_by_id = load_interactions_by_id(interaction_dir, evidence_ids)
 
         candidate_id = interaction_id
         if isinstance(candidate_id, str) and candidate_id in interactions_by_id.duplicate_ids:
@@ -2462,7 +2502,7 @@ def _select_interaction_exemption_pair_validate_fn(
 
         interaction_findings = validate_interaction_data(
             interaction_target, candidate_interaction, interaction_validator, valid_debt_interaction_ids,
-            covering_boundary_edges, exemption_coverage,
+            covering_boundary_edges, exemption_coverage, evidence_ids,
         )
         interaction_errors = [
             finding for finding in interaction_findings if getattr(finding, "severity", "error") == "error"
@@ -2616,8 +2656,8 @@ def cmd_promote_evidence(args: argparse.Namespace) -> int:
 
 
 def cmd_record_assurance(args: argparse.Namespace) -> int:
-    """`ligature record-assurance <work-package> --proof <obligation>=<path>
-    [--proof ...]` (docs/cli-contract.md §1, §10): assemble a work
+    """`ligature record-assurance <work-package> --proof ...` or
+    `--verus-json ... --verus-function ...` (docs/cli-contract.md §1, §10): assemble a work
     package's assurance report from the verifier's own proof certificates
     and write it to the manifest's `report.emit` path (chainlink #87) --
     the producer gate-g14's achieved side never had, which is why the
@@ -2625,19 +2665,24 @@ def cmd_record_assurance(args: argparse.Namespace) -> int:
     achieved assurance" with no command able to change it.
 
     The report is machine-assembled (see scripts/record_assurance.py's
-    docstring for what is derived from where): nothing here accepts a
-    caller's word for what was proved, only a declaration of which
-    certificate is about which obligation, and that declaration is checked
-    against the manifest and the certificate's own location.
+    docstring for what is derived from where): Creusot reads each proof
+    certificate; Verus reads official `--output-json` with a named function
+    and exact Ligature proof note for each obligation.
 
     Exit codes per docs/exit-code-contract.md: 0 recorded; 1 the evidence
     does not establish the obligation (stuck subgoals, a certificate older
     than the Coma program it certifies, a record satisfies() would refuse);
-    2 invalid input (a malformed `--proof`, a manifest not where gate-g14
-    reads it, an evidence path that is not a proof certificate). Nothing
-    is written on any non-zero exit."""
+    2 invalid input (a malformed proof mapping, a manifest not where
+    gate-g14 reads it, or an input that is not recognized verifier output).
+    Nothing is written on any non-zero exit."""
     try:
-        outcome = record_assurance(args.workspace, args.work_package, args.proof)
+        outcome = record_assurance(
+            args.workspace,
+            args.work_package,
+            args.proof,
+            args.verus_json,
+            args.verus_function,
+        )
     except RecordAssuranceError as e:
         print(f"error: {e}", file=sys.stderr)
         return e.exit_code
@@ -3107,8 +3152,15 @@ def build_parser() -> argparse.ArgumentParser:
     future `#56`/`#58` nested-CLI wrappers) from the single place it is
     defined, instead of that tooling re-declaring its own copy of this list
     that could silently drift from what argparse actually dispatches."""
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--workspace", type=Path, default=Path("."))
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Global options such as --workspace and --descriptor must precede the subcommand.",
+    )
+    parser.add_argument(
+        "--workspace", type=Path, default=Path("."),
+        help="workspace root (global option; place before the subcommand)",
+    )
     parser.add_argument(
         "--descriptor",
         type=Path,
@@ -3336,6 +3388,24 @@ def build_parser() -> argparse.ArgumentParser:
             "weekday_from_days)"
         ),
     )
+    record_assurance_p.add_argument(
+        "--verus-json",
+        metavar="PATH",
+        help=(
+            "official Verus --output-json result file (workspace-relative); required with "
+            "--verus-function for Verus guarantees"
+        ),
+    )
+    record_assurance_p.add_argument(
+        "--verus-function",
+        action="append",
+        default=[],
+        metavar="OBLIGATION=FUNCTION",
+        help=(
+            "bind a Verus guarantee to the exact func-details key; repeatable, and the function "
+            "must carry #[verifier::proof_note(\"ligature:<obligation>\")] on its guarantee"
+        ),
+    )
     record_assurance_p.set_defaults(func=cmd_record_assurance)
 
     extract_c_static_p = sub.add_parser(
@@ -3392,6 +3462,9 @@ def build_parser() -> argparse.ArgumentParser:
     check_bridges_p = sub.add_parser(
         "check-bridges",
         help="Stage 8A: compile bridge_logic to a harness, dispatch it to the owning verifier (#47)",
+        description="Generate and check bridge harnesses in the selected workspace.",
+        epilog="Global options must precede this command, for example: ligature --workspace <dir> check-bridges",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     check_bridges_p.set_defaults(func=cmd_check_bridges)
 

@@ -382,6 +382,47 @@ class ComputeSchemaVersionsTest(unittest.TestCase):
             versions = compute_schema_versions(workspace, DESCRIPTOR, [boundary_path, interaction_path])
         self.assertEqual(versions, {"boundary": "1.0", "interaction": "1.0"})
 
+    def test_interaction_with_dangling_evidence_link_is_refused_at_promotion(self):
+        """G4 must receive the workspace evidence set during Stage 4.5
+        too; missing context must not turn a dangling link into an info
+        finding while the interaction is promoted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            interaction = dict(VALID_INTERACTION)
+            interaction["evidence_links"] = ["E-999"]
+            path = _write_json(
+                workspace,
+                "crates/scheduler/specs/_interactions/I-SCHED-TQ-001.json",
+                interaction,
+            )
+            with self.assertRaisesRegex(PromotionReceiptError, "G4"):
+                compute_schema_versions(workspace, DESCRIPTOR, [path])
+
+    def test_interaction_with_ungrounded_reliance_is_refused_at_promotion(self):
+        """G5 is advisory during authoring but blocks Stage 4.5 when a
+        promoted interaction declares a reliance without any resolvable
+        evidence link."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            interaction = dict(VALID_INTERACTION)
+            interaction["reliances"] = [{
+                "obligation_id": "TaskQueue.C003",
+                "required_assurance": {
+                    "required_claims": ["postcondition-holds"],
+                    "accepted_evidence_kinds": ["creusot-deductive-check"],
+                    "minimum_scope": {"input_domain": "queue_len_le_8"},
+                    "trust_policy": {"assumptions_allowed": []},
+                },
+            }]
+            path = _write_json(
+                workspace,
+                "crates/scheduler/specs/_interactions/I-SCHED-TQ-001.json",
+                interaction,
+            )
+
+            with self.assertRaisesRegex(PromotionReceiptError, "G5"):
+                compute_schema_versions(workspace, DESCRIPTOR, [path])
+
     def test_disagreeing_versions_for_the_same_kind_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)

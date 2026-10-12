@@ -178,14 +178,16 @@ concept. For Verus guarantees, pass the official `verus --output-json`
 result with `--verus-json <path>` and one repeatable
 `--verus-function <obligation>=<func-details-key>` mapping per guarantee.
 The function key must exactly match an entry in Verus's `func-details`,
-and that function must carry
-`#[verifier::proof_note("ligature:<obligation>")]`. Verus JSON is
+and the function's `ensures` clause must contain the inner attribute
+`#![verifier::proof_note("ligature:<obligation>")]`. Verus JSON is
 accepted only when `verification-results.success` is true, the run is
 marked as whole-crate, and its error count is zero; the function's
 `obligation_proof_notes` must contain the exact marker and
 `failed_proof_notes` must not. Aggregate `verified` counts never bind an
-obligation to a proof. The report records the JSON path and SHA-256;
-`gate g14` re-opens the same official JSON and checks the hash and
+obligation to a proof. The report records the JSON path and SHA-256, plus a
+hash of Rust source files covered by the manifest's `allowed_write_set`.
+`record-assurance` refuses a JSON result older than those sources, and
+`gate g14` re-opens the same JSON, checks both hashes, and checks the
 function marker again (#129). These records establish Verus evidence for
 the named guarantees; CG3's separate `creusot_owned` disjunct remains
 limited to Creusot ownership. It writes nothing on a refusal
@@ -200,9 +202,10 @@ claims to be -- workspace containment, the obligation's concept
 directory, a non-empty `proofs` section with no stuck subgoal and at
 least one proved goal, nothing older than its Coma program. A Verus
 target is checked as the official whole-crate `--output-json` result,
-with its recorded hash, exact function key, and obligation proof note
-checked again. Both formats must still establish the obligation -- and
-every derived field (`evidence.kind`/`verifier`/`harness` from the
+with its recorded hash, exact function key, obligation proof note, and
+manifest-scoped Rust source hash checked again. Both formats must still
+establish the obligation -- and every derived field
+(`evidence.kind`/`verifier`/`harness` from the
 manifest's own `harness`, `config` from its `provenance`) is re-derived
 from that manifest and must agree. A record that names no proof evidence,
 whose evidence cannot be re-opened or no longer establishes the
@@ -1326,7 +1329,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `accept-policy` | stable; records a reviewed change to the normative reliance-policy document as the manifest's reviewed `base_hash` (the explicit accept path for governance drift; `--policy-path` defaults to the descriptor's `compatibility_policy.reliance_policy_path`, and a disagreeing explicit path is refused) (#78, §8). `--version <name>@<major>.<minor>` stamps the document's single `Policy version:` marker line first — that line and nothing else — so the template `init` installs can reach an accepted state, and be re-versioned, without a hand-edit of a `protected_root`; a human checkpoint like `approve` and `accept-promotion` (#113, §8) |
 | `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1) |
 | `record-ruling` | stable; records an explicit human verdict (`ratified`\|`rejected`) over an exact artifact set in `ci/results/human_rulings.jsonl` -- the human-ruling gate `accept-promotion` enforces: no receipt is minted until every artifact in the accepted set carries a `ratified` ruling over its current content (#82, §5) |
-| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads, and the producer the obligation half of `docs/assurance-report-schema.json` never had (#87, §1). Creusot uses `--proof <obligation>=<path>` and why3find `proof.json`; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function <obligation>=<func-details-key>` mappings (#129). Verus requires whole-crate success and an exact `#[verifier::proof_note("ligature:<obligation>")]` in that function's `obligation_proof_notes`, absent from `failed_proof_notes`; aggregate counts do not prove individual guarantees. Every record field is derived from evidence and manifest provenance. A feature ledger already sitting at that path is replaced with a warning naming the collision; unrecognizable content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
+| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads, and the producer the obligation half of `docs/assurance-report-schema.json` never had (#87, §1). Creusot uses `--proof <obligation>=<path>` and why3find `proof.json`; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function <obligation>=<func-details-key>` mappings (#129). Verus requires whole-crate success and an exact `#![verifier::proof_note("ligature:<obligation>")]` inside the function's `ensures` clause, present in `obligation_proof_notes` and absent from `failed_proof_notes`; aggregate counts do not prove individual guarantees. It refuses JSON older than Rust source files covered by the manifest's `allowed_write_set` and G14 rechecks the recorded source hash. Every record field is derived from evidence and manifest provenance. A feature ledger already sitting at that path is replaced with a warning naming the collision; unrecognizable content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
 | `select-pilot-cluster` | alias → `report pilot-cluster` |
 | `measure-gold-set` | alias → `report gold-set-measurement` |
 | `generate-feature-ledger` | alias → `report feature-ledger` |

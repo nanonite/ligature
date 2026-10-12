@@ -3403,7 +3403,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="OBLIGATION=FUNCTION",
         help=(
             "bind a Verus guarantee to the exact func-details key; repeatable, and the function "
-            "must carry #[verifier::proof_note(\"ligature:<obligation>\")] on its guarantee"
+            "must put #![verifier::proof_note(\"ligature:<obligation>\")] inside its ensures clause"
         ),
     )
     record_assurance_p.set_defaults(func=cmd_record_assurance)

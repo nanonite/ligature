@@ -810,7 +810,7 @@
       "path": "scripts/record_assurance.py",
       "role": "generator",
       "disposition": "runtime-required",
-      "summary": "chainlink #87: the producer gate-g14's achieved side never had -- assembles a work package's assurance report from why3find proof certificates (`proof.json`) and writes it to the manifest's own report.emit path, every field derived from evidence or the manifest, with only the obligation-to-certificate mapping declared by the caller and that declaration checked (concept anchor, containment, staleness), behind `ligature record-assurance`."
+      "summary": "chainlink #87/#129: assembles a work package's assurance report from why3find proof certificates or official whole-crate Verus JSON, writes it to report.emit, and derives the record from evidence and manifest provenance. Verus binds the exact func-details key and proof note, refuses output older than Rust sources under allowed_write_set, and records output/source hashes for G14 to recheck."
     }
   ],
   "schemas": [

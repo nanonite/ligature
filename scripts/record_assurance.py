@@ -29,7 +29,8 @@ What is derived, from where
   * `claim`, `evidence`, `support` -- read from verifier output. Creusot
     uses why3find `proof.json`. Verus uses its official `--output-json`
     result, with each guarantee bound to a named function by a
-    `#[verifier::proof_note("ligature:<obligation>")]`. Verus must report
+    `#![verifier::proof_note("ligature:<obligation>")]` inside its
+    `ensures` clause. Verus must report
     whole-crate success, and the named function's JSON must contain that
     exact note in `obligation_proof_notes` but not `failed_proof_notes`.
     Aggregate verified/error counts alone never establish a guarantee.
@@ -46,11 +47,11 @@ What is derived, from where
     assumption a proof relied on, and an empty list is the only answer
     that cannot claim one; satisfies() fails any assumption outside the
     required profile's allow-list.
-  * `evidence.scope` -- the certificate paths themselves (what was
-    actually checked). Deliberately NOT a copy of the requirement's
-    `minimum_scope`: copying the required domain into the achievement
-    would assert coverage the certificate never states. A provided
-    guarantee that declares `minimum_scope` is therefore REFUSED, with
+  * `evidence.scope` -- the proof targets and verifier-specific hashes
+    (what was actually checked). Deliberately NOT a copy of the
+    requirement's `minimum_scope`: copying the required domain into the
+    achievement would assert coverage the certificate never states. A
+    provided guarantee that declares `minimum_scope` is therefore REFUSED, with
     satisfies()'s own reasons printed, rather than satisfied by copying.
 
 The declaration a human does make is checked, not trusted. Creusot uses
@@ -68,7 +69,9 @@ with one shared `--verus-json` result file:
     program it claims to discharge says nothing about the file on disk.
   * Verus function names must exactly match a key in `func-details`, and
     the corresponding proof-note marker must be present as proved; G14
-    hashes and re-reads the same JSON result.
+    hashes and re-reads the same JSON result. Rust sources in the manifest's
+    allowed write set must be no newer than that result; their source
+    snapshot is recorded and rechecked by G14.
 
 Report placement and the feature-ledger collision
 -------------------------------------------------
@@ -92,6 +95,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -107,6 +111,7 @@ from generate_feature_ledger import load_validator as load_feature_ledger_valida
 from satisfies import load_achieved_validator  # noqa: E402
 from satisfies import satisfies  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
+from validate_work_package import _pattern_covers_path  # noqa: E402
 
 PROOF_FILE_NAME = "proof.json"
 COMA_SUFFIX = ".coma"
@@ -162,6 +167,7 @@ class Certificate:
     evidence_format: str = "why3find"
     content_hash: str | None = None
     verifier_version: str | None = None
+    source_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -414,6 +420,102 @@ def verus_json_path_for(workspace: Path, spec: str) -> Path:
     return path
 
 
+_VERUS_SOURCE_SKIP_DIRS = frozenset(
+    {".git", "target", "node_modules", "__pycache__"}
+)
+
+
+def verus_source_snapshot(workspace: Path, manifest: dict) -> tuple[str, int, str | None]:
+    """Hash Rust files covered by this work package's allowed write set.
+
+    Verus's JSON does not carry a source hash. Bound the tracked source set
+    by the work package's declared write roots, then use both its content
+    hash and mtimes: the hash lets G14 detect later edits, while the mtime
+    lets record-assurance reject a JSON result that already predates an
+    edited source file.
+    """
+    write_policy = manifest.get("write_policy")
+    patterns = write_policy.get("allowed_write_set") if isinstance(write_policy, dict) else None
+    if not isinstance(patterns, list) or not all(isinstance(pattern, str) for pattern in patterns):
+        raise InvalidRecordInput(
+            "manifest has no usable write_policy.allowed_write_set for Verus source freshness"
+        )
+    normalized_patterns = []
+    for pattern in patterns:
+        normalized = pattern.rstrip("/")
+        if pattern.endswith("/"):
+            normalized += "/**"
+        elif normalized and not any(char in normalized for char in "*?"):
+            candidate = (workspace / normalized).resolve()
+            if candidate.is_dir():
+                normalized += "/**"
+        normalized_patterns.append(normalized)
+
+    sources: list[tuple[str, Path]] = []
+
+    def fail_on_walk_error(error: OSError) -> None:
+        raise InvalidRecordInput(
+            f"cannot scan Rust sources under the workspace: {error}"
+        ) from error
+
+    for directory, dirnames, filenames in os.walk(workspace, onerror=fail_on_walk_error):
+        dirnames[:] = sorted(name for name in dirnames if name not in _VERUS_SOURCE_SKIP_DIRS)
+        for filename in filenames:
+            if not filename.endswith(".rs"):
+                continue
+            candidate = Path(directory) / filename
+            relative = candidate.relative_to(workspace).as_posix()
+            if not any(_pattern_covers_path(pattern, relative) for pattern in normalized_patterns):
+                continue
+            resolved = candidate.resolve()
+            if not _contains(workspace, resolved):
+                raise InvalidRecordInput(
+                    f"Verus source {relative} resolves outside the workspace -- source freshness "
+                    "cannot be established"
+                )
+            sources.append((relative, resolved))
+
+    digest = hashlib.sha256()
+    newest_mtime_ns = 0
+    newest_path: str | None = None
+    for relative, path in sorted(sources):
+        try:
+            content = path.read_bytes()
+            stat = path.stat()
+        except OSError as exc:
+            raise InvalidRecordInput(f"cannot read Verus source {relative}: {exc}") from exc
+        relative_bytes = relative.encode("utf-8")
+        digest.update(len(relative_bytes).to_bytes(8, "big"))
+        digest.update(relative_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+        if stat.st_mtime_ns > newest_mtime_ns:
+            newest_mtime_ns = stat.st_mtime_ns
+            newest_path = relative
+    return "sha256:" + digest.hexdigest(), newest_mtime_ns, newest_path
+
+
+def require_fresh_verus_json(
+    path: Path, workspace: Path, source_snapshot: tuple[str, int, str | None]
+) -> None:
+    """Refuse a result written before any scoped Rust source it could prove."""
+    _source_hash, newest_source_mtime_ns, newest_source = source_snapshot
+    if newest_source is None:
+        return
+    try:
+        result_mtime_ns = path.stat().st_mtime_ns
+    except OSError as exc:
+        raise InvalidRecordInput(
+            f"cannot stat Verus JSON result {_relative(path, workspace)}: {exc}"
+        ) from exc
+    if newest_source_mtime_ns > result_mtime_ns:
+        raise EvidenceNotEstablished(
+            f"{newest_source} is newer than the Verus JSON result "
+            f"{_relative(path, workspace)} -- the result does not describe the current Rust "
+            "sources; re-run Verus and record assurance again"
+        )
+
+
 def verus_target(workspace: Path, path: Path, function: str) -> str:
     """Stable workspace-relative target stored for G14's independent reread."""
     relative = _relative(path, workspace)
@@ -520,7 +622,11 @@ def read_certificate(path: Path, workspace: Path, obligation_id: str) -> Certifi
 
 
 def read_verus_function_result(
-    path: Path, workspace: Path, obligation_id: str, function: str
+    path: Path,
+    workspace: Path,
+    obligation_id: str,
+    function: str,
+    source_hash: str | None = None,
 ) -> Certificate:
     """Read Verus's official JSON and bind one obligation to one function.
 
@@ -625,6 +731,7 @@ def read_verus_function_result(
         evidence_format="verus-json",
         content_hash="sha256:" + hashlib.sha256(raw).hexdigest(),
         verifier_version=version,
+        source_hash=source_hash,
     )
 
 
@@ -635,6 +742,8 @@ def read_proof_target(
     expected_verus_hash: str | None = None,
     expected_harness: str | None = None,
     expected_verus_version: str | None = None,
+    expected_verus_source_hash: str | None = None,
+    source_manifest: dict | None = None,
 ) -> Certificate:
     """Re-open one stored target, dispatching by its explicit evidence kind."""
     if target.startswith(VERUS_TARGET_PREFIX):
@@ -645,7 +754,16 @@ def read_proof_target(
             )
         path_spec, function = parse_verus_target(target)
         path = verus_json_path_for(workspace, path_spec)
-        certificate = read_verus_function_result(path, workspace, obligation_id, function)
+        if source_manifest is None:
+            raise InvalidRecordInput(
+                f"{target!r} has no manifest source scope; G14 cannot confirm the Verus result "
+                "still matches the Rust sources"
+            )
+        source_snapshot = verus_source_snapshot(workspace, source_manifest)
+        require_fresh_verus_json(path, workspace, source_snapshot)
+        certificate = read_verus_function_result(
+            path, workspace, obligation_id, function, source_hash=source_snapshot[0]
+        )
         if expected_verus_hash is None:
             raise InvalidRecordInput(
                 f"{target!r} has no recorded Verus output hash; the evidence cannot be matched "
@@ -663,6 +781,17 @@ def read_proof_target(
                 f"{certificate.verifier_version!r}, not the recorded "
                 f"{expected_verus_version!r}"
             )
+        if expected_verus_source_hash is None:
+            raise InvalidRecordInput(
+                f"{target!r} has no recorded Verus source hash; G14 cannot confirm the result "
+                "still matches the Rust sources"
+            )
+        if certificate.source_hash != expected_verus_source_hash:
+            raise EvidenceNotEstablished(
+                f"Rust source files covered by the manifest changed after Verus evidence was "
+                f"recorded for {obligation_id} -- expected {expected_verus_source_hash}, found "
+                f"{certificate.source_hash}; re-run Verus and record assurance again"
+            )
         return certificate
     if expected_harness == "verus":
         raise InvalidRecordInput(
@@ -672,6 +801,8 @@ def read_proof_target(
         raise InvalidRecordInput(
             "a Verus output hash was recorded for a non-Verus proof target"
         )
+    if expected_verus_source_hash is not None:
+        raise InvalidRecordInput("a Verus source hash was recorded for a non-Verus proof target")
     path = certificate_path_for(workspace, target, obligation_id)
     return read_certificate(path, workspace, obligation_id)
 
@@ -721,6 +852,7 @@ def _record_for(
     scope = {"proof_targets": ",".join(sorted({c.relative for c in certificates}))}
     if harness == "verus":
         hashes = {certificate.content_hash for certificate in certificates}
+        source_hashes = {certificate.source_hash for certificate in certificates}
         versions = {
             certificate.verifier_version
             for certificate in certificates
@@ -730,7 +862,12 @@ def _record_for(
             raise InvalidRecordInput(
                 f"{obligation_id}: Verus functions must resolve from one unchanged JSON result file"
             )
+        if len(source_hashes) != 1 or None in source_hashes:
+            raise InvalidRecordInput(
+                f"{obligation_id}: Verus source inputs could not be bound to the result"
+            )
         scope["verus_output_sha256"] = next(iter(hashes))
+        scope["verus_source_sha256"] = next(iter(source_hashes))
         if len(versions) == 1:
             scope["verus_version"] = next(iter(versions))
     record = {
@@ -856,6 +993,10 @@ def record_assurance(
             f"obligations {overlap!r} have both --proof and --verus-function evidence"
         )
     verus_path = verus_json_path_for(workspace, verus_json) if verus_json else None
+    verus_sources = None
+    if verus_path is not None:
+        verus_sources = verus_source_snapshot(workspace, manifest)
+        require_fresh_verus_json(verus_path, workspace, verus_sources)
 
     guarantees = manifest["definition_of_done"]["provided_guarantees"]
     provided = {entry["obligation_id"]: entry for entry in guarantees}
@@ -893,7 +1034,13 @@ def record_assurance(
                     f"{obligation_id}: Verus evidence requires --verus-json <output.json>"
                 )
             certificates = [
-                read_verus_function_result(verus_path, workspace, obligation_id, function)
+                read_verus_function_result(
+                    verus_path,
+                    workspace,
+                    obligation_id,
+                    function,
+                    source_hash=verus_sources[0] if verus_sources is not None else None,
+                )
                 for function in verus_functions[obligation_id]
             ]
         else:
@@ -963,6 +1110,31 @@ def record_assurance(
         raise EvidenceNotEstablished(
             f"assembled achieved record is not schema-valid: {record_errors[0].message}"
         )
+
+    if verus_path is not None and verus_sources is not None:
+        final_sources = verus_source_snapshot(workspace, manifest)
+        require_fresh_verus_json(verus_path, workspace, final_sources)
+        if final_sources[0] != verus_sources[0]:
+            raise EvidenceNotEstablished(
+                "Rust source files changed while assurance was being assembled -- re-run Verus "
+                "and record assurance again"
+            )
+        try:
+            final_output_hash = "sha256:" + hashlib.sha256(verus_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise InvalidRecordInput(
+                f"cannot re-read Verus JSON result {_relative(verus_path, workspace)}: {exc}"
+            ) from exc
+        recorded_output_hashes = {
+            certificate.content_hash
+            for certificates in certificates_by_obligation.values()
+            for certificate in certificates
+        }
+        if recorded_output_hashes != {final_output_hash}:
+            raise EvidenceNotEstablished(
+                "Verus JSON changed while assurance was being assembled -- re-run Verus and "
+                "record assurance again"
+            )
 
     write_atomically(report_path, json.dumps(report, indent=2, sort_keys=True) + "\n")
 

@@ -606,7 +606,10 @@ def check_requirements(
 
 
 def check_record_certificates(
-    workspace: Path, closure: Closure, reports: dict[str, dict]
+    workspace: Path,
+    closure: Closure,
+    reports: dict[str, dict],
+    manifests: dict[str, dict] | None = None,
 ) -> list[Finding]:
     """chainlink #92: every obligation record's proof certificate is
     RE-OPENED here, the same way record-assurance checked it before
@@ -624,6 +627,11 @@ def check_record_certificates(
     write-set-check called the edit clean. A record is a claim ABOUT a
     certificate; only re-checking the certificate turns the claim back
     into evidence.
+
+    Verus results also bind the current Rust source snapshot covered by
+    the manifest's allowed write set. A source edit after the recorded
+    result makes the report stale even when the Verus JSON itself has not
+    changed.
 
     So each obligation record in the closure's reports must name at
     least one certificate (`record-assurance` never writes one without
@@ -651,6 +659,9 @@ def check_record_certificates(
         read_proof_target,
     )
 
+    if manifests is None:
+        manifests, _manifest_findings = load_manifests(workspace)
+
     findings: list[Finding] = []
     for work_package in closure.work_packages:
         report = reports.get(work_package)
@@ -666,6 +677,7 @@ def check_record_certificates(
             harness = evidence.get("harness") if isinstance(evidence, dict) else None
             verus_hash = scope.get("verus_output_sha256") if isinstance(scope, dict) else None
             verus_version = scope.get("verus_version") if isinstance(scope, dict) else None
+            verus_source_hash = scope.get("verus_source_sha256") if isinstance(scope, dict) else None
             if harness == "verus" and (not isinstance(verus_hash, str) or not verus_hash):
                 findings.append(
                     Finding(
@@ -674,6 +686,18 @@ def check_record_certificates(
                         "evidence.scope, so G14 cannot confirm it is re-reading the same official "
                         "Verus JSON that record-assurance checked; re-record from "
                         f"`verus --output-json` with `ligature record-assurance {work_package}`",
+                    )
+                )
+                continue
+            if harness == "verus" and (
+                not isinstance(verus_source_hash, str) or not verus_source_hash
+            ):
+                findings.append(
+                    Finding(
+                        "G14", record_ref,
+                        "the recorded Verus achievement has no `verus_source_sha256` in "
+                        "evidence.scope, so G14 cannot confirm the result still matches the "
+                        "manifest's Rust source files; re-run Verus and record assurance again",
                     )
                 )
                 continue
@@ -725,6 +749,12 @@ def check_record_certificates(
                     )
                     continue
                 try:
+                    source_manifest = manifests.get(work_package)
+                    if source_manifest is None and harness == "verus":
+                        raise RecordAssuranceError(
+                            f"no valid work-package manifest is available to re-check Rust "
+                            f"source freshness for {work_package}"
+                        )
                     read_proof_target(
                         workspace,
                         target,
@@ -734,6 +764,10 @@ def check_record_certificates(
                         expected_verus_version=(
                             verus_version if isinstance(verus_version, str) else None
                         ),
+                        expected_verus_source_hash=(
+                            verus_source_hash if isinstance(verus_source_hash, str) else None
+                        ),
+                        source_manifest=source_manifest,
                     )
                 except RecordAssuranceError as e:
                     if target.startswith("verus-json:"):
@@ -1810,7 +1844,7 @@ def gate_cluster(
     # re-derive every field record-assurance derives from the manifest,
     # before any of the record's claims are evaluated -- satisfies() can
     # only compare the record's own words against a requirement's words.
-    findings.extend(check_record_certificates(workspace, closure, reports))
+    findings.extend(check_record_certificates(workspace, closure, reports, manifests))
     findings.extend(check_record_derivation(closure, manifests, reports))
 
     findings.extend(check_provided_guarantees(cluster, profile, closure, manifests, reports))

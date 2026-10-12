@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-10-12
+
+### Fixed
+- Refuse stale Verus assurance when scoped Rust sources changed after the JSON result, and have G14 recheck the recorded source snapshot (#129 follow-up)
+- Show the Verus inner proof-note attribute in the `ensures` clause in `record-assurance` help (#129 follow-up)
+
 ## [1.3.4] - 2026-10-11
 
 ### Added

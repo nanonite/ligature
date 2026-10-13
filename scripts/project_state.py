@@ -1113,6 +1113,8 @@ class Analysis:
     conditions: set[str] = field(default_factory=set)
     descriptor_diagnostics: list[str] = field(default_factory=list)
     pending_evidence_drafts: list[Path] = field(default_factory=list)
+    missing_crate_roots: list[str] = field(default_factory=list)
+    issue: int | None = None
 
     @property
     def descriptor_rel(self) -> str:
@@ -1307,6 +1309,23 @@ def _has_c_static(workspace: Path) -> bool:
     return directory.is_dir() and any(directory.glob("*.json"))
 
 
+def _missing_crate_roots(workspace: Path, descriptor: dict | None) -> list[str]:
+    """Return descriptor-declared crate roots that are not directories.
+
+    `extract-c-static` resolves each declared crate root before scanning, so
+    recommending it before a missing root is created produces a command that
+    cannot run. Keep the check read-only and report paths in descriptor order.
+    """
+    if descriptor is None:
+        return []
+    missing = []
+    for crate in descriptor.get("crates", []):
+        crate_dir = crate.get("crate_dir") if isinstance(crate, dict) else None
+        if isinstance(crate_dir, str) and crate_dir and not (workspace / crate_dir).is_dir():
+            missing.append(crate_dir)
+    return missing
+
+
 def _has_bridges(workspace: Path, descriptor: dict | None) -> bool:
     return _any_artifact_file(workspace, descriptor, "_bridges")
 
@@ -1330,7 +1349,12 @@ def _any_artifact_file(workspace: Path, descriptor: dict | None, dirname: str) -
     return False
 
 
-def _run_gates(workspace: Path, descriptor: dict | None):
+def _run_gates(
+    workspace: Path,
+    descriptor: dict | None,
+    *,
+    missing_crate_roots: list[str] | None = None,
+):
     """Run the six §3 gates read-only, returning (gate_runs, findings)."""
     runs: list[dict] = []
     findings: list[NormalizedFinding] = []
@@ -1343,11 +1367,24 @@ def _run_gates(workspace: Path, descriptor: dict | None):
 
     # r1-g16
     if not _has_c_static(workspace):
+        missing_roots = (
+            missing_crate_roots
+            if missing_crate_roots is not None
+            else _missing_crate_roots(workspace, descriptor)
+        )
+        reason = "no C_static reports at ci/results/c_static/ -- run extract-c-static first"
+        if missing_roots:
+            roots = ", ".join(missing_roots)
+            reason = (
+                f"declared crate root(s) {roots} do not exist or are not directories; "
+                "create or scaffold them before running extract-c-static; "
+                "no C_static reports at ci/results/c_static/"
+            )
         runs.append(
             {
                 "gate_id": "r1-g16",
                 "outcome": "blocked",
-                "reason": "no C_static reports at ci/results/c_static/ -- run extract-c-static first",
+                "reason": reason,
             }
         )
     else:
@@ -1525,6 +1562,7 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
             descriptor_state = "unknown"
             descriptor_error = str(exc)
 
+    missing_crate_roots = _missing_crate_roots(workspace, descriptor)
     promotions = _promotion_manifest(workspace)
     installation = _installation_manifest(workspace)
     # chainlink #78: the normative user-owned documents' drift records (the
@@ -1578,6 +1616,20 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
             installation["state"] = "unknown"
 
     findings = _run_standalone_validators(workspace, descriptor)
+    for crate_dir in missing_crate_roots:
+        findings.append(
+            NormalizedFinding(
+                gate_id="crate-prerequisite",
+                severity="high",
+                subject=crate_dir,
+                reason=(
+                    f"declared crate root {crate_dir} does not exist or is not a directory; "
+                    "create or scaffold it before running extract-c-static"
+                ),
+                authority="mechanized-gate",
+                provenance="scripts/project_state.py:_missing_crate_roots",
+            )
+        )
     # chainlink #79: a staged evidence draft is inert (validate-evidence skips
     # *.draft), so it produces no finding -- but it is still a pending artifact
     # the agent must promote. Track it here so `check next` can recommend
@@ -1617,7 +1669,9 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
     # validated (exists + inside the project root) rather than advisory --
     # see _descriptor_policy_path_findings.
     findings.extend(_descriptor_policy_path_findings(descriptor, workspace))
-    gate_runs, gate_findings, witness_backend = _run_gates(workspace, descriptor)
+    gate_runs, gate_findings, witness_backend = _run_gates(
+        workspace, descriptor, missing_crate_roots=missing_crate_roots
+    )
     findings.extend(gate_findings)
     findings.extend(_lifecycle_findings(artifacts))
     for finding in findings:
@@ -1656,6 +1710,8 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
         observations=observations,
         conditions=conditions,
         pending_evidence_drafts=pending_evidence_drafts,
+        missing_crate_roots=missing_crate_roots,
+        issue=issue,
     )
 
 
@@ -1847,6 +1903,29 @@ def _next_action(analysis: Analysis) -> dict | None:
                 f"run `ligature promote-evidence {target}` to make it a real evidence record"
             ),
             "command": f"ligature promote-evidence {target}",
+        }
+
+    if analysis.missing_crate_roots:
+        roots = ", ".join(analysis.missing_crate_roots)
+        if analysis.descriptor and analysis.descriptor.get("mode") == "port":
+            issue = analysis.issue if analysis.issue is not None else "<N>"
+            scaffold = "; then ".join(
+                f"`ligature scaffold-crate --issue {issue} --crate {root}`"
+                for root in analysis.missing_crate_roots
+            )
+            scaffold_guidance = (
+                f" In a port workspace, run {scaffold} when an active issue-scoped write grant "
+                "exists for each crate's Cargo.toml."
+            )
+        else:
+            scaffold_guidance = " Use the workspace's approved crate-creation process."
+        return {
+            "kind": "human-decision",
+            "description": (
+                f"declared crate root(s) {roots} are missing. Create or scaffold them before "
+                "running C_static extraction, then re-run check." + scaffold_guidance
+            ),
+            "command": None,
         }
 
     # 1. A blocked gate whose missing prerequisite is one of the three

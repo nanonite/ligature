@@ -720,7 +720,7 @@
       "path": "scripts/project_state.py",
       "role": "helper",
       "disposition": "runtime-required",
-      "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`."
+      "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`; reports missing descriptor-declared crate roots as blocking prerequisites and resolves them before recommending C_static extraction."
     },
     {
       "path": "scripts/write_set.py",

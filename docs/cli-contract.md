@@ -579,6 +579,14 @@ more severe is already blocking — may *recommend* running the refresh via
 running it; the operator (human or an outer orchestration layer that is
 explicitly not `check` itself) decides whether to run it.
 
+When a descriptor-declared crate root is missing or is not a directory,
+`check` reports a blocking `crate-prerequisite` finding. If C_static reports
+are also missing, the `r1-g16` blocked reason names the absent roots, and
+`next_action` asks the operator to create or scaffold them before extraction.
+For a port workspace, `scaffold-crate --issue N --crate <name>` can create a
+declared crate when an active issue-scoped write grant exists. `check` does
+not recommend `extract-c-static` until the crate-root prerequisite is met.
+
 **The stable part of that recommendation is `action_id`, not `command`.**
 A round-3 external review found the first version of this fix still
 pointed the ONLY machine-consumable field (`command`) at these same three

@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.6] - 2026-10-12
+
+### Fixed
+- Surface missing descriptor-declared crate roots as prerequisites before recommending C_static extraction
+
 ## [1.3.5] - 2026-10-12
 
 ### Fixed

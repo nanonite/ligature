@@ -364,8 +364,31 @@ class KaniRecordAssuranceTest(RecordAssuranceTestCase):
         data["provenance"]["features"] = [self.FEATURE]
         self.write_manifest(data)
 
-    def kani_output(self, *, status="SUCCESS", succeeded=1, failed=0, exit_code=0):
+    def kani_output(
+        self, *, status="SUCCESS", succeeded=1, failed=0, exit_code=0, extra_checks=()
+    ):
         verdict = "SUCCESSFUL" if failed == 0 else "FAILED"
+        checks = [
+            (
+                f"{self.HARNESS_IDENTITY}.assertion.1",
+                status,
+                "assertion failed: tag.len() == 16",
+                "src/kani_proofs.rs:140:5 in function " + self.HARNESS_IDENTITY,
+            ),
+            *extra_checks,
+        ]
+        check_blocks = []
+        for number, (name, check_status, description, *location) in enumerate(checks, 1):
+            block = (
+                f"Check {number}: {name}\n"
+                f"\t - Status: {check_status}\n"
+                f"\t - Description: {json.dumps(description)}\n"
+            )
+            if location:
+                block += f"\t - Location: {location[0]}\n"
+            check_blocks.append(block)
+        unreachable = sum(check[1] == "UNREACHABLE" for check in checks)
+        unreachable_note = f" ({unreachable} unreachable)" if unreachable else ""
         return SimpleNamespace(
             returncode=exit_code,
             stdout=(
@@ -375,11 +398,9 @@ class KaniRecordAssuranceTest(RecordAssuranceTestCase):
             ),
             stderr="",
             result_text=(
-                "RESULTS:\n"
-                f"Check 1: {self.HARNESS_IDENTITY}.assertion.1\n"
-                f"\t - Status: {status}\n"
+                "RESULTS:\n" + "\n".join(check_blocks) +
                 "SUMMARY:\n"
-                f" ** {failed} of 1 failed\n"
+                f" ** {failed} of {len(checks)} failed{unreachable_note}\n"
                 f"VERIFICATION:- {verdict}\n"
                 "Verification Time: 0.01s\n"
             ),
@@ -485,6 +506,17 @@ class KaniRecordAssuranceTest(RecordAssuranceTestCase):
             self.assertEqual(record["evidence"]["harness"], self.HARNESS)
             self.assertEqual(record["evidence"]["kind"], "kani-bounded-model-check")
             self.assertEqual(record["evidence"]["scope"]["input_domain"], self.INPUT_DOMAIN)
+            self.assertEqual(
+                json.loads(record["evidence"]["scope"]["kani_result_summary"]),
+                {
+                    "total_checks": 1,
+                    "successful_checks": 1,
+                    "successful_claim_assertions": [
+                        f"{self.HARNESS_IDENTITY}.assertion.1"
+                    ],
+                    "unreachable_checks": [],
+                },
+            )
             manifests, closure, reports, findings = self.gate_view()
             self.assertEqual(findings, [])
             self.assertEqual(gate_g14.check_record_certificates(self.root, closure, reports, manifests), [])
@@ -522,6 +554,210 @@ class KaniRecordAssuranceTest(RecordAssuranceTestCase):
         ):
             with self.assertRaises(EvidenceNotEstablished):
                 self.record()
+        self.assertFalse(self.report_exists())
+
+    def test_successful_claim_with_unreachable_safety_checks_records_and_g14_rechecks(self):
+        run = self.kani_output(
+            extra_checks=(
+                (
+                    "poly1305::Poly1305State::update.assertion.1",
+                    "UNREACHABLE",
+                    "attempt to subtract with overflow",
+                    "src/poly1305.rs:110:24 in function poly1305::Poly1305State::update",
+                ),
+                (
+                    "core::num::<impl usize>::abs_diff.assertion.1",
+                    "UNREACHABLE",
+                    "attempt to subtract with overflow",
+                    "library/core/src/num/uint_macros.rs:2852:21",
+                ),
+            )
+        )
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani(proof_result=run)
+        ) as invoked:
+            outcome = self.record()
+            self.assertEqual(outcome.recorded[0].goals, 1)
+            summary = json.loads(
+                self.report()["obligation_records"][0]["record"]["evidence"]["scope"]
+                ["kani_result_summary"]
+            )
+            self.assertEqual(summary["successful_checks"], 1)
+            self.assertEqual(len(summary["unreachable_checks"]), 2)
+            self.assertEqual(
+                summary["unreachable_checks"][0]["description"],
+                "attempt to subtract with overflow",
+            )
+            manifests, closure, reports, findings = self.gate_view()
+            self.assertEqual(findings, [])
+            self.assertEqual(
+                gate_g14.check_record_certificates(self.root, closure, reports, manifests), []
+            )
+            self.assertEqual(
+                invoked.call_count,
+                10,
+                "record-assurance and G14 both rerun and parse the same successful result shape",
+            )
+
+    def test_unreachable_explicit_harness_assertion_is_vacuous_and_not_recorded(self):
+        unreachable_claim = self.kani_output(status="UNREACHABLE")
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run",
+            side_effect=self.fake_kani(proof_result=unreachable_claim),
+        ):
+            with self.assertRaises(EvidenceNotEstablished) as caught:
+                self.record()
+        self.assertIn("UNREACHABLE and therefore vacuous", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_g14_rejects_a_report_summary_that_disagrees_with_the_fresh_run(self):
+        run = self.kani_output(
+            extra_checks=(
+                (
+                    "poly1305::Poly1305State::update.assertion.1",
+                    "UNREACHABLE",
+                    "attempt to subtract with overflow",
+                ),
+            )
+        )
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani(proof_result=run)
+        ):
+            self.record()
+        report = self.report()
+        report["obligation_records"][0]["record"]["evidence"]["scope"][
+            "kani_result_summary"
+        ] = "{}"
+        (self.root / EMIT).write_text(json.dumps(report))
+        manifests, closure, reports, findings = self.gate_view()
+        self.assertEqual(findings, [])
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani(proof_result=run)
+        ):
+            recheck = gate_g14.check_record_certificates(self.root, closure, reports, manifests)
+        self.assertEqual(len(recheck), 1)
+        self.assertIn("Kani check summary changed", recheck[0].reason)
+
+    def test_g14_keeps_legacy_all_success_records_usable(self):
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani()
+        ):
+            self.record()
+        report = self.report()
+        scope = report["obligation_records"][0]["record"]["evidence"]["scope"]
+        scope.pop("kani_result_summary")
+        (self.root / EMIT).write_text(json.dumps(report))
+        manifests, closure, reports, findings = self.gate_view()
+        self.assertEqual(findings, [])
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani()
+        ):
+            self.assertEqual(
+                gate_g14.check_record_certificates(self.root, closure, reports, manifests), []
+            )
+
+    def test_g14_requires_a_summary_when_a_legacy_rerun_has_unreachable_checks(self):
+        run = self.kani_output(
+            extra_checks=(
+                (
+                    "poly1305::Poly1305State::update.assertion.1",
+                    "UNREACHABLE",
+                    "attempt to subtract with overflow",
+                ),
+            )
+        )
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani(proof_result=run)
+        ):
+            self.record()
+        report = self.report()
+        scope = report["obligation_records"][0]["record"]["evidence"]["scope"]
+        scope.pop("kani_result_summary")
+        (self.root / EMIT).write_text(json.dumps(report))
+        manifests, closure, reports, findings = self.gate_view()
+        self.assertEqual(findings, [])
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani(proof_result=run)
+        ):
+            recheck = gate_g14.check_record_certificates(self.root, closure, reports, manifests)
+        self.assertEqual(len(recheck), 1)
+        self.assertIn("no `kani_result_summary`", recheck[0].reason)
+
+    def test_unknown_kani_status_is_rejected_as_unrecognized_output(self):
+        unknown = self.kani_output(status="MAYBE")
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani(proof_result=unknown)
+        ):
+            with self.assertRaises(InvalidRecordInput) as caught:
+                self.record()
+        self.assertIn("unsupported status 'MAYBE'", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_undetermined_kani_status_is_not_recorded(self):
+        undetermined = self.kani_output(status="UNDETERMINED")
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run",
+            side_effect=self.fake_kani(proof_result=undetermined),
+        ):
+            with self.assertRaises(EvidenceNotEstablished) as caught:
+                self.record()
+        self.assertIn("UNDETERMINED", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_cover_properties_are_not_accepted_as_assertion_evidence(self):
+        cover = self.kani_output(
+            extra_checks=(
+                (
+                    f"{self.HARNESS_IDENTITY}.cover.1",
+                    "UNREACHABLE",
+                    "cover condition: message_len > 0",
+                ),
+            )
+        )
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani(proof_result=cover)
+        ):
+            with self.assertRaises(EvidenceNotEstablished) as caught:
+                self.record()
+        self.assertIn("cover results are unsupported", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_unreachable_aggregate_count_must_match_the_per_check_results(self):
+        inconsistent = self.kani_output(
+            extra_checks=(
+                (
+                    "poly1305::Poly1305State::update.assertion.1",
+                    "UNREACHABLE",
+                    "attempt to subtract with overflow",
+                ),
+            )
+        )
+        inconsistent.result_text = inconsistent.result_text.replace(
+            "(1 unreachable)", "(0 unreachable)"
+        )
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run",
+            side_effect=self.fake_kani(proof_result=inconsistent),
+        ):
+            with self.assertRaises(InvalidRecordInput) as caught:
+                self.record()
+        self.assertIn("aggregate unreachable count", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_missing_per_check_description_is_rejected_as_incomplete(self):
+        malformed = self.kani_output()
+        malformed.result_text = (
+            "RESULTS:\n"
+            f"Check 1: {self.HARNESS_IDENTITY}.assertion.1\n"
+            "\t - Status: SUCCESS\n"
+            "SUMMARY:\n ** 0 of 1 failed\nVERIFICATION:- SUCCESSFUL\n"
+        )
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani(proof_result=malformed)
+        ):
+            with self.assertRaises(InvalidRecordInput) as caught:
+                self.record()
+        self.assertIn("malformed or incomplete result block", str(caught.exception))
         self.assertFalse(self.report_exists())
 
     def test_malformed_kani_transcript_is_rejected(self):
@@ -755,6 +991,9 @@ class KaniRecordAssuranceTest(RecordAssuranceTestCase):
         self.assertIn("manifest minimum_scope", help_text)
         self.assertIn("result_output_dir/<qualified-harness>", help_text)
         self.assertIn("VERIFICATION:- SUCCESSFUL", help_text)
+        self.assertIn("UNREACHABLE", help_text)
+        self.assertIn("cover properties", help_text)
+        self.assertIn("matches the recorded summary", help_text)
 
 
 class TheIssuesBaselineTest(RecordAssuranceTestCase):

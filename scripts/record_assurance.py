@@ -35,8 +35,10 @@ What is derived, from where
     exact note in `obligation_proof_notes` but not `failed_proof_notes`.
     Aggregate verified/error counts alone never establish a guarantee.
     Kani 0.67 has no JSON verdict export; Ligature runs the manifest's exact
-    Rust harness itself and requires a complete, all-success Kani 0.67
-    `--output-into-files` per-harness result and complete run summary. A
+    Rust harness itself and requires a complete successful Kani 0.67
+    `--output-into-files` per-harness result and complete run summary. Every
+    explicit assertion in the harness must be reachable and successful;
+    unrelated unreachable safety checks are retained in the record summary. A
     manifest's bare function name is resolved against Kani's pinned,
     feature-selected compiler metadata and must identify one unique fully
     qualified harness.
@@ -200,6 +202,53 @@ class Certificate:
     verifier_version: str | None = None
     source_hash: str | None = None
     harness_hash: str | None = None
+    kani_result_summary: str | None = None
+
+
+@dataclass(frozen=True)
+class KaniCheckResult:
+    number: int
+    name: str
+    status: str
+    description: str
+    location: str | None = None
+
+
+@dataclass(frozen=True)
+class KaniResultSummary:
+    checks: tuple[KaniCheckResult, ...]
+    successful_claim_assertions: tuple[str, ...]
+
+    @property
+    def successful_checks(self) -> int:
+        return sum(check.status == "SUCCESS" for check in self.checks)
+
+    @property
+    def unreachable_checks(self) -> tuple[KaniCheckResult, ...]:
+        return tuple(check for check in self.checks if check.status == "UNREACHABLE")
+
+    def as_scope_value(self) -> str:
+        """Stable, reviewable summary stored in the schema's string scope fields."""
+        return json.dumps(
+            {
+                "total_checks": len(self.checks),
+                "successful_checks": self.successful_checks,
+                "successful_claim_assertions": sorted(self.successful_claim_assertions),
+                "unreachable_checks": [
+                    {
+                        "check": check.name,
+                        "description": check.description,
+                    }
+                    for check in sorted(
+                        self.unreachable_checks,
+                        key=lambda value: (value.name, value.description),
+                    )
+                ],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -802,13 +851,16 @@ def parse_kani_target(target: str) -> tuple[str, str]:
 
 def parse_kani_067_result(
     result_text: str, driver_output: str, returncode: int, harness_identity: str
-) -> int:
+) -> KaniResultSummary:
     """Recognize only the complete Kani 0.67 regular-output verdict.
 
     Kani 0.67 has no JSON verdict interface. We do not ingest the detached
     CBMC build files or scrape a success-looking line: this parser is paired
     with Ligature's own exact-harness rerun and requires the complete
-    per-check, aggregate, and manual-harness success summaries.
+    per-check, aggregate, and manual-harness success summaries. Explicit
+    assertions from the selected harness must succeed and cannot be
+    unreachable. Ancillary unreachable safety checks are retained in the
+    record summary; cover properties are unsupported by this intake.
     """
     if not isinstance(result_text, str) or not isinstance(driver_output, str):
         raise InvalidRecordInput("Kani 0.67 returned non-text output")
@@ -818,36 +870,122 @@ def parse_kani_067_result(
             "Kani 0.67 output did not identify exactly the requested harness "
             f"{harness_identity!r}"
         )
-    if result_text.count("RESULTS:") != 1:
+    results_markers = list(re.finditer(r"(?m)^RESULTS:\s*$", result_text))
+    if len(results_markers) != 1:
         raise InvalidRecordInput("Kani 0.67 per-harness result has no unique RESULTS section")
-    check_headers = re.findall(r"(?m)^Check [0-9]+: .+$", result_text)
-    statuses = re.findall(r"(?m)^\s+- Status: ([A-Z_]+)\s*$", result_text)
-    if not check_headers or len(statuses) != len(check_headers):
+    summary_markers = list(re.finditer(r"(?m)^SUMMARY:\s*$", result_text))
+    if len(summary_markers) != 1:
+        raise InvalidRecordInput("Kani 0.67 per-harness result has no unique SUMMARY section")
+    results_start = results_markers[0].end()
+    summary_start = summary_markers[0].start()
+    if summary_start <= results_start:
+        raise InvalidRecordInput("Kani 0.67 SUMMARY section precedes its RESULTS section")
+    checks_text = result_text[results_start:summary_start]
+    check_headers = list(re.finditer(r"(?m)^Check ([0-9]+): (.+)$", checks_text))
+    if not check_headers:
         raise InvalidRecordInput(
             "Kani 0.67 output has no complete per-check status list; incomplete results are refused"
         )
-    if any(status != "SUCCESS" for status in statuses):
-        raise EvidenceNotEstablished(
-            f"Kani did not prove every check in harness {harness_identity!r}: {statuses!r}"
+    checks: list[KaniCheckResult] = []
+    for index, header in enumerate(check_headers):
+        number = int(header.group(1))
+        name = header.group(2).strip()
+        block_end = (
+            check_headers[index + 1].start()
+            if index + 1 < len(check_headers)
+            else len(checks_text)
         )
-    check_count = len(check_headers)
-    summary_match = re.search(r"(?m)^\s*\*\* ([0-9]+) of ([0-9]+) failed\s*$", result_text)
-    manual_match = re.search(
+        block = checks_text[header.end():block_end]
+        status_values = re.findall(r"(?m)^\s+- Status: ([A-Z_]+)\s*$", block)
+        description_values = re.findall(r'(?m)^\s+- Description: (".*")\s*$', block)
+        location_values = re.findall(r"(?m)^\s+- Location: (.+?)\s*$", block)
+        if len(status_values) != 1 or len(description_values) != 1 or len(location_values) > 1:
+            raise InvalidRecordInput(
+                f"Kani 0.67 check {number} has a malformed or incomplete result block"
+            )
+        quoted_description = description_values[0]
+        if len(quoted_description) < 2 or not quoted_description.endswith('"'):
+            raise InvalidRecordInput(
+                f"Kani 0.67 check {number} has a malformed Description string"
+            )
+        # Kani 0.67 wraps descriptions in quotes but does not escape quotes
+        # inside every description (for example, foreign-function diagnostics
+        # contain the literal word \"Rust\"). Preserve the text between the
+        # outer quotes instead of treating this human-readable field as JSON.
+        description = quoted_description[1:-1]
+        check = KaniCheckResult(
+            number=number,
+            name=name,
+            status=status_values[0],
+            description=description,
+            location=location_values[0] if location_values else None,
+        )
+        if ".cover." in name or name.endswith(".cover") or description.startswith("cover condition:"):
+            raise EvidenceNotEstablished(
+                f"Kani cover property {name!r} is not assertion proof evidence; cover results "
+                "are unsupported by this assurance intake"
+            )
+        if check.status not in {"SUCCESS", "UNREACHABLE", "FAILURE", "UNDETERMINED"}:
+            raise InvalidRecordInput(
+                f"Kani 0.67 check {number} has an unsupported status {check.status!r}"
+            )
+        if check.status in {"FAILURE", "UNDETERMINED"}:
+            raise EvidenceNotEstablished(
+                f"Kani check {number} ({name}) has status {check.status}; "
+                "the harness does not establish the obligation"
+            )
+        if check.status == "UNREACHABLE" and description.startswith("assertion failed:"):
+            raise EvidenceNotEstablished(
+                f"Kani obligation assertion {name!r} is UNREACHABLE and therefore vacuous"
+            )
+        checks.append(check)
+
+    check_numbers = [check.number for check in checks]
+    if check_numbers != list(range(1, len(checks) + 1)):
+        raise InvalidRecordInput("Kani 0.67 per-check results are not a complete numbered sequence")
+    successful_claim_assertions = tuple(
+        check.name
+        for check in checks
+        if check.name.startswith(harness_identity + ".assertion.")
+        and check.description.startswith("assertion failed:")
+        and check.status == "SUCCESS"
+    )
+    if not successful_claim_assertions:
+        raise EvidenceNotEstablished(
+            f"Kani did not establish an explicit assertion in harness {harness_identity!r}; "
+            "a successful run without a successful harness assertion is vacuous for this intake"
+        )
+
+    check_count = len(checks)
+    summary_matches = list(re.finditer(
+        r"(?m)^\s*\*\* ([0-9]+) of ([0-9]+) failed"
+        r"(?: \(([0-9]+) unreachable\))?\s*$",
+        result_text,
+    ))
+    manual_matches = list(re.finditer(
         r"(?m)^Manual Harness Summary:\s*Complete - ([0-9]+) successfully verified "
         r"harnesses, ([0-9]+) failures, ([0-9]+) total\.\s*$",
         driver_output,
-    )
-    if summary_match is None or manual_match is None:
+    ))
+    if len(summary_matches) != 1 or len(manual_matches) != 1:
         if returncode != 0 or "VERIFICATION:- FAILED" in result_text:
             raise EvidenceNotEstablished(
                 f"Kani 0.67 did not complete harness {harness_identity!r} successfully"
             )
         raise InvalidRecordInput("Kani 0.67 output is missing a complete success summary")
-    summary_failed, summary_total = map(int, summary_match.groups())
+    summary_match = summary_matches[0]
+    manual_match = manual_matches[0]
+    summary_failed, summary_total = map(int, summary_match.groups()[:2])
+    summary_unreachable = int(summary_match.group(3) or 0)
     succeeded_harnesses, failed_harnesses, total_harnesses = map(int, manual_match.groups())
     if summary_total != check_count:
         raise InvalidRecordInput(
             "Kani 0.67 aggregate check count does not match its per-check results"
+        )
+    actual_unreachable = sum(check.status == "UNREACHABLE" for check in checks)
+    if summary_unreachable != actual_unreachable:
+        raise InvalidRecordInput(
+            "Kani 0.67 aggregate unreachable count does not match its per-check results"
         )
     if returncode != 0 or summary_failed != 0 or failed_harnesses != 0 or succeeded_harnesses != 1:
         raise EvidenceNotEstablished(
@@ -864,7 +1002,10 @@ def parse_kani_067_result(
                 f"Kani reported harness {harness_identity!r} as failed"
             )
         raise InvalidRecordInput("Kani 0.67 output has no unique successful verification verdict")
-    return check_count
+    return KaniResultSummary(
+        checks=tuple(checks),
+        successful_claim_assertions=successful_claim_assertions,
+    )
 
 
 def run_kani_067_codegen_metadata(
@@ -939,7 +1080,7 @@ def run_kani_067_codegen_metadata(
         )
 
 
-def run_kani_067(crate_root: Path, manifest: dict, harness: str) -> int:
+def run_kani_067(crate_root: Path, manifest: dict, harness: str) -> KaniResultSummary:
     """Rerun one named harness with the manifest's Cargo config and Kani 0.67."""
     cargo = shutil.which("cargo")
     if cargo is None:
@@ -1087,6 +1228,7 @@ def read_kani_result(
     harness: str,
     expected_source_hash: str | None = None,
     expected_harness_hash: str | None = None,
+    expected_result_summary: str | None = None,
 ) -> Certificate:
     """Rerun Kani 0.67 and bind its complete result to current Rust sources."""
     source_hash, _mtime, _newest = rust_source_snapshot(workspace, manifest)
@@ -1101,7 +1243,7 @@ def read_kani_result(
             f"Rust source snapshot changed after Kani assurance was recorded for "
             f"{obligation_id}; re-run Kani and record assurance again"
         )
-    checks = run_kani_067(crate_root, manifest, harness)
+    result_summary = run_kani_067(crate_root, manifest, harness)
     final_source_hash, _mtime, _newest = rust_source_snapshot(workspace, manifest)
     _final_harness_path, final_harness_hash = kani_harness_source(
         workspace, crate_root, manifest, harness
@@ -1111,15 +1253,31 @@ def read_kani_result(
             f"Rust source or Kani harness changed while verifying {obligation_id}; "
             "rerun Kani and record assurance again"
         )
+    recorded_summary = result_summary.as_scope_value()
+    if (
+        expected_result_summary is None
+        and (expected_source_hash is not None or expected_harness_hash is not None)
+        and result_summary.unreachable_checks
+    ):
+        raise EvidenceNotEstablished(
+            f"Kani rerun for {obligation_id} contains unreachable checks but the recorded "
+            "assurance has no `kani_result_summary` to preserve them; re-record the result"
+        )
+    if expected_result_summary is not None and recorded_summary != expected_result_summary:
+        raise EvidenceNotEstablished(
+            f"Kani check summary changed after assurance was recorded for {obligation_id}; "
+            "re-run Kani and record assurance again"
+        )
     return Certificate(
         path=harness_path,
         relative=kani_target(workspace, crate_root, harness),
-        proved=checks,
-        goal_count=checks,
+        proved=result_summary.successful_checks,
+        goal_count=len(result_summary.checks),
         evidence_format="kani-0.67-run",
         verifier_version=KANI_VERSION,
         source_hash=source_hash,
         harness_hash=harness_hash,
+        kani_result_summary=recorded_summary,
     )
 
 
@@ -1333,6 +1491,7 @@ def read_proof_target(
     expected_kani_source_hash: str | None = None,
     expected_kani_harness_hash: str | None = None,
     expected_kani_version: str | None = None,
+    expected_kani_result_summary: str | None = None,
     source_manifest: dict | None = None,
 ) -> Certificate:
     """Re-open one stored target, dispatching by its explicit evidence kind."""
@@ -1418,6 +1577,7 @@ def read_proof_target(
             harness,
             expected_source_hash=expected_kani_source_hash,
             expected_harness_hash=expected_kani_harness_hash,
+            expected_result_summary=expected_kani_result_summary,
         )
     if expected_harness is not None and verifier_for_manifest_harness(expected_harness) == "kani":
         raise InvalidRecordInput(
@@ -1434,7 +1594,12 @@ def read_proof_target(
         )
     if expected_verus_source_hash is not None:
         raise InvalidRecordInput("a Verus source hash was recorded for a non-Verus proof target")
-    if any(value is not None for value in (expected_kani_source_hash, expected_kani_harness_hash, expected_kani_version)):
+    if any(value is not None for value in (
+        expected_kani_source_hash,
+        expected_kani_harness_hash,
+        expected_kani_version,
+        expected_kani_result_summary,
+    )):
         raise InvalidRecordInput("Kani source or harness scope was recorded for non-Kani evidence")
     path = certificate_path_for(workspace, target, obligation_id)
     return read_certificate(path, workspace, obligation_id)
@@ -1539,6 +1704,11 @@ def _record_for(
         scope["kani_source_sha256"] = certificate.source_hash
         scope["kani_harness_sha256"] = certificate.harness_hash
         scope["kani_version"] = certificate.verifier_version or KANI_VERSION
+        if not certificate.kani_result_summary:
+            raise InvalidRecordInput(
+                f"{obligation_id}: Kani result summary is required for a reviewable record"
+            )
+        scope["kani_result_summary"] = certificate.kani_result_summary
     record = {
         "schema_version": "1.0",
         "claim": {"kind": claim_kind, "result": "pass"},

@@ -719,6 +719,9 @@ def check_record_certificates(
             kani_source_hash = scope.get("kani_source_sha256") if isinstance(scope, dict) else None
             kani_harness_hash = scope.get("kani_harness_sha256") if isinstance(scope, dict) else None
             kani_version = scope.get("kani_version") if isinstance(scope, dict) else None
+            kani_result_summary = (
+                scope.get("kani_result_summary") if isinstance(scope, dict) else None
+            )
             if verifier == "verus" and (not isinstance(verus_hash, str) or not verus_hash):
                 findings.append(
                     Finding(
@@ -744,7 +747,11 @@ def check_record_certificates(
                 continue
             if verifier == "kani" and any(
                 not isinstance(value, str) or not value
-                for value in (kani_source_hash, kani_harness_hash, kani_version)
+                for value in (
+                    kani_source_hash,
+                    kani_harness_hash,
+                    kani_version,
+                )
             ):
                 findings.append(
                     Finding(
@@ -841,6 +848,9 @@ def check_record_certificates(
                         expected_kani_version=(
                             kani_version if isinstance(kani_version, str) else None
                         ),
+                        expected_kani_result_summary=(
+                            kani_result_summary if isinstance(kani_result_summary, str) else None
+                        ),
                         source_manifest=source_manifest,
                     )
                 except RecordAssuranceError as e:
@@ -875,7 +885,7 @@ def check_record_certificates(
                             "per-function JSON result, or Kani 0.67 exact-harness rerun before "
                             "recording; G14 applies the same reader and fails closed if that "
                             "evidence changed or no longer binds the named obligation "
-                            "(chainlink #92/#129/#132). " + remediation,
+                            "(chainlink #92/#129/#132/#140). " + remediation,
                         )
                     )
     return findings

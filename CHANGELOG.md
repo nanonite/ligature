@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.10] - 2026-10-14
+
+### Fixed
+- #140: accept successful Kani 0.67 runs with ancillary unreachable safety checks, while rejecting unreachable assertions, cover properties, failed/incomplete output, and unknown statuses. Record the check summary and have G14 compare it against a fresh exact-harness rerun.
+
 ## [1.3.9] - 2026-10-14
 
 ### Fixed

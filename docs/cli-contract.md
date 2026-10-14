@@ -37,7 +37,7 @@ ligature promote-evidence <target>           # #79 -- mechanically promote a sta
 ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
 ligature record-assurance <work-package> --proof <obligation>=<path> [...]  # #87 -- assemble a work package's assurance report from verifier evidence
 ligature record-assurance <work-package> --verus-json <output.json> --verus-function <obligation>=<func-details-key> [...]  # #129 -- ingest Verus's official per-function JSON results
-ligature record-assurance <work-package> --kani-crate <package-dir> --kani-harness <obligation>=<harness> [...]  # #132/#133 -- resolve and rerun a manifest-named Kani 0.67 harness, then record its bounded result
+ligature record-assurance <work-package> --kani-crate <package-dir> --kani-harness <obligation>=<harness> [...]  # #132/#133/#140 -- resolve and rerun a manifest-named Kani 0.67 harness, then record its bounded result
 ligature validate <artifact-kind> <target>   # deterministic, per-artifact
 ligature gate <gate-id> [args...]            # deterministic, cross-artifact
 ligature draft <artifact-kind> <target>      # Stage 0/3, one-shot LLM
@@ -252,17 +252,27 @@ provenance; `--features` lists the remaining declared features when nonempty.
 Only `cargo-kani 0.67.0` regular output is accepted. Ligature requires exactly
 one `Checking harness <qualified-identity>...` line and the complete Kani run
 summary on stdout. It reads Kani's fresh per-harness text file at
-`<temporary-directory>/result_output_dir/<qualified-identity>`, which must contain at least
-one `Check N:` result, `Status: SUCCESS` for every check, `** 0 of N failed`
-with the matching check count, and `VERIFICATION:- SUCCESSFUL`. Stdout must
-also report `Manual Harness Summary: Complete - 1 successfully verified
-harnesses, 0 failures, 1 total.` A nonzero process status, timeout,
-failed/unknown check, missing result file or summary, extra harness, different
-Kani version, or different transcript shape records no result. This per-run
-text file is produced inside a fresh temporary target directory; Ligature
-does not accept a caller-provided copy. G14 reruns the same harness and
-rechecks the recorded allowed-source and harness SHA-256 values; it never
-accepts a detached success line as proof.
+`<temporary-directory>/result_output_dir/<qualified-identity>`, which must contain a
+complete numbered `Check N:` sequence, one recognized status and description
+per check, `** 0 of N failed` with a matching optional unreachable count, and
+`VERIFICATION:- SUCCESSFUL`. Every explicit assertion from the selected
+harness must be `SUCCESS`; at least one such assertion must be present.
+Ancillary safety checks with status `UNREACHABLE` are allowed because they do
+not establish the obligation, and their check names and descriptions are kept
+in `evidence.scope.kani_result_summary` for review. An unreachable assertion
+is vacuous and rejected. Cover properties are not accepted by this assertion
+intake. `FAILURE`, `UNDETERMINED`, unknown statuses, malformed or incomplete
+check blocks, mismatched aggregates, missing summaries, and nonzero process
+status record no result. Stdout must also report `Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.` A timeout,
+missing result file, extra harness, different Kani version, or different
+transcript shape also records no result. This per-run text file is produced
+inside a fresh temporary target directory; Ligature does not accept a
+caller-provided copy. G14 reruns the same harness, checks the recorded result
+summary when one is present, and rechecks the allowed-source and harness
+SHA-256 values. If a legacy record lacks a summary but the fresh run contains
+unreachable checks, G14 refuses it until it is re-recorded. It never accepts
+a detached success line as proof.
 
 The Kani record's `input_domain` is `the bounded model encoded by Kani harness
 <name>`, pinned to its exact harness and Rust-source hashes. Ligature does not
@@ -1465,7 +1475,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `accept-policy` | stable; records a reviewed change to the normative reliance-policy document as the manifest's reviewed `base_hash` (the explicit accept path for governance drift; `--policy-path` defaults to the descriptor's `compatibility_policy.reliance_policy_path`, and a disagreeing explicit path is refused) (#78, §8). `--version <name>@<major>.<minor>` stamps the document's single `Policy version:` marker line first — that line and nothing else — so the template `init` installs can reach an accepted state, and be re-versioned, without a hand-edit of a `protected_root`; a human checkpoint like `approve` and `accept-promotion` (#113, §8) |
 | `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1) |
 | `record-ruling` | stable; records an explicit human verdict (`ratified`\|`rejected`) over an exact artifact set in `ci/results/human_rulings.jsonl` -- the human-ruling gate `accept-promotion` enforces: no receipt is minted until every artifact in the accepted set carries a `ratified` ruling over its current content (#82, §5) |
-| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads (#87, §1). Creusot uses `--proof <obligation>=<path>`; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function` mappings (#129); Kani uses `--kani-crate`/`--kani-harness`, resolves the manifest's bare function through feature-selected Kani 0.67 compile metadata, reruns one exact qualified identity, and G14 repeats it against current source/harness hashes (#132/#133). Kani scope names the bounded model and never copies a broader `minimum_scope`; G14 consumes the record but leaves that guarantee unmet. Verus requires whole-crate success and the exact proof note in its `ensures` clause. Every record is derived from verifier evidence and manifest provenance. Feature-ledger collision warns; unknown content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
+| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads (#87, §1). Creusot uses `--proof <obligation>=<path>`; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function` mappings (#129); Kani uses `--kani-crate`/`--kani-harness`, resolves the manifest's bare function through feature-selected Kani 0.67 compile metadata, and reruns one exact qualified identity (#132/#133). Successful harness assertions are required; ancillary unreachable safety checks are retained in the report summary, and G14 compares that summary against its fresh rerun (#140). Kani scope names the bounded model and never copies a broader `minimum_scope`; G14 consumes the record but leaves that guarantee unmet. Verus requires whole-crate success and the exact proof note in its `ensures` clause. Every record is derived from verifier evidence and manifest provenance. Feature-ledger collision warns; unknown content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
 | `select-pilot-cluster` | alias → `report pilot-cluster` |
 | `measure-gold-set` | alias → `report gold-set-measurement` |
 | `generate-feature-ledger` | alias → `report feature-ledger` |

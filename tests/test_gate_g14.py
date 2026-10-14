@@ -58,6 +58,19 @@ from test_validate_closure import valid_degradation, valid_profile  # noqa: E402
 REVIEW = {"reviewer": "alice", "reviewed_at": "2026-09-04"}
 
 
+def kani_fixture_summary(harness: str) -> record_assurance_module.KaniResultSummary:
+    assertion = f"{harness}.assertion.1"
+    return record_assurance_module.KaniResultSummary(
+        checks=(record_assurance_module.KaniCheckResult(
+            number=1,
+            name=assertion,
+            status="SUCCESS",
+            description="assertion failed: fixture claim",
+        ),),
+        successful_claim_assertions=(assertion,),
+    )
+
+
 def default_descriptor() -> dict:
     """A minimal, schema-valid descriptor naming the single crate every
     fixture in this module lives under. Built locally rather than
@@ -450,6 +463,7 @@ class Workspace:
                     "kani_source_sha256": source_hash,
                     "kani_harness_sha256": harness_hash,
                     "kani_version": record_assurance_module.KANI_VERSION,
+                    "kani_result_summary": kani_fixture_summary(harness).as_scope_value(),
                 },
             }
         )
@@ -514,20 +528,24 @@ class Workspace:
         return path
 
     def outcomes(self):
-        has_kani = False
+        kani_harnesses = []
         for path in (self.root / "ci/manifest").glob("*.json"):
             try:
                 data = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError):
                 continue  # Let gate_workspace report the bad manifest itself.
-            has_kani |= any(
-                isinstance(entry.get("harness"), str)
-                and entry["harness"].startswith("kani_")
+            kani_harnesses.extend(
+                entry["harness"]
                 for entry in data.get("definition_of_done", {}).get("provided_guarantees", [])
                 if isinstance(entry, dict)
+                and isinstance(entry.get("harness"), str)
+                and entry["harness"].startswith("kani_")
             )
-        if has_kani:
-            with patch("record_assurance.run_kani_067", return_value=1):
+        if kani_harnesses:
+            with patch(
+                "record_assurance.run_kani_067",
+                side_effect=lambda _crate_root, _manifest, harness: kani_fixture_summary(harness),
+            ):
                 return gate_workspace(self.root, self.descriptor)
         return gate_workspace(self.root, self.descriptor)
 

@@ -3473,8 +3473,13 @@ def build_parser() -> argparse.ArgumentParser:
             "`*.kani-metadata.json` `proof_harnesses[].pretty_name`. Exactly one fully qualified "
             "identity must match; missing and ambiguous "
             "names fail. Ligature reruns that identity with --exact and accepts only fresh "
-            "`result_output_dir/<qualified-harness>` output with `Status: SUCCESS`, `** 0 of N "
-            "failed`, `VERIFICATION:- SUCCESSFUL`, and the complete summary. G14 repeats the run. "
+            "`result_output_dir/<qualified-harness>` output with complete checks and zero failed "
+            "checks. Explicit harness assertions must be SUCCESS; ancillary UNREACHABLE safety "
+            "checks are retained in the report summary, while unreachable assertions and cover "
+            "properties are not accepted as proof. The complete aggregate and "
+            "VERIFICATION:- SUCCESSFUL summaries are required. G14 repeats the run and matches "
+            "the recorded summary; a legacy record without one is refused if the rerun has "
+            "unreachable checks. "
             "Bounded scope cannot satisfy a broader manifest minimum_scope"
         ),
     )

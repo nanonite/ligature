@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -42,6 +43,7 @@ from gate_g14 import (  # noqa: E402
     work_package_manifest_dir_for,
 )
 import pipeline  # noqa: E402
+import record_assurance as record_assurance_module  # noqa: E402
 import review_checkpoint  # noqa: E402
 import validate_closure  # noqa: E402
 from generate_promotion_receipt import compute_artifact_manifest  # noqa: E402
@@ -397,6 +399,62 @@ class Workspace:
         }))
         return path
 
+    def add_kani_harness(self, work_package: str, obligation: str, harness: str) -> None:
+        """Give a Kani fixture a named, source-pinned harness definition."""
+        manifest_path = self.root / f"ci/manifest/{work_package}.json"
+        manifest_data = json.loads(manifest_path.read_text())
+        guarantee_entry = next(
+            entry
+            for entry in manifest_data["definition_of_done"]["provided_guarantees"]
+            if entry["obligation_id"] == obligation
+        )
+        guarantee_entry["harness"] = harness
+        self.write(f"ci/manifest/{work_package}.json", manifest_data)
+
+        crate_root = self.root / "crates/scheduler"
+        source_root = crate_root / "src"
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / f"{harness}.rs").write_text(
+            f"#[kani::proof]\nfn {harness}() {{ assert!(1u8 == 1u8); }}\n"
+        )
+        (crate_root / "Cargo.toml").write_text(
+            '[package]\nname = "scheduler"\nversion = "0.1.0"\nedition = "2021"\n'
+        )
+        (crate_root / "Cargo.lock").write_text(
+            '# generated fixture lockfile\nversion = 4\n'
+        )
+
+    def bind_kani_record(self, work_package: str, obligation: str, harness: str) -> None:
+        """Bind the fixture ledger to its exact named Kani rerun target."""
+        manifest_data = self.read(f"ci/manifest/{work_package}.json")
+        record_path = f"ci/results/{work_package}.json"
+        report = self.read(record_path)
+        entry = next(item for item in report["obligation_records"] if item["obligation_id"] == obligation)
+        record = entry["record"]
+        source_hash, _mtime, _newest = record_assurance_module.rust_source_snapshot(
+            self.root, manifest_data
+        )
+        _source, harness_hash = record_assurance_module.kani_harness_source(
+            self.root, self.root / "crates/scheduler", manifest_data, harness
+        )
+        record["evidence"].update(
+            {
+                "kind": "kani-bounded-model-check",
+                "verifier": "kani",
+                "harness": harness,
+                "scope": {
+                    "proof_targets": record_assurance_module.kani_target(
+                        self.root, self.root / "crates/scheduler", harness
+                    ),
+                    "input_domain": f"the bounded model encoded by Kani harness {harness}",
+                    "kani_source_sha256": source_hash,
+                    "kani_harness_sha256": harness_hash,
+                    "kani_version": record_assurance_module.KANI_VERSION,
+                },
+            }
+        )
+        self.write(record_path, report)
+
     DEGRADATION_RECORD = "specs/_closure/scheduler-core.degradation.json"
 
     def approve_record(self, relative=None, review=None) -> None:
@@ -456,6 +514,21 @@ class Workspace:
         return path
 
     def outcomes(self):
+        has_kani = False
+        for path in (self.root / "ci/manifest").glob("*.json"):
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue  # Let gate_workspace report the bad manifest itself.
+            has_kani |= any(
+                isinstance(entry.get("harness"), str)
+                and entry["harness"].startswith("kani_")
+                for entry in data.get("definition_of_done", {}).get("provided_guarantees", [])
+                if isinstance(entry, dict)
+            )
+        if has_kani:
+            with patch("record_assurance.run_kani_067", return_value=1):
+                return gate_workspace(self.root, self.descriptor)
         return gate_workspace(self.root, self.descriptor)
 
     def cluster(self, name="scheduler-core"):
@@ -482,7 +555,12 @@ def make_closure_kani_only(ws: Workspace) -> None:
     CG3 exception's own test class (chainlink #100) builds the same
     workspace the declared-bit tests do, instead of a second,
     drifting copy of this rewrite."""
-    for name in ("WP-A", "WP-B", "WP-C"):
+    harnesses = {
+        "WP-A": ("Scheduler.C001", "kani_wp_a"),
+        "WP-B": ("TaskQueue.C003", "kani_wp_b"),
+        "WP-C": ("Clock.C007", "kani_wp_c"),
+    }
+    for name, (obligation, harness) in harnesses.items():
         ws.patch(f"ci/manifest/{name}.json", lambda d: [
             entry["required_assurance"].update(
                 {"accepted_evidence_kinds": ["kani-bounded-model-check"]}
@@ -493,20 +571,16 @@ def make_closure_kani_only(ws: Workspace) -> None:
                 + d["definition_of_done"]["required_preconditions_to_establish"]
             )
         ])
-        # The manifest declares the kani harness for the guarantees it
-        # now records kani evidence for -- the field gate-g14
-        # re-derives evidence.verifier/kind/harness from
-        # (chainlink #92).
-        ws.patch(f"ci/manifest/{name}.json", lambda d: [
-            entry.update({"harness": "kani"})
-            for entry in d["definition_of_done"]["provided_guarantees"]
-        ])
+        # G14 now requires Kani's manifest-named harness and reruns it.
+        ws.add_kani_harness(name, obligation, harness)
+    for name, (obligation, harness) in harnesses.items():
         ws.patch(f"ci/results/{name}.json", lambda d: [
             entry["record"]["evidence"].update(
                 {"kind": "kani-bounded-model-check", "verifier": "kani", "harness": "kani"}
             )
             for entry in d["obligation_records"] + d["bridge_records"]
         ])
+        ws.bind_kani_record(name, obligation, harness)
     ws.patch(
         "specs/_closure/scheduler-core.json",
         lambda d: (
@@ -712,7 +786,7 @@ class RecordCertificateRecheckTest(GateTestCase):
         outcome, _ = self.ws.cluster()
         errors = self.errors(outcome)
         self.assertTrue(any(
-            "names no proof certificate" in e and "WP-C:Clock.C007" in e for e in errors
+            "names no proof evidence" in e and "WP-C:Clock.C007" in e for e in errors
         ), errors)
         self.assertEqual(outcome.status, "blocked")
 
@@ -836,6 +910,23 @@ class RecordDerivationRecheckTest(GateTestCase):
         self.assertTrue(any(
             "evidence.kind is 'verus-deductive-check'" in e and "produces 'creusot-deductive-check'" in e
             for e in errors
+        ), errors)
+        self.assertEqual(outcome.status, "blocked")
+
+    def test_a_kani_record_cannot_widen_its_bounded_input_domain(self):
+        make_closure_kani_only(self.ws)
+        self.ws.patch(
+            "ci/results/WP-C.json",
+            lambda d: d["obligation_records"][0]["record"]["evidence"]["scope"].update(
+                {"input_domain": "all possible inputs without a bound"}
+            ),
+        )
+        outcome, _ = self.ws.cluster()
+        errors = self.errors(outcome)
+        self.assertTrue(any(
+            "evidence.scope.input_domain" in error
+            and "exact manifest harness 'kani_wp_c'" in error
+            for error in errors
         ), errors)
         self.assertEqual(outcome.status, "blocked")
 
@@ -1440,35 +1531,29 @@ class Cg3SoundnessTest(GateTestCase):
 
     def kani_work_package(self, ledger: bool = True) -> None:
         """The issue's WP-KANI-OTHER: a schema-valid Kani-owned work
-        package -- `harness: kani` on its provided guarantee -- plus its
+        package -- an exact named `kani_*` harness on its provided guarantee -- plus its
         `kani-bounded-model-check` ledger, exactly as legs C1/C2/C5
         mutate only the PLACEMENT of."""
+        harness = "kani_wp_other"
         self.ws.write("ci/manifest/WP-KANI.json", manifest(
             "WP-KANI",
             provided=[("Generic.C001", required_assurance(kinds=("kani-bounded-model-check",)))],
         ))
-        self.ws.patch("ci/manifest/WP-KANI.json", lambda d: [
-            entry.update({"harness": "kani"})
-            for entry in d["definition_of_done"]["provided_guarantees"]
-        ])
+        self.ws.add_kani_harness("WP-KANI", "Generic.C001", harness)
         if ledger:
-            # named and written together: leg C2 puts this work package
-            # INTO the closure, where gate-g14 re-opens the certificate
-            # behind every record (chainlink #92) -- the placement legs
-            # C1/C5 use never re-opens it, but the fixture is one shape.
-            self.ws.write_certificate("Generic.C001")
+            # Named and written together: leg C2 puts this work package
+            # INTO the closure, where gate-g14 reruns the exact Kani
+            # harness. Placement legs C1/C5 use the same report shape.
             self.ws.write("ci/results/WP-KANI.json", {
                 "schema_version": "1.0",
                 "work_package": "WP-KANI",
                 "obligation_records": [{
                     "obligation_id": "Generic.C001",
-                    "record": achieved(
-                        kind="kani-bounded-model-check",
-                        proof_targets=certificate_path("Generic.C001"),
-                    ),
+                    "record": achieved(kind="kani-bounded-model-check"),
                 }],
                 "bridge_records": [],
             })
+            self.ws.bind_kani_record("WP-KANI", "Generic.C001", harness)
 
     def assert_cg3_blocked_naming(self, outcome, needle: str) -> None:
         errors = self.errors(outcome)
@@ -1510,7 +1595,7 @@ class Cg3SoundnessTest(GateTestCase):
         string from -- is still a Kani owner, never an empty scan."""
         self.kani_work_package(ledger=False)
         outcome, _ = self.ws.cluster()
-        self.assert_cg3_blocked_naming(outcome, "harness 'kani'")
+        self.assert_cg3_blocked_naming(outcome, "harness 'kani_wp_other'")
 
     def test_the_control_closure_profile_list_placement_is_still_caught(self):
         """Leg C2, the issue's control: the same work package ADDED to

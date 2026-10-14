@@ -125,6 +125,22 @@ EVIDENCE_KIND_BY_VERIFIER = {
     "kani": "kani-bounded-model-check",
 }
 
+
+def verifier_for_manifest_harness(harness: str) -> str:
+    """Resolve the verifier encoded by a manifest's ``harness`` field.
+
+    Creusot and Verus use their verifier names directly. Kani manifests name
+    the exact Rust proof harness, using the repository's ``kani_`` prefix;
+    that name remains separate from the verifier identity ``kani``.
+    """
+    if harness in ("creusot", "verus"):
+        return harness
+    if isinstance(harness, str) and harness.startswith("kani_"):
+        return "kani"
+    if harness == "kani":
+        return "kani"
+    return harness
+
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 CONCEPT_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
 OBLIGATION_CODE_RE = re.compile(r"^[A-Z][0-9]+$")

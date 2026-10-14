@@ -277,7 +277,7 @@
     {
       "name": "record-assurance",
       "func": "cmd_record_assurance",
-      "stable_mapping": "stable assurance-recording command -- assembles a work package's assurance report at its manifest's own report.emit path from why3find proof certificates, with only the obligation-to-certificate mapping declared by the caller and that declaration checked (chainlink #87, docs/cli-contract.md \u00a71/\u00a710)"
+      "stable_mapping": "stable assurance-recording command -- assembles a work package's report.emit assurance report from why3find certificates, official Verus JSON, or a fresh Kani 0.67 exact-harness rerun. Kani mappings are checked against the manifest; source/harness hashes are recorded and G14 reruns Kani, while broader minimum_scope stays unmet (chainlink #87/#129/#132, docs/cli-contract.md \u00a71/\u00a710)"
     },
     {
       "name": "draft",
@@ -810,7 +810,7 @@
       "path": "scripts/record_assurance.py",
       "role": "generator",
       "disposition": "runtime-required",
-      "summary": "chainlink #87/#129: assembles a work package's assurance report from why3find proof certificates or official whole-crate Verus JSON, writes it to report.emit, and derives the record from evidence and manifest provenance. Verus binds the exact func-details key and proof note, refuses output older than Rust sources under allowed_write_set, and records output/source hashes for G14 to recheck."
+      "summary": "chainlink #87/#129/#132: assembles a work package's assurance report from why3find proof certificates, official whole-crate Verus JSON, or a fresh Kani 0.67 exact-harness rerun. Kani binds the manifest obligation to its exact kani_... function, records scoped Rust-source/harness hashes and bounded input_domain, and G14 reruns the proof; broader minimum_scope requirements remain unmet rather than being copied into the record."
     }
   ],
   "schemas": [

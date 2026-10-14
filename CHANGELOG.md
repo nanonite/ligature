@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.8] - 2026-10-13
+
+### Added
+- #135 (local tracking for upstream escalation #132): add Kani 0.67 bounded-model-check assurance intake. `record-assurance` reruns the exact manifest-declared harness, records source/harness hashes and bounded scope, and G14 reruns it before consuming the record. Kani 0.67 has no structured JSON verdict export; the accepted regular output is parsed strictly and is never taken from a detached report. A Kani result narrower than `minimum_scope` remains recorded but does not satisfy G14.
+
 ## [1.3.7] - 2026-10-13
 
 ### Fixed

@@ -137,6 +137,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
 from bridge_harness import EVIDENCE_KIND_BY_VERIFIER  # noqa: E402
+from bridge_harness import verifier_for_manifest_harness  # noqa: E402
 from gate_r1_g16 import unresolved_at_or_above_medium  # noqa: E402
 from review_checkpoint import review_log_path  # noqa: E402
 from project_descriptor import boundary_dir_for, bridge_dir_for  # noqa: E402
@@ -167,6 +168,23 @@ VERIFIER_BY_EVIDENCE_KIND = {
     "verus-deductive-check": "verus",
     "kani-bounded-model-check": "kani",
 }
+
+
+def assurance_record_command(work_package: str, guarantee: dict) -> str:
+    obligation = guarantee["obligation_id"]
+    harness = guarantee["harness"]
+    verifier = verifier_for_manifest_harness(harness)
+    if verifier == "kani":
+        return (
+            f"ligature record-assurance {work_package} --kani-crate <package-directory> "
+            f"--kani-harness {obligation}={harness}"
+        )
+    if verifier == "verus":
+        return (
+            f"ligature record-assurance {work_package} --verus-json <output.json> "
+            f"--verus-function {obligation}=<func-details-key>"
+        )
+    return f"ligature record-assurance {work_package} --proof {obligation}=<path>"
 
 GENERIC_CALLEES_CONDITION = "generic_callees_type_universal_or_creusot_owned"
 
@@ -471,13 +489,17 @@ def load_assurance_reports(
         emit = manifest["report"]["emit"]
         path = (workspace / emit).resolve()
         if not path.is_file():
+            guarantees = manifest["definition_of_done"]["provided_guarantees"]
+            if guarantees:
+                remediation = assurance_record_command(work_package, guarantees[0])
+            else:
+                remediation = f"ligature record-assurance {work_package} <verifier evidence>"
             findings.append(
                 Finding(
                     "G14", work_package,
                     f"no assurance report at its manifest's own report.emit path ({emit}) -- "
                     "nothing achieved has been recorded for this work package; record one from "
-                    "the verifier's own proof certificates with `ligature record-assurance "
-                    "<work-package> --proof <obligation>=<path>` (docs/cli-contract.md §1)",
+                    f"the verifier's own result with `{remediation}` (docs/cli-contract.md §1)",
                 )
             )
             continue
@@ -541,9 +563,8 @@ def check_provided_guarantees(
                     Finding(
                         "G14", obligation,
                         f"{work_package} provides this obligation but recorded no achieved "
-                        "assurance for it -- record one from this work package's proof "
-                        "certificates with `ligature record-assurance "
-                        f"{work_package} --proof {obligation}=<path>`",
+                        f"assurance for it -- record one from this work package's verifier result "
+                        f"with `{assurance_record_command(work_package, entry)}`",
                     )
                 )
                 continue
@@ -561,7 +582,12 @@ def check_provided_guarantees(
 
 
 def check_requirements(
-    cluster: str, profile: dict, closure: Closure, providers: dict[str, str], reports: dict[str, dict]
+    cluster: str,
+    profile: dict,
+    closure: Closure,
+    providers: dict[str, str],
+    reports: dict[str, dict],
+    manifests: dict[str, dict] | None = None,
 ) -> list[Finding]:
     """plan.md §8.5 steps 4 and 6, over every edge in the TRANSITIVE
     closure rather than the cluster's direct edges only."""
@@ -582,13 +608,24 @@ def check_requirements(
             continue  # already reported as unsupported
         record = _obligation_record(reports.get(provider), obligation)
         if record is None:
+            provider_guarantee = None
+            if manifests is not None and provider in manifests:
+                provider_guarantee = next(
+                    item
+                    for item in manifests[provider]["definition_of_done"]["provided_guarantees"]
+                    if item["obligation_id"] == obligation
+                )
+            remediation = (
+                assurance_record_command(provider, provider_guarantee)
+                if provider_guarantee is not None
+                else f"ligature record-assurance {provider} --proof {obligation}=<path>"
+            )
             findings.append(
                 Finding(
                     "G14", obligation,
                     f"required by {work_package} at closure depth {depth}, provided by {provider}, "
                     "which recorded no achieved assurance for it -- the providing work package "
-                    "records its own evidence with `ligature record-assurance "
-                    f"{provider} --proof {obligation}=<path>`",
+                    f"records its own evidence with `{remediation}`",
                 )
             )
             continue
@@ -675,10 +712,14 @@ def check_record_certificates(
             scope = evidence.get("scope") if isinstance(evidence, dict) else None
             targets = scope.get("proof_targets") if isinstance(scope, dict) else None
             harness = evidence.get("harness") if isinstance(evidence, dict) else None
+            verifier = verifier_for_manifest_harness(harness) if isinstance(harness, str) else None
             verus_hash = scope.get("verus_output_sha256") if isinstance(scope, dict) else None
             verus_version = scope.get("verus_version") if isinstance(scope, dict) else None
             verus_source_hash = scope.get("verus_source_sha256") if isinstance(scope, dict) else None
-            if harness == "verus" and (not isinstance(verus_hash, str) or not verus_hash):
+            kani_source_hash = scope.get("kani_source_sha256") if isinstance(scope, dict) else None
+            kani_harness_hash = scope.get("kani_harness_sha256") if isinstance(scope, dict) else None
+            kani_version = scope.get("kani_version") if isinstance(scope, dict) else None
+            if verifier == "verus" and (not isinstance(verus_hash, str) or not verus_hash):
                 findings.append(
                     Finding(
                         "G14", record_ref,
@@ -689,7 +730,7 @@ def check_record_certificates(
                     )
                 )
                 continue
-            if harness == "verus" and (
+            if verifier == "verus" and (
                 not isinstance(verus_source_hash, str) or not verus_source_hash
             ):
                 findings.append(
@@ -701,12 +742,30 @@ def check_record_certificates(
                     )
                 )
                 continue
+            if verifier == "kani" and any(
+                not isinstance(value, str) or not value
+                for value in (kani_source_hash, kani_harness_hash, kani_version)
+            ):
+                findings.append(
+                    Finding(
+                        "G14", record_ref,
+                        "the recorded Kani achievement has no complete source, harness, and "
+                        "tool-version hashes in evidence.scope; G14 cannot rerun the exact "
+                        "manifest harness against the source that was recorded",
+                    )
+                )
+                continue
             if not isinstance(targets, str) or not targets.strip():
-                if harness == "verus":
+                if verifier == "verus":
                     remediation = (
                         f"Re-record it from Verus JSON with `ligature record-assurance "
                         f"{work_package} --verus-json <output.json> --verus-function "
                         f"{obligation}=<func-details-key>`"
+                    )
+                elif verifier == "kani":
+                    remediation = (
+                        f"Re-record Kani evidence with `ligature record-assurance {work_package} "
+                        f"--kani-crate <package-directory> --kani-harness {obligation}={harness}`"
                     )
                 else:
                     remediation = (
@@ -727,11 +786,17 @@ def check_record_certificates(
             for target in targets.split(","):
                 target = target.strip()
                 if not target:
-                    if harness == "verus":
+                    if verifier == "verus":
                         remediation = (
                             f"Re-record it from Verus JSON with `ligature record-assurance "
                             f"{work_package} --verus-json <output.json> --verus-function "
                             f"{obligation}=<func-details-key>`"
+                        )
+                    elif verifier == "kani":
+                        remediation = (
+                            f"Re-record Kani evidence with `ligature record-assurance {work_package} "
+                            f"--kani-crate <package-directory> --kani-harness "
+                            f"{obligation}={harness}`"
                         )
                     else:
                         remediation = (
@@ -750,9 +815,9 @@ def check_record_certificates(
                     continue
                 try:
                     source_manifest = manifests.get(work_package)
-                    if source_manifest is None and harness == "verus":
+                    if source_manifest is None and verifier in ("verus", "kani"):
                         raise RecordAssuranceError(
-                            f"no valid work-package manifest is available to re-check Rust "
+                            f"no valid work-package manifest is available to re-check {verifier} "
                             f"source freshness for {work_package}"
                         )
                     read_proof_target(
@@ -767,6 +832,15 @@ def check_record_certificates(
                         expected_verus_source_hash=(
                             verus_source_hash if isinstance(verus_source_hash, str) else None
                         ),
+                        expected_kani_source_hash=(
+                            kani_source_hash if isinstance(kani_source_hash, str) else None
+                        ),
+                        expected_kani_harness_hash=(
+                            kani_harness_hash if isinstance(kani_harness_hash, str) else None
+                        ),
+                        expected_kani_version=(
+                            kani_version if isinstance(kani_version, str) else None
+                        ),
                         source_manifest=source_manifest,
                     )
                 except RecordAssuranceError as e:
@@ -775,6 +849,17 @@ def check_record_certificates(
                             f"Re-run Verus and record assurance with `ligature record-assurance "
                             f"{work_package} --verus-json <output.json> --verus-function "
                             f"{obligation}=<func-details-key>`."
+                        )
+                    elif target.startswith("kani-run:"):
+                        crate_spec, separator, kani_harness = target[
+                            len("kani-run:"):].rpartition("#")
+                        if not separator or not crate_spec or not kani_harness:
+                            crate_spec = "<package-directory>"
+                            kani_harness = harness if isinstance(harness, str) else "<harness>"
+                        remediation = (
+                            f"Rerun Kani and record assurance with `ligature record-assurance "
+                            f"{work_package} --kani-crate {crate_spec} --kani-harness "
+                            f"{obligation}={kani_harness}`."
                         )
                     else:
                         remediation = (
@@ -786,10 +871,11 @@ def check_record_certificates(
                             "G14", record_ref,
                             f"the recorded achievement names proof evidence {target!r}, which "
                             f"does not re-establish {obligation} when re-read: {e}. "
-                            "record-assurance re-checks each Creusot certificate or Verus "
-                            "per-function JSON result before recording; G14 applies the same "
-                            "reader and fails closed if that evidence changed or no longer binds "
-                            "the named obligation (chainlink #92/#129). " + remediation,
+                            "record-assurance re-checks each Creusot proof certificate, Verus "
+                            "per-function JSON result, or Kani 0.67 exact-harness rerun before "
+                            "recording; G14 applies the same reader and fails closed if that "
+                            "evidence changed or no longer binds the named obligation "
+                            "(chainlink #92/#129/#132). " + remediation,
                         )
                     )
     return findings
@@ -850,17 +936,18 @@ def check_record_derivation(
             record_ref = f"{work_package}:{obligation}"
             record = entry["record"]
             harness = guarantee["harness"]
+            expected_verifier = verifier_for_manifest_harness(harness)
             evidence = record.get("evidence") if isinstance(record, dict) else None
             evidence = evidence if isinstance(evidence, dict) else {}
             config = record.get("config") if isinstance(record, dict) else None
 
             mismatches: list[str] = []
             observed_verifier = evidence.get("verifier")
-            if observed_verifier != harness:
+            if observed_verifier != expected_verifier:
                 mismatches.append(
                     f"evidence.verifier is {observed_verifier!r}, but this manifest declares "
-                    f"harness {harness!r} for {obligation} -- record-assurance derives the "
-                    "verifier from exactly that field"
+                    f"harness {harness!r} (verifier {expected_verifier!r}) for {obligation} -- "
+                    "record-assurance derives the verifier from exactly that field"
                 )
             observed_harness = evidence.get("harness")
             if observed_harness != harness:
@@ -868,7 +955,17 @@ def check_record_derivation(
                     f"evidence.harness is {observed_harness!r}, but the manifest's own harness "
                     f"for {obligation} is {harness!r}"
                 )
-            expected_kind = EVIDENCE_KIND_BY_VERIFIER.get(harness)
+            if expected_verifier == "kani":
+                scope = evidence.get("scope")
+                observed_domain = scope.get("input_domain") if isinstance(scope, dict) else None
+                expected_domain = f"the bounded model encoded by Kani harness {harness}"
+                if observed_domain != expected_domain:
+                    mismatches.append(
+                        f"evidence.scope.input_domain is {observed_domain!r}, but Kani only "
+                        f"records the bounded model encoded by its exact manifest harness "
+                        f"{harness!r}"
+                    )
+            expected_kind = EVIDENCE_KIND_BY_VERIFIER.get(expected_verifier)
             observed_kind = evidence.get("kind")
             if expected_kind is None:
                 mismatches.append(
@@ -891,12 +988,19 @@ def check_record_derivation(
                     "from the provenance block of the run that produced the proof"
                 )
             if mismatches:
-                if harness == "verus":
+                if expected_verifier == "verus":
                     remediation = (
                         f"Re-record it with `ligature record-assurance {work_package} "
                         f"--verus-json <output.json> --verus-function "
                         f"{obligation}=<func-details-key>` so the fields come from the "
                         "manifest and Verus result again"
+                    )
+                elif expected_verifier == "kani":
+                    remediation = (
+                        f"Re-record it with `ligature record-assurance {work_package} "
+                        f"--kani-crate <package-directory> --kani-harness "
+                        f"{obligation}={harness}` so the fields come from the manifest "
+                        "and fresh Kani run again"
                     )
                 else:
                     remediation = (
@@ -1980,7 +2084,7 @@ def gate_cluster(
     findings.extend(check_record_derivation(closure, manifests, reports))
 
     findings.extend(check_provided_guarantees(cluster, profile, closure, manifests, reports))
-    findings.extend(check_requirements(cluster, profile, closure, providers, reports))
+    findings.extend(check_requirements(cluster, profile, closure, providers, reports, manifests))
 
     assumption_findings = check_transitive_assumptions(closure, manifests, reports, seed)
     findings.extend(assumption_findings)

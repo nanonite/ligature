@@ -2685,7 +2685,8 @@ def cmd_promote_evidence(args: argparse.Namespace) -> int:
 
 def cmd_record_assurance(args: argparse.Namespace) -> int:
     """`ligature record-assurance <work-package> --proof ...` or
-    `--verus-json ... --verus-function ...` (docs/cli-contract.md §1, §10): assemble a work
+    `--verus-json ... --verus-function ...` / `--kani-crate ... --kani-harness ...`
+    (docs/cli-contract.md §1, §10): assemble a work
     package's assurance report from the verifier's own proof certificates
     and write it to the manifest's `report.emit` path (chainlink #87) --
     the producer gate-g14's achieved side never had, which is why the
@@ -2695,7 +2696,9 @@ def cmd_record_assurance(args: argparse.Namespace) -> int:
     The report is machine-assembled (see scripts/record_assurance.py's
     docstring for what is derived from where): Creusot reads each proof
     certificate; Verus reads official `--output-json` with a named function
-    and exact Ligature proof note for each obligation.
+    and exact Ligature proof note for each obligation; Kani 0.67 reruns one
+    exact manifest-named harness and G14 reruns it again against current
+    Rust inputs.
 
     Exit codes per docs/exit-code-contract.md: 0 recorded; 1 the evidence
     does not establish the obligation (stuck subgoals, a certificate older
@@ -2710,6 +2713,8 @@ def cmd_record_assurance(args: argparse.Namespace) -> int:
             args.proof,
             args.verus_json,
             args.verus_function,
+            args.kani_harness,
+            args.kani_crate,
         )
     except RecordAssuranceError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -2725,6 +2730,13 @@ def cmd_record_assurance(args: argparse.Namespace) -> int:
         print(
             f"  {entry.obligation_id}: {entry.evidence_kind} supported -- {entry.goals} proved "
             f"goal(s) <- {', '.join(entry.targets)}"
+        )
+    for obligation_id, reasons in outcome.scope_warnings.items():
+        print(
+            f"warning: {obligation_id}: Kani result was recorded at its bounded harness scope, "
+            "but it does not meet the manifest's minimum_scope; G14 will keep this guarantee "
+            "unmet: " + "; ".join(reasons),
+            file=sys.stderr,
         )
     if outcome.preserved_obligation_records:
         print(
@@ -3438,6 +3450,31 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "bind a Verus guarantee to the exact func-details key; repeatable, and the function "
             "must put #![verifier::proof_note(\"ligature:<obligation>\")] inside its ensures clause"
+        ),
+    )
+    record_assurance_p.add_argument(
+        "--kani-crate",
+        metavar="PATH",
+        help=(
+            "Cargo package directory containing Cargo.toml (workspace-relative); required with "
+            "--kani-harness. Cargo metadata must pass --locked; Ligature reruns this package "
+            "during recording and G14"
+        ),
+    )
+    record_assurance_p.add_argument(
+        "--kani-harness",
+        action="append",
+        default=[],
+        metavar="OBLIGATION=HARNESS",
+        help=(
+            "bind one obligation to its exact manifest-declared kani_... Rust harness; repeatable. "
+            "Kani 0.67 has no JSON verdict intake: Ligature runs `cargo +<manifest-toolchain> "
+            "kani -Z unstable-options --manifest-path <crate>/Cargo.toml --harness <name> "
+            "--exact --output-format regular --output-into-files --target-dir <temp>`. Only "
+            "cargo-kani 0.67.0's `result_output_dir/<harness>` result with `Status: SUCCESS` "
+            "for every check, `** 0 of N failed`, and `VERIFICATION:- SUCCESSFUL`, plus the "
+            "complete Manual Harness Summary, is accepted; G14 reruns it. Bounded scope cannot satisfy a broader "
+            "manifest minimum_scope"
         ),
     )
     record_assurance_p.set_defaults(func=cmd_record_assurance)

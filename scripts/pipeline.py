@@ -2696,9 +2696,9 @@ def cmd_record_assurance(args: argparse.Namespace) -> int:
     The report is machine-assembled (see scripts/record_assurance.py's
     docstring for what is derived from where): Creusot reads each proof
     certificate; Verus reads official `--output-json` with a named function
-    and exact Ligature proof note for each obligation; Kani 0.67 reruns one
-    exact manifest-named harness and G14 reruns it again against current
-    Rust inputs.
+    and exact Ligature proof note for each obligation; Kani 0.67 resolves the
+    bare manifest function to one fully qualified identity, reruns that exact
+    harness, and G14 repeats the resolution and run against current Rust inputs.
 
     Exit codes per docs/exit-code-contract.md: 0 recorded; 1 the evidence
     does not establish the obligation (stuck subgoals, a certificate older
@@ -3467,14 +3467,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="OBLIGATION=HARNESS",
         help=(
-            "bind one obligation to its exact manifest-declared kani_... Rust harness; repeatable. "
-            "Kani 0.67 has no JSON verdict intake: Ligature runs `cargo +<manifest-toolchain> "
-            "kani -Z unstable-options --manifest-path <crate>/Cargo.toml --harness <name> "
-            "--exact --output-format regular --output-into-files --target-dir <temp>`. Only "
-            "cargo-kani 0.67.0's `result_output_dir/<harness>` result with `Status: SUCCESS` "
-            "for every check, `** 0 of N failed`, and `VERIFICATION:- SUCCESSFUL`, plus the "
-            "complete Manual Harness Summary, is accepted; G14 reruns it. Bounded scope cannot satisfy a broader "
-            "manifest minimum_scope"
+            "bind one obligation to its bare manifest-declared kani_... Rust function; repeatable. "
+            "Only cargo-kani 0.67.0 is supported; it has no JSON verdict intake. Ligature resolves "
+            "the name with --only-codegen and manifest features using Kani's "
+            "`*.kani-metadata.json` `proof_harnesses[].pretty_name`. Exactly one fully qualified "
+            "identity must match; missing and ambiguous "
+            "names fail. Ligature reruns that identity with --exact and accepts only fresh "
+            "`result_output_dir/<qualified-harness>` output with `Status: SUCCESS`, `** 0 of N "
+            "failed`, `VERIFICATION:- SUCCESSFUL`, and the complete summary. G14 repeats the run. "
+            "Bounded scope cannot satisfy a broader manifest minimum_scope"
         ),
     )
     record_assurance_p.set_defaults(func=cmd_record_assurance)

@@ -36,8 +36,11 @@ What is derived, from where
     Aggregate verified/error counts alone never establish a guarantee.
     Kani 0.67 has no JSON verdict export; Ligature runs the manifest's exact
     Rust harness itself and requires a complete, all-success Kani 0.67
-    `--output-into-files` per-harness result and complete run summary. G14
-    repeats that run against current inputs.
+    `--output-into-files` per-harness result and complete run summary. A
+    manifest's bare function name is resolved against Kani's pinned,
+    feature-selected compiler metadata and must identify one unique fully
+    qualified harness.
+    G14 repeats that resolution and run against current inputs.
   * `evidence.kind` / `evidence.verifier` / `evidence.harness` -- the
     manifest's own `definition_of_done.provided_guarantees[].harness`,
     through `bridge_harness.EVIDENCE_KIND_BY_VERIFIER`'s single mapping.
@@ -79,14 +82,13 @@ with one shared `--verus-json` result file; Kani uses
     hashes and re-reads the same JSON result. Rust sources in the manifest's
     allowed write set must be no newer than that result; their source
     snapshot is recorded and rechecked by G14.
-  * The Kani harness must exactly equal the manifest's `harness` value,
-    begin with `kani_`, and have one explicit function definition in the
+  * The Kani harness must exactly equal the manifest's bare `kani_...`
+    function name and have one explicit function definition in the
     manifest's allowed Rust write set. Ligature accepts only cargo-kani
-    0.67.0 and reruns `cargo +<manifest-toolchain> kani -Z unstable-options
-    --manifest-path <package>/Cargo.toml --harness <name> --exact
-    --output-format regular --output-into-files --target-dir <temporary-dir>`
-    (with the manifest features). It reads the fresh text result at
-    `result_output_dir/<harness>` and checks Kani's stdout summary. Kani's
+    0.67.0, resolves the name to one unique fully qualified identity from
+    Kani's compile-only metadata generated with the manifest features, and
+    reruns that identity with `--exact`. It reads the fresh text result at
+    `result_output_dir/<qualified-harness>` and checks Kani's stdout summary. Kani's
     documented host target must match
     manifest provenance; Cargo metadata must pass `--locked`. The record
     pins the source and harness hashes, and G14 repeats the exact run.
@@ -426,6 +428,96 @@ def parse_kani_harness_specs(specs: list[str]) -> dict[str, str]:
     return mapping
 
 
+KANI_HARNESS_ID_RE = re.compile(
+    r"(?:r#)?[A-Za-z_][A-Za-z0-9_]*(?:::(?:r#)?[A-Za-z_][A-Za-z0-9_]*)*"
+)
+
+
+def cargo_target_crate_names(metadata_text: str, crate_root: Path) -> set[str]:
+    """Get this manifest's Rust target crate names from locked Cargo metadata."""
+    try:
+        metadata = json.loads(metadata_text)
+    except json.JSONDecodeError as exc:
+        raise InvalidRecordInput(f"Cargo metadata is malformed JSON: {exc}") from exc
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("packages"), list):
+        raise InvalidRecordInput("Cargo metadata has no package list for Kani harness resolution")
+    expected_manifest = (crate_root / "Cargo.toml").resolve()
+    packages = [
+        package for package in metadata["packages"]
+        if isinstance(package, dict)
+        and isinstance(package.get("manifest_path"), str)
+        and Path(package["manifest_path"]).resolve() == expected_manifest
+    ]
+    if len(packages) != 1 or not isinstance(packages[0].get("targets"), list):
+        raise InvalidRecordInput(
+            f"locked Cargo metadata does not identify exactly one package at {expected_manifest}"
+        )
+    names: set[str] = set()
+    for target in packages[0]["targets"]:
+        if not isinstance(target, dict) or not isinstance(target.get("name"), str):
+            raise InvalidRecordInput("Cargo metadata contains a malformed package target")
+        # Cargo turns package names containing hyphens into Rust crate names
+        # with underscores before writing Kani's compiler metadata.
+        names.add(target["name"].replace("-", "_"))
+    if not names:
+        raise InvalidRecordInput("Cargo metadata package has no Rust targets for Kani")
+    return names
+
+
+def parse_kani_067_codegen_metadata(
+    metadata_files: list[tuple[str, str]],
+    target_crate_names: set[str],
+    manifest_harness: str,
+) -> str:
+    """Resolve one bare name from Kani 0.67 compiler-generated metadata."""
+    matches: list[tuple[str, str]] = []
+    for metadata_path, metadata_text in metadata_files:
+        try:
+            metadata = json.loads(metadata_text)
+        except json.JSONDecodeError as exc:
+            raise InvalidRecordInput(
+                f"Kani 0.67 compiler metadata {metadata_path!r} is malformed JSON: {exc}"
+            ) from exc
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("crate_name"), str):
+            raise InvalidRecordInput(
+                f"Kani 0.67 compiler metadata {metadata_path!r} has no crate_name"
+            )
+        if metadata["crate_name"] not in target_crate_names:
+            continue
+        proof_harnesses = metadata.get("proof_harnesses")
+        if not isinstance(proof_harnesses, list):
+            raise InvalidRecordInput(
+                f"Kani 0.67 compiler metadata {metadata_path!r} has no proof_harnesses list"
+            )
+        for proof in proof_harnesses:
+            if not isinstance(proof, dict):
+                raise InvalidRecordInput(
+                    f"Kani 0.67 compiler metadata {metadata_path!r} has a malformed proof harness"
+                )
+            identity = proof.get("pretty_name")
+            if not isinstance(identity, str) or not KANI_HARNESS_ID_RE.fullmatch(identity):
+                raise InvalidRecordInput(
+                    f"Kani 0.67 listed an unsupported harness identity {identity!r}"
+                )
+            if identity.rsplit("::", 1)[-1] == manifest_harness:
+                matches.append((identity, metadata_path))
+
+    if not matches:
+        raise InvalidRecordInput(
+            f"Kani 0.67 compiler metadata has no harness named {manifest_harness!r} "
+            "for the selected package and manifest features"
+        )
+    if len(matches) > 1:
+        details = ", ".join(
+            f"{identity} ({metadata_path})" for identity, metadata_path in matches
+        )
+        raise InvalidRecordInput(
+            f"Kani harness name {manifest_harness!r} is ambiguous; matching identities: "
+            f"{details}"
+        )
+    return matches[0][0]
+
+
 def kani_crate_root(workspace: Path, spec: str) -> Path:
     """Resolve one Cargo package directory inside the workspace."""
     raw = Path(spec)
@@ -709,7 +801,7 @@ def parse_kani_target(target: str) -> tuple[str, str]:
 
 
 def parse_kani_067_result(
-    result_text: str, driver_output: str, returncode: int, harness: str
+    result_text: str, driver_output: str, returncode: int, harness_identity: str
 ) -> int:
     """Recognize only the complete Kani 0.67 regular-output verdict.
 
@@ -721,9 +813,10 @@ def parse_kani_067_result(
     if not isinstance(result_text, str) or not isinstance(driver_output, str):
         raise InvalidRecordInput("Kani 0.67 returned non-text output")
     harness_headers = re.findall(r"(?m)^Checking harness (.+)\.\.\.\s*$", driver_output)
-    if harness_headers != [harness]:
+    if harness_headers != [harness_identity]:
         raise InvalidRecordInput(
-            f"Kani 0.67 output did not identify exactly the requested harness {harness!r}"
+            "Kani 0.67 output did not identify exactly the requested harness "
+            f"{harness_identity!r}"
         )
     if result_text.count("RESULTS:") != 1:
         raise InvalidRecordInput("Kani 0.67 per-harness result has no unique RESULTS section")
@@ -735,7 +828,7 @@ def parse_kani_067_result(
         )
     if any(status != "SUCCESS" for status in statuses):
         raise EvidenceNotEstablished(
-            f"Kani did not prove every check in harness {harness!r}: {statuses!r}"
+            f"Kani did not prove every check in harness {harness_identity!r}: {statuses!r}"
         )
     check_count = len(check_headers)
     summary_match = re.search(r"(?m)^\s*\*\* ([0-9]+) of ([0-9]+) failed\s*$", result_text)
@@ -747,7 +840,7 @@ def parse_kani_067_result(
     if summary_match is None or manual_match is None:
         if returncode != 0 or "VERIFICATION:- FAILED" in result_text:
             raise EvidenceNotEstablished(
-                f"Kani 0.67 did not complete harness {harness!r} successfully"
+                f"Kani 0.67 did not complete harness {harness_identity!r} successfully"
             )
         raise InvalidRecordInput("Kani 0.67 output is missing a complete success summary")
     summary_failed, summary_total = map(int, summary_match.groups())
@@ -758,7 +851,7 @@ def parse_kani_067_result(
         )
     if returncode != 0 or summary_failed != 0 or failed_harnesses != 0 or succeeded_harnesses != 1:
         raise EvidenceNotEstablished(
-            f"Kani did not prove harness {harness!r} (exit={returncode}, "
+            f"Kani did not prove harness {harness_identity!r} (exit={returncode}, "
             f"failed_checks={summary_failed}, failed_harnesses={failed_harnesses})"
         )
     if total_harnesses != 1:
@@ -767,9 +860,83 @@ def parse_kani_067_result(
         )
     if result_text.count("VERIFICATION:- SUCCESSFUL") != 1:
         if "VERIFICATION:- FAILED" in result_text:
-            raise EvidenceNotEstablished(f"Kani reported harness {harness!r} as failed")
+            raise EvidenceNotEstablished(
+                f"Kani reported harness {harness_identity!r} as failed"
+            )
         raise InvalidRecordInput("Kani 0.67 output has no unique successful verification verdict")
     return check_count
+
+
+def run_kani_067_codegen_metadata(
+    crate_root: Path,
+    toolchain: str,
+    features: list[str],
+    target_crate_names: set[str],
+    manifest_harness: str,
+) -> str:
+    """Resolve the harness from Kani's compile-only metadata in an isolated target dir."""
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise InvalidRecordInput("cargo is unavailable; Ligature cannot resolve Kani harnesses")
+    command = [
+        cargo, f"+{toolchain}", "kani", "-Z", "unstable-options",
+        "--manifest-path", str(crate_root / "Cargo.toml"), "--only-codegen",
+    ]
+    if "default" not in features:
+        command.append("--no-default-features")
+    explicit_features = [feature for feature in features if feature != "default"]
+    if explicit_features:
+        command.extend(["--features", ",".join(explicit_features)])
+
+    with tempfile.TemporaryDirectory(prefix="ligature-kani-discovery-067-") as target_dir:
+        target_root = Path(target_dir)
+        command.extend(["--target-dir", str(target_root)])
+        try:
+            result = subprocess.run(
+                command,
+                cwd=crate_root,
+                capture_output=True,
+                text=True,
+                timeout=KANI_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise EvidenceNotEstablished(
+                f"Kani {KANI_VERSION} compile-only harness discovery timed out"
+            ) from exc
+        except OSError as exc:
+            raise InvalidRecordInput(f"cannot discover Kani harnesses: {exc}") from exc
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0:
+            raise EvidenceNotEstablished(
+                "Kani compile-only harness discovery failed before proof execution "
+                f"(exit={result.returncode}): {output.strip()}"
+            )
+
+        metadata_files: list[tuple[str, str]] = []
+        for metadata_path in sorted(target_root.rglob("*.kani-metadata.json")):
+            if (
+                metadata_path.is_symlink()
+                or not metadata_path.is_file()
+                or not _contains(target_root, metadata_path)
+            ):
+                raise InvalidRecordInput(
+                    f"Kani compiler metadata path {metadata_path} is not a regular file"
+                )
+            try:
+                metadata_text = metadata_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise InvalidRecordInput(
+                    f"Kani compiler metadata {metadata_path.name!r} is not readable UTF-8: {exc}"
+                ) from exc
+            metadata_files.append((metadata_path.relative_to(target_root).as_posix(), metadata_text))
+        if not metadata_files:
+            raise InvalidRecordInput(
+                "Kani 0.67 compile-only run produced no *.kani-metadata.json harness metadata"
+            )
+        return parse_kani_067_codegen_metadata(
+            metadata_files, target_crate_names, manifest_harness
+        )
 
 
 def run_kani_067(crate_root: Path, manifest: dict, harness: str) -> int:
@@ -854,11 +1021,16 @@ def run_kani_067(crate_root: Path, manifest: dict, harness: str) -> int:
             f"and lockfile first ({detail})"
         )
 
+    target_crate_names = cargo_target_crate_names(metadata_result.stdout or "", crate_root)
+    harness_identity = run_kani_067_codegen_metadata(
+        crate_root, toolchain, features, target_crate_names, harness
+    )
+
     command = [
         *base,
         "-Z", "unstable-options",
         "--manifest-path", str(crate_root / "Cargo.toml"),
-        "--harness", harness,
+        "--harness", harness_identity,
         "--exact",
         "--output-format", "regular",
         "--output-into-files",
@@ -887,15 +1059,16 @@ def run_kani_067(crate_root: Path, manifest: dict, harness: str) -> int:
         except OSError as exc:
             raise InvalidRecordInput(f"cannot invoke Kani for {harness!r}: {exc}") from exc
         output = (result.stdout or "") + (result.stderr or "")
-        result_path = Path(target_dir) / "result_output_dir" / harness
+        result_path = Path(target_dir) / "result_output_dir" / harness_identity
         if result_path.is_symlink() or not result_path.is_file() or not _contains(Path(target_dir), result_path):
             if result.returncode != 0:
                 raise EvidenceNotEstablished(
-                    f"Kani did not produce a per-harness result file for {harness!r}"
+                    "Kani did not produce a per-harness result file for resolved identity "
+                    f"{harness_identity!r} (manifest name {harness!r})"
                 )
             raise InvalidRecordInput(
                 f"Kani 0.67 did not write the expected per-harness result file "
-                f"result_output_dir/{harness}"
+                f"result_output_dir/{harness_identity}"
             )
         try:
             result_text = result_path.read_text(encoding="utf-8")
@@ -903,7 +1076,7 @@ def run_kani_067(crate_root: Path, manifest: dict, harness: str) -> int:
             raise InvalidRecordInput(
                 f"Kani per-harness result {result_path.name!r} is not readable UTF-8: {exc}"
             ) from exc
-    return parse_kani_067_result(result_text, output, result.returncode, harness)
+    return parse_kani_067_result(result_text, output, result.returncode, harness_identity)
 
 
 def read_kani_result(

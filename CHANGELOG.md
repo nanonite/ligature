@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.9] - 2026-10-14
+
+### Fixed
+- #136 (local tracking for upstream Kani harness-name escalation #133): resolve the manifest's bare `kani_...` function through fresh cargo-kani 0.67.0 compile-only metadata generated with the manifest's package and feature selection, require one unique fully qualified Kani identity, run that identity with `--exact`, and read its qualified per-harness result file. Missing, ambiguous, malformed, or stale inputs fail closed; the assurance record remains bound to the manifest's bare harness and bounded scope.
+
 ## [1.3.8] - 2026-10-13
 
 ### Added

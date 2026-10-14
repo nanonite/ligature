@@ -21,6 +21,13 @@ PROMPTS = ROOT / "prompts"
 
 
 class PromptTemplateScaffoldingTest(unittest.TestCase):
+    def test_closure_profile_template_accepts_plan_or_manifest_membership(self):
+        text = (PROMPTS / "stage-3-closure-profile-drafting.md").read_text()
+        self.assertIn('"work_packages": {{work_packages}}', text)
+        self.assertIn("approved Stage 7 plans", text)
+        self.assertIn("generated manifests", text)
+        self.assertIn("G14 checks the final", text)
+
     def test_stage_3_template_has_required_scaffolding(self):
         text = (PROMPTS / "stage-3-boundary-drafting.md").read_text()
         self.assertIn("Output **only** the JSON object", text)

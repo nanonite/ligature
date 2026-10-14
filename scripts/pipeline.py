@@ -1833,6 +1833,34 @@ def cmd_draft(args: argparse.Namespace) -> int:
         )
 
     variables = dict(pair.split("=", 1) for pair in args.var)
+    if template.name == "closure-profile-drafting":
+        if "work_packages" not in variables:
+            raise PipelineError(
+                "closure-profile-drafting needs an explicit --var work_packages=<JSON array> "
+                "from approved Stage 7 plan ids (profile-first) or generated manifests "
+                "(manifest-first)"
+            )
+        try:
+            work_packages = json.loads(variables["work_packages"])
+        except json.JSONDecodeError as exc:
+            raise PipelineError(
+                "closure-profile-drafting --var work_packages must be a JSON array of WP ids"
+            ) from exc
+        if (
+            not isinstance(work_packages, list)
+            or not work_packages
+            or any(
+                not isinstance(work_package, str)
+                or re.fullmatch(r"WP-[A-Z][A-Z0-9-]*", work_package) is None
+                for work_package in work_packages
+            )
+            or len(work_packages) != len(set(work_packages))
+        ):
+            raise PipelineError(
+                "closure-profile-drafting --var work_packages must be a non-empty JSON array "
+                "of unique WP- ids"
+            )
+        variables["work_packages"] = json.dumps(work_packages, separators=(",", ":"))
     prompt = render_prompt(template_path, variables)
 
     if backend["kind"] == "manual":
@@ -3318,7 +3346,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     draft_p.add_argument("target", type=Path, help="Target artifact path the draft will eventually promote to")
-    draft_p.add_argument("--var", action="append", default=[], help="key=value, repeatable")
+    draft_p.add_argument(
+        "--var", action="append", default=[],
+        help=(
+            "key=value, repeatable; closure-profile-drafting requires "
+            "work_packages=<JSON array of approved plan or generated manifest WP ids>"
+        ),
+    )
     draft_p.set_defaults(func=cmd_draft)
 
     approve_p = sub.add_parser("approve", help="Review checkpoint: promote a draft")

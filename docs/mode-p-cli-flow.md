@@ -78,16 +78,16 @@ spec exists, but reports little until interactions declaring
 | — (operator, off-CLI) | operator replaces the placeholder `port_source`, `verifier_policy`, `crates[]`, `review` fields with real project values; `check`/`status` report a `P0` finding while the descriptor still holds the shipped example values (`check next` recommends editing it), though `draft`/`validate` themselves still do not gate on it — see §4 | `check`, `status` | read-only |
 | Stage 0 | evidence intake: claim + origin + semantic_disposition + lifecycle | `draft evidence-intake` → `promote-evidence` | LLM-side → mechanical |
 | Stage 1/2 | concepts (L1), intra-contracts (L2) | `draft concept-to-code` → `approve` (concept spec + constraint-id production; #105 gave the staged spec a promotion path, without which every `applies_to` check in Stage 4 stayed unverifiable and G18/G19/G20 had no reachable input) | LLM-side → human |
-| Stage 3 | interactions (I) + reliance (O) + boundary contracts + bridge specs + witness specs + exemptions + protocol-debt records + conflict resolutions — independent candidate sources | `draft boundary-drafting`/`interaction-drafting`/`bridge-drafting`/`witness-drafting`/`exemption-drafting`/`protocol-debt-drafting`/`conflict-resolution-drafting` → `approve draft`/`pair`/`exemption-pair` | LLM-side → human |
+| Stage 3 | interactions (I) + reliance (O) + boundary contracts + bridge specs + witness specs + exemptions + protocol-debt records + conflict resolutions + closure profile — independent candidate sources | `draft boundary-drafting`/`interaction-drafting`/`bridge-drafting`/`witness-drafting`/`exemption-drafting`/`protocol-debt-drafting`/`conflict-resolution-drafting`/`closure-profile-drafting` → `approve draft`/`pair`/`exemption-pair` | LLM-side → human |
 | Stage 4 | adjudication: G1a/G1b/G2/G2+/R2/G4/G5/G11/G15, **plus G18** (witness coverage) | `validate boundary\|interaction\|exemption\|protocol-debt\|bridge\|evidence\|conflict-resolution\|witness`, `gate g18` | read-only |
 | Stage 4.5 | promotion (detached receipt, explicit `artifact_manifest`); **G20** (witness degeneracy, warn); generated projections | `approve promotion`, `validate promotion`, `gate g20`, `report feature-ledger`, `report contact-sheet` | deterministic+human / read-only / projection |
 | Stage 5 | emission (`emit_stubs.py`, G8) — not yet implemented in this codebase as of this writing | — | — |
 | Stage 6 | attach gate (attachment dimension only) — not yet implemented | — | — |
-| Stage 7 | work-package manifest, read-only, hash-pinned incl. gate code | `validate work-package` | read-only |
+| Stage 7 | work-package manifest, derived from the plan and validated project artifacts, then written under an exact-path grant | `generate-work-package`, `validate work-package` | bounded generator write / read-only |
 | — (orchestration) | one issue → one owner → one worktree → one PR; real implementation happens here (`crates/*/src/`, the actual port) | *(not a `ligature` command)* | — |
 | Stage 8A | implementation verification: C_static extraction, callsite scope, bridge checks, R1/G16, **G19** (witness determinism, re-dispatches `witness_backend` fresh and compares against the witness spec's stored `determinism.value_hash` — it does not parse `render-witness`'s output file, though `render-witness` is what puts a value there to compare against in the first place) | `extract-c-static`, `validate callsites`, `check-bridges`, `gate g9`, `gate r1-g16`, `render-witness`, `gate g19` | read-only (internal ops write, §3) |
 | Stage 8B | acceptance (non-normative): Mode P = differential testing, Mode R = G10R | *(project-specific tooling, not a `ligature` command — plan.md's own G10 is not implemented anywhere in this codebase; nothing in `gate <gate-id>` reads `ci/results/differential_ledger.json` or any equivalent)* | — |
-| Stage 8C | release closure: **G14** `satisfies()` over the transitive closure + CG6 well-foundedness discharge, reading a pre-authored closure profile (`specs/_closure/<cluster>.json` — G14 refuses if the directory is absent; it does not create the file) against work-package manifests, callsite reports, and bridge data → confirms `closure_kind` or names a degradation record. The ACHIEVED side G14 evaluates against is produced by **`record-assurance`** (#87) from the verifier's own proof certificates — nothing else can write it | `validate closure`, `record-assurance`, `gate g14` | read-only (`record-assurance` writes the report, §3) |
+| Stage 8C | release closure: **G14** `satisfies()` over the transitive closure + CG6 well-foundedness discharge, reading a human-approved closure profile (`specs/_closure/<cluster>.json` — G14 refuses if absent; it does not create the file) against work-package manifests, callsite reports, and bridge data → confirms `closure_kind` or names a degradation record. Stage 3 profile drafting and Stage 7 manifest generation support profile-first and manifest-first ordering; G14 checks the completed profile membership against manifests tied to the accepted cluster promotion receipt. The ACHIEVED side G14 evaluates against is produced by **`record-assurance`** (#87) from the verifier's own proof certificates — nothing else can write it | `validate closure`, `record-assurance`, `gate g14` | read-only (`record-assurance` writes the report, §3) |
 | (cross-cutting) | pilot-cluster ranking, gold-set measurement — not stage-bound, meaningful once concept/verifier/edge structure exists | `report pilot-cluster`, `validate gold-set`, `report gold-set-measurement` | read-only / projection |
 
 Two corrections to a natural first reading of this table:
@@ -95,10 +95,13 @@ Two corrections to a natural first reading of this table:
 - **The closure profile is an input to Stage 8C, not its output.**
   `gate g14` reads `specs/_closure/<cluster>.json`'s declared `closure_kind`
   and checks it against the evidence it can actually compute
-  (`check_closure_kind`); it does not write that file. Something upstream
-  (today: hand-authored, or a future `draft closure`/`approve` path once
-  closure profiles are wired into the checkpoint mechanism — not yet the
-  case in this codebase) must produce it before Stage 8C can run at all.
+  (`check_closure_kind`); it does not write that file. Stage 3's
+  `closure-profile-drafting` template plus `approve` produces the reviewed
+  profile. Its `work_packages` can come from approved Stage 7 plans before
+  manifest generation (profile-first), or from generated manifests
+  (manifest-first). Stage 7 permits the latter ordering when no profile
+  exists; after approval, G14 checks the two sets against the accepted
+  promotion receipt before closure can pass.
 - **`report feature-ledger`/`contact-sheet` are Stage 4.5, not Stage 8A.**
   They project over G18/G19/G20 findings, but the ledger/contact-sheet
   generation itself is a Stage 4.5 review artifact (plan.md §16.5's "review

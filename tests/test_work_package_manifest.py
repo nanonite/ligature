@@ -268,8 +268,13 @@ def test_self_referential_guarantee_is_refused():
 
 
 def test_missing_and_ambiguous_authoritative_sources_are_refused():
-    with pytest.raises(ManifestDerivationError, match="no closure profile"):
-        derive_manifest(make_request(), make_state(closure_profiles=()))
+    # Manifest-first is a supported bootstrap: the promotion receipt and
+    # descriptor still anchor this package; profile membership is deferred
+    # until the approved profile and generated manifests can be checked by G14.
+    manifest = derive_manifest(make_request(), make_state(closure_profiles=()))
+    assert manifest["work_package"] == "WP-SCHED-001"
+    assert manifest["depends_on"] == ["WP-SCHED-000"]
+
     with pytest.raises(ManifestDerivationError, match="2 closure profiles"):
         derive_manifest(
             make_request(),
@@ -286,6 +291,21 @@ def test_missing_and_ambiguous_authoritative_sources_are_refused():
             make_request(),
             make_state(promotion_receipts=make_state().promotion_receipts * 2),
         )
+
+
+def test_manifest_first_defers_dependency_membership_until_g14():
+    request = make_request(depends_on=("WP-SCHED-FUTURE-001",))
+    manifest = derive_manifest(request, make_state(closure_profiles=()))
+    assert manifest["depends_on"] == ["WP-SCHED-FUTURE-001"]
+
+    with pytest.raises(ManifestDerivationError, match="resolves to no work package"):
+        derive_manifest(request, make_state())
+
+
+def test_profile_first_keeps_membership_as_a_hard_generator_check():
+    request = make_request(work_package="WP-SCHED-OTHER-001", depends_on=())
+    with pytest.raises(ManifestDerivationError, match="not listed in cluster"):
+        derive_manifest(request, make_state())
 
 
 def test_conflicting_authoritative_assurance_is_refused():

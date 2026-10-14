@@ -1782,6 +1782,133 @@ def apply_degradation(findings: list[Finding], degradation: dict | None) -> list
     return result
 
 
+def check_profile_manifest_membership(
+    workspace: Path,
+    cluster: str,
+    profile: dict,
+    manifests: dict[str, dict],
+    descriptor: dict | None,
+) -> list[Finding]:
+    """Require a closure profile to name exactly the packages tied to its
+    accepted promotion receipt.
+
+    A profile-first workflow can seed membership from approved plans, while
+    a manifest-first workflow can generate packages before a profile exists.
+    The promotion receipt is the durable cluster key shared by both paths.
+    When a receipt is present, omission and cross-cluster additions are
+    blocking G14 findings; the profile cannot silently shrink the set that
+    the gate checks. Workspaces with older hand-authored manifests and no
+    receipt retain their existing validation path.
+    """
+    receipt_dir = workspace / "specs" / "_promotions"
+    if not receipt_dir.is_dir():
+        return []
+    suffixes = {".json", ".yaml", ".yml"}
+    try:
+        receipts = sorted(
+            path
+            for path in receipt_dir.iterdir()
+            if path.is_file() and path.stem == cluster and path.suffix.lower() in suffixes
+        )
+    except OSError as exc:
+        return [
+            Finding(
+                "G14",
+                cluster,
+                f"cannot inspect promotion receipts in {receipt_dir}: {exc}",
+            )
+        ]
+    if not receipts:
+        return []
+    if len(receipts) != 1:
+        return [
+            Finding(
+                "G14",
+                cluster,
+                f"cannot verify profile membership: {len(receipts)} promotion receipts name this cluster; "
+                "keep exactly one canonical receipt",
+            )
+        ]
+
+    # Local imports keep the G14 -> promotion validator -> feature ledger ->
+    # G14 dependency out of module initialization.
+    import validate_promotion_receipt  # noqa: E402
+
+    receipt_path = receipts[0]
+    try:
+        receipt_findings = validate_promotion_receipt.validate_file(
+            receipt_path,
+            validate_promotion_receipt.load_validator(),
+            workspace,
+            descriptor,
+        )
+    except Exception as exc:
+        return [
+            Finding(
+                "G14",
+                cluster,
+                f"cannot verify profile membership because promotion receipt {receipt_path} "
+                f"could not be validated: {exc}",
+            )
+        ]
+    errors = [finding for finding in receipt_findings if finding.severity == "error"]
+    if errors:
+        return [
+            Finding(
+                "G14",
+                cluster,
+                f"cannot verify profile membership because promotion receipt {receipt_path} is invalid: "
+                f"{errors[0]}",
+            )
+        ]
+    try:
+        receipt = validate_promotion_receipt._load_receipt(receipt_path)
+    except Exception as exc:
+        return [
+            Finding(
+                "G14",
+                cluster,
+                f"cannot read promotion receipt {receipt_path} to verify profile membership: {exc}",
+            )
+        ]
+    promotion_id = receipt.get("promotion_id") if isinstance(receipt, dict) else None
+    if not isinstance(promotion_id, str):
+        return [
+            Finding("G14", cluster, f"promotion receipt {receipt_path} has no valid promotion_id")
+        ]
+
+    receipt_members = {
+        work_package
+        for work_package, manifest in manifests.items()
+        if manifest.get("provenance", {}).get("promotion_id") == promotion_id
+    }
+    declared_members = set(profile.get("work_packages", ()))
+    omitted = sorted(receipt_members - declared_members)
+    foreign = sorted(
+        work_package
+        for work_package in declared_members & manifests.keys()
+        if manifests[work_package].get("provenance", {}).get("promotion_id") != promotion_id
+    )
+    if not omitted and not foreign:
+        return []
+
+    details = []
+    if omitted:
+        details.append("omits generated package(s) " + ", ".join(omitted))
+    if foreign:
+        details.append(
+            "includes package(s) tied to another promotion " + ", ".join(foreign)
+        )
+    return [
+        Finding(
+            "G14",
+            cluster,
+            f"closure-profile work_packages do not match manifests tied to promotion "
+            f"{promotion_id!r}: {'; '.join(details)}",
+        )
+    ]
+
+
 def gate_cluster(
     workspace: Path,
     cluster: str,
@@ -1816,6 +1943,11 @@ def gate_cluster(
         workspace, cluster, degradation, descriptor
     )
     findings.extend(degradation_findings)
+    findings.extend(
+        check_profile_manifest_membership(
+            workspace, cluster, profile, manifests, descriptor
+        )
+    )
     degradation_record = degradation[1] if degradation is not None else None
 
     missing = [wp for wp in profile["work_packages"] if wp not in manifests]

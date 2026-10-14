@@ -422,7 +422,7 @@
     {
       "name": "generate-work-package",
       "func": "cmd_generate_work_package",
-      "stable_mapping": "chainlink #122: reads a JSON/YAML Stage 7 plan and validated descriptor-backed closure, promotion, boundary, interaction and bridge sources, then derives and validates one canonical ci/manifest/<WP>.json. A same-issue exact-path write grant is required. Writes atomically, refuses conflicting content, records issue/grant/path/before-after hashes/result in the protected-writes ledger, permits identical no-op reruns, and prevents grant replay after deletion. --json returns the audit event or a structured refusal."
+      "stable_mapping": "chainlink #122/#134: reads a JSON/YAML Stage 7 plan and validated descriptor-backed promotion, boundary, interaction and bridge sources; closure profile is optional for manifest-first scheduling and constrains membership when present. Derives and validates one canonical ci/manifest/<WP>.json under a same-issue exact-path write grant. Writes atomically, refuses conflicting content, records issue/grant/path/before-after hashes/result in the protected-writes ledger, permits identical no-op reruns, and prevents grant replay after deletion. G14 checks final profile membership against manifests tied to the accepted cluster promotion receipt. --json returns the audit event or a structured refusal."
     },
     {
       "name": "doctor",
@@ -496,7 +496,7 @@
       "path": "scripts/gate_g14.py",
       "role": "gate",
       "disposition": "runtime-required",
-      "summary": "G14: release closure over the transitive assurance dependency graph; a degradation record releases a cluster only once its review block is provenanced and a ratified human ruling covers its exact bytes (chainlink #97), and only when the canonical validated degradation-record loader accepts it (chainlink #100)."
+      "summary": "G14: release closure over the transitive assurance dependency graph; checks that each closure profile exactly names the work-package manifests tied to its valid promotion receipt, recomputes closure conditions, and accepts degradation only after review provenance and a ratified ruling over exact bytes (#97/#100/#134)."
     },
     {
       "path": "scripts/gate_g18.py",
@@ -562,7 +562,7 @@
       "path": "scripts/pipeline.py",
       "role": "entrypoint",
       "disposition": "runtime-required",
-      "summary": "The pipeline CLI entrypoint (plan.md \u00a76.1, chainlink #37); draft/approve dispatch to closure profiles and degradation records at specs/_closure/*.json, workspace-level like conflict-resolution (chainlink #98)."
+      "summary": "The pipeline CLI entrypoint (plan.md \u00a76.1, chainlink #37); draft/approve dispatch to workspace-level closure profiles and degradation records, and closure-profile drafting requires an explicit JSON work-package membership list for either profile-first or manifest-first Stage 3/7 order (#98/#134)."
     },
     {
       "path": "scripts/project_descriptor.py",
@@ -756,13 +756,13 @@
       "path": "scripts/work_package_manifest.py",
       "role": "generator",
       "disposition": "runtime-required",
-      "summary": "chainlink #121: pure Stage 7 work-package derivation. Resolves selected obligations, bridges, assumptions, dependencies, verifier assurance, promotion provenance, and gate hashes only from validated project artifacts; refuses missing, ambiguous, contradictory, duplicate, dangling, stale, or out-of-policy inputs; emits schema-checked canonical JSON bytes without writing files or authorization records."
+      "summary": "chainlink #121/#134: pure Stage 7 work-package derivation. Resolves selected obligations, bridges, assumptions, dependencies, verifier assurance, promotion provenance, and gate hashes only from validated project artifacts; accepts manifest-first bootstrap without a closure profile while deferring profile-dependent membership to G14, and retains strict membership checks when a profile exists. Emits schema-checked canonical JSON without writing files or authorization records."
     },
     {
       "path": "scripts/generate_work_package.py",
       "role": "generator",
       "disposition": "runtime-required",
-      "summary": "chainlink #122: Stage 7 command boundary. Loads canonical inputs through existing validators, verifies an active exact issue/path/write capability, derives and validates before writing ci/manifest/<WP>.json atomically, and appends a strict use-audit event that prevents replay after deletion; grant-reader ignores the audit event as authority."
+      "summary": "chainlink #122/#134: Stage 7 command boundary. Loads canonical inputs through existing validators, verifies an active exact issue/path/write capability, derives and validates before writing ci/manifest/<WP>.json atomically, and appends a strict use-audit event that prevents replay after deletion; supports manifest-first ordering when the closure profile is not yet present."
     },
     {
       "path": "scripts/promote_evidence.py",

@@ -8,6 +8,7 @@ locations is part of what the gate is asserting, and a test that handed
 the gate pre-loaded dicts would not be testing the gate anyone runs.
 """
 import copy
+import hashlib
 import io
 import json
 import os
@@ -150,7 +151,13 @@ def achieved(
     }
 
 
-def manifest(work_package, provided=(), required=(), bridges=()) -> dict:
+def manifest(
+    work_package,
+    provided=(),
+    required=(),
+    bridges=(),
+    promotion_id="PROM-SCHEDULER-CORE-001",
+) -> dict:
     return {
         "schema": "work-package-manifest/1.0",
         "work_package": work_package,
@@ -162,7 +169,7 @@ def manifest(work_package, provided=(), required=(), bridges=()) -> dict:
         "obligations": [obligation for obligation, _ in provided],
         "provenance": {
             "base_commit": "a1b2c3d",
-            "promotion_id": "PROM-SCHED-001",
+            "promotion_id": promotion_id,
             "artifact_set_hash": "sha256:" + "2" * 64,
             "toolchain": "nightly-2026-05-01",
             "target": "x86_64-unknown-linux-gnu",
@@ -305,9 +312,12 @@ class Workspace:
             "WP-B",
             provided=[("TaskQueue.C003", required_assurance())],
             required=[("Clock.C007", required_assurance())],
+            promotion_id="PROM-DEPENDENCIES-001",
         ))
         self.write("ci/manifest/WP-C.json", manifest(
-            "WP-C", provided=[("Clock.C007", required_assurance())]
+            "WP-C",
+            provided=[("Clock.C007", required_assurance())],
+            promotion_id="PROM-DEPENDENCIES-001",
         ))
         self.write("ci/results/WP-A.json", {
             "schema_version": "1.0",
@@ -904,6 +914,61 @@ class DependencyTest(GateTestCase):
         self.ws.patch("ci/manifest/WP-C.json", lambda d: d.update({"work_package": "WP-OTHER"}))
         _, workspace_findings = self.ws.cluster()
         self.assertTrue(any("its filename says" in str(f) for f in workspace_findings))
+
+
+class ProfileManifestMembershipTest(GateTestCase):
+    def write_cluster_receipt(self):
+        artifact = self.ws.write("docs/reliance-policy.json", {"policy": "fixture"})
+        self.ws.write(
+            "specs/_promotions/scheduler-core.json",
+            {
+                "schema": "promotion-receipt/1.0",
+                "promotion_id": "PROM-SCHEDULER-CORE-001",
+                "cluster": "scheduler-core",
+                "reviewer": "alice",
+                "policy_version": "reliance-policy@1.0",
+                "schema_versions": {"work-package-manifest": "1.0"},
+                "accepted_at": "2026-10-13",
+                "artifact_manifest": [
+                    {
+                        "path": "docs/reliance-policy.json",
+                        "hash": "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                    }
+                ],
+            },
+        )
+
+    def test_g14_rejects_profile_membership_from_another_promotion(self):
+        self.write_cluster_receipt()
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda profile: profile["work_packages"].append("WP-B"),
+        )
+
+        outcome, _ = self.ws.cluster()
+        self.assertTrue(
+            any(
+                "do not match manifests tied to promotion" in finding
+                and "WP-B" in finding
+                for finding in self.errors(outcome)
+            )
+        )
+
+    def test_g14_rejects_omitting_a_manifest_tied_to_the_cluster_receipt(self):
+        self.write_cluster_receipt()
+        self.ws.write(
+            "ci/manifest/WP-X.json",
+            manifest("WP-X", promotion_id="PROM-SCHEDULER-CORE-001"),
+        )
+
+        outcome, _ = self.ws.cluster()
+        self.assertTrue(
+            any(
+                "do not match manifests tied to promotion" in finding
+                and "WP-X" in finding
+                for finding in self.errors(outcome)
+            )
+        )
 
 
 class BridgeTest(GateTestCase):

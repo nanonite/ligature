@@ -450,6 +450,12 @@ ran the command, naming no alternative, after `--help` had listed two of
 the eleven. Every `prompts/*.md` is in the registry, enforced by a test, so
 a template cannot ship undiscoverable and cannot be discoverable unshipped.
 
+`closure-profile-drafting` requires `--var work_packages=<JSON array>`.
+Use ids from approved Stage 7 plans for profile-first scheduling, or ids
+from generated manifests for manifest-first scheduling. The profile remains
+a human-approved declaration; G14 checks its membership against manifests
+associated with the cluster's accepted promotion receipt.
+
 ## 5. `approve <operation>`
 
 | operation | legacy flat command | authority |
@@ -1128,9 +1134,12 @@ the files are on disk, and the honest report is the one that says so.
 --target <triple> [--feature <name> ...] [--grant-id GW-ID] [--json]` is the
 Stage 7 writer. The plan is a JSON or YAML `WorkPackageRequest`; it selects
 scope but cannot supply normative content. Descriptor-backed canonical
-closure profiles, promotion receipts, boundaries, interactions and bridges
-are loaded only after their existing validators accept them. The manifest
-deriver's field/source table is the content policy; the command runs
+promotion receipts, boundaries, interactions and bridges are loaded only
+after their existing validators accept them. A closure profile is optional
+for manifest-first scheduling. When one exists, it constrains package and
+dependency membership; when it does not, G14 checks those relationships
+after the profile is approved. The manifest deriver's field/source table is
+the content policy; the command runs
 `validate-work-package` over the result before attempting a write.
 That validation uses the same descriptor-declared canonical boundary
 directories as the `validate-work-package` CLI, so trusted assumptions must
@@ -1162,13 +1171,48 @@ their own gate results and fail-closed exit codes.
 #### Packaged workflow and common refusals (chainlink #124)
 
 Run generation from the initialized project root after its descriptor,
-closure profile, accepted promotion receipt, and selected crate artifacts
-are valid. The workspace must be the Git repository root and have a committed
-HEAD. The plan's `issue` and `work_package` must match the issue and the
-cluster's closure-profile membership; each selected interaction must agree
-with the requested target and feature set. Function paths use Rust crate
-identifiers, so a Cargo package named `black-box-fixture-core` is referenced
-as `black_box_fixture_core::...`.
+accepted promotion receipt, and selected crate artifacts are valid. The
+workspace must be the Git repository root and have a committed HEAD. If a
+closure profile exists, the plan's `work_package` must appear in its
+membership. Without a profile, package and dependency membership are
+provisional until G14 checks the approved profile against manifests tied to
+the cluster's accepted promotion receipt. Each selected interaction must
+agree with the requested target and feature set. Function paths use Rust
+crate identifiers, so a Cargo package named `black-box-fixture-core` is
+referenced as `black_box_fixture_core::...`.
+
+Both orderings are supported. In profile-first order, provide approved plan
+ids as provisional membership; Stage 7 refuses any generated package omitted
+from that profile. In manifest-first order, generate all cluster manifests
+from approved plans before drafting the profile. In either order, approve the
+profile through the human checkpoint, then run G14; a missing, extra, or
+cross-cluster package blocks closure.
+
+Profile-first:
+
+```text
+ligature draft 3 closure-profile-drafting specs/_closure/<cluster>.json --var cluster=<cluster> --var 'work_packages=["WP-A","WP-B"]'
+ligature approve specs/_closure/<cluster>.json --reviewer <human>
+ligature authorize-write --issue N --path ci/manifest/<WP>.json --op write --issuer <human>
+ligature generate-work-package --plan <path> --issue N --toolchain <value> --target <triple> [--feature <name> ...]
+ligature gate g14
+```
+
+Manifest-first:
+
+```text
+ligature authorize-write --issue N --path ci/manifest/<WP>.json --op write --issuer <human>
+ligature generate-work-package --plan <path> --issue N --toolchain <value> --target <triple> [--feature <name> ...]
+ligature draft 3 closure-profile-drafting specs/_closure/<cluster>.json --var cluster=<cluster> --var 'work_packages=["WP-A","WP-B"]'
+ligature approve specs/_closure/<cluster>.json --reviewer <human>
+ligature gate g14
+```
+
+Repeat the exact-path grant and generation for every manifest. The supplied
+membership list must include the complete set of plans or generated manifests
+for the cluster. A profile-first declaration is provisional until its
+manifests exist, and a manifest-first set is provisional until its profile
+is approved and G14 accepts the match.
 
 The normal sequence is:
 
@@ -1307,7 +1351,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `write-set-check` | stable; read-only write-set conformance report -- files outside `allowed_roots` (`out-of-set`) and files inside `protected_roots` that no declaration vouches for (`protected-write`), relative to the project descriptor, with the verdict also carried as `status --json`'s `write_set.state` and as high-severity `write-set` findings in `check --json`. The protected surface is reported per declared pattern, including patterns matching no file (#77, #103, §8). `--issue N` scopes the write grants it consumes to one issue; with no `--issue`, no grant is consulted. `authorized_writes[]` reports what a grant covered (including a `--one-shot` grant's `spent` attribution) and `grants[]` carries the whole ledger with each record's status, so the audit is a machine-readable surface rather than a claim (#114, §8) |
 | `authorize-write` | stable; records ONE issue-scoped capability authorizing a single sanctioned write into a declared `protected_roots` path, as an append-only entry in `ci/results/protected-writes.jsonl` -- the third route out of the dead end #103's enforcement left (widen `allowed_roots`, hand-edit outside every tool, or record a bound grant; §8, #114). The record binds the exact path or an explicitly bounded pattern, the operation (`write`|`delete`), the issue, `issued_at`/`expires_at`, the one-shot flag, the named issuer, the grant id (a hash of that binding, recomputed on read) and audit metadata. Refused, writing nothing, for a path no `protected_roots` pattern covers, one `allowed_roots` already permits, an absolute/escaping/vacuous/directory path, an undeclared `--issuer-kind supervisor`, a TTL outside `[1, 86400]`, an `--issued-at` in the future, `--one-shot` on a pattern, a replayed grant id, or a ledger that itself sits inside a protected root. A human checkpoint in the `human` lane; the `supervisor` lane needs the identity declared in `write_set.authorized_supervisors`. Exits 0/2 per docs/exit-code-contract.md |
 | `scaffold-crate` | stable; writes a MISSING crate's `Cargo.toml` and canonical `src/lib.rs`, deterministically and from the project descriptor alone, in a Mode P (`port`) workspace -- the generator half of `authorize-write`'s capability record (§8, #115). Exactly two files: the manifest, which is a protected-root write and requires an active issue-scoped `write` grant at exactly that path (read through the same `write_authorization` reader `write-set-check` consumes), and the skeleton, which is inside `allowed_roots`, needs no capability record, and is never overwritten once it exists. There is no flag for manifest content and no flag naming a target: both files are pure functions of the descriptor's declared `crate_dir`, and the command accepts only a descriptor-declared crate name. Refused, writing nothing, for a crate no `crates[]` declares (or one two of them declare alike), an absolute/escaping/glob name, a non-`port` mode, a target inside a canonical pipeline artifact location, a declared crate's `specs/` tree or the pinned upstream checkout, a manifest no `protected_roots` pattern covers or `allowed_roots` already permits, no active grant (with the status that stopped each nearby record named), a `--grant-id` mismatch, or an existing manifest whose bytes differ. Idempotent by hash: identical bytes are `unchanged` and nothing is written. Emits a versioned receipt (`docs/scaffold-receipt-schema.json`) recording the issue, the grant consumed, both generated paths with before/after hashes, and the result of every named check -- including offline Cargo workspace membership and `write_set.check_write_set`'s OWN verdict on the write just made. Exits 0/1/2 per docs/exit-code-contract.md |
-| `generate-work-package` | stable; reads a JSON/YAML Stage 7 plan and descriptor-backed canonical closure, promotion, boundary, interaction and bridge inputs, derives the manifest with scripts/work_package_manifest.py, and writes only `ci/manifest/<work_package>.json` after the derived document passes `validate-work-package` and an active exact-path `write` grant for the same issue/path is verified (#122). The issue must match the plan; toolchain/target/features are explicit and selected interaction configuration is checked. Refused, writing nothing, for an invalid/mismatched plan, invalid authoritative inputs, missing/expired/wrong-issue/wrong-operation/wrong-path/replayed grant, a conflicting target, a symlink/escaping target or invalid audit history. Identical bytes are `unchanged`. Each successful run appends a strict event with issue, grant id, path, before/after hashes and command result to `ci/results/protected-writes.jsonl`; this event is ignored by the grant reader and is used only to prevent replay after output deletion. `--json` emits that event or a structured error with stable code, message and required inputs; exits 0/2 per docs/exit-code-contract.md |
+| `generate-work-package` | stable; reads a JSON/YAML Stage 7 plan and descriptor-backed canonical promotion, boundary, interaction and bridge inputs; closure profile is optional for manifest-first scheduling and constrains package/dependency membership when present. Derives the manifest with scripts/work_package_manifest.py, and writes only `ci/manifest/<work_package>.json` after the derived document passes `validate-work-package` and an active exact-path `write` grant for the same issue/path is verified (#122/#134). The issue must match the plan; toolchain/target/features are explicit and selected interaction configuration is checked. Refused, writing nothing, for an invalid/mismatched plan, invalid authoritative inputs, missing/expired/wrong-issue/wrong-operation/wrong-path/replayed grant, a conflicting target, a symlink/escaping target or invalid audit history. Identical bytes are `unchanged`. Each successful run appends a strict event with issue, grant id, path, before/after hashes and command result to `ci/results/protected-writes.jsonl`; this event is ignored by the grant reader and is used only to prevent replay after output deletion. After profile approval, G14 checks exact membership against manifests tied to the accepted cluster promotion receipt. `--json` emits that event or a structured error with stable code, message and required inputs; exits 0/2 per docs/exit-code-contract.md |
 | `configure-cargo-profile` | stable; merges only typed profile keys named by the caller into the workspace-root `[profile.<name>]` table in `Cargo.toml`. Requires an active exact-path `write` grant for issue N and `Cargo.toml`; invalid fields, wrong-issue or pattern grants, invalid TOML, and Cargo metadata failures are refused. Failed Cargo validation restores the original file. Unrelated TOML text and values are preserved. Successful and unchanged runs append a strict event (`docs/cargo-profile-audit-schema.json`) recording issuer, issue, profile, typed values, result, and validator status. The event contains no Git diff, commit history, or rollback copy; those remain Git's job. A one-shot grant authorizes at most one changed profile operation. Exits 0/2 per docs/exit-code-contract.md |
 | `configure-crate` | stable; `--crate` selects one existing descriptor-declared crate and `--profile cargo-verus` applies the typed Verus configuration to only that crate's `Cargo.toml` in a port workspace. Requires an active exact-path grant for the same issue and manifest. Derives an exact `vstd` pin from the Verus distribution and refuses a Rust toolchain mismatch, foreign dependency source, or unapproved repin. Preserves unrelated manifest values and sibling crate manifests, restores `Cargo.lock`, and validates with Cargo metadata/check, Verus verify/build, and Cargo test. Successful and unchanged events validate against `docs/cargo-verus-profile-audit-schema.json`, recording authorization, profile transition, before/after manifest hashes and validator status; Git retains the printed diff, history and rollback. Exits 0/2 per docs/exit-code-contract.md (#125) |
 | `validate` | alias → `validate boundary` |

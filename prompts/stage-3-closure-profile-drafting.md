@@ -26,7 +26,7 @@ as a declaration about a cluster.
   "schema_version": "1.0",
   "cluster": "<{{cluster}}, verbatim>",
   "closure_kind": "deductive | bounded | partial",
-  "work_packages": ["<work-package manifest id, e.g. WP-SCHED-001>"],
+  "work_packages": {{work_packages}},
   "conditions": {
     "single_verifier_system": true,
     "owning_verifier": "creusot | kani | verus",
@@ -47,6 +47,15 @@ false inside the block — no aliases, no omissions. Do **not** emit a
 
 - `{{cluster}}` — the target cluster id, precomputed by the caller. Must
   equal the eventual filename stem (G1b, `scripts/validate_closure.py`).
+- `{{work_packages}}` — a non-empty JSON array of the cluster's work-package
+  ids, supplied by the caller. In a profile-first workflow, take these ids
+  from the approved Stage 7 plans; they are provisional until manifests are
+  generated. In a manifest-first workflow, take them from the generated
+  manifests associated with this cluster's accepted promotion receipt.
+  Never invent or infer ids from the cluster name. When both plans and
+  manifests are available, include the complete planned membership and
+  surface any disagreement for human resolution; G14 checks the final
+  membership against the generated manifests.
 - Re-entry only (plan.md §6 diagram: change requests/drift findings route
   back to Stage 0/3): `{{prior_artifact}}` (the last drafted profile for
   this cluster, if any) and `{{finding}}` (the specific gate failure or
@@ -80,10 +89,14 @@ rounding-up.
 
 ### 2. `work_packages` — what the cluster is made of
 
-The `ci/manifest/<id>.json` manifests whose definition of done makes up
-this cluster — at least one. Derive membership from the workspace's own
-manifests, never from the cluster's name; the transitive closure G14
-computes starts exactly here.
+Use the caller-supplied `{{work_packages}}` array. A supported profile-first
+sequence supplies ids from the approved Stage 7 plans before generating
+manifests. A supported manifest-first sequence supplies ids from manifests
+already generated from those plans. The list is a declaration to review,
+not proof that those packages exist or belong in this cluster: Stage 7 checks
+each generated package against an existing profile, and G14 checks that the
+approved profile and manifests agree after both sides exist. Do not report a
+G14 pass until that final check succeeds.
 
 ### 3. `conditions` — declared, then recomputed
 

@@ -22,9 +22,9 @@ hard error, never a value to invent.
 
 ``AuthoritativeState`` is the bundle of already-validated project
 artifacts the content is read from: the project descriptor, the cluster's
-closure profile, the cluster's promotion receipt, the boundary contracts,
-the interaction specs, the bridge specs, and (optionally) a declared
-gate-hash map. Every value in the output is either a constant of the
+optional closure profile, the cluster's promotion receipt, the boundary
+contracts, the interaction specs, the bridge specs, and (optionally) a
+declared gate-hash map. Every value in the output is either a constant of the
 schema, a reference resolved against one of those artifacts, or a value
 computed mechanically from one (a hash, a canonical report path, a
 canonical sort order).
@@ -41,8 +41,8 @@ manifest field                  authoritative source                            
 ``schema``                      constant ``work-package-manifest/1.0``                      fixed
 ``work_package``                ``WorkPackageRequest.work_package``                        plan wins; pattern-validated
 ``issue``                       ``WorkPackageRequest.issue``                               plan wins; ``chainlink:N``
-``depends_on``                  ``WorkPackageRequest`` refs                                 plan selects; must resolve inside the
-                                                                                            closure profile's ``work_packages``
+``depends_on``                  ``WorkPackageRequest`` refs                                 plan selects; must resolve inside profile
+                                                                                            membership when present; otherwise G14 checks it
 ``coupling_notes``              ``WorkPackageRequest.coupling_notes``                      plan wins (advisory, never a merge order)
 ``scheduling_rule``             ``WorkPackageRequest`` or the default                      plan overrides the documented default
 ``functions``                   ``WorkPackageRequest.functions``                           plan selects; must name a declared crate
@@ -74,15 +74,17 @@ Rejections
 * a duplicate identifier anywhere a set is declared (functions, dependencies,
   obligations, bridges, gates, write-set patterns, gate runners, features,
   assumption references);
-* a dangling dependency (a ``depends_on`` entry that resolves to no work
-  package in the cluster's closure profile) or a self-dependency;
+* a dangling dependency (when a closure profile is present, a ``depends_on``
+  entry that resolves to no package in that profile) or a self-dependency;
 * a self-referential guarantee (an obligation this package both provides and
   requires);
 * a stale integrity hash (a declared gate hash that no longer matches the file
   on disk, or a promotion artifact whose current bytes no longer match the
   receipt);
-* a missing or ambiguous authoritative input (no closure profile / receipt /
-  interaction / bridge for a referenced id, or more than one);
+* a missing or ambiguous authoritative input (no promotion receipt /
+  interaction / bridge for a referenced id, or more than one). A closure
+  profile is optional during manifest-first bootstrap; G14 checks the
+  completed profile against generated manifests after both sides exist;
 * a contradiction between the resolved assurance and the descriptor's declared
   verifier policy for the cluster.
 """
@@ -212,8 +214,8 @@ FIELD_SOURCES: tuple[FieldSource, ...] = (
     FieldSource("issue", "plan", "plan selects; chainlink:N"),
     FieldSource(
         "depends_on",
-        "plan + closure profile",
-        "plan selects; must resolve inside closure_profile.work_packages",
+        "plan + closure profile when present",
+        "plan selects; membership resolves against the profile when present and otherwise is checked by G14 after profile approval",
     ),
     FieldSource(
         "coupling_notes", "plan", "advisory scheduling input, never a merge instruction"
@@ -693,6 +695,32 @@ def _single_match(
     return matches[0]
 
 
+def _optional_single_match(
+    items: Iterable[Mapping[str, Any]],
+    identifier: Callable[[Mapping[str, Any]], Any],
+    wanted: str,
+    *,
+    kind: str,
+) -> Mapping[str, Any] | None:
+    """Resolve an optional Stage 3 artifact while preserving uniqueness.
+
+    Stage 7 may run before the cluster's closure profile. In that ordering,
+    the descriptor and promotion receipt still anchor the cluster; G14
+    performs profile-dependent membership checks once both artifacts exist.
+    """
+    if any(not isinstance(item, Mapping) for item in items):
+        raise ManifestDerivationError(
+            "invalid-authoritative-state", f"{kind} sources must be validated mappings"
+        )
+    matches = [item for item in items if identifier(item) == wanted]
+    if len(matches) > 1:
+        raise ManifestDerivationError(
+            "ambiguous-source",
+            f"{len(matches)} {kind}s match {wanted!r}; the authoritative state must be unique",
+        )
+    return matches[0] if matches else None
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -708,17 +736,6 @@ def _sha256_file(path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Resolution against authoritative artifacts.
 # ---------------------------------------------------------------------------
-
-
-def _resolve_closure_profile(
-    state: AuthoritativeState, cluster: str
-) -> Mapping[str, Any]:
-    return _single_match(
-        state.closure_profiles,
-        lambda p: p.get("cluster"),
-        cluster,
-        kind="closure profile",
-    )
 
 
 def _resolve_receipt(state: AuthoritativeState, cluster: str) -> Mapping[str, Any]:
@@ -1022,10 +1039,10 @@ def _derive_functions(
 
 
 def _derive_dependencies(
-    request: WorkPackageRequest, closure_profile: Mapping[str, Any]
+    request: WorkPackageRequest, closure_profile: Mapping[str, Any] | None
 ) -> list[str]:
     _reject_duplicates(request.depends_on, "dependency")
-    known = set(closure_profile.get("work_packages") or ())
+    known = set(closure_profile.get("work_packages") or ()) if closure_profile else None
     for dependency in request.depends_on:
         _require_match(
             _WORK_PACKAGE_RE,
@@ -1038,7 +1055,7 @@ def _derive_dependencies(
                 "dangling-dependency",
                 f"work package {request.work_package!r} depends on itself",
             )
-        if dependency not in known:
+        if known is not None and dependency not in known:
             raise ManifestDerivationError(
                 "dangling-dependency",
                 f"dependency {dependency!r} resolves to no work package in cluster "
@@ -1716,10 +1733,15 @@ def derive_manifest(
         "invalid-plan",
         f"cluster {request.cluster!r} is not a cluster name",
     )
-    closure_profile = _resolve_closure_profile(state, request.cluster)
+    closure_profile = _optional_single_match(
+        state.closure_profiles,
+        lambda profile: profile.get("cluster"),
+        request.cluster,
+        kind="closure profile",
+    )
     receipt = _resolve_receipt(state, request.cluster)
-    known_packages = list(closure_profile.get("work_packages") or ())
-    if request.work_package not in known_packages:
+    known_packages = list(closure_profile.get("work_packages") or ()) if closure_profile else None
+    if known_packages is not None and request.work_package not in known_packages:
         raise ManifestDerivationError(
             "dangling-reference",
             f"work package {request.work_package!r} is not listed in cluster "
@@ -1731,7 +1753,11 @@ def derive_manifest(
         "missing-source",
         "descriptor declares no verifier for this cluster",
     )
-    closure_owner = (closure_profile.get("conditions") or {}).get("owning_verifier")
+    closure_owner = (
+        (closure_profile.get("conditions") or {}).get("owning_verifier")
+        if closure_profile
+        else None
+    )
     if closure_owner is not None and closure_owner != policy["owning"]:
         raise ManifestDerivationError(
             "contradictory-source",

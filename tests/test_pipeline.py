@@ -251,6 +251,39 @@ class CmdDraftEndToEndTest(unittest.TestCase):
         descriptor["llm_backend"] = {"kind": "claude", "command": f"{sys.executable} {stub_path}"}
         self.descriptor_path.write_text(json.dumps(descriptor))
 
+    def test_closure_profile_draft_requires_explicit_membership(self):
+        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+        target = self.workspace / "specs" / "_closure" / "scheduling.json"
+        error = io.StringIO()
+        with redirect_stderr(error):
+            code = pipeline.main(
+                [
+                    "--workspace", str(self.workspace),
+                    "--descriptor", str(self.descriptor_path),
+                    "draft", "3", "closure-profile-drafting", str(target),
+                    "--var", "cluster=scheduling",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("needs an explicit --var work_packages", error.getvalue())
+
+    def test_closure_profile_draft_rejects_malformed_membership_json(self):
+        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+        target = self.workspace / "specs" / "_closure" / "scheduling.json"
+        error = io.StringIO()
+        with redirect_stderr(error):
+            code = pipeline.main(
+                [
+                    "--workspace", str(self.workspace),
+                    "--descriptor", str(self.descriptor_path),
+                    "draft", "3", "closure-profile-drafting", str(target),
+                    "--var", "cluster=scheduling",
+                    "--var", "work_packages=not-json",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("must be a JSON array of WP ids", error.getvalue())
+
     def _run_draft(self, target: Path) -> int:
         return pipeline.main([
             "--workspace", str(self.workspace),

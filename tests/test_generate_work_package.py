@@ -332,6 +332,13 @@ class PackagedWorkspace:
         }
         self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
 
+        evidence_dir = root / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            ROOT / "tests/fixtures/evidence/valid/evidence/E-0143.json",
+            evidence_dir / "E-0143.json",
+        )
+
         crate_root = root / crate_dir
         crate_specs = crate_root / "specs"
         for directory in (crate_specs / "_boundaries", crate_specs / "_interactions", crate_specs / "_bridges"):
@@ -534,6 +541,38 @@ def test_packaged_clean_init_generation_is_idempotent_and_reaches_all_surfaces(
     assert write_set.returncode == 0, write_set.stderr + write_set.stdout
     assert report["write_set"]["state"] == "clean"
     assert not report["write_set"]["violations"]
+
+
+def test_packaged_manifest_first_bootstrap_defers_membership_to_g14(
+    packaged_workspace,
+):
+    project = packaged_workspace
+    profile_path = project.root / "specs/_closure/scheduling.json"
+    profile_path.unlink()
+
+    project.authorize_sources()
+    project.authorize("ci/manifest/WP-BLACK-BOX-001.json")
+    generated = project.generate()
+    assert generated.returncode == 0, generated.stderr + generated.stdout
+    manifest = json.loads(project.manifest.read_text())
+    assert manifest["work_package"] == "WP-BLACK-BOX-001"
+
+    profile = json.loads(
+        (ROOT / "tests/fixtures/closure/stale/specs/_closure/scheduler-core.json").read_text()
+    )
+    profile["cluster"] = "scheduling"
+    profile["work_packages"] = ["WP-OTHER-001"]
+    profile_path.write_text(json.dumps(profile, indent=2) + "\n")
+
+    mismatch = project.run("gate", "g14")
+    assert mismatch.returncode != 0
+    assert "do not match manifests tied to promotion" in mismatch.stdout
+    assert "WP-BLACK-BOX-001" in mismatch.stdout
+
+    profile["work_packages"] = ["WP-BLACK-BOX-001"]
+    profile_path.write_text(json.dumps(profile, indent=2) + "\n")
+    matched = project.run("gate", "g14")
+    assert "do not match manifests tied to promotion" not in matched.stdout
 
 
 def test_packaged_generation_reports_refusals_without_creating_a_manifest(

@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.3.7] - 2026-10-13
+
+### Fixed
+- Support profile-first and manifest-first Stage 3/7 workflows (#134)
+
 ## [1.3.6] - 2026-10-12
 
 ### Fixed

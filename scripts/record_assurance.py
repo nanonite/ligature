@@ -99,12 +99,19 @@ with one shared `--verus-json` result file; Kani uses
     bounded model defined by the hashed harness, so any broader manifest
     `minimum_scope` remains unsatisfied.
 
+A package with no provided guarantees and at least one required bridge may
+use `--bridges-only`. That mode requires a regular project descriptor and a
+clean G9 validation, then copies only the package's required passing bridge
+records. It writes no obligation records and leaves G14's checks in force.
+
 Report placement and the feature-ledger collision
 -------------------------------------------------
 The report is written to the manifest's own `report.emit` path -- the
 only path gate-g14 reads. An existing assurance report for the same work
-package is updated in place (its `bridge_records`, and obligation entries
-this run does not record, survive); an existing feature ledger -- what
+package is updated in place for verifier-input invocations (its `bridge_records`,
+and obligation entries this run does not record, survive). `--bridges-only`
+rebuilds the eligible no-guarantee package report from its required G9
+records. An existing feature ledger -- what
 some workspaces point `report.emit` at, including the pilot, which is why
 gate-g14 reported a non-schema-valid report at
 `ci/results/feature_ledger.json` -- is replaced with a warning naming the
@@ -1798,6 +1805,84 @@ def _bridge_records_for(workspace: Path, manifest: dict, base: dict) -> list[dic
     return entries
 
 
+def _bridge_only_records(
+    workspace: Path, manifest: dict, descriptor_path: Path | None = None
+) -> list[dict]:
+    """Build the entire report payload for a bridge-only work package.
+
+    The report may only copy current verifier records after G9 has
+    independently accepted the generated bridge harnesses and their
+    results. The package manifest remains the authority for membership:
+    unrelated workspace bridge records are never added to this report.
+    """
+    required = manifest["definition_of_done"]["required_preconditions_to_establish"]
+    descriptor_path = descriptor_path or (workspace / "project-descriptor.json")
+    if descriptor_path.is_symlink() or not descriptor_path.is_file():
+        raise InvalidRecordInput(
+            "bridge-only assurance requires a regular project-descriptor.json so G9 can "
+            "validate the recorded bridge checks"
+        )
+    from project_descriptor import ProjectDescriptorError, load_project_descriptor
+    from gate_g9 import gate_workspace as gate_g9_workspace
+    from gate_g9 import bridge_records_for
+
+    try:
+        descriptor = load_project_descriptor(descriptor_path)
+    except ProjectDescriptorError as exc:
+        raise InvalidRecordInput(f"cannot load project descriptor for G9: {exc}") from exc
+    findings, discovered = gate_g9_workspace(workspace, descriptor)
+
+    if findings:
+        detail = "; ".join(str(finding) for finding in findings[:5])
+        if len(findings) > 5:
+            detail += f"; and {len(findings) - 5} more finding(s)"
+        raise EvidenceNotEstablished(
+            f"G9 has not validated the workspace bridge records; refusing bridge-only report: {detail}"
+        )
+    if discovered == 0:
+        raise EvidenceNotEstablished("G9 discovered no promoted bridges to validate")
+
+    available = {entry["bridge_id"]: entry for entry in bridge_records_for(workspace)}
+    result: list[dict] = []
+    seen: set[str] = set()
+    for requirement in required:
+        bridge_id = requirement["bridge_id"]
+        if bridge_id in seen:
+            raise InvalidRecordInput(
+                f"bridge-only manifest repeats required bridge {bridge_id!r}"
+            )
+        seen.add(bridge_id)
+        entry = available.get(bridge_id)
+        if entry is None:
+            raise EvidenceNotEstablished(
+                f"G9 has no current passing bridge record for required bridge {bridge_id!r}"
+            )
+        record = entry.get("record")
+        errors = list(load_achieved_validator().iter_errors(record))
+        if errors:
+            raise EvidenceNotEstablished(
+                f"G9 bridge record for {bridge_id!r} is not a valid achieved record: "
+                f"{errors[0].message}"
+            )
+        if (
+            record.get("claim", {}).get("kind") != "callee-precondition-established"
+            or record.get("claim", {}).get("result") != "pass"
+        ):
+            raise EvidenceNotEstablished(
+                f"G9 bridge record for {bridge_id!r} does not establish a passing callee precondition"
+            )
+        assurance_result = satisfies(
+            requirement["required_assurance"], record, {"bridge_id": bridge_id}
+        )
+        if not assurance_result:
+            raise EvidenceNotEstablished(
+                f"G9 bridge record for {bridge_id!r} does not satisfy the manifest: "
+                + "; ".join(assurance_result.reasons)
+            )
+        result.append({"bridge_id": bridge_id, "record": record})
+    return result
+
+
 def record_assurance(
     workspace: Path,
     target: str,
@@ -1806,6 +1891,8 @@ def record_assurance(
     verus_function_specs: list[str] | None = None,
     kani_harness_specs: list[str] | None = None,
     kani_crate: str | None = None,
+    bridges_only: bool = False,
+    descriptor_path: Path | None = None,
 ) -> RecordOutcome:
     """Assemble and write one work package's assurance report.
 
@@ -1820,11 +1907,16 @@ def record_assurance(
     declared = parse_proof_specs(proof_specs) if proof_specs else {}
     verus_functions = parse_verus_function_specs(verus_function_specs or [])
     kani_harnesses = parse_kani_harness_specs(kani_harness_specs or [])
-    if not declared and not verus_functions and not kani_harnesses:
+    if not declared and not verus_functions and not kani_harnesses and not bridges_only:
         raise InvalidRecordInput(
             "no proof evidence given -- pass --proof for Creusot, --verus-json with "
-            "--verus-function for Verus, or --kani-crate with --kani-harness for Kani"
+            "--verus-function for Verus, --kani-crate with --kani-harness for Kani, or "
+            "--bridges-only for a package with no provided guarantees and required bridges"
         )
+    if bridges_only and (
+        declared or verus_json or verus_functions or kani_harnesses or kani_crate
+    ):
+        raise InvalidRecordInput("--bridges-only cannot be combined with obligation proof inputs")
     if verus_functions and not verus_json:
         raise InvalidRecordInput("--verus-function requires --verus-json <output.json>")
     if verus_json and not verus_functions:
@@ -1856,6 +1948,15 @@ def record_assurance(
         raise InvalidRecordInput(
             f"{work_package} declares the same obligation twice -- which body meets the contract "
             "would depend on file order"
+        )
+    required_bridges = manifest["definition_of_done"]["required_preconditions_to_establish"]
+    if bridges_only and provided:
+        raise InvalidRecordInput(
+            f"--bridges-only is only valid when {work_package} has no provided guarantees"
+        )
+    if bridges_only and not required_bridges:
+        raise InvalidRecordInput(
+            f"--bridges-only is only valid when {work_package} requires at least one bridge"
         )
     unknown = sorted((set(declared) | set(verus_functions) | set(kani_harnesses)) - set(provided))
     if unknown:
@@ -1990,15 +2091,19 @@ def record_assurance(
         )
     base, replaced = _existing_report(workspace, report_path, work_package)
 
-    preserved = [
+    preserved = [] if bridges_only else [
         entry for entry in base["obligation_records"] if entry["obligation_id"] not in records
     ]
-    obligation_records = preserved + [
+    obligation_records = [] if bridges_only else preserved + [
         {"obligation_id": obligation_id, "record": records[obligation_id]}
         for obligation_id in provided
         if obligation_id in records
     ]
-    bridge_records = _bridge_records_for(workspace, manifest, base)
+    bridge_records = (
+        _bridge_only_records(workspace, manifest, descriptor_path)
+        if bridges_only
+        else _bridge_records_for(workspace, manifest, base)
+    )
 
     report = {
         "schema_version": "1.0",
@@ -2018,6 +2123,11 @@ def record_assurance(
         for entry in report["obligation_records"]
         for error in load_achieved_validator().iter_errors(entry["record"])
     ]
+    record_errors.extend(
+        error
+        for entry in report["bridge_records"]
+        for error in load_achieved_validator().iter_errors(entry["record"])
+    )
     if record_errors:
         raise EvidenceNotEstablished(
             f"assembled achieved record is not schema-valid: {record_errors[0].message}"

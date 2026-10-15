@@ -492,6 +492,8 @@ def load_assurance_reports(
             guarantees = manifest["definition_of_done"]["provided_guarantees"]
             if guarantees:
                 remediation = assurance_record_command(work_package, guarantees[0])
+            elif manifest["definition_of_done"]["required_preconditions_to_establish"]:
+                remediation = f"ligature record-assurance {work_package} --bridges-only"
             else:
                 remediation = f"ligature record-assurance {work_package} <verifier evidence>"
             findings.append(
@@ -1739,6 +1741,8 @@ class ClusterOutcome:
     obligations: int
     cycles: list[list[str]]
     findings: list[Finding]
+    degradation_ceiling: str | None = None
+    degraded_conditions: tuple[str, ...] = ()
 
     def summary(self) -> str:
         if self.status == "closes":
@@ -1748,9 +1752,19 @@ class ClusterOutcome:
                 f"transitive closure, {len(self.cycles)} cycle(s) discharged"
             )
         if self.status == "degraded":
+            ceiling = (
+                f" under accepted ceiling={self.degradation_ceiling!r}"
+                if self.degradation_ceiling is not None
+                else " under an accepted degradation record"
+            )
+            conditions = (
+                f" for {', '.join(self.degraded_conditions)}"
+                if self.degraded_conditions
+                else ""
+            )
             return (
-                f"cluster {self.cluster!r} does NOT close: degraded under an accepted "
-                f"degradation record (declared closure_kind={self.closure_kind})"
+                f"cluster {self.cluster!r} does NOT close: degraded{ceiling}{conditions} "
+                f"(declared closure_kind={self.closure_kind!r})"
             )
         return f"cluster {self.cluster!r} is BLOCKED: closure not established"
 
@@ -2251,6 +2265,14 @@ def gate_cluster(
         ),
         cycles=found_cycles,
         findings=findings,
+        degradation_ceiling=(
+            accepted_degradation["ceiling"]
+            if accepted_degradation is not None and degraded
+            else None
+        ),
+        degraded_conditions=tuple(
+            sorted({finding.condition for finding in degraded if finding.condition is not None})
+        ),
     )
 
 

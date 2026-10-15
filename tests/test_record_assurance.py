@@ -1371,6 +1371,150 @@ class ExistingReportTest(RecordAssuranceTestCase):
         self.assertEqual(self.report()["bridge_records"], [])
 
 
+class BridgeOnlyAssuranceTest(RecordAssuranceTestCase):
+    """A bridge-only work package has no obligation proof to map, but its
+    passing G9 bridge records still belong in the report G14 consumes."""
+
+    BRIDGE_ID = "BR-TEST-001"
+
+    def setUp(self):
+        super().setUp()
+        self.provided = []
+        self.write_manifest(manifest([], bridges=[self.BRIDGE_ID]))
+        (self.root / "project-descriptor.json").write_text("{}\n")
+
+    def passing_bridge_record(self):
+        return {
+            "schema_version": "1.0",
+            "claim": {"kind": "callee-precondition-established", "result": "pass"},
+            "evidence": {
+                "kind": "creusot-deductive-check",
+                "verifier": "creusot",
+                "harness": "creusot-bridge-harness",
+                "scope": {"proof_targets": "ci/harness/BR-TEST-001.rs"},
+            },
+            "trust": {"assumptions": []},
+            "support": {"status": "supported"},
+            "config": {
+                "toolchain": "nightly-2026-05-01",
+                "target": "x86_64-unknown-linux-gnu",
+                "features": ["default"],
+            },
+        }
+
+    def _run_bridge_only(self, bridge_records=None):
+        records = bridge_records if bridge_records is not None else [
+            {"bridge_id": self.BRIDGE_ID, "record": self.passing_bridge_record()}
+        ]
+        with (
+            patch("project_descriptor.load_project_descriptor", return_value={}),
+            patch("gate_g9.gate_workspace", return_value=([], 1)),
+            patch("gate_g9.bridge_records_for", return_value=records),
+        ):
+            output, errors = StringIO(), StringIO()
+            with redirect_stdout(output), redirect_stderr(errors):
+                code = pipeline.main([
+                    "--workspace", str(self.root), "record-assurance", WORK_PACKAGE,
+                    "--bridges-only",
+                ])
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_cli_records_exact_g9_bridges_and_g14_consumes_report(self):
+        extra = {"bridge_id": "BR-OTHER", "record": self.passing_bridge_record()}
+        code, output, error = self._run_bridge_only(
+            [
+                {"bridge_id": self.BRIDGE_ID, "record": self.passing_bridge_record()},
+                extra,
+            ]
+        )
+        self.assertEqual(code, 0, error)
+        self.assertIn("recorded bridge-only assurance", output)
+        report = self.report()
+        self.assertEqual(report["obligation_records"], [])
+        self.assertEqual([entry["bridge_id"] for entry in report["bridge_records"]], [self.BRIDGE_ID])
+        self.assertEqual(list(gate_g14.load_assurance_report_validator().iter_errors(report)), [])
+
+        manifests, manifest_findings = gate_g14.load_manifests(self.root)
+        self.assertEqual(manifest_findings, [])
+        closure = gate_g14.Closure(work_packages=[WORK_PACKAGE])
+        reports, findings = gate_g14.load_assurance_reports(self.root, closure, manifests)
+        self.assertEqual(findings, [])
+        self.assertEqual(
+            gate_g14.check_bridges(
+                CLUSTER,
+                PROFILE,
+                closure,
+                manifests,
+                reports,
+                {self.BRIDGE_ID: {"protocol_class": "pairwise"}},
+                0,
+            ),
+            [],
+        )
+
+    def test_bridge_only_refuses_missing_required_g9_record_without_writing(self):
+        code, _output, error = self._run_bridge_only([])
+        self.assertEqual(code, 1)
+        self.assertIn("no current passing bridge record", error)
+        self.assertFalse(self.report_exists())
+
+    def test_bridge_only_refuses_g9_findings_without_writing(self):
+        with (
+            patch("project_descriptor.load_project_descriptor", return_value={}),
+            patch(
+                "gate_g9.gate_workspace",
+                return_value=(["stale G9 harness"], 1),
+            ),
+        ):
+            with self.assertRaises(EvidenceNotEstablished) as caught:
+                record_assurance(self.root, WORK_PACKAGE, [], bridges_only=True)
+        self.assertIn("G9 has not validated", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_bridge_only_refuses_record_that_does_not_meet_manifest_scope(self):
+        data = manifest([], bridges=[self.BRIDGE_ID])
+        data["definition_of_done"]["required_preconditions_to_establish"][0][
+            "required_assurance"
+        ]["minimum_scope"] = {"input_domain": "reviewed bounded bridge model"}
+        self.write_manifest(data)
+        with (
+            patch("project_descriptor.load_project_descriptor", return_value={}),
+            patch("gate_g9.gate_workspace", return_value=([], 1)),
+            patch(
+                "gate_g9.bridge_records_for",
+                return_value=[{"bridge_id": self.BRIDGE_ID, "record": self.passing_bridge_record()}],
+            ),
+        ):
+            with self.assertRaises(EvidenceNotEstablished) as caught:
+                record_assurance(self.root, WORK_PACKAGE, [], bridges_only=True)
+        self.assertIn("minimum_scope['input_domain']", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_bridge_only_refuses_malformed_record_without_writing(self):
+        malformed = {"bridge_id": self.BRIDGE_ID, "record": {"claim": {"result": "pass"}}}
+        code, _output, error = self._run_bridge_only([malformed])
+        self.assertEqual(code, 1)
+        self.assertIn("not a valid achieved record", error)
+        self.assertFalse(self.report_exists())
+
+    def test_bridge_only_is_refused_for_packages_with_provided_guarantees(self):
+        self.write_manifest(manifest([guarantee("Weekday.C1")], bridges=[self.BRIDGE_ID]))
+        with self.assertRaises(InvalidRecordInput) as caught:
+            record_assurance(self.root, WORK_PACKAGE, [], bridges_only=True)
+        self.assertIn("no provided guarantees", str(caught.exception))
+        self.assertFalse(self.report_exists())
+
+    def test_bridge_only_cli_help_documents_g9_requirement(self):
+        output = StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as caught:
+            pipeline.main(["record-assurance", "--help"])
+        self.assertEqual(caught.exception.code, 0)
+        help_text = " ".join(output.getvalue().split())
+        self.assertIn("--bridges-only", help_text)
+        self.assertIn("clean G9 validation", help_text)
+        self.assertIn("passing G9 records", help_text)
+
+
 class ManifestTargetTest(RecordAssuranceTestCase):
     def test_the_manifest_may_be_named_as_a_path(self):
         outcome = record_assurance(self.root, f"ci/manifest/{WORK_PACKAGE}.json", self.specs)

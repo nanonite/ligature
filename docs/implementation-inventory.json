@@ -277,7 +277,7 @@
     {
       "name": "record-assurance",
       "func": "cmd_record_assurance",
-      "stable_mapping": "stable assurance-recording command -- assembles a work package's report.emit assurance report from why3find certificates, official Verus JSON, or a fresh Kani 0.67 exact-harness rerun. Kani resolves a bare manifest function through fresh feature-selected Kani 0.67 compiler metadata, reruns exactly one qualified identity, and G14 repeats the identity resolution and run with source/harness hashes checked, while broader minimum_scope stays unmet (chainlink #87/#129/#132/#133, docs/cli-contract.md \u00a71/\u00a710)"
+      "stable_mapping": "stable assurance-recording command -- assembles a work package's report.emit assurance report from why3find certificates, official Verus JSON, or a fresh Kani 0.67 exact-harness rerun. Kani resolves a bare manifest function through fresh feature-selected Kani 0.67 compiler metadata, reruns exactly one qualified identity, and G14 repeats the identity resolution and run with source/harness hashes checked, while broader minimum_scope stays unmet. `--bridges-only` generates a no-guarantee package report from its required passing G9 bridge records after clean G9 validation (#141; chainlink #87/#129/#132/#133, docs/cli-contract.md \u00a71/\u00a710)"
     },
     {
       "name": "draft",
@@ -496,7 +496,7 @@
       "path": "scripts/gate_g14.py",
       "role": "gate",
       "disposition": "runtime-required",
-      "summary": "G14: release closure over the transitive assurance dependency graph; checks that each closure profile exactly names the work-package manifests tied to its valid promotion receipt, recomputes closure conditions, and accepts degradation only after review provenance and a ratified ruling over exact bytes (#97/#100/#134)."
+      "summary": "G14: release closure over the transitive assurance dependency graph; checks that each closure profile exactly names the work-package manifests tied to its valid promotion receipt, recomputes closure conditions, accepts degradation only after review provenance and a ratified ruling over exact bytes (#97/#100/#134), and prints the accepted ceiling and affected conditions in degraded cluster summaries (#142)."
     },
     {
       "path": "scripts/gate_g18.py",
@@ -810,7 +810,7 @@
       "path": "scripts/record_assurance.py",
       "role": "generator",
       "disposition": "runtime-required",
-      "summary": "chainlink #87/#129/#132/#133: assembles a work package's assurance report from why3find proof certificates, official whole-crate Verus JSON, or a fresh Kani 0.67 exact-harness rerun. Kani resolves the manifest's bare kani_... function to one qualified identity using fresh feature-selected compiler metadata, records scoped Rust-source/harness hashes and bounded input_domain, and G14 repeats the resolution and proof; broader minimum_scope requirements remain unmet rather than being copied into the record."
+      "summary": "chainlink #87/#129/#132/#133/#141: assembles a work package's assurance report from why3find proof certificates, official whole-crate Verus JSON, or a fresh Kani 0.67 exact-harness rerun. Kani resolves the manifest's bare kani_... function to one qualified identity using fresh feature-selected compiler metadata, records scoped Rust-source/harness hashes and bounded input_domain, and G14 repeats the resolution and proof; broader minimum_scope requirements remain unmet rather than being copied into the record. For packages with no provided guarantees, `--bridges-only` requires clean G9 validation and copies only current records for the manifest's required bridges."
     }
   ],
   "schemas": [

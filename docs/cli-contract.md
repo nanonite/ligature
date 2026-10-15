@@ -36,6 +36,7 @@ ligature accept-policy --reviewer <name> [--version <name>@<major>.<minor>]  # #
 ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
 ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
 ligature record-assurance <work-package> --proof <obligation>=<path> [...]  # #87 -- assemble a work package's assurance report from verifier evidence
+ligature record-assurance <work-package> --bridges-only  # #141 -- assemble a no-guarantee package report from passing G9 bridge records
 ligature record-assurance <work-package> --verus-json <output.json> --verus-function <obligation>=<func-details-key> [...]  # #129 -- ingest Verus's official per-function JSON results
 ligature record-assurance <work-package> --kani-crate <package-dir> --kani-harness <obligation>=<harness> [...]  # #132/#133/#140 -- resolve and rerun a manifest-named Kani 0.67 harness, then record its bounded result
 ligature validate <artifact-kind> <target>   # deterministic, per-artifact
@@ -194,6 +195,22 @@ the named guarantees; CG3's separate `creusot_owned` disjunct remains
 limited to Creusot ownership. It writes nothing on a refusal
 and exits 0 (recorded) / 1 (the evidence does not establish the
 obligation) / 2 (invalid input), per docs/exit-code-contract.md.
+
+A work package with no `provided_guarantees` but one or more required bridge
+preconditions uses `record-assurance <work-package> --bridges-only`. Ligature
+loads the project descriptor, runs the G9 bridge validation, requires a
+current passing record for every bridge named by that package, and writes only
+those records with an empty `obligation_records` array. Other workspace bridge
+records are not copied. Missing records, G9 findings, invalid records, or a
+record that does not satisfy the package's required assurance stop the write.
+G14 still validates the report and evaluates the bridge records against the
+manifest; this option creates no obligation guarantee and does not waive a
+gate. It is invalid for packages that provide obligations or require no
+bridges.
+
+```sh
+ligature --workspace <workspace> record-assurance WP-AEAD --bridges-only
+```
 
 For Kani, use repeatable `--kani-harness <obligation>=<harness>` mappings and
 one `--kani-crate <workspace-relative-package-dir>` containing the package's
@@ -1475,7 +1492,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `accept-policy` | stable; records a reviewed change to the normative reliance-policy document as the manifest's reviewed `base_hash` (the explicit accept path for governance drift; `--policy-path` defaults to the descriptor's `compatibility_policy.reliance_policy_path`, and a disagreeing explicit path is refused) (#78, §8). `--version <name>@<major>.<minor>` stamps the document's single `Policy version:` marker line first — that line and nothing else — so the template `init` installs can reach an accepted state, and be re-versioned, without a hand-edit of a `protected_root`; a human checkpoint like `approve` and `accept-promotion` (#113, §8) |
 | `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1) |
 | `record-ruling` | stable; records an explicit human verdict (`ratified`\|`rejected`) over an exact artifact set in `ci/results/human_rulings.jsonl` -- the human-ruling gate `accept-promotion` enforces: no receipt is minted until every artifact in the accepted set carries a `ratified` ruling over its current content (#82, §5) |
-| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads (#87, §1). Creusot uses `--proof <obligation>=<path>`; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function` mappings (#129); Kani uses `--kani-crate`/`--kani-harness`, resolves the manifest's bare function through feature-selected Kani 0.67 compile metadata, and reruns one exact qualified identity (#132/#133). Successful harness assertions are required; ancillary unreachable safety checks are retained in the report summary, and G14 compares that summary against its fresh rerun (#140). Kani scope names the bounded model and never copies a broader `minimum_scope`; G14 consumes the record but leaves that guarantee unmet. Verus requires whole-crate success and the exact proof note in its `ensures` clause. Every record is derived from verifier evidence and manifest provenance. Feature-ledger collision warns; unknown content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
+| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads (#87, §1). Creusot uses `--proof <obligation>=<path>`; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function` mappings (#129); Kani uses `--kani-crate`/`--kani-harness`, resolves the manifest's bare function through feature-selected Kani 0.67 compile metadata, and reruns one exact qualified identity (#132/#133). Successful harness assertions are required; ancillary unreachable safety checks are retained in the report summary, and G14 compares that summary against its fresh rerun (#140). Kani scope names the bounded model and never copies a broader `minimum_scope`; G14 consumes the record but leaves that guarantee unmet. A package with no provided guarantees and required bridges uses `--bridges-only`, which requires a clean G9 validation and copies only the package's passing bridge records (#141). Verus requires whole-crate success and the exact proof note in its `ensures` clause. Every record is derived from verifier evidence and manifest provenance. Feature-ledger collision warns; unknown content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
 | `select-pilot-cluster` | alias → `report pilot-cluster` |
 | `measure-gold-set` | alias → `report gold-set-measurement` |
 | `generate-feature-ledger` | alias → `report feature-ledger` |

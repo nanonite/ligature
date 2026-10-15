@@ -4,7 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [1.3.11] - 2026-10-14
+
+### Added
+- #141: add `record-assurance --bridges-only` for packages with no provided guarantees and required bridges. It requires a clean G9 validation, copies only the package's passing bridge records, and leaves the obligation record list empty.
+
+### Fixed
+- #142: include the accepted degradation ceiling and affected condition in degraded G14 cluster summaries, alongside the declared `closure_kind`; Kani's `per-instantiation` CG3 ceiling remains distinct from type-universal coverage.
 
 ## [1.3.10] - 2026-10-14
 

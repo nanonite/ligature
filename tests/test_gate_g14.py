@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from gate_g14 import (  # noqa: E402
+    Closure,
     EXIT_BLOCKED,
     EXIT_INPUT_ERROR,
     EXIT_OK,
@@ -34,6 +35,7 @@ from gate_g14 import (  # noqa: E402
     compute_closure,
     cycles,
     gate_workspace,
+    load_assurance_reports,
     load_manifests,
     looks_like_work_package_manifest,
     main,
@@ -990,6 +992,18 @@ class DependencyTest(GateTestCase):
         outcome, _ = self.ws.cluster()
         self.assertTrue(any("no assurance report" in e for e in self.errors(outcome)))
 
+    def test_a_bridge_only_package_gets_the_native_report_remediation(self):
+        package = manifest("WP-BRIDGE", bridges=["BR-TEST-ONLY"])
+        self.ws.write("ci/manifest/WP-BRIDGE.json", package)
+        manifests, findings = load_manifests(self.ws.root)
+        self.assertEqual(findings, [])
+        reports, findings = load_assurance_reports(
+            self.ws.root, Closure(work_packages=["WP-BRIDGE"]), manifests
+        )
+        self.assertEqual(reports, {})
+        self.assertEqual(len(findings), 1)
+        self.assertIn("record-assurance WP-BRIDGE --bridges-only", findings[0].reason)
+
     def test_a_report_from_another_work_package_is_refused(self):
         self.ws.patch("ci/results/WP-C.json", lambda d: d.update({"work_package": "WP-Z"}))
         outcome, _ = self.ws.cluster()
@@ -1481,12 +1495,21 @@ class DeclaredConditionTest(GateTestCase):
         outcome, _ = self.ws.cluster()
         self.assertEqual(self.errors(outcome), [])
         self.assertEqual(outcome.status, "degraded")
+        self.assertEqual(outcome.degradation_ceiling, "per-instantiation")
+        self.assertEqual(outcome.degraded_conditions, (self.CG3,))
         self.assertTrue(
             any("accepted as degradation under ceiling 'per-instantiation' (chainlink:86)" in d
                 for d in self.degraded(outcome)),
             [str(f) for f in outcome.findings],
         )
         self.assertIn("does NOT close", outcome.summary())
+        self.assertIn("ceiling='per-instantiation'", outcome.summary())
+        self.assertIn(self.CG3, outcome.summary())
+        self.assertIn("declared closure_kind='bounded'", outcome.summary())
+        code, printed = self.ws.run()
+        self.assertEqual(code, EXIT_OK)
+        self.assertIn("ceiling='per-instantiation'", printed)
+        self.assertIn(self.CG3, printed)
 
     def test_an_unrecorded_work_package_makes_cg3_unverifiable(self):
         """No record at all is not evidence of no Kani result: a work

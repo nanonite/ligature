@@ -56,6 +56,13 @@ false inside the block — no aliases, no omissions. Do **not** emit a
   manifests are available, include the complete planned membership and
   surface any disagreement for human resolution; G14 checks the final
   membership against the generated manifests.
+- `expected_obligations` is an optional human-reviewed exact pin of the
+  unique obligation IDs expected across the transitive manifests. Include it
+  only when the caller supplies an authoritative reviewed list; do not infer
+  it from proof files, verifier outputs, source names, or the current report.
+  When no such list is supplied, omit the field and let G14 report that
+  obligation completeness is unpinned. When supplied, G14 blocks if the
+  manifest-declared provided/required ID set differs in either direction.
 - Re-entry only (plan.md §6 diagram: change requests/drift findings route
   back to Stage 0/3): `{{prior_artifact}}` (the last drafted profile for
   this cluster, if any) and `{{finding}}` (the specific gate failure or

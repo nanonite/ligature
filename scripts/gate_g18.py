@@ -200,7 +200,7 @@ def collect_valid_witnesses(
                 continue
             if not isinstance(data, dict):
                 continue
-            file_findings = validate_witness_data(path, data, validator, specs_search_root)
+            file_findings = validate_witness_data(path, data, validator, specs_search_root, workspace)
             if any(f.severity == "error" for f in file_findings):
                 continue
             key = (data["concept"], data["query"])

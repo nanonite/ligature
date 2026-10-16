@@ -106,7 +106,7 @@
         "properties": {
           "crate_dir": {
             "type": "string",
-            "description": "Path (workspace-relative) to the crate root containing src/ and tests/."
+            "description": "Path (workspace-relative) to the crate root containing src/ and tests/. Ligature resolves this path against the project workspace, rejects absolute or parent-traversing roots, and rejects symlinks that resolve outside the workspace; a missing in-scope directory is reported separately as a prerequisite."
           },
           "contracts_crate": {
             "type": "string",
@@ -159,6 +159,18 @@
         "partial"
       ],
       "description": "The project's intended closure_kind for its clusters, declared before any code exists (chainlink #73). plan.md §4's vocabulary: deductive = Creusot/Verus-owned (universal over inputs, modulo SMT completeness and trusted specs); bounded = Kani-owned (holds only within unwind/harness bounds and enumerated monomorphizations); partial = partially verified (chainlink #85) -- a pilot that knows it cannot achieve full deductive closure may declare that intent here instead of being limited to the two uniform claims its clusters can only round to. This records intent only -- each cluster's closure profile (specs/_closure/<cluster>.json) remains the authoritative per-cluster declaration at Stage 8C, and gate g14 recomputes closure_kind from the evidence actually present, rejecting a uniform kind the evidence refutes (a `deductive` claim over a closure containing a Kani result is a G17 hard error). Optional and deliberately absent from the init template: a project that has not chosen an intent yet must not be silently defaulted to 'deductive'."
+    },
+    "interaction_policy": {
+      "type": "object",
+      "description": "Optional R1/G16 policy. The default leaves the existing risk-tiered warning/decision/block behavior unchanged; an explicit true value requires every discovered call to reconcile before the gate passes.",
+      "required": ["require_complete_reconciliation"],
+      "additionalProperties": false,
+      "properties": {
+        "require_complete_reconciliation": {
+          "type": "boolean",
+          "description": "When true, R1/G16 blocks if any syntactically discovered call remains unresolved, undeclared, or configuration-mismatched. Absence or false preserves existing gate acceptance rules."
+        }
+      }
     },
     "verifier_backends": {
       "type": "object",
@@ -350,6 +362,39 @@
           "type": "string",
           "format": "date",
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "accepted_fixture_values": {
+          "type": "array",
+          "description": "Explicit human acceptance of legitimate shipped fixture values that remain intentional. Each record is bound to the exact JSON value hash; changing the field makes the acceptance stale. Initialization creates no records.",
+          "items": {
+            "type": "object",
+            "required": ["path", "value_sha256", "reviewer", "accepted_at"],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string",
+                "enum": [
+                  "review.reviewed_at",
+                  "port_source.language",
+                  "port_source.oracle_build_command",
+                  "verifier_policy.default"
+                ]
+              },
+              "value_sha256": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "reviewer": {
+                "type": "string",
+                "minLength": 1
+              },
+              "accepted_at": {
+                "type": "string",
+                "format": "date",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              }
+            }
+          }
         }
       }
     }

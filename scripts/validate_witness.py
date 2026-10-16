@@ -77,7 +77,7 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
-from project_descriptor import is_underscore_artifact_path  # noqa: E402
+from concept_spec_lookup import find_concept_spec  # noqa: E402
 from review_checkpoint import is_staged_draft  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -266,77 +266,60 @@ def query_name_from_sig(rust_sig: str) -> str:
     return rust_sig.split("(", 1)[0].replace("fn", "", 1).strip() if "(" in rust_sig else ""
 
 
-def resolve_query(concept: str, query: str, specs_search_root: Path | None) -> tuple[str, dict | None]:
-    """Resolve <Concept>.<query> to a query dict in the concept's spec.
-
-    Mirrors validate_boundary_contracts.py's `_resolve_constraint`,
-    including its statuses and the D3 lesson behind them: match on the
-    spec's own `concept` field, never on a filename, and sort the scan so
-    a result never depends on filesystem order. A query has no name field
-    of its own -- concept-to-code embeds it in `rust_sig` (plan.md §2's
-    "de facto id"), so that is where the name is read from."""
-    if specs_search_root is None:
-        return "no_search_root", None
-    if not specs_search_root.is_dir():
-        return "spec_not_found", None
-
-    matches = []
-    for spec_path in sorted(specs_search_root.glob("**/*.json")):
-        if is_underscore_artifact_path(spec_path, specs_search_root):
-            continue
-        try:
-            spec = json.loads(spec_path.read_text())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        if not isinstance(spec, dict) or spec.get("concept") != concept:
-            continue
-        if not any(key in spec for key in ("queries", "commands", "constraints", "english_description")):
-            # A document naming a concept is not thereby a concept spec.
-            continue
-        matches.append(spec)
-
-    if not matches:
-        return "spec_not_found", None
-    if len(matches) > 1:
-        return "ambiguous", None
-
-    for candidate in matches[0].get("queries", []) or []:
+def _resolve_query_detailed(
+    concept: str,
+    query: str,
+    specs_search_root: Path | None,
+    workspace_root: Path | None = None,
+) -> tuple[str, dict | None, str | None]:
+    """Resolve <Concept>.<query> under the one authoritative declared root."""
+    lookup = find_concept_spec(concept, specs_search_root, workspace_root)
+    if lookup.status != "resolved" or lookup.document is None:
+        return lookup.status, None, lookup.diagnostic()
+    for candidate in lookup.document.get("queries", []) or []:
         if query_name_from_sig(candidate.get("rust_sig", "")) == query:
-            return "resolved", candidate
-    return "dangling", None
+            return "resolved", candidate, None
+    return (
+        "dangling", None,
+        f"valid concept spec at {lookup.path} declares no query named {query!r} "
+        "(queries are matched by the function name embedded in rust_sig)",
+    )
 
 
-def gate_g2(path: Path, data: dict, specs_search_root: Path | None) -> list[Finding]:
+def resolve_query(
+    concept: str,
+    query: str,
+    specs_search_root: Path | None,
+    workspace_root: Path | None = None,
+) -> tuple[str, dict | None]:
+    """Compatibility tuple API; detailed diagnostics are rendered by gate_g2."""
+    status, candidate, _detail = _resolve_query_detailed(
+        concept, query, specs_search_root, workspace_root
+    )
+    return status, candidate
+
+
+def gate_g2(
+    path: Path,
+    data: dict,
+    specs_search_root: Path | None,
+    workspace_root: Path | None = None,
+) -> list[Finding]:
     concept, query = data["concept"], data["query"]
-    status, candidate = resolve_query(concept, query, specs_search_root)
+    status, candidate, detail = _resolve_query_detailed(
+        concept, query, specs_search_root, workspace_root
+    )
 
     if status == "no_search_root":
-        return [
-            Finding(
-                "G2", path,
-                "the query cross-reference was not checked -- no specs_search_root was supplied to "
-                "this validator run",
-                severity="info",
-            )
-        ]
-    if status == "spec_not_found":
-        return [Finding("G2", path, f"no concept spec under the search root declares concept {concept!r}")]
+        return [Finding("G2", path, f"the query cross-reference was not checked -- {detail}", severity="info")]
+    if status in ("spec_not_found", "search_root_missing", "invalid", "mislocated"):
+        return [Finding("G2", path, f"cannot resolve {concept}.{query} -- {detail}")]
     if status == "ambiguous":
-        return [
-            Finding(
-                "G2", path,
-                f"more than one spec under the search root declares concept {concept!r} -- which "
-                "query this witness is over cannot be determined",
-            )
-        ]
+        return [Finding("G2", path, f"{detail} -- which query this witness is over cannot be determined")]
     if status == "dangling":
-        return [
-            Finding(
-                "G2", path,
-                f"concept {concept!r} declares no query named {query!r} (queries are matched by the "
-                "function name embedded in rust_sig)",
-            )
-        ]
+        return [Finding("G2", path, detail or f"{concept} declares no query named {query!r}")]
+    if candidate is None:
+        return [Finding("G2", path, f"concept query resolution for {concept}.{query} returned no query")]
     if candidate.get("pure") is not True:
         return [
             Finding(
@@ -361,7 +344,11 @@ def check_no_draft_review(path: Path, data: dict) -> list[Finding]:
 
 
 def validate_data(
-    path: Path, data: dict, validator: Draft202012Validator, specs_search_root: Path | None = None
+    path: Path,
+    data: dict,
+    validator: Draft202012Validator,
+    specs_search_root: Path | None = None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
@@ -369,7 +356,7 @@ def validate_data(
     findings = check_naming(path, data)
     findings.extend(check_renderer_consistency(path, data))
     findings.extend(check_output_path(path, data))
-    findings.extend(gate_g2(path, data, specs_search_root))
+    findings.extend(gate_g2(path, data, specs_search_root, workspace_root))
     return findings
 
 
@@ -391,7 +378,10 @@ def validate_draft_data(
 
 
 def validate_file(
-    path: Path, validator: Draft202012Validator, specs_search_root: Path | None = None
+    path: Path,
+    validator: Draft202012Validator,
+    specs_search_root: Path | None = None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     try:
         text = path.read_text()
@@ -403,7 +393,7 @@ def validate_file(
         return [Finding("G1a", path, f"invalid JSON: {e}")]
     if not isinstance(data, dict):
         return [Finding("G1a", path, "top-level value is not a JSON object")]
-    return validate_data(path, data, validator, specs_search_root)
+    return validate_data(path, data, validator, specs_search_root, workspace_root)
 
 
 def check_family_consistency(specs: list[tuple[Path, dict]]) -> list[Finding]:
@@ -497,7 +487,10 @@ def count_discovered(root: Path) -> int:
 
 
 def validate_crate(
-    crate_root: Path, canonical_dir: Path, specs_search_root: Path | None = None
+    crate_root: Path,
+    canonical_dir: Path,
+    specs_search_root: Path | None = None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     """Discover crate-wide, then reject by location -- the same
     discover-then-reject shape every validate_<type>.py module uses, and
@@ -529,7 +522,7 @@ def validate_crate(
                 )
             )
             continue
-        file_findings = validate_file(path, validator, specs_search_root)
+        file_findings = validate_file(path, validator, specs_search_root, workspace_root)
         findings.extend(file_findings)
         if not any(f.severity == "error" for f in file_findings):
             valid.append((path, json.loads(path.read_text())))
@@ -538,7 +531,11 @@ def validate_crate(
     return findings
 
 
-def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]:
+def validate(
+    root: Path,
+    specs_search_root: Path | None = None,
+    workspace_root: Path | None = None,
+) -> list[Finding]:
     """Standalone CLI entry: an unanchored recursive scan, since this CLI
     has no crate-boundary concept to derive one from (the same position
     scripts/validate_interaction.py's own standalone CLI is in). Does
@@ -548,7 +545,7 @@ def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]
     findings: list[Finding] = []
     valid: list[tuple[Path, dict]] = []
     for path in sorted(find_witness_files(root)):
-        file_findings = validate_file(path, validator, specs_search_root)
+        file_findings = validate_file(path, validator, specs_search_root, workspace_root)
         findings.extend(file_findings)
         if not any(f.severity == "error" for f in file_findings):
             valid.append((path, json.loads(path.read_text())))

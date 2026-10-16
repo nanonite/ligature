@@ -265,6 +265,11 @@
       "stable_mapping": "stable accept path for reviewed normative-policy drift -- records the on-disk reliance-policy document as the manifest's reviewed base_hash, and with --version stamps that document's single `Policy version:` marker line first so the template `init` installs can reach an accepted state without a hand-edit of a protected_root (chainlink #78, #113, docs/cli-contract.md \u00a78)"
     },
     {
+      "name": "accept-fixture-value",
+      "func": "cmd_accept_fixture_value",
+      "stable_mapping": "human checkpoint to retain an unchanged legitimate shipped project-descriptor value; records reviewer/date and the hash of the exact JSON value in review.accepted_fixture_values, which P0 checks. Initialization creates no acceptance and sentinel values such as review.reviewer and port_source.repository cannot be accepted (#145, docs/cli-contract.md \u00a71/\u00a78)"
+    },
+    {
       "name": "promote-evidence",
       "func": "cmd_promote_evidence",
       "stable_mapping": "stable mechanical evidence-draft promotion -- re-validates a staged evidence/*.json.draft (G1a/G1b), renames it to its target, and records the move (chainlink #79, docs/cli-contract.md \u00a71/\u00a710)"
@@ -352,7 +357,12 @@
     {
       "name": "gate-g14",
       "func": "cmd_gate_g14",
-      "stable_mapping": "gate g14"
+      "stable_mapping": "gate g14; --json emits the versioned G14 scope/evidence report, including selected packages, declared/evaluated obligations, consumed proof references, bridges, and optional exact human-reviewed expected-scope comparison (chainlink #158/#159; docs/g14-report-schema.json)"
+    },
+    {
+      "name": "gate-r1-g16",
+      "func": "cmd_gate_r1_g16",
+      "stable_mapping": "gate r1-g16; --json emits the versioned R1/G16 report with separate gate acceptance, source resolution, reconciliation counts and findings. Optional descriptor interaction_policy.require_complete_reconciliation strengthens the default without changing it (chainlink #160; docs/r1-g16-report-schema.json)"
     },
     {
       "name": "select-pilot-cluster",
@@ -422,12 +432,12 @@
     {
       "name": "generate-work-package",
       "func": "cmd_generate_work_package",
-      "stable_mapping": "chainlink #122/#134: reads a JSON/YAML Stage 7 plan and validated descriptor-backed promotion, boundary, interaction and bridge sources; closure profile is optional for manifest-first scheduling and constrains membership when present. Derives and validates one canonical ci/manifest/<WP>.json under a same-issue exact-path write grant. Writes atomically, refuses conflicting content, records issue/grant/path/before-after hashes/result in the protected-writes ledger, permits identical no-op reruns, and prevents grant replay after deletion. G14 checks final profile membership against manifests tied to the accepted cluster promotion receipt. --json returns the audit event or a structured refusal."
+      "stable_mapping": "chainlink #122/#134: plan-driven Stage 7 manifest generation from an explicit JSON/YAML plan and validated descriptor-backed promotion, boundary, interaction and bridge sources; this does not infer plans or package scope from promoted I/O. Closure profile is optional for manifest-first scheduling and constrains membership when present. Derives and validates one canonical ci/manifest/<WP>.json under a same-issue exact-path write grant. Writes atomically, refuses conflicting content, records issue/grant/path/before-after hashes/result in the protected-writes ledger, permits identical no-op reruns, and prevents grant replay after deletion. G14 checks final profile membership against manifests tied to the accepted cluster promotion receipt. --json returns the audit event or a structured refusal."
     },
     {
       "name": "doctor",
       "func": "cmd_doctor",
-      "stable_mapping": "stable capability manifest; owns the text `status` used to print (docs/cli-contract.md \u00a78); its descriptor gate follows the global `--descriptor` flag (chainlink #109)"
+      "stable_mapping": "stable capability manifest; lists `generate-work-package` as the plan-driven Stage 7 generator and separately reports that automatic promoted-I/O plan synthesis is not implemented (#155); owns the text `status` used to print (docs/cli-contract.md \u00a78); its descriptor gate follows the global `--descriptor` flag (chainlink #109)"
     },
     {
       "name": "init",
@@ -445,9 +455,14 @@
       "stable_mapping": "stable; reports product version + executable build attestation, `--verify` self-verifies (chainlink #57, docs/cli-contract.md \u00a71/\u00a78)"
     },
     {
+      "name": "schema",
+      "func": "cmd_schema",
+      "stable_mapping": "chainlink #157: offline list/show/export for JSON Schemas shipped by this binary. Catalog and self-contained export envelope carry exact schema hashes and the installed product/adjudicator identity; closure-profile and degradation-record exports include their related schema. Export refuses overwrite."
+    },
+    {
       "name": "gate",
       "func": "cmd_gate",
-      "stable_mapping": "stable; nested `gate <gate-id>` dispatches the six standalone gates (docs/cli-contract.md \u00a73, grammar v1.0)"
+      "stable_mapping": "stable; nested `gate <gate-id>` dispatches the six standalone gates; `gate g14 --json` emits the versioned G14 scope/evidence report (docs/cli-contract.md \u00a73, grammar v1.0, chainlink #159)"
     },
     {
       "name": "report",
@@ -496,7 +511,7 @@
       "path": "scripts/gate_g14.py",
       "role": "gate",
       "disposition": "runtime-required",
-      "summary": "G14: release closure over the transitive assurance dependency graph; checks that each closure profile exactly names the work-package manifests tied to its valid promotion receipt, recomputes closure conditions, accepts degradation only after review provenance and a ratified ruling over exact bytes (#97/#100/#134), and prints the accepted ceiling and affected conditions in degraded cluster summaries (#142)."
+      "summary": "G14: release closure over the transitive assurance dependency graph; checks that each closure profile exactly names the work-package manifests tied to its valid promotion receipt, recomputes closure conditions, accepts degradation only after review provenance and a ratified ruling over exact bytes (#97/#100/#134), prints the accepted ceiling and affected conditions in degraded cluster summaries (#142), and counts provided/required/evaluated obligations from manifest and report scope rather than dependency edges (#158). Its versioned --json report exposes selected packages, manifest scope, evaluated records, rechecked proof references, bridge-only/empty scope, and the optional human-reviewed expected_obligations pin without inferring intended scope from files (#159)."
     },
     {
       "path": "scripts/gate_g18.py",
@@ -526,7 +541,7 @@
       "path": "scripts/gate_r1_g16.py",
       "role": "gate",
       "disposition": "runtime-required",
-      "summary": "R1 and G16: reconciling realized calls (C_static) against intended interactions."
+      "summary": "R1 and G16: reconcile realized calls (C_static) against intended interactions while keeping risk-tiered acceptance. Text and versioned JSON distinguish gate acceptance from source resolution and interaction reconciliation, with warning/blocking/configuration mismatch counts per report; an opt-in project policy can require complete reconciliation (#160). Syntactic discovery is explicitly a lower bound."
     },
     {
       "path": "scripts/generate_contact_sheet.py",
@@ -604,7 +619,7 @@
       "path": "scripts/validate_boundary_contracts.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Boundary contract validation: G1a, G1b, G2+ -- including callee_obligation_role(), which reads each callee_guarantees entry's constraint `kind` so a `kind: precondition` entry is reported as the caller obligation a bridge discharges rather than a callee guarantee (#111)."
+      "summary": "Boundary contract validation: G1a, G1b, G2+ -- including callee_obligation_role(), which reads each callee_guarantees entry's constraint `kind` so a `kind: precondition` entry is reported as the caller obligation a bridge discharges rather than a callee guarantee (#111); G2+ gives an actionable concept/ID repair for missing or dangling stable IDs (#154)."
     },
     {
       "path": "scripts/validate_boundary_naming.py",
@@ -628,7 +643,7 @@
       "path": "scripts/validate_concept_spec.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Concept-spec validation at draft time and at approve time (chainlink #105), against the vendored concept-to-code schema extended in memory with the decided `witness_required`, `id` and `review` fields (docs/concept-to-code-modifications.md gaps #5/#6/#7). Owns the G1b <snake_case(concept)>.json naming rule and the extended schema select_pilot_cluster's rubric also validates against, so `draft`, `approve` and the rubric cannot disagree about what a genuinely valid concept spec is."
+      "summary": "Concept-spec validation at draft time and at approve time (chainlink #105), against the vendored concept-to-code schema extended in memory with the decided `witness_required`, `id` and `review` fields (docs/concept-to-code-modifications.md gaps #5/#6/#7). Owns the G1b <snake_case(concept)>.json naming rule and rejects duplicate author-assigned constraint IDs (#154); the extended schema select_pilot_cluster's rubric also validates against, so `draft`, `approve` and the rubric cannot disagree about what a genuinely valid concept spec is."
     },
     {
       "path": "scripts/validate_closure.py",
@@ -665,6 +680,18 @@
       "role": "validator",
       "disposition": "runtime-required",
       "summary": "Interaction (I) validation: G1a, G1b, computed eligibility, G2++, G15, R2."
+    },
+    {
+      "path": "scripts/concept_spec_lookup.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "One authoritative resolver for concept specs under descriptor-declared specs_search_root values; distinguishes absent, invalid, ambiguous, and mislocated specs and never uses an outside-root fallback (#149/#151)."
+    },
+    {
+      "path": "scripts/verifier_policy.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "Shared verifier-to-evidence-kind mapping and owner/supporting compatibility rules used by Stage 7 work-package validation and descriptor-aware interaction policy checks (#151)."
     },
     {
       "path": "scripts/validate_promotion_receipt.py",
@@ -720,7 +747,7 @@
       "path": "scripts/project_state.py",
       "role": "helper",
       "disposition": "runtime-required",
-      "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`; reports missing descriptor-declared crate roots as blocking prerequisites and resolves them before recommending C_static extraction."
+      "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`; reports missing descriptor-declared crate roots as blocking prerequisites and resolves them before recommending C_static extraction. Passes the optional interaction_policy.require_complete_reconciliation into R1/G16 so check and the standalone gate honor the same explicit policy (#160)."
     },
     {
       "path": "scripts/write_set.py",
@@ -795,6 +822,12 @@
       "summary": "The executable's own identity (#57): content/build hash over the zipapp bundle, product version, bundled schema set, required Python/platform, and self-verification used by `version --verify`, `doctor`, and gate_integrity. Also surfaces the embedded build's source provenance (`source_commit`/`source_dirty`/`working_tree_diff_hash`), #64."
     },
     {
+      "path": "scripts/schema_cli.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "Chainlink #157: offline catalog, inspection, and versioned export for the exact JSON Schemas in the bundled implementation inventory; export carries the installed adjudicator identity and hashes, includes related closure/degradation schemas, and refuses overwrite."
+    },
+    {
       "path": "scripts/build_zipapp.py",
       "role": "generator",
       "disposition": "excluded",
@@ -845,6 +878,14 @@
     },
     {
       "path": "docs/closure-profile-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/g14-report-schema.json",
+      "disposition": "runtime-required"
+    },
+    {
+      "path": "docs/r1-g16-report-schema.json",
       "disposition": "runtime-required"
     },
     {
@@ -1363,6 +1404,11 @@
       "disposition": "test-only"
     },
     {
+      "path": "tests/test_schema_cli.py",
+      "kind": "regression",
+      "disposition": "test-only"
+    },
+    {
       "path": "tests/test_neargye_port_acceptance.py",
       "kind": "regression",
       "disposition": "test-only"
@@ -1530,16 +1576,16 @@
   ],
   "counts": {
     "by_disposition": {
-        "runtime-required": 101,
+      "runtime-required": 106,
       "excluded": 1,
       "documentation": 14,
       "installed-template": 4,
-        "test-only": 79,
+        "test-only": 80,
       "vendored-runtime": 1
     },
-      "total_entries": 200,
-      "test_count": 65,
-      "registered_cli_command_count": 49
+      "total_entries": 206,
+      "test_count": 66,
+      "registered_cli_command_count": 51
   },
   "documentation_and_templates": [
     {

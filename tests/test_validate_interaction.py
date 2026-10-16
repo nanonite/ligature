@@ -220,6 +220,127 @@ class G5GroundingTest(unittest.TestCase):
         self.assertEqual(len(g5), 1)
         self.assertEqual(g5[0].severity, "warning")
 
+    def test_draft_rejects_a_dangling_evidence_link_when_workspace_context_exists(self):
+        data = load_valid()
+        data.pop("review")
+        findings = validate_draft_data(
+            INTERACTION_PATH, data, load_draft_validator(), evidence_ids=set()
+        )
+        g4 = [finding for finding in findings if finding.gate == "G4"]
+        self.assertEqual(len(g4), 1)
+        self.assertEqual(g4[0].severity, "error")
+        self.assertIn("E-0143", g4[0].reason)
+
+    def test_draft_accepts_a_valid_evidence_link(self):
+        data = load_valid()
+        data.pop("review")
+        findings = validate_draft_data(
+            INTERACTION_PATH, data, load_draft_validator(), evidence_ids={"E-0143"}
+        )
+        self.assertFalse([finding for finding in findings if finding.gate == "G4"], [str(f) for f in findings])
+
+
+class VerifierPolicyValidationTest(unittest.TestCase):
+    """Chainlink #151: descriptor policy governs which verifier evidence a
+    callee reliance can require. Cross-verifier composition remains a G14
+    closure decision, while explicitly declared supporting evidence remains
+    admissible at the interaction boundary."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        self.specs = self.workspace / "crates" / "scheduler" / "specs"
+        self.interactions = self.specs / "_interactions"
+        self.interactions.mkdir(parents=True)
+        spec = json.loads((ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/task_queue.json").read_text())
+        scheduler = {**spec, "concept": "Scheduler", "cluster": "caller-cluster"}
+        task_queue = {**spec, "concept": "TaskQueue", "cluster": "callee-cluster"}
+        (self.specs / "scheduler.json").write_text(json.dumps(scheduler))
+        (self.specs / "task_queue.json").write_text(json.dumps(task_queue))
+        self.path = self.interactions / "I-SCHED-TQ-001.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def descriptor(self, policy):
+        return {
+            "crates": [{"crate_dir": "crates/scheduler", "specs_search_root": "crates/scheduler/specs"}],
+            "verifier_policy": policy,
+        }
+
+    def validate(self, data, policy):
+        return validate_data(
+            self.path,
+            data,
+            load_validator(),
+            {data["interaction_id"]},
+            {("Scheduler", "dispatch", "TaskQueue", "pop_ready")},
+            set(),
+            {"E-0143"},
+            workspace_root=self.workspace,
+            descriptor=self.descriptor(policy),
+        )
+
+    def test_rejects_reliance_that_omits_and_disallows_the_cluster_owner(self):
+        data = load_valid()
+        for concept in ("Scheduler", "TaskQueue"):
+            path = self.specs / ("scheduler.json" if concept == "Scheduler" else "task_queue.json")
+            spec = json.loads(path.read_text())
+            spec["verifier"] = "kani"
+            path.write_text(json.dumps(spec))
+
+        findings = self.validate(data, {"default": "kani"})
+        policy = [finding for finding in findings if finding.gate == "G2-policy"]
+        self.assertEqual(len(policy), 2, [str(finding) for finding in findings])
+        self.assertTrue(any("not produced" in finding.reason for finding in policy))
+        self.assertTrue(any("omits owning verifier evidence kind 'kani-bounded-model-check'" in finding.reason for finding in policy))
+
+    def test_accepts_declared_supporting_evidence_and_surfaces_g14_ceiling(self):
+        caller = json.loads((self.specs / "scheduler.json").read_text())
+        caller["verifier"] = "creusot"
+        (self.specs / "scheduler.json").write_text(json.dumps(caller))
+        data = load_valid()
+        data["reliances"][0]["required_assurance"]["accepted_evidence_kinds"] = [
+            "kani-bounded-model-check", "creusot-deductive-check"
+        ]
+
+        findings = self.validate(data, {
+            "default": "kani",
+            "clusters": {"caller-cluster": "creusot"},
+            "supporting": ["creusot"],
+        })
+        errors = [finding for finding in findings if finding.severity == "error"]
+        warnings = [finding for finding in findings if finding.severity == "warning"]
+        self.assertEqual(errors, [], [str(finding) for finding in errors])
+        self.assertTrue(any("CG1 limits" in finding.reason and "harness-tested" in finding.reason for finding in warnings))
+
+    def test_default_change_does_not_invalidate_unrelated_interaction(self):
+        data = load_valid()
+        data["edge_class"] = ["import-only"]
+        data["eligibility"] = "inform"
+        data.pop("reliances")
+
+        findings = self.validate(data, {"default": "kani"})
+        self.assertFalse([finding for finding in findings if finding.gate == "G2-policy"], [str(f) for f in findings])
+
+    def test_draft_boundary_enforces_policy_before_staging(self):
+        data = load_valid()
+        data.pop("review")
+        for concept in ("Scheduler", "TaskQueue"):
+            path = self.specs / ("scheduler.json" if concept == "Scheduler" else "task_queue.json")
+            spec = json.loads(path.read_text())
+            spec["verifier"] = "kani"
+            path.write_text(json.dumps(spec))
+
+        findings = validate_draft_data(
+            self.path,
+            data,
+            load_draft_validator(),
+            {"E-0143"},
+            workspace_root=self.workspace,
+            descriptor=self.descriptor({"default": "kani"}),
+        )
+        self.assertTrue(any(f.gate == "G2-policy" and "omits owning verifier" in f.reason for f in findings), [str(f) for f in findings])
 
 class G1aFailureTest(unittest.TestCase):
     def test_missing_required_field_is_rejected(self):

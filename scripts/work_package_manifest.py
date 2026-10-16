@@ -103,6 +103,11 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import validate_work_package
+from verifier_policy import (
+    VERIFIER_EVIDENCE_KIND,
+    assurance_policy_mismatches,
+    policy_for_cluster,
+)
 
 # ---------------------------------------------------------------------------
 # Constants. Every one is a named fact about the manifest contract rather
@@ -120,15 +125,6 @@ CALLSITE_REQUIREMENT = "all-discovered-resolved"
 
 SCHEDULING_RULES = ("reverse-dependency-order", "parallel-modular-assumptions")
 DEFAULT_SCHEDULING_RULE = "reverse-dependency-order"
-
-#: Which evidence kind a declared verifier is authoritative for. A resolved
-#: assurance whose accepted kinds fall outside this map for the cluster's
-#: owning (and supporting) verifiers is contradictory with the descriptor.
-VERIFIER_EVIDENCE_KIND = {
-    "kani": "kani-bounded-model-check",
-    "creusot": "creusot-deductive-check",
-    "verus": "verus-deductive-check",
-}
 
 CLAIM_KINDS = ("callee-precondition-established", "postcondition-holds")
 EVIDENCE_KINDS = tuple(VERIFIER_EVIDENCE_KIND.values())
@@ -970,23 +966,13 @@ def _validate_assumption_ref(state: AuthoritativeState, ref: Mapping[str, Any]) 
 def _verifier_policy_for_cluster(
     descriptor: Mapping[str, Any], cluster: str
 ) -> dict[str, Any]:
-    policy = descriptor.get("verifier_policy") or {}
-    owning = (policy.get("clusters") or {}).get(cluster, policy.get("default"))
-    supporting = tuple(policy.get("supporting") or ())
-    return {"owning": owning, "supporting": supporting}
+    return policy_for_cluster(descriptor, cluster)
 
 
 def _check_assurance_against_policy(
     assurance: Mapping[str, Any], policy: Mapping[str, Any], subject: str
 ) -> None:
-    allowed_verifiers = {policy["owning"], *policy["supporting"]}
-    allowed_kinds = {
-        VERIFIER_EVIDENCE_KIND[v]
-        for v in allowed_verifiers
-        if v in VERIFIER_EVIDENCE_KIND
-    }
-    kinds = list(assurance.get("accepted_evidence_kinds") or ())
-    unexpected = [k for k in kinds if k not in allowed_kinds]
+    unexpected, owner_missing = assurance_policy_mismatches(assurance, policy)
     if unexpected:
         raise ManifestDerivationError(
             "contradictory-source",
@@ -995,7 +981,7 @@ def _check_assurance_against_policy(
             f"{sorted(policy['supporting'])!r} can produce",
         )
     owning_kind = VERIFIER_EVIDENCE_KIND.get(str(policy["owning"]))
-    if owning_kind and owning_kind not in kinds:
+    if owner_missing:
         raise ManifestDerivationError(
             "contradictory-source",
             f"{subject} does not accept the evidence kind of the cluster's declared owning "

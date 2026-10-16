@@ -9,6 +9,9 @@ from __future__ import annotations
 import re
 import sys
 import unittest
+import io
+import argparse
+from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,6 +74,112 @@ class LegacyCommandMappingTest(unittest.TestCase):
     def test_every_row_has_a_nonempty_disposition(self):
         for name, disposition in self.rows:
             self.assertTrue(disposition.strip(), f"{name} has an empty disposition cell")
+
+    def test_documented_inventory_count_matches_parser(self):
+        header = re.search(r"## 10\. Legacy command.*\(complete, (\d+)/(\d+)\)", CONTRACT_PATH.read_text())
+        self.assertIsNotNone(header, "section 10 must publish its registered-command count")
+        self.assertEqual(tuple(map(int, header.groups())), (len(self.registered), len(self.registered)))
+
+
+class CurrentExitAndJsonContractTest(unittest.TestCase):
+    """The current-dispatcher table is separate from the aspirational shared
+    exit-code vocabulary. Keep its command and --json inventory in sync with
+    argparse so help, docs, and the binary surface cannot silently drift."""
+
+    def _table_rows(self):
+        text = (ROOT / "docs" / "exit-code-contract.md").read_text()
+        section = text.split("## Registered command behavior", 1)[1]
+        section = section.split("\n## ", 1)[0]
+        rows = []
+        for line in section.splitlines():
+            if not line.startswith("|") or line.startswith("|---"):
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) != 3 or cells[0] == "command(s)":
+                continue
+            names = re.findall(r"`([^`]+)`", cells[0])
+            rows.extend((name, cells[2]) for name in names)
+        return rows
+
+    def _parsers_within(self, parser):
+        yield parser
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for child in action.choices.values():
+                    yield from self._parsers_within(child)
+
+    def test_every_registered_command_has_one_exit_and_json_profile(self):
+        registered = pipeline.registered_commands()
+        rows = self._table_rows()
+        names = [name for name, _json in rows]
+        self.assertEqual(set(names), set(registered))
+        self.assertEqual(len(names), len(set(names)), "a command appears in more than one profile")
+
+        actual_json = {
+            name
+            for name, parser in registered.items()
+            if any(
+                "--json" in action.option_strings
+                for nested in self._parsers_within(parser)
+                for action in nested._actions
+            )
+        }
+        documented_json = {name for name, support in rows if support == "yes"}
+        self.assertEqual(documented_json, actual_json)
+        self.assertEqual(
+            actual_json,
+            {
+                "migrate", "status", "check", "write-set-check", "authorize-write",
+                "scaffold-crate", "configure-crate", "configure-cargo-profile",
+                "generate-work-package", "schema", "gate-g14", "gate-r1-g16", "gate",
+            },
+        )
+
+    def test_top_level_and_command_help_point_to_the_contract(self):
+        parser = pipeline.build_parser()
+        self.assertIn("Exit codes and JSON support are command-specific", parser.format_help())
+        for name, command_parser in pipeline.registered_commands(parser).items():
+            with self.subTest(command=name):
+                self.assertIn("Exit codes and JSON support are command-specific", command_parser.format_help())
+
+    def test_exit_contract_names_warning_and_human_decision_code_three(self):
+        contract = (ROOT / "docs" / "exit-code-contract.md").read_text()
+        self.assertIn("`gate-r1-g16`", contract)
+        self.assertIn("`gate-g20`", contract)
+        self.assertIn("visible warning(s)", contract)
+
+
+class ConceptSearchRootHelpTest(unittest.TestCase):
+    def test_pipeline_help_names_descriptor_search_root_for_cross_references(self):
+        parser = pipeline.build_parser()
+        for command in ("validate", "validate-witness", "status", "check"):
+            with self.subTest(command=command):
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                    parser.parse_args([command, "--help"])
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn("specs_search_root", output.getvalue())
+
+    def test_schema_subcommand_help_describes_offline_bundled_resource_scope(self):
+        parser = pipeline.build_parser()
+        for argv, expected in (
+            (["schema", "--help"], "checkout"),
+            (["schema", "list", "--help"], "JSON Schemas shipped"),
+            (["schema", "show", "--help"], "exact bundled schema"),
+            (["schema", "export", "--help"], "existing paths are refused"),
+        ):
+            with self.subTest(argv=argv):
+                output = io.StringIO()
+                with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                    parser.parse_args(argv)
+                self.assertEqual(raised.exception.code, 0)
+                self.assertIn(expected, output.getvalue())
+
+    def test_cli_contract_documents_exact_root_and_no_fallback(self):
+        section = _parse_section("## Concept-spec search roots (#149)")
+        self.assertIn("crates[].specs_search_root", section)
+        self.assertIn("do not fall back", section.lower())
+        self.assertIn("Ligature does not invent", section)
 
 
 class StableCommandUniquenessTest(unittest.TestCase):

@@ -79,7 +79,12 @@ def witness_spec(value_hash: str | None = None) -> dict:
 
 def concept_spec(pure: bool = True) -> dict:
     return {
+        "schema_version": "1.0",
         "concept": "TaskQueue",
+        "cluster": "scheduling",
+        "kind": "struct",
+        "english_description": "A queue of tasks ordered by their deadlines for scheduling.",
+        "verifier": "creusot",
         "queries": [
             {
                 "english": "What fraction of the queue's slots are currently occupied?",
@@ -95,6 +100,11 @@ def concept_spec(pure: bool = True) -> dict:
                 "kind": "postcondition",
                 "applies_to": ["pop_ready"],
             }
+        ],
+        "commands": [],
+        "review": {"reviewer": "alice", "reviewed_at": "2026-09-04"},
+        "adversary_table": [
+            {"scenario": "a task has no deadline", "violates": "deadline order", "resolution": "reject"}
         ],
     }
 
@@ -235,10 +245,11 @@ class QueryResolutionTest(unittest.TestCase):
         self.assertEqual(status, "resolved")
         self.assertTrue(candidate["pure"])
 
-    def test_a_non_pure_query_is_refused(self):
+    def test_schema_invalid_non_pure_query_spec_is_refused(self):
         self.spec_path.write_text(json.dumps(concept_spec(pure=False)))
         findings = findings_for(witness_spec(), search_root=self.search_root)
-        self.assertTrue(any("observes a side effect and calls it a value" in f for f in findings))
+        self.assertTrue(any("concept spec candidate" in f and "invalid" in f for f in findings))
+        self.assertTrue(any("True was expected" in f for f in findings))
 
     def test_an_undeclared_query_is_dangling(self):
         data = witness_spec()
@@ -252,13 +263,38 @@ class QueryResolutionTest(unittest.TestCase):
     def test_a_missing_concept_spec_is_refused(self):
         self.spec_path.unlink()
         findings = findings_for(witness_spec(), search_root=self.search_root)
-        self.assertTrue(any("no concept spec under the search root" in f for f in findings))
+        self.assertTrue(any("no valid concept spec declares 'TaskQueue'" in f for f in findings))
+        self.assertTrue(any(str(self.search_root) in f for f in findings))
 
     def test_two_specs_for_one_concept_are_ambiguous(self):
         (self.search_root / "other" / "specs").mkdir(parents=True)
         (self.search_root / "other" / "specs" / "task_queue.json").write_text(json.dumps(concept_spec()))
         findings = findings_for(witness_spec(), search_root=self.search_root)
-        self.assertTrue(any("more than one spec" in f for f in findings))
+        self.assertTrue(any("more than one spec under declared specs_search_root" in f for f in findings))
+
+    def test_invalid_candidate_is_reported_with_the_declared_root(self):
+        invalid = concept_spec()
+        invalid["queries"] = "not-an-array"
+        self.spec_path.write_text(json.dumps(invalid))
+        findings = findings_for(witness_spec(), search_root=self.search_root)
+        self.assertTrue(any("candidate" in f and "invalid" in f for f in findings))
+        self.assertTrue(any(str(self.search_root) in f for f in findings))
+
+    def test_concept_spec_outside_declared_root_is_diagnosed_but_not_used(self):
+        declared = self.search_root / "declared"
+        declared.mkdir()
+        status, candidate = resolve_query("TaskQueue", "load_factor", declared, self.search_root)
+        self.assertEqual((status, candidate), ("mislocated", None))
+        findings = [str(f) for f in validate_data(
+            WITNESS_PATH, witness_spec(), load_validator(), declared, self.search_root
+        )]
+        self.assertTrue(any("outside declared specs_search_root" in f for f in findings))
+        self.assertIn(str(declared), "\n".join(findings))
+
+    def test_missing_declared_root_is_distinct_from_missing_concept(self):
+        missing = self.search_root / "does-not-exist"
+        status, candidate = resolve_query("TaskQueue", "load_factor", missing, self.search_root)
+        self.assertEqual((status, candidate), ("search_root_missing", None))
 
     def test_the_witness_itself_is_not_mistaken_for_a_concept_spec(self):
         # A witness carries a top-level `concept` and lives under the

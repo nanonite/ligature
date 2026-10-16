@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/g14-report-schema.json",
+  "title": "G14 scope and evidence report — v1.0",
+  "description": "Machine-readable `gate-g14 --json` output (chainlink #159). Scope comes only from manifests reached by the closure and assurance reports G14 actually loads. `expected_obligations` is a human-reviewed exact pin when declared; otherwise its state is `unpinned`. Proof files on disk never become expected scope by discovery.",
+  "type": "object",
+  "required": ["format", "exit_code", "clusters", "workspace_findings"],
+  "additionalProperties": false,
+  "properties": {
+    "format": { "type": "string", "const": "ligature.g14-report.v1" },
+    "exit_code": { "type": "integer", "enum": [0, 1] },
+    "clusters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/cluster" }
+    },
+    "workspace_findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "$defs": {
+    "cluster": {
+      "type": "object",
+      "required": [
+        "cluster", "status", "closure_kind", "work_packages", "scope",
+        "evaluated_obligation_records", "required_bridges", "evaluated_bridge_records",
+        "rechecked_proof_artifacts", "cycles", "degradation", "findings"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "cluster": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["closes", "degraded", "blocked"] },
+        "closure_kind": { "type": "string", "enum": ["deductive", "bounded", "partial"] },
+        "work_packages": { "type": "array", "items": { "type": "string" } },
+        "scope": { "$ref": "#/$defs/scope" },
+        "evaluated_obligation_records": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/record_reference" }
+        },
+        "required_bridges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bridge_scope" }
+        },
+        "evaluated_bridge_records": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/bridge_record_reference" }
+        },
+        "rechecked_proof_artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/record_reference" }
+        },
+        "cycles": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
+        "degradation": { "$ref": "#/$defs/degradation" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "required": [
+        "kind", "counts", "provided_obligations", "required_obligations", "expected_obligations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["empty", "bridge-only", "obligations-only", "obligations-and-bridges"] },
+        "counts": { "$ref": "#/$defs/counts" },
+        "provided_obligations": { "type": "array", "items": { "$ref": "#/$defs/obligation_scope" } },
+        "required_obligations": { "type": "array", "items": { "$ref": "#/$defs/obligation_scope" } },
+        "expected_obligations": { "$ref": "#/$defs/expected_scope" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "required": [
+        "work_packages", "unique_obligations", "provided_obligations", "required_obligations",
+        "evaluated_obligations", "required_bridges", "evaluated_bridge_records"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "work_packages": { "type": "integer", "minimum": 0 },
+        "unique_obligations": { "type": "integer", "minimum": 0 },
+        "provided_obligations": { "type": "integer", "minimum": 0 },
+        "required_obligations": { "type": "integer", "minimum": 0 },
+        "evaluated_obligations": { "type": "integer", "minimum": 0 },
+        "required_bridges": { "type": "integer", "minimum": 0 },
+        "evaluated_bridge_records": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "obligation_scope": {
+      "type": "object",
+      "required": ["work_package", "obligation_id"],
+      "additionalProperties": false,
+      "properties": {
+        "work_package": { "type": "string", "minLength": 1 },
+        "obligation_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "expected_scope": {
+      "type": "object",
+      "required": ["state", "obligation_ids", "missing", "unexpected"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "type": "string", "enum": ["unpinned", "matched", "mismatch"] },
+        "obligation_ids": { "type": "array", "items": { "type": "string" } },
+        "missing": { "type": "array", "items": { "type": "string" } },
+        "unexpected": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "bridge_scope": {
+      "type": "object",
+      "required": ["work_package", "bridge_id"],
+      "additionalProperties": false,
+      "properties": {
+        "work_package": { "type": "string", "minLength": 1 },
+        "bridge_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "record_reference": {
+      "type": "object",
+      "required": [
+        "work_package", "obligation_id", "report_path", "evidence",
+        "proof_artifact_references", "used_by", "record"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "work_package": { "type": "string", "minLength": 1 },
+        "obligation_id": { "type": "string", "minLength": 1 },
+        "report_path": { "type": "string", "minLength": 1 },
+        "evidence": { "$ref": "#/$defs/evidence_reference" },
+        "proof_artifact_references": { "type": "array", "items": { "type": "string" } },
+        "used_by": { "type": "array", "items": { "$ref": "#/$defs/use_reference" } },
+        "record": { "type": "object" }
+      }
+    },
+    "bridge_record_reference": {
+      "type": "object",
+      "required": [
+        "work_package", "bridge_id", "report_path", "evidence",
+        "proof_artifact_references", "used_by", "record"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "work_package": { "type": "string", "minLength": 1 },
+        "bridge_id": { "type": "string", "minLength": 1 },
+        "report_path": { "type": "string", "minLength": 1 },
+        "evidence": { "$ref": "#/$defs/evidence_reference" },
+        "proof_artifact_references": { "type": "array", "items": { "type": "string" } },
+        "used_by": { "type": "array", "items": { "$ref": "#/$defs/use_reference" } },
+        "record": { "type": "object" }
+      }
+    },
+    "evidence_reference": {
+      "type": "object",
+      "required": ["kind", "verifier", "harness", "scope"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": ["string", "null"] },
+        "verifier": { "type": ["string", "null"] },
+        "harness": { "type": ["string", "null"] },
+        "scope": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "use_reference": {
+      "type": "object",
+      "required": ["kind", "work_package"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["provided-guarantee", "required-guarantee", "required-bridge", "G14-proof-recheck"] },
+        "work_package": { "type": "string", "minLength": 1 }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["ceiling", "conditions"],
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": { "type": ["string", "null"] },
+        "conditions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": ["gate", "subject", "reason", "severity", "condition"],
+      "additionalProperties": false,
+      "properties": {
+        "gate": { "type": "string" },
+        "subject": { "type": "string" },
+        "reason": { "type": "string" },
+        "severity": { "type": "string", "enum": ["error", "degraded", "info"] },
+        "condition": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

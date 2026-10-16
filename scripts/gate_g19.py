@@ -142,7 +142,7 @@ def collect_valid_witness_entries(descriptor: dict, workspace: Path) -> list[tup
                 continue
             if not isinstance(data, dict):
                 continue
-            file_findings = validate_witness_data(path, data, validator, specs_search_root)
+            file_findings = validate_witness_data(path, data, validator, specs_search_root, workspace)
             if any(f.severity == "error" for f in file_findings):
                 continue
             entries.append((path.resolve(), data))

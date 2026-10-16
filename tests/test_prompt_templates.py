@@ -21,12 +21,21 @@ PROMPTS = ROOT / "prompts"
 
 
 class PromptTemplateScaffoldingTest(unittest.TestCase):
+    def test_interaction_prompt_uses_declared_verifier_policy_and_states_g14_ceiling(self):
+        text = (PROMPTS / "stage-3-interaction-drafting.md").read_text()
+        self.assertIn("{{verifier_policy}}", text)
+        self.assertIn("cannot replace the owner's evidence kind", text)
+        self.assertIn("G14 determines whether the achieved closure", text)
+        self.assertIn("harness-tested ceiling", text)
+
     def test_closure_profile_template_accepts_plan_or_manifest_membership(self):
         text = (PROMPTS / "stage-3-closure-profile-drafting.md").read_text()
         self.assertIn('"work_packages": {{work_packages}}', text)
         self.assertIn("approved Stage 7 plans", text)
         self.assertIn("generated manifests", text)
         self.assertIn("G14 checks the final", text)
+        self.assertIn("expected_obligations", text)
+        self.assertIn("do not infer", text)
 
     def test_stage_3_template_has_required_scaffolding(self):
         text = (PROMPTS / "stage-3-boundary-drafting.md").read_text()
@@ -35,6 +44,15 @@ class PromptTemplateScaffoldingTest(unittest.TestCase):
         self.assertIn("{{prior_artifact}}", text)
         self.assertIn("docs/boundary-contract-schema.json", text)
         self.assertIn("adversary", text.lower())
+
+    def test_boundary_prompt_uses_the_project_policy_as_authority(self):
+        text = (PROMPTS / "stage-3-boundary-drafting.md").read_text()
+        self.assertIn("contents read from this project's", text)
+        self.assertIn("docs/reliance-policy.md", text)
+        self.assertIn("bundled", text)
+        self.assertIn("only the source used to initialize", text)
+        self.assertIn("the project file is the policy authority", text)
+        self.assertNotIn("copied from `docs/reliance-policy.template.md`", text)
 
     def test_stage_0_template_has_required_scaffolding(self):
         text = (PROMPTS / "stage-0-evidence-intake.md").read_text()
@@ -343,29 +361,26 @@ class SimulatedCompliantOutputTest(unittest.TestCase):
 
         specs_dir = self.root / "crate_a" / "specs"
         specs_dir.mkdir(parents=True, exist_ok=True)
-        (specs_dir / "task_queue.json").write_text(
-            json.dumps(
-                {
-                    "concept": "TaskQueue",
-                    "constraints": [
-                        {
-                            "id": "C001",
-                            "english": "pop_ready is called only when a task is due by now",
-                            "logic": "true",
-                            "kind": "precondition",
-                            "applies_to": ["pop_ready"],
-                        },
-                        {
-                            "id": "C002",
-                            "english": "pop_ready returns the task with the earliest deadline",
-                            "logic": "true",
-                            "kind": "postcondition",
-                            "applies_to": ["pop_ready"],
-                        },
-                    ],
-                }
-            )
+        concept_spec = json.loads(
+            (ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/task_queue.json").read_text()
         )
+        concept_spec["constraints"] = [
+            {
+                "id": "C001",
+                "english": "pop_ready is called only when a task is due by now",
+                "logic": "true",
+                "kind": "precondition",
+                "applies_to": ["pop_ready"],
+            },
+            {
+                "id": "C002",
+                "english": "pop_ready returns the task with the earliest deadline",
+                "logic": "true",
+                "kind": "postcondition",
+                "applies_to": ["pop_ready"],
+            },
+        ]
+        (specs_dir / "task_queue.json").write_text(json.dumps(concept_spec))
 
         simulated_llm_output = {
             "schema_version": "1.0",

@@ -1,6 +1,22 @@
 {
-  "_note": "Minimal concept-spec fixture simulating docs/concept-to-code-modifications.md gap #6 already applied (constraint.id present) -- current concept-to-code does not have this field yet.",
+  "schema_version": "1.0",
   "concept": "TaskQueue",
+  "cluster": "scheduling",
+  "kind": "struct",
+  "english_description": "A queue of tasks ordered by their deadlines for scheduling.",
+  "verifier": "creusot",
+  "queries": [
+    {
+      "english": "How many tasks are ready?",
+      "rust_sig": "fn ready_count(&self) -> usize",
+      "pure": true
+    }
+  ],
+  "commands": [],
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-09-04"
+  },
   "constraints": [
     {
       "id": "C003",
@@ -8,6 +24,13 @@
       "logic": "true",
       "kind": "postcondition",
       "applies_to": ["pop_ready"]
+    }
+  ],
+  "adversary_table": [
+    {
+      "scenario": "a task has no deadline",
+      "violates": "deadline order",
+      "resolution": "reject"
     }
   ]
 }

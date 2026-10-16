@@ -125,6 +125,20 @@ class SatisfiesEvidenceKindTest(unittest.TestCase):
         self.assertFalse(result.holds)
         self.assertTrue(any("evidence.kind" in r for r in result.reasons), result.reasons)
 
+    def test_compile_time_source_evidence_kind_is_not_a_verifier_assurance_record(self):
+        """The Stage 0 evidence classification added in #156 must not be
+        accepted as an achieved verifier result or satisfy a G14 profile."""
+        record = achieved_record(evidence={
+            "kind": "compile-time", "verifier": "kani", "harness": "h",
+            "scope": {"input_domain": "queue_len_le_8"},
+        })
+        result = satisfies(required_profile(), record)
+        self.assertFalse(result.holds)
+        self.assertTrue(
+            any("achieved_record is not schema-valid" in reason for reason in result.reasons),
+            result.reasons,
+        )
+
 
 class SatisfiesScopeTest(unittest.TestCase):
     def test_missing_scope_key_is_rejected(self):

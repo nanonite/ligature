@@ -235,6 +235,33 @@ def check_naming(path: Path, data: dict) -> list[Finding]:
     return []
 
 
+def check_constraint_id_uniqueness(path: Path, data: dict) -> list[Finding]:
+    """A stable ID must identify one constraint, not whichever duplicate
+    happens to appear first in the JSON array. IDs stay optional for
+    compatibility, but any author-supplied IDs must be unique within the
+    concept spec before draft staging or human approval."""
+    seen: dict[str, int] = {}
+    findings: list[Finding] = []
+    for index, constraint in enumerate(data.get("constraints") or []):
+        if not isinstance(constraint, dict):
+            continue
+        constraint_id = constraint.get("id")
+        if not isinstance(constraint_id, str):
+            continue
+        previous = seen.get(constraint_id)
+        if previous is not None:
+            findings.append(Finding(
+                "G1b", path,
+                f"constraint id {constraint_id!r} is duplicated at constraints indexes "
+                f"{previous} and {index}; a stable id must identify exactly one constraint. "
+                "Have the human author assign a distinct, unused id to the intended constraint, "
+                "then rerun draft/approve; Ligature does not derive ids from array position or source text",
+            ))
+        else:
+            seen[constraint_id] = index
+    return findings
+
+
 def check_no_draft_review(path: Path, data: dict) -> list[Finding]:
     """A Stage 0/3 draft must never carry its own `review` block --
     review_checkpoint.approve() is the only path that attaches one, after
@@ -268,7 +295,7 @@ def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator)
     g1a = gate_g1a(path, data, validator)
     if g1a:
         return g1a
-    return check_naming(path, data)
+    return check_naming(path, data) + check_constraint_id_uniqueness(path, data)
 
 
 def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
@@ -279,4 +306,4 @@ def validate_data(path: Path, data: dict, validator: Draft202012Validator) -> li
     g1a = gate_g1a(path, data, validator)
     if g1a:
         return g1a
-    return check_naming(path, data)
+    return check_naming(path, data) + check_constraint_id_uniqueness(path, data)

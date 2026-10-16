@@ -54,7 +54,7 @@ import resources  # noqa: E402
 from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
-from project_descriptor import is_underscore_artifact_path  # noqa: E402
+from concept_spec_lookup import find_concept_spec  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
 from validate_boundary_naming import check_file as check_naming  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
@@ -197,56 +197,44 @@ def gate_g1b(path: Path, data: dict) -> list[Finding]:
 
 
 def _resolve_constraint(
-    concept: str, obligation_id: str, specs_search_root: Path | None
-) -> tuple[str, dict | None]:
+    concept: str,
+    obligation_id: str,
+    specs_search_root: Path | None,
+    workspace_root: Path | None = None,
+) -> tuple[str, dict | None, str | None]:
     """Best-effort resolution of <Concept>.<id> to a constraint dict in the
     callee's concept spec. Returns (status, constraint_or_none).
-    status is one of: 'resolved', 'no_search_root', 'spec_not_found',
-    'ambiguous' (review finding D3 -- more than one spec file declares this
-    concept), 'no_ids_in_spec' (gap #6 not applied upstream yet), 'dangling'
-    (G2, not this gate's job to fail on, but reported for visibility)."""
-    if specs_search_root is None:
-        return "no_search_root", None
+    status comes from concept_spec_lookup (`resolved`, missing root/reference,
+    ambiguous, invalid, or mislocated), then adds the separate stable-ID and
+    dangling-reference outcomes. Missing/invalid authoritative references are
+    errors; absent stable IDs remain informational for compatibility."""
+    lookup = find_concept_spec(concept, specs_search_root, workspace_root)
+    if lookup.status != "resolved" or lookup.document is None:
+        return lookup.status, None, lookup.diagnostic()
 
-    # D3: match by the spec's own `concept` field, not by filename -- a
-    # file named task_queue.json is not proof its `concept` is TaskQueue
-    # (it could be a stale copy, or declare TaskQueueV2). Sort for
-    # determinism regardless (glob order is filesystem-dependent).
-    all_specs = sorted(specs_search_root.glob("**/*.json"))
-    matches = []
-    for spec_path in all_specs:
-        if is_underscore_artifact_path(spec_path, specs_search_root):
-            # A witness spec carries its own top-level `concept`; an
-            # unfiltered scan would mistake it for the concept spec that
-            # defines the callee's concept and report a spurious ambiguity
-            # whenever a witness shares a concept name with a boundary's
-            # callee (chainlink #69).
-            continue
-        try:
-            spec = json.loads(spec_path.read_text())
-        except json.JSONDecodeError:
-            continue
-        if isinstance(spec, dict) and spec.get("concept") == concept:
-            matches.append((spec_path, spec))
-
-    if not matches:
-        return "spec_not_found", None
-    if len(matches) > 1:
-        return "ambiguous", None
-
-    _, spec = matches[0]
+    spec = lookup.document
     constraints = spec.get("constraints", [])
     if constraints and not any("id" in c for c in constraints):
-        return "no_ids_in_spec", None
+        return (
+            "no_ids_in_spec", None,
+            f"{concept}'s valid concept spec at {lookup.path} has constraints but none carries "
+            f"a stable id in constraints[].id; requested constraint id is {obligation_id!r}",
+        )
 
     for c in constraints:
         if c.get("id") == obligation_id:
-            return "resolved", c
-    return "dangling", None
+            return "resolved", c, None
+    return (
+        "dangling", None,
+        f"valid concept spec at {lookup.path} declares no constraint id {obligation_id!r}",
+    )
 
 
 def gate_g2_plus(
-    path: Path, data: dict, specs_search_root: Path | None
+    path: Path,
+    data: dict,
+    specs_search_root: Path | None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     callee = data.get("callee") or {}
@@ -303,7 +291,9 @@ def gate_g2_plus(
             )
             continue
 
-        status, constraint = _resolve_constraint(ref_concept, entry.split(".", 1)[1], specs_search_root)
+        status, constraint, resolution_detail = _resolve_constraint(
+            ref_concept, entry.split(".", 1)[1], specs_search_root, workspace_root
+        )
         if status == "resolved" and constraint is not None:
             # chainlink #111: name the role out loud. This entry resolved to
             # a constraint that declares itself a precondition, so it is the
@@ -346,8 +336,7 @@ def gate_g2_plus(
                 Finding(
                     "G2+",
                     path,
-                    f"{entry!r}: more than one spec file under specs_search_root "
-                    f"declares concept {ref_concept!r} -- cannot resolve unambiguously",
+                    f"{entry!r}: {resolution_detail}",
                 )
             )
         elif status == "dangling":
@@ -365,27 +354,39 @@ def gate_g2_plus(
                 Finding(
                     "G2+",
                     path,
-                    f"{entry!r} does not match any constraint id in {ref_concept}'s "
-                    "resolved spec (dangling reference)",
+                    f"{entry!r}: {resolution_detail} (dangling reference). Check whether this "
+                    "reference should name an existing reviewed constraint id; if the concept "
+                    "spec is missing the intended normative constraint, assign its id in a "
+                    "`concept-to-code` draft and promote it through `ligature approve --reviewer "
+                    "<human> <target>`. Ligature does not infer or add constraint ids",
                 )
             )
-        elif status in ("no_search_root", "spec_not_found", "no_ids_in_spec"):
+        elif status in (
+            "no_search_root", "search_root_missing", "spec_not_found", "mislocated",
+            "invalid", "no_ids_in_spec",
+        ):
             # D4: previously a silent skip -- "0 findings" was indistinguishable
             # from "0 findings because nothing was checkable." Report it,
-            # non-blocking, so gap #6's upstream state is a measurable signal
-            # instead of invisible.
-            reason = {
-                "no_search_root": "no --specs-search-root given",
-                "spec_not_found": f"no spec file under specs_search_root declares concept {ref_concept!r}",
-                "no_ids_in_spec": f"{ref_concept}'s spec has constraints but none carry a stable id yet "
-                "(docs/concept-to-code-modifications.md gap #6, not applied upstream)",
-            }[status]
+            # as blocking for a descriptor-backed unresolved reference.
+            # Only the standalone no-root mode and the separate stable-ID
+            # compatibility gap remain informational.
+            reason = resolution_detail or f"concept {ref_concept!r} could not be resolved"
+            if status == "no_ids_in_spec":
+                reason += (
+                    "; this is unresolved, not evidence that the guarantee is valid. Assign a "
+                    "human-chosen `constraints[].id` in a `ligature draft 3 concept-to-code "
+                    "<crate>/specs/<concept_snake_case>.json` draft, then have a human promote "
+                    "that exact draft with `ligature approve --reviewer <human> <target>` and "
+                    "rerun validation. Do not derive the id from array order or source text"
+                )
             findings.append(
                 Finding(
                     "G2+",
                     path,
                     f"{entry!r}: applies_to unverifiable -- {reason}",
-                    severity="info",
+                    severity="info" if status in (
+                        "no_search_root", "search_root_missing", "spec_not_found", "no_ids_in_spec"
+                    ) else "error",
                 )
             )
 
@@ -435,7 +436,11 @@ def validate_draft_data(path: Path, data: dict, validator: Draft202012Validator)
 
 
 def validate_data(
-    path: Path, data: dict, validator: Draft202012Validator, specs_search_root: Path | None = None
+    path: Path,
+    data: dict,
+    validator: Draft202012Validator,
+    specs_search_root: Path | None = None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     """The full G1a/G1b/G2+ chain against in-memory data, positioned at
     `path` for filename-based checks -- `path` need not exist on disk yet.
@@ -447,22 +452,28 @@ def validate_data(
         # G1b/G2+ need a structurally valid document to mean anything.
         return g1a
 
-    return gate_g1b(path, data) + gate_g2_plus(path, data, specs_search_root)
+    return gate_g1b(path, data) + gate_g2_plus(path, data, specs_search_root, workspace_root)
 
 
 def validate_file(
-    path: Path, validator: Draft202012Validator, specs_search_root: Path | None
+    path: Path,
+    validator: Draft202012Validator,
+    specs_search_root: Path | None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     try:
         data = json.loads(path.read_text())
     except json.JSONDecodeError as e:
         return [Finding("G1a", path, f"invalid JSON: {e}")]
 
-    return validate_data(path, data, validator, specs_search_root)
+    return validate_data(path, data, validator, specs_search_root, workspace_root)
 
 
 def valid_boundary_edges_from_crate(
-    crate_root: Path, canonical_dir: Path, specs_search_root: Path | None
+    crate_root: Path,
+    canonical_dir: Path,
+    specs_search_root: Path | None,
+    workspace_root: Path | None = None,
 ) -> set[tuple[str | None, str | None, str | None, str | None]]:
     """The set of (caller_concept, caller_method, callee_concept,
     callee_method) edges covered by a fully valid (zero-ERROR-finding --
@@ -493,7 +504,7 @@ def valid_boundary_edges_from_crate(
     for path in sorted(find_boundary_files(crate_root)):
         if path.resolve().parent != canonical_resolved:
             continue
-        findings = validate_file(path, validator, specs_search_root)
+        findings = validate_file(path, validator, specs_search_root, workspace_root)
         if any(getattr(finding, "severity", "error") == "error" for finding in findings):
             continue
         data = json.loads(path.read_text())
@@ -512,7 +523,11 @@ class BoundaryLookup(dict[str, dict]):
         self.duplicate_ids: set[str] = set()
 
 
-def load_boundaries_by_id(canonical_dir: Path, specs_search_root: Path | None = None) -> BoundaryLookup:
+def load_boundaries_by_id(
+    canonical_dir: Path,
+    specs_search_root: Path | None = None,
+    workspace_root: Path | None = None,
+) -> BoundaryLookup:
     """Load only approved, fully valid, canonically located boundary
     contracts, keyed by boundary_id -- mirrors
     scripts/validate_interaction.py's own load_interactions_by_id
@@ -547,7 +562,7 @@ def load_boundaries_by_id(canonical_dir: Path, specs_search_root: Path | None = 
         if boundary_id in result.duplicate_ids:
             continue
         path, data = entries[0]
-        findings = validate_data(path, data, validator, specs_search_root)
+        findings = validate_data(path, data, validator, specs_search_root, workspace_root)
         if any(getattr(finding, "severity", "error") == "error" for finding in findings):
             continue
         result[boundary_id] = data
@@ -631,13 +646,17 @@ def check_assumption_identity_collisions(boundaries: list[dict]) -> list[Finding
     return findings
 
 
-def validate(root: Path, specs_search_root: Path | None = None) -> list[Finding]:
+def validate(
+    root: Path,
+    specs_search_root: Path | None = None,
+    workspace_root: Path | None = None,
+) -> list[Finding]:
     validator = load_validator()
     findings: list[Finding] = []
     for path in find_boundary_files(root):
         if path.suffix != ".json":
             continue
-        findings.extend(validate_file(path, validator, specs_search_root))
+        findings.extend(validate_file(path, validator, specs_search_root, workspace_root))
     return findings
 
 
@@ -660,7 +679,7 @@ def main(argv: list[str]) -> int:
         "--specs-search-root",
         type=Path,
         default=None,
-        help="Root to resolve callee concept specs from, for the applies_to check (optional).",
+        help="Authoritative root to resolve callee concept specs from; unresolved references name this root.",
     )
     args = parser.parse_args(argv)
 

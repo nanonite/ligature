@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
@@ -360,11 +360,53 @@ def write_set_overlap_diagnostics(data: dict) -> list[str]:
     from validate_work_package import _patterns_can_overlap
 
     return [
-        f"write_set.allowed_roots pattern {a!r} overlaps write_set.protected_roots pattern {p!r}"
+        f"write_set.allowed_roots pattern {a!r} overlaps write_set.protected_roots pattern {p!r}; "
+        "review the declared scope and narrow or otherwise revise the patterns so they are disjoint "
+        "while retaining the protected-root boundary"
         for a in allowed
         for p in protected
         if isinstance(a, str) and isinstance(p, str) and _patterns_can_overlap(a, p)
     ]
+
+
+def crate_root_scope_diagnostics(workspace: Path, descriptor: dict) -> list[str]:
+    """Require each declared crate root to be workspace-relative and to
+    resolve inside the workspace. Existence is a separate prerequisite:
+    a missing in-scope crate remains reportable as such, while an absolute,
+    parent-traversing, or escaping-symlink root makes the descriptor
+    invalid before any validator or extractor follows it (date-ligature-009).
+
+    A symlink whose resolved target remains inside the workspace is allowed;
+    the containment boundary, not the filesystem spelling, is the policy."""
+    workspace_root = Path(workspace).resolve()
+    diagnostics: list[str] = []
+    crates = descriptor.get("crates", []) if isinstance(descriptor, dict) else []
+    if not isinstance(crates, list):
+        return diagnostics  # JSON Schema reports the malformed shape.
+    for index, crate in enumerate(crates):
+        if not isinstance(crate, dict):
+            continue
+        raw = crate.get("crate_dir")
+        if not isinstance(raw, str) or not raw:
+            continue  # JSON Schema reports the malformed field.
+        posix = PurePosixPath(raw)
+        windows = PureWindowsPath(raw)
+        if posix.is_absolute() or windows.is_absolute() or windows.drive or ".." in posix.parts:
+            diagnostics.append(
+                f"crates[{index}].crate_dir {raw!r} must be workspace-relative and may not use "
+                "an absolute path or parent traversal; set it to a crate directory inside the workspace"
+            )
+            continue
+        candidate = workspace_root.joinpath(*posix.parts)
+        try:
+            resolved = candidate.resolve(strict=False)
+            resolved.relative_to(workspace_root)
+        except (OSError, RuntimeError, ValueError):
+            diagnostics.append(
+                f"crates[{index}].crate_dir {raw!r} resolves outside the workspace (including through "
+                "a symlink); point it to a crate root contained by the workspace"
+            )
+    return diagnostics
 
 
 def read_descriptor_text(path: Path) -> str:

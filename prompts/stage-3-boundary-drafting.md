@@ -27,8 +27,10 @@ response as a hard failure to retry or escalate, never as an empty guarantee.
 - `{{caller_spec}}` — the caller's concept-to-code spec JSON (queries,
   commands, constraints).
 - `{{callee_spec}}` — the callee's concept-to-code spec JSON.
-- `{{reliance_policy}}` — this project's `docs/reliance-policy.md` (copied
-  from `docs/reliance-policy.template.md`), resolution rule included. This
+- `{{reliance_policy}}` — contents read from this project's
+  `docs/reliance-policy.md`, resolution rule included. Ligature's bundled
+  `docs/reliance-policy.template.md` is only the source used to initialize
+  or migrate the project copy; the project file is the policy authority. This
   document is **standing governance, not a one-time artifact**: it is
   user-owned, and its on-disk content is drift-checked against the reviewed
   hash the ownership manifest records — if it was edited without review,
@@ -81,13 +83,20 @@ and it is the shape that lets a real gap pass unnoticed. Leave it empty only
 when the callee spec genuinely declares no constraint with a stable `id` yet
 (the gap #6 case below).
 
-If the callee spec has no constraint with a stable `id` field yet (current
-concept-to-code doesn't expose one — `docs/concept-to-code-modifications.md`
-gap #6, not yet applied upstream), do not invent one and do not reference
-that constraint. Omit it from `callee_guarantees` rather than fabricate an
-id. The output stays JSON-only either way; an incomplete `callee_guarantees`
-list is exactly the kind of thing the human catches at
-`scripts/review_checkpoint.py diff`, not something to explain inline.
+If a real normative constraint needs to be referenced but the approved spec
+has no IDs, do not invent one in this boundary. Revise the concept spec
+through `ligature draft 3 concept-to-code
+<crate>/specs/<concept_snake_case>.json`, have a human review the staged
+draft, and promote it with `ligature approve --reviewer <human> <target>`
+before referencing its author-assigned ID.
+
+If the callee spec has no constraint with a stable `id` field yet (the
+vendored concept-to-code schema has not adopted gap #6 upstream), do not
+invent one and do not reference that constraint. Omit it from
+`callee_guarantees` rather than fabricate an id, and state the missing
+reference only in the surrounding review workflow, not in the JSON output.
+The human reviewer must establish whether the concept spec should receive an
+author-assigned ID before approving a boundary that depends on it.
 
 ## Schema
 

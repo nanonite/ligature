@@ -125,6 +125,7 @@ class RenderPromptTest(unittest.TestCase):
             "caller_spec": "{}",
             "callee_spec": "{}",
             "target_triple": "x86_64-unknown-linux-gnu",
+            "verifier_policy": "{}",
             "prior_artifact": "(none)",
             "finding": "(none)",
         }
@@ -246,13 +247,19 @@ class CmdDraftEndToEndTest(unittest.TestCase):
         self.addCleanup(path.unlink)
         return path
 
-    def _write_descriptor(self, stub_path: Path) -> None:
+    def _write_descriptor(self, stub_path: Path, write_set: dict | None = None) -> None:
         descriptor = dict(VALID_DESCRIPTOR)
         descriptor["llm_backend"] = {"kind": "claude", "command": f"{sys.executable} {stub_path}"}
+        descriptor["write_set"] = write_set or {
+            "allowed_roots": ["evidence/**"],
+            "protected_roots": [],
+        }
         self.descriptor_path.write_text(json.dumps(descriptor))
 
     def test_closure_profile_draft_requires_explicit_membership(self):
-        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+        descriptor = dict(VALID_DESCRIPTOR)
+        descriptor["write_set"] = {"allowed_roots": [], "protected_roots": ["specs/_closure/**"]}
+        self.descriptor_path.write_text(json.dumps(descriptor))
         target = self.workspace / "specs" / "_closure" / "scheduling.json"
         error = io.StringIO()
         with redirect_stderr(error):
@@ -268,7 +275,9 @@ class CmdDraftEndToEndTest(unittest.TestCase):
         self.assertIn("needs an explicit --var work_packages", error.getvalue())
 
     def test_closure_profile_draft_rejects_malformed_membership_json(self):
-        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+        descriptor = dict(VALID_DESCRIPTOR)
+        descriptor["write_set"] = {"allowed_roots": [], "protected_roots": ["specs/_closure/**"]}
+        self.descriptor_path.write_text(json.dumps(descriptor))
         target = self.workspace / "specs" / "_closure" / "scheduling.json"
         error = io.StringIO()
         with redirect_stderr(error):
@@ -329,6 +338,113 @@ class CmdDraftEndToEndTest(unittest.TestCase):
         # Proves the claim genuinely flowed prompt -> subprocess -> parsed
         # output, not a value asserted straight from a hand-built fixture.
         self.assertEqual(data["claim"], "pop_ready returns None only when no task has deadline <= now")
+
+    def test_compile_time_evidence_drafts_and_promotes_without_becoming_assurance(self):
+        stub = self._write_stub_backend({
+            "schema_version": "1.0",
+            "id": "E-9002",
+            "kind": "compile-time",
+            "claim": "The source contains a compile-time assertion for queue capacity",
+            "origin": {
+                "repository": "https://example.com/repro",
+                "commit": "a1b2c3d",
+                "symbol": "TaskQueue::CAPACITY_ASSERTION",
+                "path": "src/queue.cpp",
+                "content_hash": "sha256:" + "1" * 64,
+                "line_hint": "24-31",
+            },
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "R",
+        })
+        self._write_descriptor(stub)
+        target = self.workspace / "evidence" / "E-9002.json"
+
+        draft_rc = self._run_draft(target)
+        self.assertEqual(draft_rc, 0)
+        staged = target.with_suffix(".json.draft")
+        self.assertTrue(staged.is_file())
+        staged_data = json.loads(staged.read_text())
+        self.assertEqual(staged_data["kind"], "compile-time")
+        self.assertEqual(staged_data["origin"]["commit"], "a1b2c3d")
+        self.assertEqual(staged_data["origin"]["content_hash"], "sha256:" + "1" * 64)
+
+        promote_rc = pipeline.main([
+            "--workspace", str(self.workspace),
+            "--descriptor", str(self.descriptor_path),
+            "promote-evidence", str(target),
+        ])
+        self.assertEqual(promote_rc, 0)
+        self.assertFalse(staged.exists())
+        promoted = json.loads(target.read_text())
+        self.assertEqual(promoted["kind"], "compile-time")
+        self.assertNotIn("review", promoted)
+        validate_rc = pipeline.main(["--workspace", str(self.workspace), "validate-evidence"])
+        self.assertEqual(validate_rc, 0)
+
+    def test_out_of_set_in_crate_target_is_refused_before_prompt_or_backend(self):
+        stub = self._write_stub_backend({})
+        self._write_descriptor(stub)
+        target = self.workspace / "crate_a" / "rogue" / "evil.json"
+        with mock.patch.object(pipeline, "render_prompt") as render, mock.patch.object(
+            pipeline, "invoke_llm_backend"
+        ) as invoke:
+            error = io.StringIO()
+            with redirect_stderr(error):
+                rc = self._run_draft(target)
+        self.assertEqual(rc, 1)
+        self.assertIn("outside every allowed_roots pattern", error.getvalue())
+        render.assert_not_called()
+        invoke.assert_not_called()
+        self.assertFalse(target.with_suffix(".json.draft").exists())
+
+    def test_protected_canonical_evidence_draft_remains_supported(self):
+        stub = self._write_stub_backend({
+            "schema_version": "1.0",
+            "id": "E-9003",
+            "kind": "source-artifact",
+            "origin": {
+                "repository": "https://example.com/repro",
+                "commit": "a1b2c3d",
+                "symbol": "TaskQueue::pop_ready",
+                "path": "src/queue.cpp",
+                "content_hash": "sha256:" + "0" * 64,
+                "line_hint": "118-160",
+            },
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "R",
+        })
+        self._write_descriptor(stub, {
+            "allowed_roots": [],
+            "protected_roots": ["evidence/**"],
+        })
+        target = self.workspace / "evidence" / "E-9003.json"
+        rc = self._run_draft(target)
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.with_suffix(".json.draft").is_file())
+
+    def test_protected_non_artifact_destination_is_refused_without_generic_grant(self):
+        stub = self._write_stub_backend({})
+        self._write_descriptor(stub, {
+            "allowed_roots": [],
+            "protected_roots": ["crate_a/**"],
+        })
+        target = self.workspace / "crate_a" / "rogue" / "evil.json"
+        with mock.patch.object(pipeline, "render_prompt") as render, mock.patch.object(
+            pipeline, "invoke_llm_backend"
+        ) as invoke:
+            error = io.StringIO()
+            with redirect_stderr(error):
+                rc = self._run_draft(target)
+        self.assertEqual(rc, 1)
+        self.assertIn("inside protected_roots pattern", error.getvalue())
+        self.assertIn("does not consume generic protected-write grants", error.getvalue())
+        render.assert_not_called()
+        invoke.assert_not_called()
+        self.assertFalse(target.with_suffix(".json.draft").exists())
 
     def test_generated_evidence_missing_required_field_is_rejected_by_cmd_draft_itself(self):
         """External review, high severity: cmd_draft used to stage a draft
@@ -484,6 +600,12 @@ class EvidenceTemplateSchemaContractTest(unittest.TestCase):
         self.assertIsNotNone(fence, "template has no fenced output-contract JSON block")
         contract = json.loads(fence.group(1))
 
+        self.assertEqual(
+            set(contract["kind"].split(" | ")),
+            set(schema["properties"]["kind"]["enum"]),
+            "the Stage 0 kind choices must stay aligned with the schema enum",
+        )
+
         for field in schema["required"]:
             self.assertIn(
                 field, contract, f"schema requires {field!r} at the top level but the template's contract omits it"
@@ -527,6 +649,8 @@ class SelectDraftValidateFnTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self.tmp.name)
+        specs = self.workspace / "crate_a" / "specs"
+        specs.mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
         (self.workspace / "crate_a" / "specs" / "_exemptions").mkdir(parents=True)
@@ -536,6 +660,12 @@ class SelectDraftValidateFnTest(unittest.TestCase):
         (self.workspace / "evidence").mkdir(parents=True)
         (self.workspace / "specs" / "_conflicts").mkdir(parents=True)
         (self.workspace / "specs" / "_closure").mkdir(parents=True)
+        concept = json.loads(
+            (ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/task_queue.json").read_text()
+        )
+        (self.workspace / "crate_a" / "specs" / "task_queue.json").write_text(json.dumps(concept))
+        scheduler = {**concept, "concept": "Scheduler"}
+        (self.workspace / "crate_a" / "specs" / "scheduler.json").write_text(json.dumps(scheduler))
         self._write_real_evidence("E-0143")
         self._write_real_evidence("E-0201")
 
@@ -625,6 +755,45 @@ class SelectDraftValidateFnTest(unittest.TestCase):
         }
         self.assertEqual(self._findings(target, data), [])
 
+    def test_interaction_draft_and_approval_dispatchers_enforce_verifier_policy(self):
+        """Chainlink #151: both sides of the actual pipeline dispatch must
+        pass descriptor policy to the interaction validator. A reliance
+        accepting Creusot-only evidence cannot pass when the callee cluster
+        is owned by Kani."""
+        specs = self.workspace / "crate_a" / "specs"
+        concept = json.loads(
+            (ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/task_queue.json").read_text()
+        )
+        scheduler = {**concept, "concept": "Scheduler", "verifier": "kani"}
+        task_queue = {**concept, "concept": "TaskQueue", "verifier": "kani"}
+        (specs / "scheduler.json").write_text(json.dumps(scheduler))
+        (specs / "task_queue.json").write_text(json.dumps(task_queue))
+        descriptor = json.loads(json.dumps(VALID_DESCRIPTOR))
+        descriptor["verifier_policy"] = {"default": "kani"}
+
+        target = specs / "_interactions" / "I-SCHED-TQ-001.json"
+        interaction = json.loads(
+            (ROOT / "tests/fixtures/interactions/valid/specs/_interactions/I-SCHED-TQ-001.json").read_text()
+        )
+        interaction["reliances"][0]["required_assurance"]["accepted_evidence_kinds"] = [
+            "creusot-deductive-check"
+        ]
+        draft = {key: value for key, value in interaction.items() if key != "review"}
+
+        draft_validate = pipeline._select_draft_validate_fn(target, self.workspace, descriptor)
+        draft_findings = draft_validate(target, draft)
+        self.assertTrue(
+            any(f.gate == "G2-policy" and f.severity == "error" for f in draft_findings),
+            [str(f) for f in draft_findings],
+        )
+
+        approve_validate = pipeline._select_validate_fn(target, self.workspace, descriptor)
+        approve_findings = approve_validate(target, interaction)
+        self.assertTrue(
+            any(f.gate == "G2-policy" and f.severity == "error" for f in approve_findings),
+            [str(f) for f in approve_findings],
+        )
+
     def test_interaction_draft_with_model_supplied_review_is_rejected(self):
         target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
         data = {
@@ -688,7 +857,11 @@ class SelectDraftValidateFnTest(unittest.TestCase):
                 },
             }],
         }
-        self.assertEqual(self._findings(target, data), [])
+        findings = self._findings(target, data)
+        self.assertFalse(
+            [f for f in findings if f.severity == "error" or f.gate == "G15"],
+            [str(f) for f in findings],
+        )
 
     def test_valid_pre_review_exemption_draft_passes(self):
         target = self.workspace / "crate_a" / "specs" / "_exemptions" / "I-SCHED-TQ-002.json"
@@ -1323,6 +1496,12 @@ class CmdDraftInteractionEndToEndTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self.tmp.name)
         (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
+        concept = json.loads(
+            (ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/task_queue.json").read_text()
+        )
+        specs = self.workspace / "crate_a" / "specs"
+        (specs / "task_queue.json").write_text(json.dumps(concept))
+        (specs / "scheduler.json").write_text(json.dumps({**concept, "concept": "Scheduler"}))
         self.descriptor_path = self.workspace / "project-descriptor.json"
 
     def tearDown(self):
@@ -1339,6 +1518,10 @@ class CmdDraftInteractionEndToEndTest(unittest.TestCase):
     def _write_descriptor(self, stub_path: Path) -> None:
         descriptor = dict(VALID_DESCRIPTOR)
         descriptor["llm_backend"] = {"kind": "claude", "command": f"{sys.executable} {stub_path}"}
+        descriptor["write_set"] = {
+            "allowed_roots": [],
+            "protected_roots": ["crate_a/specs/**"],
+        }
         self.descriptor_path.write_text(json.dumps(descriptor))
 
     def _run_draft(self, target: Path) -> int:
@@ -1357,6 +1540,85 @@ class CmdDraftInteractionEndToEndTest(unittest.TestCase):
             "--var", "prior_artifact=(none)",
             "--var", "finding=(none)",
         ])
+
+    def _linked_interaction_fields(self, evidence_id: str) -> dict:
+        return {
+            "schema_version": "1.0",
+            "caller": {"concept": "Scheduler", "method": "dispatch"},
+            "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+            "edge_class": ["import-only"],
+            "eligibility": "inform",
+            "rationale": "the edge consumes a declared data interface",
+            "evidence_links": [evidence_id],
+            "protocol_class": "pairwise",
+            "realization": {
+                "requirement": "required",
+                "config_scope": {
+                    "target": "x86_64-unknown-linux-gnu",
+                    "features": ["default"],
+                    "cfg": [],
+                },
+            },
+        }
+
+    def _write_valid_evidence(self, evidence_id: str) -> None:
+        evidence = self.workspace / "evidence" / f"{evidence_id}.json"
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        evidence.write_text(json.dumps({
+            "schema_version": "1.0",
+            "id": evidence_id,
+            "kind": "source-artifact",
+            "claim": "the source behavior is recorded",
+            "origin": {
+                "repository": "https://example.com/repro",
+                "commit": "a1b2c3d",
+                "symbol": "TaskQueue::pop_ready",
+                "path": "src/queue.cpp",
+                "content_hash": "sha256:" + "0" * 64,
+                "line_hint": "118-160",
+            },
+            "semantic_disposition": "required",
+            "lifecycle": "accepted",
+            "confidence": "high",
+            "mode": "R",
+        }))
+
+    def test_draft_accepts_a_valid_workspace_evidence_reference(self):
+        stub = self._write_stub_backend(self._linked_interaction_fields("E-0143"))
+        self._write_descriptor(stub)
+        self._write_valid_evidence("E-0143")
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-020.json"
+
+        rc = self._run_draft(target)
+        self.assertEqual(rc, 0)
+        self.assertTrue(target.with_suffix(".json.draft").is_file())
+
+    def test_draft_rejects_a_dangling_workspace_evidence_reference_before_staging(self):
+        stub = self._write_stub_backend(self._linked_interaction_fields("E-999"))
+        self._write_descriptor(stub)
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-021.json"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = self._run_draft(target)
+        self.assertEqual(rc, 1)
+        self.assertIn("[G4/error]", output.getvalue())
+        self.assertIn("E-999", output.getvalue())
+        self.assertFalse(target.with_suffix(".json.draft").exists())
+
+    def test_draft_does_not_treat_schema_invalid_evidence_as_a_valid_link(self):
+        stub = self._write_stub_backend(self._linked_interaction_fields("E-0222"))
+        self._write_descriptor(stub)
+        invalid = self.workspace / "evidence" / "E-0222.json"
+        invalid.parent.mkdir(parents=True, exist_ok=True)
+        invalid.write_text(json.dumps({"schema_version": "1.0", "id": "E-0222"}))
+        target = self.workspace / "crate_a" / "specs" / "_interactions" / "I-SCHED-TQ-022.json"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            rc = self._run_draft(target)
+        self.assertEqual(rc, 1)
+        self.assertIn("[G4/error]", output.getvalue())
+        self.assertIn("E-0222", output.getvalue())
+        self.assertFalse(target.with_suffix(".json.draft").exists())
 
     def test_generated_boundary_required_interaction_passes_cmd_drafts_own_validation(self):
         stub = self._write_stub_backend({
@@ -3328,7 +3590,9 @@ class CmdApproveConceptSpecIntegrationTest(unittest.TestCase):
         self.workspace = Path(self.tmp.name)
         (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
         self.descriptor_path = self.workspace / "project-descriptor.json"
-        self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
+        descriptor = json.loads(json.dumps(VALID_DESCRIPTOR))
+        descriptor["write_set"]["protected_roots"] = ["crate_a/specs/**"]
+        self.descriptor_path.write_text(json.dumps(descriptor))
         self.spec_target = self.workspace / "crate_a" / "specs" / "task_queue.json"
         self.boundary_target = (
             self.workspace / "crate_a" / "specs" / "_boundaries"
@@ -3446,6 +3710,30 @@ class CmdApproveConceptSpecIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(log["target_path"], str(self.spec_target))
         self.assertEqual(log["reviewer"], "alice")
+
+    def test_a_concept_spec_with_duplicate_stable_ids_is_not_staged(self):
+        data = self._concept_spec()
+        duplicate = dict(data["constraints"][0])
+        duplicate["english"] = "The queue preserves a second distinct ordering property"
+        data["constraints"].append(duplicate)
+
+        rc = self._draft_via_cli(self.spec_target, data)
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.spec_target.with_suffix(".json.draft").exists())
+
+    def test_approval_rejects_duplicate_stable_ids(self):
+        data = self._concept_spec()
+        duplicate = dict(data["constraints"][0])
+        duplicate["english"] = "The queue preserves a second distinct ordering property"
+        data["constraints"].append(duplicate)
+        self._write_draft(self.spec_target, data)
+
+        rc = self._run("approve", str(self.spec_target), "--reviewer", "alice")
+
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.spec_target.exists())
+        self.assertTrue(self.spec_target.with_suffix(".json.draft").exists())
 
     def test_the_approve_dispatcher_recognizes_a_concept_spec(self):
         """Pinned against the dispatcher's own refusal, since that message
@@ -3753,15 +4041,34 @@ class CmdApproveIntegrationTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.workspace = Path(self.tmp.name)
-        (self.workspace / "crate_a" / "specs" / "_boundaries").mkdir(parents=True)
-        (self.workspace / "crate_a" / "specs" / "_interactions").mkdir(parents=True)
-        (self.workspace / "crate_a" / "specs" / "_exemptions").mkdir(parents=True)
-        (self.workspace / "crate_a" / "specs" / "_protocol_debt").mkdir(parents=True)
+        specs = self.workspace / "crate_a" / "specs"
+        (specs / "_boundaries").mkdir(parents=True)
+        (specs / "_interactions").mkdir(parents=True)
+        (specs / "_exemptions").mkdir(parents=True)
+        (specs / "_protocol_debt").mkdir(parents=True)
         # Workspace-level, deliberately NOT under crate_a/ -- proves the
         # dispatcher recognizes it without any crate membership (chainlink
         # #20: conflict-resolution records aren't crate-scoped at all).
         (self.workspace / "evidence").mkdir(parents=True)
         (self.workspace / "specs" / "_conflicts").mkdir(parents=True)
+        # Reliance policy is resolved from authoritative concept specs.
+        # These integration fixtures exercise approval behavior, so give
+        # them the same valid declarations as a real descriptor-rooted
+        # project rather than relying on the old implicit verifier guess.
+        fixture_spec = ROOT / "tests" / "fixtures" / "boundary_contracts" / "valid_crate" / "specs" / "task_queue.json"
+        (specs / "task_queue.json").write_text(fixture_spec.read_text())
+        (specs / "scheduler.json").write_text(json.dumps({
+            "schema_version": "1.0",
+            "concept": "Scheduler",
+            "cluster": "scheduling",
+            "kind": "struct",
+            "english_description": "A component that dispatches ready tasks to execution workers.",
+            "verifier": "creusot",
+            "queries": [{"english": "How many tasks are awaiting dispatch?", "rust_sig": "fn pending_count(&self) -> usize", "pure": True}],
+            "commands": [],
+            "constraints": [{"english": "Dispatch does not duplicate a task", "logic": "true", "kind": "invariant"}],
+            "adversary_table": [{"scenario": "A worker is unavailable during dispatch", "violates": "progress", "resolution": "leave the task queued"}],
+        }))
         self.descriptor_path = self.workspace / "project-descriptor.json"
         self.descriptor_path.write_text(json.dumps(VALID_DESCRIPTOR))
 
@@ -5127,6 +5434,49 @@ class Stage8aCStaticIntegrationTest(unittest.TestCase):
         self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
         self.assertEqual(self._run("gate-r1-g16"), 3)
 
+    def test_gate_r1_g16_json_works_on_flat_and_nested_routes(self):
+        from schema_utils import make_validator
+
+        self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+        schema = json.loads((ROOT / "docs" / "r1-g16-report-schema.json").read_text())
+        for args in (("gate-r1-g16", "--json"), ("gate", "r1-g16", "--json")):
+            with self.subTest(args=args):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = self._run(*args)
+                payload = json.loads(buffer.getvalue())
+                errors = list(make_validator(schema).iter_errors(payload))
+                self.assertEqual(errors, [], [error.message for error in errors])
+                self.assertEqual(payload["format"], "ligature.r1-g16-report.v1")
+                self.assertEqual(payload["exit_code"], code)
+                counts = payload["summary"]["counts"]
+                self.assertEqual(
+                    counts["discovered"],
+                    counts["checked"] + counts["unresolved"] + counts["undeclared_warnings"] + counts["undeclared_blocking"],
+                )
+                self.assertEqual(len(payload["reports"]), 1)
+                self.assertEqual(payload["summary"]["discovery_completeness"], "syntactic-lower-bound")
+
+    def test_complete_reconciliation_policy_is_explicit_and_default_remains_risk_tiered(self):
+        for record in [
+            _stage8a_interaction("scheduler_dispatch__to__task_queue_pop_ready",
+                                 ("Scheduler", "dispatch"), ("TaskQueue", "pop_ready")),
+            _stage8a_interaction("scheduler_clone__to__task_queue_new",
+                                 ("Scheduler", "clone"), ("TaskQueue", "new")),
+        ]:
+            (self.interactions / f"{record['interaction_id']}.json").write_text(json.dumps(record))
+        self._run("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+        self.assertEqual(self._run("gate-r1-g16"), 3)
+
+        descriptor = json.loads(self.descriptor_path.read_text())
+        descriptor["interaction_policy"] = {"require_complete_reconciliation": True}
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = self._run("gate-r1-g16")
+        self.assertEqual(code, 1, buffer.getvalue())
+        self.assertIn("policy `interaction_policy.require_complete_reconciliation`", buffer.getvalue())
+
     def test_doctor_lists_the_new_stage_8a_commands(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
@@ -5667,6 +6017,22 @@ class Stage8cClosureIntegrationTest(unittest.TestCase):
         self.assertEqual(code, 0, printed)
         self.assertIn("closes: closure_kind=deductive", printed)
 
+    def test_gate_g14_versioned_json_is_available_on_flat_and_nested_cli_routes(self):
+        for args in (("gate-g14", "--json"), ("gate", "g14", "--json")):
+            with self.subTest(args=args):
+                code, printed = self._run(*args)
+                self.assertEqual(code, 0, printed)
+                payload = json.loads(printed)
+                self.assertEqual(payload["format"], "ligature.g14-report.v1")
+                self.assertEqual(payload["exit_code"], 0)
+                self.assertEqual(len(payload["clusters"]), 1)
+                cluster = payload["clusters"][0]
+                self.assertEqual(cluster["work_packages"], ["WP-A", "WP-B", "WP-C"])
+                self.assertEqual(cluster["scope"]["kind"], "obligations-and-bridges")
+                self.assertEqual(cluster["scope"]["counts"]["evaluated_obligations"], 3)
+                self.assertEqual(len(cluster["evaluated_obligation_records"]), 3)
+                self.assertTrue(all(item["proof_artifact_references"] for item in cluster["evaluated_obligation_records"]))
+
     def test_gate_g14_blocks_when_a_deep_dependency_has_no_record(self):
         (self.workspace / "ci" / "results" / "WP-C.json").unlink()
         code, printed = self._run("gate-g14")
@@ -5699,6 +6065,26 @@ class Stage8cClosureIntegrationTest(unittest.TestCase):
         self.assertIn("validate-closure", printed)
         self.assertIn("gate-g14", printed)
         self.assertNotIn("8C", printed.split("Not yet implemented:")[1])
+
+    def test_doctor_distinguishes_plan_driven_generation_from_automatic_synthesis(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            pipeline.main(["--workspace", str(self.workspace), "doctor"])
+        printed = buffer.getvalue()
+        implemented, not_yet = printed.split("Not yet implemented:", 1)
+        self.assertIn("generate-work-package", implemented)
+        self.assertIn("plan-driven Stage 7 manifest generation", implemented)
+        self.assertIn("automatic promoted-I/O synthesis", not_yet)
+        self.assertIn("does not infer package scope", not_yet)
+        self.assertNotIn("generator that reads promoted I/O and emits a manifest from it is still not built", printed)
+
+    def test_generate_work_package_help_states_its_explicit_plan_scope(self):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer), self.assertRaises(SystemExit):
+            pipeline.build_parser().parse_args(["generate-work-package", "--help"])
+        printed = buffer.getvalue()
+        self.assertIn("explicit validated plan", printed)
+        self.assertIn("does not infer package scope", printed)
 
 
 class ContactSheetIntegrationTest(unittest.TestCase):

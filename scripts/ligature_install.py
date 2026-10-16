@@ -65,7 +65,10 @@ import adjudicator  # noqa: E402
 import resources  # noqa: E402
 from atomic_write import write_atomically  # noqa: E402
 import draft_templates  # noqa: E402
+from project_descriptor import load_project_descriptor  # noqa: E402
 from project_descriptor import schema_diagnostics  # noqa: E402
+from project_descriptor import write_set_overlap_diagnostics  # noqa: E402
+from project_descriptor import crate_root_scope_diagnostics  # noqa: E402
 from project_state import KNOWN_SCHEMA_VERSIONS  # noqa: E402
 from project_state import PRODUCT_VERSION  # noqa: E402
 
@@ -333,15 +336,14 @@ def descriptor_placeholder_fields(descriptor: dict) -> list[str]:
     value(s) -- i.e. the Stage P0 template `init` copied in and nobody
     replaced (chainlink #67).
 
-    Only unambiguous placeholders are reported on their own:
-    `review.reviewer` (the literal `"example-reviewer"`) and, for
-    `mode: port`, `port_source.repository` (the literal example path). A
-    value a real project can legitimately choose by coincidence --
-    `verifier_policy.default: "creusot"` is the shipped default -- is
-    reported only when the descriptor is byte-identical to the example
-    everywhere `_render_descriptor` does not overwrite it, so a project
-    that happens to pick the same verifier never false-positives on that
-    field alone."""
+    Obvious sentinels (`review.reviewer`, the port repository placeholder)
+    must be replaced. Other project-dependent fixture values can be
+    intentionally correct, but require an explicit hash-bound record under
+    `review.accepted_fixture_values`: review date, port language and oracle
+    command, plus the unchanged verifier default when the rest of the
+    example configuration is still present. Initialization writes no such
+    acceptance. The command value is included even if other descriptor
+    fields have changed (date-ligature-008)."""
     example = _example_descriptor_for(descriptor.get("mode"))
     if example is None:
         return []
@@ -353,11 +355,109 @@ def descriptor_placeholder_fields(descriptor: dict) -> list[str]:
         repository = _dig(example, "port_source", "repository")
         if isinstance(repository, str) and _dig(descriptor, "port_source", "repository") == repository:
             fields.append("port_source.repository")
+    candidates = ["review.reviewed_at"]
+    if descriptor.get("mode") == "port":
+        candidates.extend(("port_source.language", "port_source.oracle_build_command"))
     if _matches_example_outside_init_keys(descriptor, example):
-        verifier = _dig(example, "verifier_policy", "default")
-        if isinstance(verifier, str) and _dig(descriptor, "verifier_policy", "default") == verifier:
-            fields.append("verifier_policy.default")
+        candidates.append("verifier_policy.default")
+
+    acceptances = descriptor.get("review", {}).get("accepted_fixture_values", [])
+    accepted_hashes = {
+        (record.get("path"), record.get("value_sha256"))
+        for record in acceptances
+        if isinstance(record, dict)
+    } if isinstance(acceptances, list) else set()
+    for dotted_path in candidates:
+        expected = _dig(example, *dotted_path.split("."))
+        actual = _dig(descriptor, *dotted_path.split("."))
+        if expected is None or actual != expected:
+            continue
+        value_hash = fixture_value_hash(actual)
+        if (dotted_path, value_hash) not in accepted_hashes:
+            fields.append(dotted_path)
     return fields
+
+
+def fixture_value_hash(value: object) -> str:
+    """Hash a JSON descriptor value in a stable, type-preserving form."""
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return _sha256_text(canonical)
+
+
+def accept_fixture_value(
+    workspace: Path,
+    descriptor_path: Path,
+    field_path: str,
+    reviewer: str,
+    accepted_at: str | None = None,
+) -> dict:
+    """Record explicit human acceptance of one legitimate shipped
+    fixture value, bound to its exact value hash. The only writable
+    descriptor is the canonical workspace file; callers cannot use an
+    external descriptor or symlink as an approval target."""
+    reviewer = reviewer.strip()
+    if not reviewer:
+        raise InstallError("--reviewer must not be empty")
+    if accepted_at is None:
+        from datetime import date
+
+        accepted_at = date.today().isoformat()
+    try:
+        from datetime import date
+
+        date.fromisoformat(accepted_at)
+    except (TypeError, ValueError) as exc:
+        raise InstallError("--accepted-at must be a real YYYY-MM-DD date") from exc
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", accepted_at):
+        raise InstallError("--accepted-at must be a real YYYY-MM-DD date")
+
+    target = safe_target(workspace, "project-descriptor.json")
+    try:
+        if descriptor_path.resolve() != target.resolve():
+            raise InstallError(
+                "accept-fixture-value only updates the workspace's project-descriptor.json; "
+                "an external --descriptor cannot authorize this write"
+            )
+        descriptor = load_project_descriptor(target)
+    except InstallError:
+        raise
+    except Exception as exc:
+        raise InstallError(f"cannot read project descriptor: {exc}") from exc
+
+    example = _example_descriptor_for(descriptor.get("mode"))
+    if example is None:
+        raise InstallError("project descriptor has no supported shipped example for this mode")
+    allowed = {"review.reviewed_at"}
+    if descriptor.get("mode") == "port":
+        allowed.update(("port_source.language", "port_source.oracle_build_command"))
+    if _matches_example_outside_init_keys(descriptor, example):
+        allowed.add("verifier_policy.default")
+    if field_path not in allowed:
+        raise InstallError(
+            f"{field_path!r} is not an explicitly acceptable fixture field; replace sentinel values "
+            "such as review.reviewer and port_source.repository instead"
+        )
+    value = _dig(descriptor, *field_path.split("."))
+    expected = _dig(example, *field_path.split("."))
+    if value is None or value != expected:
+        raise InstallError(
+            f"{field_path} no longer equals the shipped fixture value; no acceptance is needed"
+        )
+
+    record = {
+        "path": field_path,
+        "value_sha256": fixture_value_hash(value),
+        "reviewer": reviewer,
+        "accepted_at": accepted_at,
+    }
+    review = descriptor.setdefault("review", {})
+    records = review.setdefault("accepted_fixture_values", [])
+    records = [item for item in records if item.get("path") != field_path]
+    records.append(record)
+    records.sort(key=lambda item: item["path"])
+    review["accepted_fixture_values"] = records
+    write_atomically(target, json.dumps(descriptor, indent=2) + "\n")
+    return record
 
 
 def _render_policy(name: str) -> str:
@@ -894,10 +994,11 @@ def _recorded_install_versions(manifest: dict) -> tuple[str, dict]:
 @dataclass(frozen=True)
 class DescriptorSchemaReport:
     """A project descriptor validated against the product's own
-    `schemas/project-descriptor.schema.json` -- the same schema and
-    validator `check`/`status` read (chainlink #74).
+    `schemas/project-descriptor.schema.json` and workspace-aware
+    semantic checks -- the same validation `check`/`status` read.
 
-    States: `valid` (parses as a JSON object and satisfies the schema),
+    States: `valid` (parses as a JSON object, satisfies the schema and
+    applicable semantic checks),
     `invalid` (parses but violates it -- `diagnostics` carries one
     actionable line per violation, or the file is not valid JSON / not a
     JSON object), `absent` (no file at the resolved descriptor path),
@@ -933,7 +1034,9 @@ class DescriptorInForce:
     installed: str | None = None
 
 
-def descriptor_schema_report_at(target: Path) -> DescriptorSchemaReport:
+def descriptor_schema_report_at(
+    target: Path, workspace: Path | None = None
+) -> DescriptorSchemaReport:
     """The read-only schema check against an already-resolved path.
 
     Deliberately not `safe_target`: that resolution exists to keep a
@@ -957,6 +1060,17 @@ def descriptor_schema_report_at(target: Path) -> DescriptorSchemaReport:
     diagnostics = schema_diagnostics(data)
     if diagnostics:
         return DescriptorSchemaReport("invalid", diagnostics)
+    # `check`/`status` use load_project_descriptor(), which includes these
+    # semantic write-set checks after JSON Schema validation. `doctor` must
+    # report the same descriptor as present-invalid instead of calling it
+    # healthy merely because its shape is valid (date-ligature-004).
+    overlaps = write_set_overlap_diagnostics(data)
+    if overlaps:
+        return DescriptorSchemaReport("invalid", overlaps)
+    if workspace is not None:
+        crate_diagnostics = crate_root_scope_diagnostics(workspace, data)
+        if crate_diagnostics:
+            return DescriptorSchemaReport("invalid", crate_diagnostics)
     return DescriptorSchemaReport("valid")
 
 
@@ -970,7 +1084,7 @@ def descriptor_schema_report(workspace: Path, descriptor_rel: str) -> Descriptor
         target = safe_target(workspace, descriptor_rel)
     except InstallError as exc:
         return DescriptorSchemaReport("unreadable", [str(exc)])
-    return descriptor_schema_report_at(target)
+    return descriptor_schema_report_at(target, workspace)
 
 
 def _display_descriptor(workspace: Path, descriptor: Path) -> str:
@@ -1015,7 +1129,7 @@ def descriptor_in_force(
         return None
     return DescriptorInForce(
         path=_display_descriptor(workspace, descriptor),
-        schema=descriptor_schema_report_at(descriptor),
+        schema=descriptor_schema_report_at(descriptor, workspace),
         installed=installed_rel,
     )
 
@@ -1851,6 +1965,8 @@ def render_report_text(report: InstallReport) -> str:
                 f"  note: the descriptor gate follows --descriptor; {override.installed} "
                 "is the descriptor ci/manifest/installation.json records, still inventoried below"
             )
+        for diagnostic in override.schema.diagnostics:
+            lines.append(f"  descriptor diagnostic: {diagnostic}")
     if report.authority_state is not None:
         lines.append(f"skill authority hash: {report.authority_state}")
     for plan in sorted(report.files, key=lambda p: p.path):
@@ -1872,6 +1988,12 @@ def render_report_text(report: InstallReport) -> str:
         lines.append(line)
     for path in sorted(report.obsolete):
         lines.append(f"  {'obsolete':>9}  {path}")
+    # The installed descriptor has its own inventory line. Include its
+    # semantic conflict details there too, so doctor exposes both patterns
+    # and the scope repair without requiring the caller to rerun check.
+    if report.descriptor_override is None and report.descriptor_schema is not None:
+        for diagnostic in report.descriptor_schema.diagnostics:
+            lines.append(f"  descriptor diagnostic: {diagnostic}")
     for message in report.messages:
         lines.append(f"  note: {message}")
     return "\n".join(lines) + "\n"

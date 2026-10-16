@@ -21,6 +21,7 @@ from gate_r1_g16 import (  # noqa: E402
     gate_workspace,
     main,
     reconcile,
+    report_document,
     report_findings,
     unresolved_at_or_above_medium,
 )
@@ -181,6 +182,10 @@ class UndeclaredCrossConceptRungTest(unittest.TestCase):
     def test_a_warn_is_never_counted_as_reconciled(self):
         findings, counts = gate(self.resolved_report(VALUE_DOMAIN_INQUIRY), interactions())
         self.assertEqual(counts.checked, 0)
+        self.assertEqual(counts.undeclared_warnings, 1)
+        self.assertEqual(counts.undeclared_blocking, 0)
+        self.assertEqual(counts.source_resolution_state(), "complete")
+        self.assertEqual(counts.interaction_reconciliation_state(), "incomplete")
         (reason,) = texts(findings, "R1", "warn")
         self.assertIn("is absent from I", reason)
         self.assertIn("not counted as checked against I", reason)
@@ -195,7 +200,20 @@ class UndeclaredCrossConceptRungTest(unittest.TestCase):
 
     def test_the_coverage_statement_never_counts_a_warned_edge(self):
         code, printed = self.run_gate(self.resolved_report(VALUE_DOMAIN_INQUIRY))
-        self.assertIn("0 checked against I", printed)
+        self.assertIn("source resolution is complete (0 unresolved of 1 discovered", printed)
+        self.assertIn("interaction reconciliation: incomplete", printed)
+        self.assertIn("discovered=1, checked=0, unresolved=0, undeclared warnings=1", printed)
+        self.assertIn("Gate acceptance: accepted (exit 0)", printed)
+
+    def test_versioned_report_keeps_acceptance_resolution_and_reconciliation_separate(self):
+        findings, counts = gate(self.resolved_report(VALUE_DOMAIN_INQUIRY), interactions())
+        report = report_document(findings, counts, EXIT_OK)
+        self.assertEqual(report["format"], "ligature.r1-g16-report.v1")
+        self.assertEqual(report["gate_acceptance"], "accepted")
+        self.assertEqual(report["summary"]["source_resolution"], "complete")
+        self.assertEqual(report["summary"]["interaction_reconciliation"], "incomplete")
+        self.assertEqual(report["summary"]["counts"]["undeclared_warnings"], 1)
+        self.assertEqual(report["summary"]["discovery_completeness"], "syntactic-lower-bound")
 
     def test_an_intra_concept_call_is_still_only_info(self):
         report = only_resolved(valid_report())
@@ -342,13 +360,13 @@ class HonestReportingTest(unittest.TestCase):
         statement = coverage_statement(counts)
         self.assertIn(HONEST_COVERAGE_STATEMENT, statement)
         self.assertNotIn(f" {FORBIDDEN_CLAIM}", statement)
-        self.assertTrue(statement.startswith("all discovered"))
+        self.assertTrue(statement.startswith("source resolution is complete"))
 
     def test_unresolved_sites_are_stated_as_a_fraction_of_discovered(self):
         findings, counts = gate(valid_report(), interactions(interaction()))
         statement = coverage_statement(counts)
         self.assertNotIn(HONEST_COVERAGE_STATEMENT, statement)
-        self.assertIn("of 2 discovered call sites are unresolved", statement)
+        self.assertIn("1 unresolved of 2 discovered", statement)
 
     def test_no_printed_output_ever_claims_full_coverage(self):
         scenarios = [

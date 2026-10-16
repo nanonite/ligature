@@ -48,6 +48,7 @@ import pipeline  # noqa: E402
 import record_assurance as record_assurance_module  # noqa: E402
 import review_checkpoint  # noqa: E402
 import validate_closure  # noqa: E402
+from schema_utils import make_validator  # noqa: E402
 from generate_promotion_receipt import compute_artifact_manifest  # noqa: E402
 from validate_closure import load_degradation_records  # noqa: E402
 from generate_promotion_receipt import record_ruling  # noqa: E402
@@ -637,10 +638,172 @@ class HappyPathTest(GateTestCase):
         outcome, _ = self.ws.cluster()
         self.assertEqual(outcome.work_packages, 3)
         self.assertEqual(outcome.obligations, 3)
+        self.assertEqual(outcome.provided_obligation_count, 3)
+        self.assertEqual(outcome.required_obligation_count, 2)
+        self.assertEqual(outcome.evaluated_obligation_count, 3)
 
     def test_the_closure_kind_is_reported_with_the_outcome(self):
         outcome, _ = self.ws.cluster()
         self.assertIn("closure_kind=deductive", outcome.summary())
+
+
+class ScopedObligationCountsTest(GateTestCase):
+    """Chainlink #158: scope counts come from reached manifest declarations
+    and consumed report records, not the dependency-edge graph."""
+
+    def test_an_isolated_provided_contract_counts_without_a_dependency_edge(self):
+        self.ws.patch(
+            "ci/manifest/WP-A.json",
+            lambda d: d["definition_of_done"].update({
+                "required_guarantees": [],
+                "required_preconditions_to_establish": [],
+            }),
+        )
+        self.ws.patch("ci/results/WP-A.json", lambda d: d["bridge_records"].clear())
+
+        outcome, _ = self.ws.cluster()
+
+        self.assertEqual(outcome.work_packages, 1)
+        self.assertEqual(outcome.obligations, 1)
+        self.assertEqual(outcome.provided_obligation_count, 1)
+        self.assertEqual(outcome.required_obligation_count, 0)
+        self.assertEqual(outcome.evaluated_obligation_count, 1)
+        self.assertIn("provided=1, required=0, evaluated=1", outcome.summary())
+
+    def test_a_transitive_dependency_chain_counts_provided_required_and_evaluated(self):
+        outcome, _ = self.ws.cluster()
+        self.assertEqual(
+            (outcome.provided_obligation_count, outcome.required_obligation_count, outcome.evaluated_obligation_count),
+            (3, 2, 3),
+        )
+
+    def test_a_bridge_only_scope_does_not_claim_an_obligation_was_evaluated(self):
+        self.ws.patch(
+            "ci/manifest/WP-A.json",
+            lambda d: d["definition_of_done"].update({
+                "provided_guarantees": [],
+                "required_guarantees": [],
+            }),
+        )
+        self.ws.patch("ci/results/WP-A.json", lambda d: d["obligation_records"].clear())
+
+        outcome, _ = self.ws.cluster()
+
+        self.assertEqual(outcome.obligations, 0)
+        self.assertEqual(outcome.provided_obligation_count, 0)
+        self.assertEqual(outcome.required_obligation_count, 0)
+        self.assertEqual(outcome.evaluated_obligation_count, 0)
+        self.assertEqual(outcome.required_bridge_count, 1)
+        self.assertEqual(outcome.evaluated_bridge_record_count, 1)
+        self.assertIn("provided=0, required=0, evaluated=0", outcome.summary())
+        self.assertIn("1 required bridge(s), 1 bridge record(s) evaluated", outcome.summary())
+        self.assertEqual(outcome.as_dict()["scope"]["kind"], "bridge-only")
+
+    def test_a_genuinely_empty_scope_is_reported_as_empty(self):
+        self.ws.patch(
+            "ci/manifest/WP-A.json",
+            lambda d: d["definition_of_done"].update({
+                "provided_guarantees": [],
+                "required_guarantees": [],
+                "required_preconditions_to_establish": [],
+            }),
+        )
+        self.ws.patch(
+            "ci/results/WP-A.json",
+            lambda d: (d["obligation_records"].clear(), d["bridge_records"].clear()),
+        )
+
+        outcome, _ = self.ws.cluster()
+
+        self.assertEqual(outcome.obligations, 0)
+        self.assertEqual(outcome.provided_obligation_count, 0)
+        self.assertEqual(outcome.required_obligation_count, 0)
+        self.assertEqual(outcome.evaluated_obligation_count, 0)
+        self.assertEqual(outcome.required_bridge_count, 0)
+        self.assertEqual(outcome.evaluated_bridge_record_count, 0)
+        self.assertIn("no obligation or bridge scope declared", outcome.summary())
+        self.assertEqual(outcome.as_dict()["scope"]["kind"], "empty")
+
+
+class G14ScopeEvidenceReportTest(GateTestCase):
+    def test_versioned_json_report_validates_against_its_bundled_schema(self):
+        outcome, _ = self.ws.cluster()
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = report_outcomes([outcome], [], as_json=True)
+        payload = json.loads(buffer.getvalue())
+        schema = json.loads((ROOT / "docs" / "g14-report-schema.json").read_text())
+        errors = list(make_validator(schema).iter_errors(payload))
+
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(payload["format"], "ligature.g14-report.v1")
+        self.assertEqual(errors, [], [error.message for error in errors])
+
+    def test_report_lists_manifest_scope_records_and_proof_references(self):
+        outcome, _ = self.ws.cluster()
+        report = outcome.as_dict()
+
+        self.assertEqual(report["work_packages"], ["WP-A", "WP-B", "WP-C"])
+        self.assertEqual(report["scope"]["expected_obligations"]["state"], "unpinned")
+        self.assertEqual(
+            [item["obligation_id"] for item in report["scope"]["provided_obligations"]],
+            ["Scheduler.C001", "TaskQueue.C003", "Clock.C007"],
+        )
+        self.assertEqual(
+            [item["obligation_id"] for item in report["scope"]["required_obligations"]],
+            ["TaskQueue.C003", "Clock.C007"],
+        )
+        self.assertEqual(len(report["evaluated_obligation_records"]), 3)
+        self.assertEqual(len(report["rechecked_proof_artifacts"]), 3)
+        for item in report["evaluated_obligation_records"]:
+            self.assertTrue(item["report_path"].startswith("ci/results/"))
+            self.assertTrue(item["proof_artifact_references"])
+            self.assertTrue(item["record"]["evidence"]["scope"]["proof_targets"])
+
+    def test_profile_expected_obligations_pin_matches_transitive_manifest_scope(self):
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda d: d.update({
+                "expected_obligations": ["Scheduler.C001", "TaskQueue.C003", "Clock.C007"]
+            }),
+        )
+
+        outcome, _ = self.ws.cluster()
+        scope = outcome.as_dict()["scope"]["expected_obligations"]
+
+        self.assertEqual(outcome.status, "closes")
+        self.assertEqual(scope["state"], "matched")
+        self.assertEqual(scope["missing"], [])
+        self.assertEqual(scope["unexpected"], [])
+
+    def test_profile_expected_obligations_detect_an_omitted_declared_scope_entry(self):
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda d: d.update({
+                "expected_obligations": [
+                    "Scheduler.C001", "TaskQueue.C003", "Clock.C007", "YearMonthDay.C001"
+                ]
+            }),
+        )
+
+        outcome, _ = self.ws.cluster()
+        scope = outcome.as_dict()["scope"]["expected_obligations"]
+
+        self.assertEqual(outcome.status, "blocked")
+        self.assertEqual(scope["state"], "mismatch")
+        self.assertEqual(scope["missing"], ["YearMonthDay.C001"])
+        self.assertTrue(any("reviewed expected_obligations pin" in str(f) for f in outcome.findings))
+
+    def test_unreferenced_proof_files_do_not_expand_expected_scope(self):
+        self.ws.write("crates/scheduler/verif/unreferenced/round_trip/proof.json", {"proofs": {}})
+
+        outcome, _ = self.ws.cluster()
+        report = outcome.as_dict()
+
+        self.assertEqual(report["scope"]["expected_obligations"]["state"], "unpinned")
+        self.assertEqual(report["scope"]["counts"]["unique_obligations"], 3)
+        self.assertNotIn("YearMonthDay.C001", [item["obligation_id"] for item in report["scope"]["provided_obligations"]])
+        self.assertNotIn("round_trip", str(report["rechecked_proof_artifacts"]))
 
 
 class TransitiveTrustPolicyTest(GateTestCase):

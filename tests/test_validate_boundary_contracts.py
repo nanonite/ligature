@@ -34,6 +34,31 @@ def gates_hit(findings) -> set:
     return {f.gate for f in findings}
 
 
+def valid_concept_spec(constraints: list[dict]) -> dict:
+    """A complete vendored concept-to-code document for cross-reference tests."""
+    return {
+        "schema_version": "1.0",
+        "concept": "TaskQueue",
+        "cluster": "scheduling",
+        "kind": "struct",
+        "english_description": "A queue of tasks ordered by their deadlines for scheduling.",
+        "verifier": "creusot",
+        "queries": [
+            {
+                "english": "How many tasks are ready?",
+                "rust_sig": "fn ready_count(&self) -> usize",
+                "pure": True,
+            }
+        ],
+        "commands": [],
+        "review": {"reviewer": "alice", "reviewed_at": "2026-09-04"},
+        "constraints": constraints,
+        "adversary_table": [
+            {"scenario": "a task has no deadline", "violates": "deadline order", "resolution": "reject"}
+        ],
+    }
+
+
 class BoundaryContractSchemaReviewFieldTest(unittest.TestCase):
     """Review finding (round 2, medium severity): review authority wasn't
     schema-enforced -- reviewer: "" and reviewed_at: "not-a-date" both
@@ -133,18 +158,15 @@ class ValidateBoundaryContractsTest(unittest.TestCase):
             (specs / "_boundaries").mkdir(parents=True)
             (specs / "task_queue.json").write_text(
                 json.dumps(
-                    {
-                        "concept": "TaskQueue",
-                        "constraints": [
-                            {
-                                "id": "C003",
-                                "english": "pop_ready returns None only when no task has deadline <= now",
-                                "logic": "true",
-                                "kind": "postcondition",
-                                "applies_to": ["pop_ready"],
-                            }
-                        ],
-                    }
+                    valid_concept_spec([
+                        {
+                            "id": "C003",
+                            "english": "pop_ready returns None only when no task has deadline <= now",
+                            "logic": "true",
+                            "kind": "postcondition",
+                            "applies_to": ["pop_ready"],
+                        }
+                    ])
                 )
             )
             (specs / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(
@@ -166,6 +188,41 @@ class ValidateBoundaryContractsTest(unittest.TestCase):
             self.assertEqual(len(errors), 1, [str(f) for f in errors])
             self.assertIn("dangling reference", errors[0].reason)
             self.assertIn("C999", errors[0].reason)
+            self.assertIn("existing reviewed constraint id", errors[0].reason)
+            self.assertIn("ligature approve --reviewer", errors[0].reason)
+
+    def test_g2_plus_no_stable_ids_names_requested_id_and_supported_repair(self):
+        """Missing IDs remain a visible compatibility limitation, but the
+        finding must name the exact concept/reference and the sanctioned
+        concept-spec draft plus human approval path. It must not fabricate
+        an ID or claim the unresolved reference passed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            specs = root / "specs"
+            (specs / "_boundaries").mkdir(parents=True)
+            (specs / "task_queue.json").write_text(json.dumps(valid_concept_spec([
+                {
+                    "english": "pop_ready returns None only when no task has deadline <= now",
+                    "logic": "true",
+                    "kind": "postcondition",
+                    "applies_to": ["pop_ready"],
+                }
+            ])))
+            (specs / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(
+                json.dumps(VALID_INSTANCE)
+            )
+            findings = validate(root, specs_search_root=specs)
+
+        infos = [f for f in findings if f.severity == "info"]
+        self.assertEqual(len(infos), 1, [str(f) for f in findings])
+        reason = infos[0].reason
+        for expected in (
+            "TaskQueue.C003", "requested constraint id is 'C003'", "constraints[].id",
+            "ligature draft 3 concept-to-code", "ligature approve --reviewer",
+            "Do not derive the id from array order or source text",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, reason)
 
 
 class G2PlusConceptResolutionTest(unittest.TestCase):
@@ -184,18 +241,15 @@ class G2PlusConceptResolutionTest(unittest.TestCase):
         (specs / "_boundaries").mkdir(parents=True)
         (specs / "task_queue.json").write_text(
             json.dumps(
-                {
-                    "concept": "TaskQueue",
-                    "constraints": [
-                        {
-                            "id": "C003",
-                            "english": "pop_ready returns None only when no task has deadline <= now",
-                            "logic": "true",
-                            "kind": "postcondition",
-                            "applies_to": ["pop_ready"],
-                        }
-                    ],
-                }
+                valid_concept_spec([
+                    {
+                        "id": "C003",
+                        "english": "pop_ready returns None only when no task has deadline <= now",
+                        "logic": "true",
+                        "kind": "postcondition",
+                        "applies_to": ["pop_ready"],
+                    }
+                ])
             )
         )
         (specs / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json").write_text(
@@ -228,9 +282,17 @@ class G2PlusConceptResolutionTest(unittest.TestCase):
 
     def test_two_concept_specs_outside_artifact_dirs_still_report_ambiguity(self):
         self._add_witness_naming_task_queue()
-        (self.root / "specs" / "task_queue_copy.json").write_text(
-            json.dumps({"concept": "TaskQueue", "constraints": []})
-        )
+        duplicate = self.root / "specs" / "copy" / "task_queue.json"
+        duplicate.parent.mkdir()
+        duplicate.write_text(json.dumps(valid_concept_spec([
+            {
+                "id": "C003",
+                "english": "pop_ready returns None only when no task has deadline <= now",
+                "logic": "true",
+                "kind": "postcondition",
+                "applies_to": ["pop_ready"],
+            }
+        ])))
         findings = validate(self.root, specs_search_root=self.root / "specs")
         errors = [f for f in findings if f.severity == "error"]
         self.assertTrue(
@@ -337,7 +399,7 @@ class CalleePreconditionRoleTest(unittest.TestCase):
 
     def _write_spec(self, constraints):
         (self.specs / "task_queue.json").write_text(
-            json.dumps({"concept": "TaskQueue", "constraints": constraints})
+            json.dumps(valid_concept_spec(constraints))
         )
 
     def _write_boundary(self, guarantees):

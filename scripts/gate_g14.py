@@ -547,6 +547,49 @@ def _bridge_record(report: dict | None, bridge_id: str) -> dict | None:
     return None
 
 
+def _report_record_entry(report: dict | None, key: str, identifier: str) -> dict | None:
+    if report is None:
+        return None
+    collection = "obligation_records" if key == "obligation_id" else "bridge_records"
+    return next((item for item in report[collection] if item.get(key) == identifier), None)
+
+
+def _record_consumption(
+    work_package: str,
+    key: str,
+    identifier: str,
+    report_path: str,
+    entry: dict,
+    used_by: list[dict] | None = None,
+) -> dict:
+    record = entry.get("record") if isinstance(entry, dict) else None
+    evidence = record.get("evidence") if isinstance(record, dict) else None
+    evidence = evidence if isinstance(evidence, dict) else {}
+    evidence_scope = evidence.get("scope")
+    evidence_scope = evidence_scope if isinstance(evidence_scope, dict) else {}
+    targets = evidence_scope.get("proof_targets")
+    if isinstance(targets, str):
+        proof_refs = [target for target in targets.split(",") if target]
+    elif isinstance(targets, list):
+        proof_refs = [target for target in targets if isinstance(target, str)]
+    else:
+        proof_refs = []
+    return {
+        "work_package": work_package,
+        key: identifier,
+        "report_path": report_path,
+        "evidence": {
+            "kind": evidence.get("kind"),
+            "verifier": evidence.get("verifier"),
+            "harness": evidence.get("harness"),
+            "scope": evidence_scope,
+        },
+        "proof_artifact_references": proof_refs,
+        "used_by": list(used_by or []),
+        "record": record if isinstance(record, dict) else {},
+    }
+
+
 def check_provided_guarantees(
     cluster: str, profile: dict, closure: Closure, manifests: dict[str, dict], reports: dict[str, dict]
 ) -> list[Finding]:
@@ -1217,7 +1260,9 @@ def load_bridges(workspace: Path, descriptor: dict) -> tuple[dict[str, dict], li
         if not crate_root.is_dir():
             continue
         specs_search_root = workspace / crate["specs_search_root"]
-        boundaries_by_id = load_boundaries_by_id(boundary_dir_for(crate, workspace), specs_search_root)
+        boundaries_by_id = load_boundaries_by_id(
+            boundary_dir_for(crate, workspace), specs_search_root, workspace
+        )
         canonical_bridge_dir = bridge_dir_for(crate, workspace)
         for path in sorted(find_bridge_files(crate_root)):
             if path.resolve().parent != canonical_bridge_dir:
@@ -1739,17 +1784,49 @@ class ClusterOutcome:
     closure_kind: str
     work_packages: int
     obligations: int
+    provided_obligation_count: int
+    required_obligation_count: int
+    evaluated_obligation_count: int
+    required_bridge_count: int
+    evaluated_bridge_record_count: int
     cycles: list[list[str]]
     findings: list[Finding]
+    work_package_ids: list[str] = field(default_factory=list)
+    provided_obligation_scope: list[dict] = field(default_factory=list)
+    required_obligation_scope: list[dict] = field(default_factory=list)
+    evaluated_obligation_records: list[dict] = field(default_factory=list)
+    required_bridge_scope: list[dict] = field(default_factory=list)
+    evaluated_bridge_records: list[dict] = field(default_factory=list)
+    rechecked_proof_artifacts: list[dict] = field(default_factory=list)
+    expected_obligations: list[str] | None = None
+    missing_expected_obligations: list[str] = field(default_factory=list)
+    unexpected_obligations: list[str] = field(default_factory=list)
     degradation_ceiling: str | None = None
     degraded_conditions: tuple[str, ...] = ()
 
     def summary(self) -> str:
+        scope_note = (
+            "; no obligation or bridge scope declared"
+            if self.obligations == 0 and self.required_bridge_count == 0
+            else ""
+        )
+        counts = (
+            f"{self.obligations} unique scoped obligation(s) "
+            f"(provided={self.provided_obligation_count}, required={self.required_obligation_count}, "
+            f"evaluated={self.evaluated_obligation_count}), "
+            f"{self.required_bridge_count} required bridge(s), "
+            f"{self.evaluated_bridge_record_count} bridge record(s) evaluated"
+        )
+        scope_pin_note = (
+            "expected obligation scope=not declared"
+            if self.expected_obligations is None
+            else f"expected obligation scope={len(self.expected_obligations)} ID(s) declared"
+        )
         if self.status == "closes":
             return (
                 f"cluster {self.cluster!r} closes: closure_kind={self.closure_kind}, "
-                f"{self.work_packages} work package(s), {self.obligations} obligation(s) in the "
-                f"transitive closure, {len(self.cycles)} cycle(s) discharged"
+                f"{self.work_packages} work package(s), {counts}, "
+                f"{len(self.cycles)} cycle(s) discharged; {scope_pin_note}{scope_note}"
             )
         if self.status == "degraded":
             ceiling = (
@@ -1764,9 +1841,74 @@ class ClusterOutcome:
             )
             return (
                 f"cluster {self.cluster!r} does NOT close: degraded{ceiling}{conditions} "
-                f"(declared closure_kind={self.closure_kind!r})"
+                f"(declared closure_kind={self.closure_kind!r}); {counts}; "
+                f"{scope_pin_note}{scope_note}"
             )
-        return f"cluster {self.cluster!r} is BLOCKED: closure not established"
+        return (
+            f"cluster {self.cluster!r} is BLOCKED: closure not established; "
+            f"{counts}; {scope_pin_note}{scope_note}"
+        )
+
+    def as_dict(self) -> dict:
+        """Versioned-data ingredients for the public `gate-g14 --json`
+        result. IDs and records come only from this cluster's manifest and
+        report scope; the output never scans proof directories for
+        additional expected obligations."""
+        if self.expected_obligations is None:
+            expected_scope = {"state": "unpinned", "obligation_ids": [], "missing": [], "unexpected": []}
+        else:
+            expected_scope = {
+                "state": "matched" if not (self.missing_expected_obligations or self.unexpected_obligations) else "mismatch",
+                "obligation_ids": list(self.expected_obligations),
+                "missing": list(self.missing_expected_obligations),
+                "unexpected": list(self.unexpected_obligations),
+            }
+        if self.obligations == 0:
+            scope_kind = "bridge-only" if self.required_bridge_count else "empty"
+        elif self.required_bridge_count:
+            scope_kind = "obligations-and-bridges"
+        else:
+            scope_kind = "obligations-only"
+        return {
+            "cluster": self.cluster,
+            "status": self.status,
+            "closure_kind": self.closure_kind,
+            "work_packages": list(self.work_package_ids),
+            "scope": {
+                "kind": scope_kind,
+                "counts": {
+                    "work_packages": self.work_packages,
+                    "unique_obligations": self.obligations,
+                    "provided_obligations": self.provided_obligation_count,
+                    "required_obligations": self.required_obligation_count,
+                    "evaluated_obligations": self.evaluated_obligation_count,
+                    "required_bridges": self.required_bridge_count,
+                    "evaluated_bridge_records": self.evaluated_bridge_record_count,
+                },
+                "provided_obligations": list(self.provided_obligation_scope),
+                "required_obligations": list(self.required_obligation_scope),
+                "expected_obligations": expected_scope,
+            },
+            "evaluated_obligation_records": list(self.evaluated_obligation_records),
+            "required_bridges": list(self.required_bridge_scope),
+            "evaluated_bridge_records": list(self.evaluated_bridge_records),
+            "rechecked_proof_artifacts": list(self.rechecked_proof_artifacts),
+            "cycles": [list(component) for component in self.cycles],
+            "degradation": {
+                "ceiling": self.degradation_ceiling,
+                "conditions": list(self.degraded_conditions),
+            },
+            "findings": [
+                {
+                    "gate": finding.gate,
+                    "subject": finding.subject,
+                    "reason": finding.reason,
+                    "severity": finding.severity,
+                    "condition": finding.condition,
+                }
+                for finding in self.findings
+            ],
+        }
 
 
 def check_degradation_provenance(
@@ -2238,6 +2380,124 @@ def gate_cluster(
             )
         )
 
+    # Scope is derived from reached manifests, independently of dependency
+    # edges. Preserve declaration owners for JSON output so duplicate IDs
+    # remain inspectable even though build_provider_index blocks ambiguity.
+    provided_scope = [
+        {"work_package": work_package, "obligation_id": entry["obligation_id"]}
+        for work_package in closure.work_packages
+        for entry in manifests[work_package]["definition_of_done"]["provided_guarantees"]
+    ]
+    required_scope = [
+        {"work_package": work_package, "obligation_id": entry["obligation_id"]}
+        for work_package in closure.work_packages
+        for entry in manifests[work_package]["definition_of_done"]["required_guarantees"]
+    ]
+    provided_ids = {entry["obligation_id"] for entry in provided_scope}
+    required_ids = {entry["obligation_id"] for entry in required_scope}
+    scoped_obligations = provided_ids | required_ids
+
+    expected_obligations = profile.get("expected_obligations")
+    missing_expected_obligations: list[str] = []
+    unexpected_obligations: list[str] = []
+    if expected_obligations is not None:
+        expected_ids = set(expected_obligations)
+        missing_expected_obligations = sorted(expected_ids - scoped_obligations)
+        unexpected_obligations = sorted(scoped_obligations - expected_ids)
+        if missing_expected_obligations or unexpected_obligations:
+            detail = []
+            if missing_expected_obligations:
+                detail.append("missing " + ", ".join(missing_expected_obligations))
+            if unexpected_obligations:
+                detail.append("unexpected " + ", ".join(unexpected_obligations))
+            findings.append(
+                Finding(
+                    "G14", cluster,
+                    "the transitive manifest obligation IDs do not match the profile's reviewed "
+                    "expected_obligations pin: " + "; ".join(detail)
+                    + "; G14 compares manifest declarations and does not infer scope from verifier files",
+                )
+            )
+
+    obligation_record_uses: dict[tuple[str, str], list[dict]] = {}
+    obligation_record_entries: dict[tuple[str, str], dict] = {}
+    for item in provided_scope:
+        work_package, obligation = item["work_package"], item["obligation_id"]
+        entry = _report_record_entry(reports.get(work_package), "obligation_id", obligation)
+        if entry is not None:
+            key = (work_package, obligation)
+            obligation_record_entries[key] = entry
+            obligation_record_uses.setdefault(key, []).append(
+                {"kind": "provided-guarantee", "work_package": work_package}
+            )
+    for item in required_scope:
+        requiring_package, obligation = item["work_package"], item["obligation_id"]
+        provider = providers.get(obligation)
+        if provider is None:
+            continue
+        entry = _report_record_entry(reports.get(provider), "obligation_id", obligation)
+        if entry is not None:
+            key = (provider, obligation)
+            obligation_record_entries[key] = entry
+            obligation_record_uses.setdefault(key, []).append(
+                {"kind": "required-guarantee", "work_package": requiring_package}
+            )
+    evaluated_obligation_records = [
+        _record_consumption(
+            work_package,
+            "obligation_id",
+            obligation,
+            manifests[work_package]["report"]["emit"],
+            obligation_record_entries[(work_package, obligation)],
+            obligation_record_uses[(work_package, obligation)],
+        )
+        for work_package, obligation in sorted(obligation_record_entries)
+    ]
+    evaluated_ids = {item["obligation_id"] for item in evaluated_obligation_records}
+
+    bridge_requirements = [
+        {"work_package": work_package, "bridge_id": entry["bridge_id"]}
+        for work_package in closure.work_packages
+        for entry in manifests[work_package]["definition_of_done"]["required_preconditions_to_establish"]
+    ]
+    evaluated_bridge_records = []
+    for item in bridge_requirements:
+        work_package, bridge_id = item["work_package"], item["bridge_id"]
+        entry = _report_record_entry(reports.get(work_package), "bridge_id", bridge_id)
+        if entry is not None:
+            evaluated_bridge_records.append(
+                _record_consumption(
+                    work_package,
+                    "bridge_id",
+                    bridge_id,
+                    manifests[work_package]["report"]["emit"],
+                    entry,
+                    [{"kind": "required-bridge", "work_package": work_package}],
+                )
+            )
+
+    rechecked_proof_artifacts = []
+    for work_package in closure.work_packages:
+        report = reports.get(work_package)
+        if report is None:
+            continue
+        for entry in report["obligation_records"]:
+            rechecked_proof_artifacts.append(
+                _record_consumption(
+                    work_package,
+                    "obligation_id",
+                    entry["obligation_id"],
+                    manifests[work_package]["report"]["emit"],
+                    entry,
+                    [{"kind": "G14-proof-recheck", "work_package": work_package}],
+                )
+            )
+
+    # Counts and artifact references above are based on the reports G14
+    # loaded and the manifest entries its satisfaction checks evaluate.
+    # They do not imply that every proof artifact passed; failures remain
+    # in the findings list and determine the cluster status.
+
     # chainlink #97: `accepted_degradation`, never the raw record -- a
     # record whose review block is unprovenanced or whose bytes no
     # ratified ruling covers downgrades nothing here, so the cluster it
@@ -2254,17 +2514,36 @@ def gate_cluster(
     else:
         status = "closes"
 
+    # Counts describe manifest-declared assurance scope, not graph edges.
+    # A package may provide a standalone contract that no other package
+    # requires; G14 still evaluates its own achieved record. Dependency
+    # edges remain the input to SCC detection only.
+
     return ClusterOutcome(
         cluster=cluster,
         status=status,
         closure_kind=profile["closure_kind"],
         work_packages=len(closure.work_packages),
-        obligations=len(
-            set(closure.obligation_edges)
-            | {target for targets in closure.obligation_edges.values() for target in targets}
-        ),
+        obligations=len(scoped_obligations),
+        provided_obligation_count=len(provided_ids),
+        required_obligation_count=len(required_ids),
+        evaluated_obligation_count=len(evaluated_ids),
+        required_bridge_count=len(bridge_requirements),
+        evaluated_bridge_record_count=len(evaluated_bridge_records),
         cycles=found_cycles,
         findings=findings,
+        work_package_ids=list(closure.work_packages),
+        provided_obligation_scope=provided_scope,
+        required_obligation_scope=required_scope,
+        evaluated_obligation_records=evaluated_obligation_records,
+        required_bridge_scope=bridge_requirements,
+        evaluated_bridge_records=evaluated_bridge_records,
+        rechecked_proof_artifacts=rechecked_proof_artifacts,
+        expected_obligations=(
+            list(expected_obligations) if expected_obligations is not None else None
+        ),
+        missing_expected_obligations=missing_expected_obligations,
+        unexpected_obligations=unexpected_obligations,
         degradation_ceiling=(
             accepted_degradation["ceiling"]
             if accepted_degradation is not None and degraded
@@ -2465,11 +2744,39 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[ClusterOutco
     return outcomes, workspace_findings
 
 
-def report_outcomes(outcomes: list[ClusterOutcome], workspace_findings: list[Finding]) -> int:
+def report_outcomes(
+    outcomes: list[ClusterOutcome], workspace_findings: list[Finding], as_json: bool = False
+) -> int:
     """Per-cluster reporting only. There is deliberately no aggregate
     "everything closed" line: closure is a per-cluster property with a
     kind (plan.md §4), and a summary sentence over several clusters is
     exactly the global guarantee this pipeline refuses to make."""
+    blocked = [o for o in outcomes if o.status == "blocked"]
+    has_workspace_errors = any(f.severity == "error" for f in workspace_findings)
+    if not outcomes or blocked or has_workspace_errors:
+        exit_code = EXIT_BLOCKED
+    else:
+        exit_code = EXIT_OK
+
+    if as_json:
+        payload = {
+            "format": "ligature.g14-report.v1",
+            "exit_code": exit_code,
+            "clusters": [outcome.as_dict() for outcome in sorted(outcomes, key=lambda o: o.cluster)],
+            "workspace_findings": [
+                {
+                    "gate": finding.gate,
+                    "subject": finding.subject,
+                    "reason": finding.reason,
+                    "severity": finding.severity,
+                    "condition": finding.condition,
+                }
+                for finding in workspace_findings
+            ],
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return exit_code
+
     for finding in workspace_findings:
         print(f"  - {finding}")
 
@@ -2487,8 +2794,7 @@ def report_outcomes(outcomes: list[ClusterOutcome], workspace_findings: list[Fin
 
     print(PER_CLUSTER_NOTE)
 
-    blocked = [o for o in outcomes if o.status == "blocked"]
-    if blocked or any(f.severity == "error" for f in workspace_findings):
+    if blocked or has_workspace_errors:
         print(f"FAIL: {len(blocked)} cluster(s) blocked, {len(outcomes) - len(blocked)} not blocked")
         return EXIT_BLOCKED
 

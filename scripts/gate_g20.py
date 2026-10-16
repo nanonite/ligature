@@ -293,7 +293,7 @@ def validate_witness_for_approval(
     the prospective set directly (`check_candidate_fixture_family_consistency`,
     not the pairwise scan `gate_workspace()` itself uses, which only
     ever flags whichever witness sorts second in a disagreeing pair)."""
-    findings = validate_witness_data(path, data, validator, specs_search_root)
+    findings = validate_witness_data(path, data, validator, specs_search_root, workspace)
     if any(f.severity == "error" for f in findings):
         return findings
 

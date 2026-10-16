@@ -12,6 +12,7 @@ failing to resolve its own schemas/prompts.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -470,10 +471,524 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
         self.assertIn(str(self.artifact), proc.stdout)
         self.assertNotIn(str(ROOT), proc.stdout)
 
+    def test_schema_catalog_and_export_work_offline_from_the_packaged_binary(self):
+        """#157: packaged users can discover, inspect, and export the closure
+        and degradation schemas with the exact installed build identity, with
+        no checkout or network fallback."""
+        with zipfile.ZipFile(self.artifact) as zf:
+            bundled = {name for name in zf.namelist() if not name.endswith("/")}
+        self.assertIn("schema_cli.py", bundled)
+        self.assertIn("ligature_data/docs/closure-profile-schema.json", bundled)
+        self.assertIn("ligature_data/docs/degradation-record-schema.json", bundled)
+
+        listing = self.run_artifact("schema", "list", "--json")
+        self.assertEqual(listing.returncode, 0, listing.stdout + listing.stderr)
+        catalog = json.loads(listing.stdout)
+        self.assertEqual(catalog["format"], "ligature.schema-list.v1")
+        self.assertTrue(catalog["adjudicator"]["verified"])
+        self.assertTrue(catalog["product_version"])
+        rows = {row["name"]: row for row in catalog["schemas"]}
+        self.assertEqual(rows["closure-profile"]["related_schema_names"], ["degradation-record"])
+        self.assertEqual(rows["degradation-record"]["related_schema_names"], ["closure-profile"])
+        self.assertTrue(rows["closure-profile"]["sha256"].startswith("sha256:"))
+
+        shown = self.run_artifact("schema", "show", "closure-profile", "--json")
+        self.assertEqual(shown.returncode, 0, shown.stdout + shown.stderr)
+        payload = json.loads(shown.stdout)
+        self.assertEqual(payload["adjudicator"], catalog["adjudicator"])
+        self.assertEqual(payload["schema"]["name"], "closure-profile")
+        self.assertIn("$schema", payload["schema"]["document"])
+        self.assertEqual([item["name"] for item in payload["related_schemas"]], ["degradation-record"])
+
+        output = self.outside / "degradation-record.export.json"
+        exported = self.run_artifact(
+            "schema", "export", "degradation-record", "--output", str(output)
+        )
+        self.assertEqual(exported.returncode, 0, exported.stdout + exported.stderr)
+        exported_payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(exported_payload["format"], "ligature.schema-export.v1")
+        self.assertEqual(exported_payload["adjudicator"], catalog["adjudicator"])
+        self.assertEqual(exported_payload["schema"]["name"], "degradation-record")
+        self.assertEqual([item["name"] for item in exported_payload["related_schemas"]], ["closure-profile"])
+
+        refused = self.run_artifact(
+            "schema", "export", "degradation-record", "--output", str(output)
+        )
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("refusing to overwrite", refused.stderr)
+
+    def test_g14_scope_and_evidence_report_works_through_the_packaged_binary(self):
+        """#159: both G14 CLI spellings report the evidence actually checked
+        by the packaged artifact, and the shipped schema validates it without
+        a source-checkout fallback."""
+        with zipfile.ZipFile(self.artifact) as zf:
+            bundled = {name for name in zf.namelist() if not name.endswith("/")}
+        self.assertIn("ligature_data/docs/g14-report-schema.json", bundled)
+
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_gate_g14 import Workspace  # noqa: E402
+
+        workspace_fixture = Workspace(self.workspace)
+        schema = json.loads((ROOT / "docs" / "g14-report-schema.json").read_text())
+        for args in (("gate-g14", "--json"), ("gate", "g14", "--json")):
+            with self.subTest(args=args):
+                proc = self.run_artifact("--workspace", str(self.workspace), *args)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                payload = json.loads(proc.stdout)
+                errors = list(make_validator(schema).iter_errors(payload))
+                self.assertEqual(errors, [], [error.message for error in errors])
+                self.assertEqual(payload["format"], "ligature.g14-report.v1")
+                cluster = payload["clusters"][0]
+                self.assertEqual(cluster["work_packages"], ["WP-A", "WP-B", "WP-C"])
+                self.assertEqual(cluster["scope"]["counts"]["evaluated_obligations"], 3)
+                self.assertEqual(len(cluster["rechecked_proof_artifacts"]), 3)
+                self.assertTrue(all(item["proof_artifact_references"] for item in cluster["rechecked_proof_artifacts"]))
+
+        # #158: an isolated provided contract has no dependency edge, so it
+        # must still count as declared and evaluated in the packaged result.
+        workspace_fixture.patch(
+            "ci/manifest/WP-A.json",
+            lambda manifest: manifest["definition_of_done"].update({
+                "required_guarantees": [], "required_preconditions_to_establish": [],
+            }),
+        )
+        workspace_fixture.patch("ci/results/WP-A.json", lambda report: report["bridge_records"].clear())
+        isolated = self.run_artifact("--workspace", str(self.workspace), "gate-g14", "--json")
+        self.assertEqual(isolated.returncode, 0, isolated.stdout + isolated.stderr)
+        scope = json.loads(isolated.stdout)["clusters"][0]["scope"]
+        self.assertEqual(scope["kind"], "obligations-only")
+        self.assertEqual(
+            (scope["counts"]["provided_obligations"], scope["counts"]["required_obligations"],
+             scope["counts"]["evaluated_obligations"]),
+            (1, 0, 1),
+        )
+
+    def test_r1_g16_report_distinguishes_warning_acceptance_from_reconciliation(self):
+        """#160: a real C_static value-domain inquiry may remain accepted by
+        the default policy, but the packaged gate must say its interaction is
+        undeclared and reconciliation is incomplete."""
+        with zipfile.ZipFile(self.artifact) as zf:
+            bundled = {name for name in zf.namelist() if not name.endswith("/")}
+        self.assertIn("ligature_data/docs/r1-g16-report-schema.json", bundled)
+
+        crate = self.workspace / "crates" / "scheduler"
+        (crate / "src").mkdir(parents=True)
+        (crate / "specs" / "_interactions").mkdir(parents=True)
+        (crate / "src" / "lib.rs").write_text(
+            """pub struct Month;\n\
+pub struct Year;\n\
+impl Month {\n\
+    pub fn is_valid(year: u32) -> bool { Year::is_leap(year) }\n\
+}\n\
+impl Year {\n\
+    pub fn is_leap(year: u32) -> bool { year % 4 == 0 }\n\
+}\n"""
+        )
+        descriptor = json.loads((ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text())
+        descriptor["crates"] = [{
+            "crate_dir": "crates/scheduler",
+            "contracts_crate": "contracts",
+            "specs_search_root": "crates",
+        }]
+        (self.workspace / "project-descriptor.json").write_text(json.dumps(descriptor))
+
+        extracted = self.run_artifact(
+            "--workspace", str(self.workspace), "extract-c-static", "--target", "x86_64-unknown-linux-gnu"
+        )
+        self.assertEqual(extracted.returncode, 0, extracted.stdout + extracted.stderr)
+        result = self.run_artifact("--workspace", str(self.workspace), "gate-r1-g16", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        schema = json.loads((ROOT / "docs" / "r1-g16-report-schema.json").read_text())
+        errors = list(make_validator(schema).iter_errors(payload))
+        self.assertEqual(errors, [], [error.message for error in errors])
+        self.assertEqual(payload["gate_acceptance"], "accepted")
+        self.assertEqual(payload["summary"]["source_resolution"], "complete")
+        self.assertEqual(payload["summary"]["interaction_reconciliation"], "incomplete")
+        self.assertEqual(payload["summary"]["counts"]["undeclared_warnings"], 1)
+
+        text_result = self.run_artifact("--workspace", str(self.workspace), "gate", "r1-g16")
+        self.assertEqual(text_result.returncode, 0, text_result.stdout + text_result.stderr)
+        self.assertIn("Gate acceptance: accepted (exit 0)", text_result.stdout)
+        self.assertIn("interaction reconciliation: incomplete", text_result.stdout)
+        self.assertIn("undeclared warnings=1", text_result.stdout)
+
+        descriptor["interaction_policy"] = {"require_complete_reconciliation": True}
+        (self.workspace / "project-descriptor.json").write_text(json.dumps(descriptor))
+        strict = self.run_artifact("--workspace", str(self.workspace), "gate-r1-g16", "--json")
+        self.assertEqual(strict.returncode, 1, strict.stdout + strict.stderr)
+        strict_report = json.loads(strict.stdout)
+        self.assertEqual(strict_report["gate_acceptance"], "blocked")
+        self.assertEqual(strict_report["summary"]["counts"]["undeclared_warnings"], 1)
+        self.assertTrue(any(
+            "require_complete_reconciliation" in finding["reason"]
+            for finding in strict_report["findings"]
+        ))
+
     def test_doctor_verifies_before_init(self):
         proc = self.run_artifact("--workspace", str(self.workspace), "doctor")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("attested: true", proc.stdout)
+        self.assertIn("plan-driven Stage 7 manifest generation", proc.stdout)
+        self.assertIn("automatic promoted-I/O synthesis", proc.stdout)
+        self.assertIn("does not infer package scope", proc.stdout)
+
+    def test_doctor_rejects_descriptor_write_set_overlap_from_the_artifact(self):
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor["write_set"]["allowed_roots"].append("docs/*.md")
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+
+        doctor = self.run_artifact("--workspace", str(self.workspace), "doctor")
+        self.assertEqual(doctor.returncode, 2, doctor.stdout + doctor.stderr)
+        for text in (
+            "schema: invalid",
+            "allowed_roots pattern 'docs/*.md'",
+            "protected_roots pattern 'docs/reliance-policy.md'",
+            "narrow or otherwise revise the patterns",
+        ):
+            self.assertIn(text, doctor.stdout)
+        self.assertIn("installation: current", doctor.stdout)
+
+    def test_fixture_value_acceptance_is_explicit_and_hash_bound_in_the_artifact(self):
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor["review"]["reviewer"] = "operator"
+        descriptor["port_source"]["repository"] = "/srv/crypto-mixed"
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+
+        before = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertIn("port_source.oracle_build_command", before.stdout)
+        accepted = self.run_artifact(
+            "--workspace", str(self.workspace), "accept-fixture-value",
+            "--path", "port_source.oracle_build_command", "--reviewer", "operator",
+            "--accepted-at", "2026-10-01",
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        descriptor = json.loads(descriptor_path.read_text())
+        receipt = descriptor["review"]["accepted_fixture_values"][0]
+        self.assertEqual(receipt["path"], "port_source.oracle_build_command")
+        self.assertRegex(receipt["value_sha256"], r"^sha256:[a-f0-9]{64}$")
+
+        after = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertNotIn("port_source.oracle_build_command", after.stdout)
+        descriptor["review"]["accepted_fixture_values"][0]["value_sha256"] = "sha256:" + "0" * 64
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        stale = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertIn("port_source.oracle_build_command", stale.stdout)
+
+    def test_declared_crate_root_escape_is_rejected_by_packaged_check_and_extraction(self):
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        outside = self.workspace.parent / f"{self.workspace.name}-outside"
+        outside.mkdir()
+        try:
+            (outside / "src").mkdir()
+            (outside / "src" / "lib.rs").write_text(
+                "pub fn outer(value: u8) -> u8 { inner(value) }\nfn inner(value: u8) -> u8 { value }\n"
+            )
+            original = descriptor["crates"][0]["crate_dir"]
+            (self.workspace / original / "src").mkdir(parents=True, exist_ok=True)
+            (self.workspace / original / "src" / "lib.rs").write_text(
+                "pub fn local(value: u8) -> u8 { helper(value) }\nfn helper(value: u8) -> u8 { value }\n"
+            )
+            escape_link = self.workspace / "crates" / "outside-link"
+            escape_link.parent.mkdir(parents=True, exist_ok=True)
+            escape_link.symlink_to(outside, target_is_directory=True)
+
+            for crate_dir in (str(outside), f"../{outside.name}", "crates/outside-link"):
+                with self.subTest(crate_dir=crate_dir):
+                    descriptor["crates"][0]["crate_dir"] = crate_dir
+                    descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+                    check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+                    self.assertEqual(check.returncode, 5, check.stdout + check.stderr)
+                    self.assertIn("crate_dir", check.stdout)
+                    self.assertTrue(
+                        "workspace-relative" in check.stdout or "resolves outside the workspace" in check.stdout,
+                        check.stdout,
+                    )
+                    extract = self.run_artifact(
+                        "--workspace", str(self.workspace), "extract-c-static",
+                        "--target", "x86_64-unknown-linux-gnu",
+                    )
+                    self.assertEqual(extract.returncode, 1, extract.stdout + extract.stderr)
+                    self.assertIn("crate_dir", extract.stderr)
+                    self.assertFalse((self.workspace / "ci" / "results" / "c_static").exists())
+
+            descriptor["crates"][0]["crate_dir"] = "crates/missing-core"
+            descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+            missing = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+            self.assertNotEqual(missing.returncode, 5, missing.stdout + missing.stderr)
+            self.assertIn("does not exist or is not a directory", missing.stdout)
+            missing_extract = self.run_artifact(
+                "--workspace", str(self.workspace), "extract-c-static",
+                "--target", "x86_64-unknown-linux-gnu",
+            )
+            self.assertEqual(missing_extract.returncode, 1, missing_extract.stdout + missing_extract.stderr)
+            self.assertIn("crate root does not exist", missing_extract.stderr)
+
+            descriptor["crates"][0]["crate_dir"] = original
+            descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+            valid = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+            self.assertNotEqual(valid.returncode, 5, valid.stdout + valid.stderr)
+
+            inside_link = self.workspace / "crates" / "inside-link"
+            inside_link.symlink_to(self.workspace / original, target_is_directory=True)
+            descriptor["crates"][0]["crate_dir"] = "crates/inside-link"
+            descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+            internal = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+            self.assertNotEqual(internal.returncode, 5, internal.stdout + internal.stderr)
+        finally:
+            shutil.rmtree(outside)
+
+    def test_installed_boundary_prompt_uses_project_policy_path(self):
+        self.assertEqual(self.init_port().returncode, 0)
+        relative = ".ligature/prompts/stage-3-boundary-drafting.md"
+        prompt_path = self.workspace / relative
+        prompt = prompt_path.read_text()
+        self.assertIn("docs/reliance-policy.md", prompt)
+        self.assertIn("the project file is the policy authority", prompt)
+        self.assertNotIn("copied from docs/reliance-policy.template.md", prompt)
+
+        stale = prompt.replace(
+            "contents read from this project's", "copied from docs/reliance-policy.template.md"
+        )
+        prompt_path.write_text(stale)
+        manifest_path = self.workspace / "ci" / "manifest" / "installation.json"
+        manifest = json.loads(manifest_path.read_text())
+        record = next(item for item in manifest["files"] if item["path"] == relative)
+        stale_hash = "sha256:" + hashlib.sha256(stale.encode("utf-8")).hexdigest()
+        record["base_hash"] = stale_hash
+        record["expected_hash"] = stale_hash
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        migrated = self.run_artifact("--workspace", str(self.workspace), "migrate", "--upgrade")
+        self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+        repaired = prompt_path.read_text()
+        self.assertIn("docs/reliance-policy.md", repaired)
+        self.assertNotIn("copied from docs/reliance-policy.template.md", repaired)
+
+    def test_draft_scope_refusal_happens_before_backend_invocation(self):
+        self.assertEqual(self.init_port().returncode, 0)
+        marker = self.workspace / "backend-was-invoked"
+        backend = self.workspace / "backend.py"
+        backend.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('called')\n"
+            "print('{}')\n"
+        )
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor["llm_backend"] = {
+            "kind": "claude", "command": f"{sys.executable} {backend}"
+        }
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        target = self.workspace / "crates" / "myport-core" / "rogue" / "evil.json"
+        proc = self.run_artifact(
+            "--workspace", str(self.workspace), "draft", "0", "evidence-intake", str(target),
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("outside every allowed_roots pattern", proc.stderr)
+        self.assertIn("before prompt rendering", proc.stderr)
+        self.assertFalse(marker.exists())
+        self.assertFalse(target.with_suffix(".json.draft").exists())
+
+    def test_search_root_constraint_resolution_and_missing_id_guidance_from_the_artifact(self):
+        self.assertEqual(self.init_port().returncode, 0)
+        policy = self.run_artifact(
+            "--workspace", str(self.workspace), "accept-policy", "--reviewer", "operator",
+            "--version", "reliance-policy@1.0",
+        )
+        self.assertEqual(policy.returncode, 0, policy.stdout + policy.stderr)
+        crate_specs = self.workspace / "crates" / "myport-core" / "specs"
+        boundaries = crate_specs / "_boundaries"
+        boundaries.mkdir(parents=True)
+        concept = json.loads(
+            (ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/task_queue.json").read_text()
+        )
+        (crate_specs / "task_queue.json").write_text(json.dumps(concept, indent=2) + "\n")
+        boundary = json.loads(
+            (ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/_boundaries/"
+             "scheduler_dispatch__to__task_queue_pop_ready.json").read_text()
+        )
+        target = boundaries / "scheduler_dispatch__to__task_queue_pop_ready.json"
+        target.write_text(json.dumps(boundary, indent=2) + "\n")
+
+        resolved = self.run_artifact("--workspace", str(self.workspace), "status", "--json")
+        self.assertEqual(resolved.returncode, 0, resolved.stdout + resolved.stderr)
+        state = json.loads(resolved.stdout)
+        self.assertFalse(any(
+            finding["gate_id"] == "G2+" and "unverifiable" in finding["summary"]
+            for finding in state["open_findings"]
+        ))
+
+        del concept["constraints"][0]["id"]
+        (crate_specs / "task_queue.json").write_text(json.dumps(concept, indent=2) + "\n")
+        missing_id = self.run_artifact("--workspace", str(self.workspace), "status", "--json")
+        self.assertEqual(missing_id.returncode, 0, missing_id.stdout + missing_id.stderr)
+        state = json.loads(missing_id.stdout)
+        guidance = next(
+            finding["summary"] for finding in state["open_findings"]
+            if finding["gate_id"] == "G2+" and "stable id" in finding["summary"]
+        )
+        for text in (
+            "TaskQueue.C003", "requested constraint id is 'C003'", "constraints[].id",
+            "ligature draft 3 concept-to-code", "ligature approve --reviewer",
+            "Do not derive the id from array order or source text",
+        ):
+            self.assertIn(text, guidance)
+
+    def test_pending_human_ruling_is_the_next_action_in_packaged_check(self):
+        initialized = self.run_artifact(
+            "--workspace", str(self.workspace), "init", "--mode", "greenfield", "--name", "myport",
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        policy = self.run_artifact(
+            "--workspace", str(self.workspace), "accept-policy", "--reviewer", "operator",
+            "--version", "reliance-policy@1.0",
+        )
+        self.assertEqual(policy.returncode, 0, policy.stdout + policy.stderr)
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor["review"]["reviewer"] = "operator"
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        for field in ("review.reviewed_at",):
+            accepted = self.run_artifact(
+                "--workspace", str(self.workspace), "accept-fixture-value", "--path", field,
+                "--reviewer", "operator", "--accepted-at", "2026-10-01",
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        relative = "crates/myport-core/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"
+        artifact = self.workspace / relative
+        artifact.parent.mkdir(parents=True)
+        boundary = json.loads(
+            (ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/_boundaries/"
+             "scheduler_dispatch__to__task_queue_pop_ready.json").read_text()
+        )
+        boundary["review"] = {"reviewer": "reviewer-label", "reviewed_at": "2026-08-25"}
+        artifact.write_text(json.dumps(boundary, indent=2) + "\n")
+        review_log = self.workspace / "ci" / "results" / "review_log.jsonl"
+        review_log.parent.mkdir(parents=True)
+        review_log.write_text(json.dumps({
+            "target_path": str(artifact), "classification": "new", "reviewer": "reviewer-label",
+            "reviewed_at": "2026-08-25", "validation": "checked",
+            "logged_at": "2026-08-25T12:00:00+00:00",
+        }) + "\n")
+
+        check = self.run_artifact("--workspace", str(self.workspace), "check", "--json")
+        self.assertIn(check.returncode, (1, 3), check.stdout + check.stderr)
+        document = json.loads(check.stdout)
+        action = document["next_action"]
+        self.assertEqual(action["kind"], "human-decision")
+        self.assertIsNone(action["command"])
+        self.assertNotIn("action_id", action)
+        self.assertIn(relative, action["description"])
+        self.assertIn("ligature record-ruling", action["description"])
+        self.assertNotIn("reviewer-label", action["description"])
+
+    def test_interaction_draft_rejects_dangling_evidence_and_verifier_policy_mismatch(self):
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor["verifier_policy"] = {"default": "kani"}
+        descriptor["write_set"] = {"allowed_roots": [], "protected_roots": ["crates/*/specs/**"]}
+        backend = self.workspace / "backend.py"
+        payload_path = self.workspace / "interaction.json"
+        descriptor["llm_backend"] = {
+            "kind": "claude", "command": f"{sys.executable} {backend}"
+        }
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        backend.write_text(
+            "import json\nfrom pathlib import Path\n"
+            f"print(Path({str(payload_path)!r}).read_text())\n"
+        )
+        specs = self.workspace / "crates" / "myport-core" / "specs"
+        specs.mkdir(parents=True)
+        for name, concept in (("task_queue", "TaskQueue"), ("scheduler", "Scheduler")):
+            source = json.loads(
+                (ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/task_queue.json").read_text()
+            )
+            source["concept"] = concept
+            source["verifier"] = "kani"
+            (specs / f"{name}.json").write_text(json.dumps(source, indent=2) + "\n")
+        payload = json.loads(
+            (ROOT / "tests/fixtures/interactions/valid/specs/_interactions/I-SCHED-TQ-001.json").read_text()
+        )
+        payload.pop("review", None)
+        payload["evidence_links"] = ["E-0143"]
+        payload["reliances"][0]["required_assurance"]["accepted_evidence_kinds"] = [
+            "creusot-deductive-check"
+        ]
+        payload_path.write_text(json.dumps(payload))
+        target = specs / "_interactions" / "I-SCHED-TQ-021.json"
+        common = (
+            "--workspace", str(self.workspace), "draft", "3", "interaction-drafting", str(target),
+            "--var", "interaction_id=I-SCHED-TQ-021", "--var", "caller_concept=Scheduler",
+            "--var", "caller_method=dispatch", "--var", "callee_concept=TaskQueue",
+            "--var", "callee_method=pop_ready", "--var", "caller_spec={}", "--var", "callee_spec={}",
+            "--var", "target_triple=x86_64-unknown-linux-gnu", "--var", "prior_artifact=(none)",
+            "--var", "finding=(none)",
+        )
+        dangling = self.run_artifact(*common)
+        self.assertEqual(dangling.returncode, 1, dangling.stdout + dangling.stderr)
+        self.assertIn("[G4/error]", dangling.stdout)
+        self.assertIn("E-0143", dangling.stdout)
+        self.assertFalse(target.with_suffix(".json.draft").exists())
+
+        evidence = json.loads((ROOT / "tests/fixtures/evidence/valid/evidence/E-0143.json").read_text())
+        evidence_dir = self.workspace / "evidence"
+        evidence_dir.mkdir()
+        (evidence_dir / "E-0143.json").write_text(json.dumps(evidence, indent=2) + "\n")
+        payload["interaction_id"] = "I-SCHED-TQ-022"
+        payload_path.write_text(json.dumps(payload))
+        target = specs / "_interactions" / "I-SCHED-TQ-022.json"
+        common = tuple(
+            str(value).replace("I-SCHED-TQ-021", "I-SCHED-TQ-022") if isinstance(value, str) else value
+            for value in common
+        )
+        policy = self.run_artifact(*common)
+        self.assertEqual(policy.returncode, 1, policy.stdout + policy.stderr)
+        self.assertIn("G2-policy", policy.stdout)
+        self.assertIn("kani", policy.stdout.lower())
+        self.assertFalse(target.with_suffix(".json.draft").exists())
+
+    def test_compile_time_evidence_is_preserved_without_becoming_assurance(self):
+        self.assertEqual(self.init_port().returncode, 0)
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor["write_set"] = {"allowed_roots": ["evidence/**"], "protected_roots": []}
+        backend = self.workspace / "backend.py"
+        backend.write_text(
+            "import json\nprint(json.dumps({"
+            "'schema_version':'1.0','id':'E-9002','kind':'compile-time',"
+            "'claim':'compiler assertion for queue capacity',"
+            "'origin':{'repository':'https://example.com/repro','commit':'a1b2c3d',"
+            "'symbol':'TaskQueue::CAPACITY_ASSERTION','path':'src/queue.rs',"
+            "'content_hash':'sha256:" + "1" * 64 + "','line_hint':'24-31'},"
+            "'semantic_disposition':'required','lifecycle':'accepted','confidence':'high','mode':'R'}))\n"
+        )
+        descriptor["llm_backend"] = {
+            "kind": "claude", "command": f"{sys.executable} {backend}"
+        }
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        target = self.workspace / "evidence" / "E-9002.json"
+        draft = self.run_artifact(
+            "--workspace", str(self.workspace), "draft", "0", "evidence-intake", str(target),
+            "--var", "source_material=compile-time assertion source and preserved compiler output",
+            "--var", "project_descriptor={}", "--var", "prior_artifact=(none)", "--var", "finding=(none)",
+        )
+        self.assertEqual(draft.returncode, 0, draft.stdout + draft.stderr)
+        staged = target.with_suffix(".json.draft")
+        staged_data = json.loads(staged.read_text())
+        self.assertEqual(staged_data["kind"], "compile-time")
+        self.assertEqual(staged_data["origin"]["content_hash"], "sha256:" + "1" * 64)
+        promoted = self.run_artifact("--workspace", str(self.workspace), "promote-evidence", str(target))
+        self.assertEqual(promoted.returncode, 0, promoted.stdout + promoted.stderr)
+        record = json.loads(target.read_text())
+        self.assertEqual(record["kind"], "compile-time")
+        self.assertNotIn("review", record)
 
     def test_port_init_and_status_from_the_artifact_alone(self):
         proc = self.init_port()

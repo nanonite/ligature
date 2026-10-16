@@ -10,6 +10,9 @@ document specifies the grammar and the mapping every registered
 cross-checked by `tests/test_inventory_drift.py` and
 `tests/test_cli_contract.py`) resolves to, so the remaining bodies are
 implemented against a fixed target instead of inventing one mid-build.
+The current per-command exit outcomes and `--json` support are indexed in
+`docs/exit-code-contract.md`; that matrix records observed dispatcher
+behavior separately from the shared target code vocabulary.
 
 Module and function names (`scripts/*.py`, `cmd_*`) are explicitly **not**
 frozen by this contract — only the strings in the tables below are public
@@ -24,6 +27,9 @@ Two levels: `ligature <top-level-verb> [<argument>] [flags...]`.
 ligature init [--mode greenfield|port]      # #58
 ligature doctor                              # #57/#58
 ligature version [--verify]                  # #57
+ligature schema list [--json]                # #157 -- inspect schemas packaged with this binary
+ligature schema show <name> [--json]         # #157 -- inspect one bundled schema and its related schemas
+ligature schema export <name> --output <path>  # #157 -- write a build-pinned, self-contained schema export
 ligature status [--json]                     # #56 -- project-state query
 ligature check [--json] [next]               # #56 -- consolidated gate run + next action
 ligature write-set-check [--json] [--issue N]  # #77, #103, #114 -- read-only write-set conformance
@@ -33,6 +39,7 @@ ligature configure-crate --issue N --crate <name> --profile cargo-verus  # #125 
 ligature configure-cargo-profile --issue N --profile <name> [typed settings...]  # merge authorized Cargo profile settings into the workspace-root manifest
 ligature generate-work-package --plan <path> --issue N --toolchain <value> --target <triple> [--feature <name> ...]  # #122 -- derive and authorize ci/manifest/WP-*.json from validated workspace authority
 ligature accept-policy --reviewer <name> [--version <name>@<major>.<minor>]  # #78, #113 -- record a reviewed governance change
+ligature accept-fixture-value --path <descriptor-field> --reviewer <name>  # #145 -- explicitly retain one unchanged shipped fixture value
 ligature promote-evidence <target>           # #79 -- mechanically promote a staged evidence draft
 ligature record-ruling --reviewer <name> --verdict ratified|rejected --artifact <path>  # #82 -- the human-ruling gate accept-promotion enforces
 ligature record-assurance <work-package> --proof <obligation>=<path> [...]  # #87 -- assemble a work package's assurance report from verifier evidence
@@ -40,8 +47,8 @@ ligature record-assurance <work-package> --bridges-only  # #141 -- assemble a no
 ligature record-assurance <work-package> --verus-json <output.json> --verus-function <obligation>=<func-details-key> [...]  # #129 -- ingest Verus's official per-function JSON results
 ligature record-assurance <work-package> --kani-crate <package-dir> --kani-harness <obligation>=<harness> [...]  # #132/#133/#140 -- resolve and rerun a manifest-named Kani 0.67 harness, then record its bounded result
 ligature validate <artifact-kind> <target>   # deterministic, per-artifact
-ligature gate <gate-id> [args...]            # deterministic, cross-artifact
-ligature draft <artifact-kind> <target>      # Stage 0/3, one-shot LLM
+ligature gate <gate-id> [--json]             # deterministic, cross-artifact; JSON supported for g14 and r1-g16
+ligature draft <artifact-kind> <target>      # Stage 0/3, write-set preflight, then one-shot LLM
 ligature approve <operation> <target...>     # human checkpoint
 ligature migrate [--upgrade|--prune|--force <path>]  # #58 installed-file recovery
 ligature migrate --assumptions [--apply --reviewer <name>]  # #59 phase-C reference migration
@@ -60,6 +67,20 @@ as part of `check`'s per-run gate loop; giving them no top-level verb at
 all would violate #55's own instruction not to silently lose reporting
 commands. `report` is the minimal, explicitly justified extension, and
 every verb still has exactly one job.
+
+`schema` is an offline inspection surface for the JSON Schema documents
+shipped in the installed binary. `schema list` reports their stable catalog
+names, schema versions, exact document hashes, packaged resource paths, and
+the Ligature/adjudicator identity. `schema show <name>` prints the schema
+document plus any related bundled schema documents; `--json` returns a
+versioned envelope. `schema export <name> --output <path>` writes that same
+self-contained envelope and refuses to overwrite an existing path. The
+envelope's `schema.document` field is the exact JSON Schema; the surrounding
+metadata pins it to the installed Ligature version and attested binary. For
+example, the closure-profile and degradation-record schemas are each shown
+with the other schema included as a related resource. The catalog comes from
+the binary's bundled inventory, so these commands work offline and users do
+not need to guess checkout-internal paths.
 
 The verbs added since are of one kind each, and are named here so the
 grammar is not read as a frozen list: `promote-evidence` (#79) and
@@ -211,6 +232,17 @@ bridges.
 ```sh
 ligature --workspace <workspace> record-assurance WP-AEAD --bridges-only
 ```
+
+`gate g14` reports assurance scope from the manifests reached in the
+transitive closure, independently of its dependency graph: unique provided
+obligation IDs, unique required obligation IDs, and unique obligation IDs
+whose provider report contains a matching achieved record that G14 evaluates.
+It reports required bridge counts and matching bridge-record counts
+separately. A bridge-only package therefore shows zero obligation records
+alongside its bridge scope; a package with no obligations or bridges is
+marked `no obligation or bridge scope declared`. `closure_kind=deductive`
+describes the declared closure profile and does not, by itself, mean a method
+was proved.
 
 For Kani, use repeatable `--kani-harness <obligation>=<harness>` mappings and
 one `--kani-crate <workspace-relative-package-dir>` containing the package's
@@ -455,8 +487,13 @@ A staged `<target>.json.draft` (what `draft` writes, promoted by
 `approve`) is **not** an artifact under review: for every kind `draft`
 can stage, the `validate` that owns that kind skips `*.draft` in
 discovery, so a staged draft is neither reported nor counted until it is
-approved. `draft` writes its output only after the immediate G1a/G1b
-check passes, so a failed candidate never becomes a staged draft (#131).
+approved. `draft` writes its output only after the immediate schema/naming,
+computed-eligibility, descriptor-policy, and workspace-resolvable evidence-link
+checks pass. An explicitly dangling `evidence_links` ID is a G4 error before
+staging; if a standalone validator has no workspace evidence context it says
+G4 was not resolved rather than claiming the link is valid. G5 remains a
+warning for an intentionally incomplete reliance. A failed candidate never
+becomes a staged draft (#131/#153).
 `validate interaction` and `validate boundary` have done so
 since chainlink #90, `validate evidence` since #79, and `validate
 closure` since #98; chainlink #110 extended the same rule to the five
@@ -517,6 +554,33 @@ call that exercises them.
 | `g19` | `gate-g19` |
 | `g20` | `gate-g20` |
 
+`gate-g14 --json` and `gate g14 --json` emit the versioned
+`ligature.g14-report.v1` document defined by the bundled
+`docs/g14-report-schema.json`. The report names the transitive work packages,
+manifest-provided and required obligation IDs, assurance records G14 evaluates,
+bridge records, and proof artifact references G14 rechecks. Its scope counts
+distinguish provided, required, and evaluated obligations. `scope.kind` marks
+an empty, bridge-only, obligations-only, or combined scope; `closure_kind`
+describes the profile's declared closure mode and does not itself mean a proof
+was consumed. An optional human-reviewed `expected_obligations` list in the
+closure profile pins the exact obligation set; without that list the report
+states `unpinned`. G14 never guesses expected scope from proof files found on
+disk. JSON exit codes match the ordinary gate result: 0 when no cluster is
+blocked, 1 when blocked or no closure profile is available.
+
+`gate-r1-g16 --json` and `gate r1-g16 --json` emit the versioned
+`ligature.r1-g16-report.v1` document described by
+`docs/r1-g16-report-schema.json`. It separates gate acceptance, source-target
+resolution, and interaction reconciliation. Counts distinguish discovered,
+checked against I, unresolved, undeclared warning, undeclared blocking, and
+configuration-mismatched calls. Each accepted C_static report has its own
+counts. `discovery_completeness` is always `syntactic-lower-bound`: a complete
+report never claims that syntactic discovery found every source call.
+Warnings remain visible and retain their current non-blocking default.
+Projects may opt into the stricter policy by setting
+`interaction_policy.require_complete_reconciliation` to `true` in the project
+descriptor; absence or `false` preserves the existing risk-tiered behavior.
+
 `gate r1-g16` is three-valued (0 / 1 / 3) and since chainlink #107 also
 prints one severity that is reported **without** blocking: an undeclared
 cross-concept `definite-direct-call` whose callee is a computed
@@ -552,6 +616,59 @@ where the artifact belongs, and which command promotes it:
 | 3 | `closure-profile-drafting` | closure profile | `specs/_closure/<cluster>.json` (workspace-level) | `approve` |
 | 3 | `degradation-drafting` | degradation record | `specs/_closure/<cluster>.degradation.json` (workspace-level) | `approve` |
 
+### Compile-time evidence records (#156)
+
+Evidence kind `compile-time` classifies evidence about compiler-enforced
+assertions or const-evaluation conditions. It is separate from the verifier
+evidence kinds in `required_assurance.accepted_evidence_kinds`. This label
+does not prove that a compiler ran successfully, record the compiler command
+or toolchain, satisfy a reliance, or establish G14 closure. A source file
+containing an assertion shows what is declared; a claim about an actual
+compiler result must point to preserved output and still needs a trusted,
+reproducible compiler workflow before it can support assurance.
+
+Shape-only example (the values below are synthetic and must be replaced with
+the actual repository, commit, source or output path, content hash, and line
+range before use):
+
+```json
+{
+  "schema_version": "1.0",
+  "id": "E-1042",
+  "kind": "compile-time",
+  "claim": "The source declares a compile-time assertion for queue capacity",
+  "origin": {
+    "repository": "https://example.test/queue-project",
+    "commit": "0123456789abcdef",
+    "symbol": "TaskQueue::CAPACITY_ASSERTION",
+    "path": "src/queue.rs",
+    "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "line_hint": "24-31"
+  },
+  "semantic_disposition": "required",
+  "lifecycle": "accepted",
+  "confidence": "medium",
+  "mode": "R"
+}
+```
+
+Use the supported Stage 0 draft and mechanical evidence promotion:
+
+```sh
+ligature draft 0 evidence-intake evidence/E-1042.json \
+  --var source_material='compile-time assertion and its preserved compiler output' \
+  --var project_descriptor='<project descriptor JSON>' \
+  --var prior_artifact='(none)' --var finding='(none)'
+ligature validate-evidence
+ligature promote-evidence evidence/E-1042.json
+```
+
+Evidence records are intentionally non-normative and have no `review` block;
+`approve` is not their promotion path. The example's synthetic values must
+not be treated as a real source record. A promoted `compile-time` record
+remains source evidence only and does not become a proof certificate or
+assurance record.
+
 A name not in the registry is refused with the complete list for the stage
 asked for (and, when the name belongs to the other stage, which stage it
 belongs to) — one line at exit 1. It used to be
@@ -566,6 +683,77 @@ Use ids from approved Stage 7 plans for profile-first scheduling, or ids
 from generated manifests for manifest-first scheduling. The profile remains
 a human-approved declaration; G14 checks its membership against manifests
 associated with the cluster's accepted promotion receipt.
+
+## Concept-spec search roots (#149)
+
+Boundary guarantee and witness query references resolve concept specs only
+under the owning crate's `crates[].specs_search_root` in
+`project-descriptor.json`. `validate`, `validate-witness`, `status`, `check`,
+and the related gates use that same root. They do not fall back to a workspace
+scan for authority. A descriptor-backed missing, invalid, ambiguous, or
+mislocated concept spec is reported with the exact root and a repair step;
+an otherwise plausible spec outside the root is diagnostic evidence only.
+For `TaskQueue.C003`, add or repair the canonical, schema-valid
+`task_queue.json` under the declared root, or correct the descriptor root.
+Stable constraint IDs remain optional for compatibility: when a valid spec
+has constraints without IDs, the result names that separate limitation and
+Ligature does not invent an ID. The standalone validator's optional
+`--specs-search-root` is its only authority because it has no project
+descriptor.
+
+### Stable constraint IDs (#154)
+
+`constraints[].id` is an author-assigned stable identity (`C` followed by
+three digits), accepted by Ligature's extended concept-spec schema even
+though the vendored schema has not adopted the upstream extension. Preserve
+IDs when revising a concept spec; assign each ID to one reviewed constraint,
+keep IDs unique within the spec, and never recycle an ID for a different
+constraint. Ligature does not derive IDs from source text, symbols, or array
+position. A duplicate ID is rejected at draft and approval time because G2+
+must resolve a reference to exactly one constraint.
+
+To add IDs to an existing concept spec, stage a revision with
+`ligature draft 3 concept-to-code <crate>/specs/<concept_snake_case>.json`,
+review the generated `.draft`, then promote that exact draft with
+`ligature approve --reviewer <human> <target>`. Approval remains the required
+human checkpoint for this normative vocabulary. A G2+ reference such as
+`TaskQueue.C003` whose resolved spec has no IDs stays visibly unresolved and
+names both the requested ID and this repair path; a dangling ID also names
+the spec and offers the two reviewed repairs: correct the reference to an
+existing ID, or add the intended constraint and author-assigned ID through
+the draft/approve path. Neither diagnostic asserts that the guarantee is
+valid, and neither path weakens G2+.
+
+## Interaction verifier policy (#151)
+
+Descriptor-aware interaction drafting, approval, and workspace validation
+resolve caller and callee concept specs only through the declared
+`crates[].specs_search_root` values. A reliance's accepted evidence kinds must
+be produced by the callee cluster's declared owner or a declared supporting
+verifier, and the owning verifier's evidence kind must remain in the accepted
+set; supporting evidence cannot substitute for the owner. An absent, invalid,
+ambiguous, or mislocated spec prevents Ligature from inferring verifier
+ownership. Interactions without reliances and without a `cross-verifier` edge
+are not invalidated just because the descriptor default changes.
+
+For an explicitly cross-verifier edge, compatible evidence intake does not
+establish that verifier systems compose. Ligature surfaces the conditional
+assurance ceiling, while G14's CG1 closure check remains authoritative: if the
+achieved closure uses multiple verifier systems, it requires the accepted,
+reviewed `harness-tested` degradation record. Standalone interaction
+validation without descriptor context cannot establish project verifier
+policy and does not claim to check it.
+
+Before rendering the prompt or invoking the configured backend, `draft`
+resolves the destination against the project write set. A path matched by
+`allowed_roots` is writable. A path under `protected_roots` is writable only
+when it is a supported canonical artifact destination handled by Ligature's
+draft and review flow (for example, a boundary under a declared crate's
+`specs/_boundaries/` or `evidence/<id>.json`). Crate membership by itself does
+not authorize a draft: an in-crate path outside every allowed root is refused
+before generation. Generic protected-write grants do not apply to `draft`;
+they cannot widen `allowed_roots` or make an unsupported destination
+promotable. Use the command that owns the relevant sanctioned protected write.
 
 ## 5. `approve <operation>`
 
@@ -740,6 +928,19 @@ expected to add more as `check`'s own recommendation logic grows (e.g.
 for further `validate`/`gate`/`approve` follow-ups), each one landing
 here and in the schema together, never one without the other.
 
+For a review-required artifact, `check next` also checks approval provenance
+before relying on its `review` field. A matching `ci/results/review_log.jsonl`
+entry establishes that the sanctioned approval path ran; it does not prove a
+human made the decision. Before Stage 4.5, an exact-content `ratified` ruling
+in `ci/results/human_rulings.jsonl` is the separate human checkpoint. When
+that ruling is missing or stale, `next_action` is `kind: human-decision`,
+names the artifact, and describes the supported
+`ligature record-ruling --reviewer <your-name> --verdict ratified|rejected
+--artifact <path>` command. Its `command` remains null and it has no
+`action_id`, so automated consumers cannot execute or infer authority from
+the recommendation. A reviewer name inside an artifact is never treated as
+the human's identity.
+
 The three flat commands themselves are **not** promoted to stable public
 API by this contract — no removal version is promised because they are
 not being deprecated, they are being kept as the only way to actually
@@ -851,6 +1052,14 @@ workspace fail closed on a descriptor file it never had.
 recorded -- it recovers what `init` installed, not what a caller is
 trialling -- so it is never handed the flag.
 
+**Implemented by #155.** `doctor` lists
+`generate-work-package` as an implemented Stage 7 command. This is the
+plan-driven generator: it consumes an explicit validated plan and validated
+workspace artifacts under the documented grant checks. It does not infer a
+plan or package scope from promoted I/O. `doctor` reports automatic
+promoted-I/O plan synthesis separately as not implemented; command presence
+does not claim that automatic workflow exists.
+
 **Implemented by #108.** Every command that loads the project descriptor
 loads it through one shared guard, so a workspace with no
 `project-descriptor.json` is reported the same way everywhere instead of
@@ -944,6 +1153,34 @@ gates; `init` checks the rendered descriptor template before writing it.
 The shipped port and greenfield templates scope Cargo/build/Kani files to
 the workspace root or `crates/*`, so those protected patterns do not
 overlap the source and test roots (#133).
+
+`doctor` runs the same semantic descriptor checks as `check` and `status`.
+An allowed/protected overlap makes the descriptor present-invalid, causes
+`doctor` to exit 2, and prints both conflicting patterns with a scope
+repair: review and narrow or otherwise revise the declared patterns so
+they are disjoint while retaining the protected-root boundary (#144).
+Doctor never edits the descriptor or silently narrows the user's policy.
+
+Each `crates[].crate_dir` is resolved from the workspace root. Absolute
+paths, `..` traversal, and symlinks that resolve outside the workspace
+make the descriptor invalid before crate validators or extraction run
+(#146). A symlink resolving to another in-workspace directory is allowed.
+A missing but otherwise in-scope crate remains a separate prerequisite:
+once higher-priority descriptor review is complete, `check` reports it
+and recommends creating or scaffolding the crate before extraction; crate
+commands refuse until the directory exists.
+
+**Descriptor fixture values require an explicit P0 decision (#145).**
+`check` identifies shipped example values that remain in the descriptor,
+including `port_source.oracle_build_command` even when other port fields
+were edited. Replace obvious sentinels such as `review.reviewer` and
+`port_source.repository`. If a legitimate value intentionally matches its
+shipped example, record that decision with
+`ligature accept-fixture-value --path port_source.oracle_build_command
+--reviewer <name>` (or the exact field named by P0). The record includes
+reviewer, date, and a SHA-256 of the canonical JSON field value; changing
+the value makes the record stop satisfying P0. `init` creates no acceptance
+records, and this command is a human checkpoint.
 
 **`protected_roots` is enforced (#103).** #77 shipped the protected half
 as an *accounted-for* category, and two location carve-outs made it
@@ -1279,6 +1516,10 @@ The resulting canonical file is discovered by project-state, `check`,
 and `validate-work-package` enforce G1a/§10.1; later project checks retain
 their own gate results and fail-closed exit codes.
 
+This is plan-driven generation only. Ligature has no automatic generator
+that infers a plan or package scope from promoted interactions and other I/O;
+`doctor` reports that separate capability gap explicitly.
+
 #### Packaged workflow and common refusals (chainlink #124)
 
 Run generation from the initialized project root after its descriptor,
@@ -1450,7 +1691,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 49/49)
+## 10. Legacy command → disposition (complete, 51/51)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -1478,9 +1719,9 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `validate-witness` | alias → `validate witness` |
 | `validate-gold-set` | alias → `validate gold-set` |
 | `validate-closure` | alias → `validate closure` |
-| `gate-r1-g16` | alias → `gate r1-g16` |
+| `gate-r1-g16` | alias → `gate r1-g16`; `--json` emits `ligature.r1-g16-report.v1` (§3) |
 | `gate-g9` | alias → `gate g9` |
-| `gate-g14` | alias → `gate g14` |
+| `gate-g14` | alias → `gate g14`; `--json` emits `ligature.g14-report.v1` (§3) |
 | `gate-g18` | alias → `gate g18` |
 | `gate-g19` | alias → `gate g19` |
 | `gate-g20` | alias → `gate g20` |
@@ -1490,7 +1731,8 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `approve-exemption-pair` | alias → `approve exemption-pair` |
 | `accept-promotion` | alias → `approve promotion` |
 | `accept-policy` | stable; records a reviewed change to the normative reliance-policy document as the manifest's reviewed `base_hash` (the explicit accept path for governance drift; `--policy-path` defaults to the descriptor's `compatibility_policy.reliance_policy_path`, and a disagreeing explicit path is refused) (#78, §8). `--version <name>@<major>.<minor>` stamps the document's single `Policy version:` marker line first — that line and nothing else — so the template `init` installs can reach an accepted state, and be re-versioned, without a hand-edit of a `protected_root`; a human checkpoint like `approve` and `accept-promotion` (#113, §8) |
-| `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1) |
+| `accept-fixture-value` | stable human checkpoint; accepts only a supported unchanged shipped descriptor value, records reviewer/date and a SHA-256 of its exact JSON value under `review.accepted_fixture_values`, and lets P0 distinguish an explicit decision from initialization. Sentinel identity/repository values cannot be accepted; a later value change invalidates the record (#145, §8) |
+| `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1). The `compile-time` evidence kind is descriptive only and is not verifier assurance (#156) |
 | `record-ruling` | stable; records an explicit human verdict (`ratified`\|`rejected`) over an exact artifact set in `ci/results/human_rulings.jsonl` -- the human-ruling gate `accept-promotion` enforces: no receipt is minted until every artifact in the accepted set carries a `ratified` ruling over its current content (#82, §5) |
 | `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads (#87, §1). Creusot uses `--proof <obligation>=<path>`; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function` mappings (#129); Kani uses `--kani-crate`/`--kani-harness`, resolves the manifest's bare function through feature-selected Kani 0.67 compile metadata, and reruns one exact qualified identity (#132/#133). Successful harness assertions are required; ancillary unreachable safety checks are retained in the report summary, and G14 compares that summary against its fresh rerun (#140). Kani scope names the bounded model and never copies a broader `minimum_scope`; G14 consumes the record but leaves that guarantee unmet. A package with no provided guarantees and required bridges uses `--bridges-only`, which requires a clean G9 validation and copies only the package's passing bridge records (#141). Verus requires whole-crate success and the exact proof note in its `ensures` clause. Every record is derived from verifier evidence and manifest provenance. Feature-ledger collision warns; unknown content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
 | `select-pilot-cluster` | alias → `report pilot-cluster` |
@@ -1504,13 +1746,14 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
 | `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print, verifies the skill authority hash (§8, #58), reports/verifies the executable's own build attestation (#57), and fails closed on the descriptor `--descriptor` names (§8, #74/#109) |
 | `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation, and both report the build's source provenance (`source_commit`, and `source_dirty`/`working_tree_diff_hash` for a dirty tree) (§1, §8, #57, #64) |
-| `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3 (#57 grammar v1.0) |
+| `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3; `gate g14 --json` emits `ligature.g14-report.v1` (#57 grammar v1.0, #159) |
 | `report` | stable; nested reporting verb, `report <report-id>` dispatches the four report generators in §6 (#57 grammar v1.0) |
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo, plus the two witness-renderer scripts G13 hash-pins (#84, §8, #58) |
 | `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C). `--upgrade` also refreshes the manifest's `gate_hashes` (the pins `gate_integrity` checks) from the actually installed managed files, updates only managed installation metadata, preserves the user-owned descriptor and normative policy, keeps a locally modified managed file's old pin instead of adopting the drifted bytes, and `--json` emits the machine-readable audit result (old/new version, changed paths, hashes, required human action) so `doctor`, `status --json`, `check --json` and `write-set-check` all read the same post-migration state (#117) |
+| `schema` | stable; `schema list` and `schema show <name>` inspect only JSON Schemas shipped in this binary; the catalog and versioned JSON envelopes include exact schema hashes and installed build/adjudicator identity. `schema export <name> --output <path>` writes a self-contained envelope including related schemas and refuses to overwrite. Offline; no checkout/network access or internal-path guessing required (#157) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 46 has a nested home, an internal-operation classification,
+every one of the 51 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

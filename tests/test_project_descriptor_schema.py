@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import _schema_property_paths  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
+from project_descriptor import crate_root_scope_diagnostics  # noqa: E402
 from project_descriptor import read_descriptor_text  # noqa: E402
 from project_descriptor import schema_diagnostics  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -43,6 +44,48 @@ class ProjectDescriptorSchemaTest(unittest.TestCase):
         )
         errors = list(self.validator.iter_errors(instance))
         self.assertEqual(errors, [], [e.message for e in errors])
+
+    def test_crate_root_scope_rejects_absolute_and_parent_escape_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "workspace"
+            workspace.mkdir()
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+            descriptor = {"crates": [{"crate_dir": str(outside)}]}
+            diagnostics = crate_root_scope_diagnostics(workspace, descriptor)
+            self.assertTrue(diagnostics)
+            self.assertIn("workspace-relative", diagnostics[0])
+
+            descriptor["crates"][0]["crate_dir"] = "../outside"
+            diagnostics = crate_root_scope_diagnostics(workspace, descriptor)
+            self.assertTrue(diagnostics)
+            self.assertIn("parent traversal", diagnostics[0])
+
+    def test_crate_root_scope_allows_missing_or_internal_roots_and_rejects_escaping_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "workspace"
+            workspace.mkdir()
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+            (workspace / "crates" / "real").mkdir(parents=True)
+            self.assertEqual(
+                crate_root_scope_diagnostics(workspace, {"crates": [{"crate_dir": "crates/missing"}]}),
+                [],
+                "existence is a separate prerequisite rather than a containment violation",
+            )
+            (workspace / "crates" / "alias").symlink_to(
+                workspace / "crates" / "real", target_is_directory=True
+            )
+            self.assertEqual(
+                crate_root_scope_diagnostics(workspace, {"crates": [{"crate_dir": "crates/alias"}]}),
+                [],
+            )
+            (workspace / "crates" / "escape").symlink_to(outside, target_is_directory=True)
+            diagnostics = crate_root_scope_diagnostics(
+                workspace, {"crates": [{"crate_dir": "crates/escape"}]}
+            )
+            self.assertTrue(diagnostics)
+            self.assertIn("including through a symlink", diagnostics[0])
 
     def test_rejects_unknown_top_level_field(self):
         instance = json.loads(
@@ -78,6 +121,17 @@ class ProjectDescriptorSchemaTest(unittest.TestCase):
         self.assertNotIn("port_source", instance)
         errors = list(self.validator.iter_errors(instance))
         self.assertEqual(errors, [])
+
+    def test_complete_interaction_reconciliation_policy_is_opt_in(self):
+        instance = json.loads(
+            (EXAMPLES_DIR / "project-descriptor.greenfield.example.json").read_text()
+        )
+        self.assertEqual(list(self.validator.iter_errors(instance)), [])
+        instance["interaction_policy"] = {"require_complete_reconciliation": True}
+        self.assertEqual(list(self.validator.iter_errors(instance)), [])
+        instance["interaction_policy"]["unknown"] = True
+        errors = list(self.validator.iter_errors(instance))
+        self.assertTrue(errors, "interaction policy accepted an undocumented key")
 
     def test_empty_reviewer_is_rejected(self):
         """Review finding (round 2, medium severity): reviewer had no

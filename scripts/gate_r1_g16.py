@@ -59,16 +59,12 @@ plan.md §9/§9.1 and the gate table in §12, chainlink #24. Stage 8A.
       accepting unresolved calls claims a completeness nobody has.
       Neither path permits a full-coverage claim.
 
-The honesty rule, plan.md §9, is structural here: this module's only
-coverage statement is "all discovered call sites resolved" (module
-constant HONEST_COVERAGE_STATEMENT). The string "all call sites
-resolved" appears nowhere it could be printed, and a test asserts that.
-The reports being reconciled say the same thing in their own vocabulary:
-a syntactic extractor may only claim `discovered-lower-bound`
-(docs/callsite-schema.json), so "discovered" is the strongest quantifier
-available anywhere in this chain -- CG2 (call-graph completeness is
-undecidable) is permanent, and the response is "report, never claim
-closure".
+The honesty rule, plan.md §9, is structural here: text and JSON report
+source-target resolution separately from interaction reconciliation and
+gate acceptance. A resolved target is not necessarily declared in I, and
+an accepted warning is not a reconciled call. The report always labels
+C_static discovery as a syntactic lower bound (docs/callsite-schema.json);
+CG2 means the tool never claims that every source call was discovered.
 
 Consumed by chainlink #25: `unresolved_at_or_above_medium()` is the
 closure-profile condition plan.md §4 names verbatim
@@ -77,8 +73,9 @@ closure-profile condition plan.md §4 names verbatim
 from __future__ import annotations
 
 import argparse
+import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -87,7 +84,7 @@ from validate_callsites import callsite_report_dir_for  # noqa: E402
 from validate_callsites import load_reports  # noqa: E402
 from validate_interaction import load_interactions_by_id  # noqa: E402
 
-HONEST_COVERAGE_STATEMENT = "all discovered call sites resolved"
+HONEST_COVERAGE_STATEMENT = "source resolution is complete"
 
 DISPOSITION_BY_TIER = {
     "critical": "block",
@@ -123,21 +120,55 @@ class Finding:
 
 @dataclass
 class Reconciliation:
-    """plan.md §9's callsite_coverage, completed. `checked` is the count
-    extraction deliberately does not produce (docs/callsite-schema.json's
-    own note on the rename): it is a reconciliation outcome, known only
-    here -- a definite-direct-call either matched an interaction or was
-    ignored as an intra-concept helper."""
+    """R1/G16's reconciliation counts, distinct from source target
+    resolution. `checked` counts definite calls matched to an interaction
+    or classified by policy as an intra-concept helper."""
     reports: int = 0
     discovered: int = 0
     checked: int = 0
     unresolved: int = 0
+    undeclared_warnings: int = 0
+    undeclared_blocking: int = 0
+    configuration_mismatches: int = 0
+    report_summaries: list[dict] = field(default_factory=list)
+
+    def source_resolution_state(self) -> str:
+        if self.reports == 0:
+            return "not-evaluated"
+        if self.discovered == 0:
+            return "no-discovered-calls"
+        return "complete" if self.unresolved == 0 else "incomplete"
+
+    def interaction_reconciliation_state(self) -> str:
+        if self.reports == 0:
+            return "not-evaluated"
+        if self.discovered == 0:
+            return "no-discovered-calls"
+        complete = (
+            self.checked == self.discovered
+            and self.unresolved == 0
+            and self.undeclared_warnings == 0
+            and self.undeclared_blocking == 0
+            and self.configuration_mismatches == 0
+        )
+        return "complete" if complete else "incomplete"
+
+    def is_interaction_reconciliation_complete(self) -> bool:
+        return self.interaction_reconciliation_state() in ("complete", "no-discovered-calls")
+
+    def counts_dict(self) -> dict:
+        return {
+            "reports": self.reports,
+            "discovered": self.discovered,
+            "checked": self.checked,
+            "unresolved": self.unresolved,
+            "undeclared_warnings": self.undeclared_warnings,
+            "undeclared_blocking": self.undeclared_blocking,
+            "configuration_mismatches": self.configuration_mismatches,
+        }
 
     def __str__(self) -> str:
-        return (
-            f"reports={self.reports} discovered={self.discovered} "
-            f"checked={self.checked} unresolved={self.unresolved}"
-        )
+        return " ".join(f"{key}={value}" for key, value in self.counts_dict().items())
 
 
 def _edge_key(caller: dict, callee: dict) -> tuple[str, str, str, str]:
@@ -272,7 +303,7 @@ def reconcile(path: Path, report: dict, interactions: dict) -> tuple[list[Findin
     by_edge, callee_methods = index_interactions(interactions)
     config_scope = report["config_scope"]
     findings: list[Finding] = []
-    counts = Reconciliation(discovered=len(report["callsites"]))
+    counts = Reconciliation(reports=1, discovered=len(report["callsites"]))
     matched_edges: set[tuple[str, str, str, str]] = set()
 
     for record in report["callsites"]:
@@ -285,7 +316,11 @@ def reconcile(path: Path, report: dict, interactions: dict) -> tuple[list[Findin
             if interaction is not None:
                 matched_edges.add(key)
                 counts.checked += 1
-                findings.extend(_check_config_compatibility(path, record, interaction, config_scope))
+                compatibility_findings = _check_config_compatibility(path, record, interaction, config_scope)
+                counts.configuration_mismatches += sum(
+                    finding.severity == "error" for finding in compatibility_findings
+                )
+                findings.extend(compatibility_findings)
                 continue
             if caller["concept"] == callee["concept"]:
                 counts.checked += 1
@@ -299,9 +334,12 @@ def reconcile(path: Path, report: dict, interactions: dict) -> tuple[list[Findin
                     )
                 )
                 continue
-            findings.append(
-                _undeclared_cross_concept_finding(path, record, caller, callee)
-            )
+            undeclared = _undeclared_cross_concept_finding(path, record, caller, callee)
+            if undeclared.severity == SEVERITY_WARN:
+                counts.undeclared_warnings += 1
+            else:
+                counts.undeclared_blocking += 1
+            findings.append(undeclared)
             continue
 
         counts.unresolved += 1
@@ -364,24 +402,26 @@ def unresolved_at_or_above_medium(report: dict) -> int:
 
 
 def coverage_statement(counts: Reconciliation) -> str:
-    """The ONLY coverage sentence this module produces. plan.md §9: report
-    "all discovered call sites resolved", never "all call sites
-    resolved" -- the extractor's own completeness_claim is a lower bound,
-    so undiscovered call sites are always possible (CG2)."""
+    """Describe source-target resolution separately from interaction
+    reconciliation. C_static discovery remains a syntactic lower bound; a
+    resolved target does not imply that the call is declared in I."""
+    state = counts.source_resolution_state()
+    lower_bound = "syntactic discovery remains a lower bound"
+    if state == "not-evaluated":
+        return f"source resolution not evaluated -- no valid C_static reports; {lower_bound}"
     if counts.discovered == 0:
-        # Vacuously "all resolved" is exactly the wording chainlink #48
-        # found wrong in the validators, one level in: nothing was
-        # discovered, so there is no coverage to claim either way.
-        return "no call sites were discovered -- nothing to resolve, and no coverage claimed"
-    if counts.unresolved == 0:
-        return f"{HONEST_COVERAGE_STATEMENT} ({counts.discovered} discovered, {counts.checked} checked against I)"
+        return f"no call sites were discovered -- source resolution not applicable; no coverage claimed; {lower_bound}"
     return (
-        f"{counts.unresolved} of {counts.discovered} discovered call sites are unresolved "
-        f"({counts.checked} checked against I)"
+        f"{HONEST_COVERAGE_STATEMENT if state == 'complete' else 'source resolution is incomplete'} "
+        f"({counts.unresolved} unresolved of {counts.discovered} discovered; {lower_bound})"
     )
 
 
-def gate_workspace(workspace: Path, interaction_dir_by_crate: dict[str, Path]) -> tuple[list[Finding], Reconciliation]:
+def gate_workspace(
+    workspace: Path,
+    interaction_dir_by_crate: dict[str, Path],
+    require_complete_reconciliation: bool = False,
+) -> tuple[list[Finding], Reconciliation]:
     """Reconcile every fully valid C_static report in the workspace. A
     report whose crate_dir is not one the descriptor knows is a hard
     error, not a skip: silently reconciling nothing is how a gate
@@ -404,10 +444,24 @@ def gate_workspace(workspace: Path, interaction_dir_by_crate: dict[str, Path]) -
         interactions = load_interactions_by_id(interaction_dir)
         report_findings, counts = reconcile(path, report, interactions)
         findings.extend(report_findings)
-        totals.reports += 1
+        totals.reports += counts.reports
         totals.discovered += counts.discovered
         totals.checked += counts.checked
         totals.unresolved += counts.unresolved
+        totals.undeclared_warnings += counts.undeclared_warnings
+        totals.undeclared_blocking += counts.undeclared_blocking
+        totals.configuration_mismatches += counts.configuration_mismatches
+        try:
+            report_path = path.relative_to(workspace).as_posix()
+        except ValueError:
+            report_path = str(path)
+        totals.report_summaries.append({
+            "report_path": report_path,
+            "crate_dir": crate_dir,
+            "counts": counts.counts_dict(),
+            "source_resolution": counts.source_resolution_state(),
+            "interaction_reconciliation": counts.interaction_reconciliation_state(),
+        })
 
     if totals.reports == 0:
         # The CLI already refuses to run with no ci/results/c_static
@@ -425,14 +479,65 @@ def gate_workspace(workspace: Path, interaction_dir_by_crate: dict[str, Path]) -
                 "and check validate-callsites for reports rejected by G1a/G1b",
             )
         )
+    elif require_complete_reconciliation and not totals.is_interaction_reconciliation_complete():
+        findings.append(
+            Finding(
+                "G16", callsite_report_dir_for(workspace),
+                "project policy `interaction_policy.require_complete_reconciliation` requires "
+                "every discovered call site to be reconciled against I; the current report set "
+                "contains unresolved, undeclared, or configuration-mismatched calls",
+            )
+        )
     return findings, totals
 
 
-def report_findings(findings: list[Finding], counts: Reconciliation) -> int:
+def _exit_code(findings: list[Finding]) -> int:
+    if any(f.severity == "error" for f in findings):
+        return EXIT_BLOCKED
+    if any(f.severity == "decision" for f in findings):
+        return EXIT_DECISION_REQUIRED
+    return EXIT_OK
+
+
+def report_document(findings: list[Finding], counts: Reconciliation, exit_code: int) -> dict:
+    gate_acceptance = {
+        EXIT_OK: "accepted",
+        EXIT_BLOCKED: "blocked",
+        EXIT_DECISION_REQUIRED: "decision-required",
+    }[exit_code]
+    return {
+        "format": "ligature.r1-g16-report.v1",
+        "exit_code": exit_code,
+        "gate_acceptance": gate_acceptance,
+        "summary": {
+            "counts": counts.counts_dict(),
+            "source_resolution": counts.source_resolution_state(),
+            "interaction_reconciliation": counts.interaction_reconciliation_state(),
+            "discovery_completeness": "syntactic-lower-bound",
+        },
+        "reports": list(counts.report_summaries),
+        "findings": [
+            {
+                "gate": finding.gate,
+                "path": str(finding.path),
+                "reason": finding.reason,
+                "severity": finding.severity,
+            }
+            for finding in findings
+        ],
+    }
+
+
+def report_findings(findings: list[Finding], counts: Reconciliation, as_json: bool = False) -> int:
     errors = [f for f in findings if f.severity == "error"]
     decisions = [f for f in findings if f.severity == "decision"]
     warns = [f for f in findings if f.severity == SEVERITY_WARN]
     infos = [f for f in findings if f.severity == "info"]
+    exit_code = _exit_code(findings)
+
+    if as_json:
+        print(json.dumps(report_document(findings, counts, exit_code), indent=2, sort_keys=True))
+        return exit_code
 
     if infos:
         print(f"INFO: {len(infos)} non-blocking finding(s)")
@@ -449,6 +554,15 @@ def report_findings(findings: list[Finding], counts: Reconciliation) -> int:
             print(f"  - {f}")
 
     print(coverage_statement(counts))
+    acceptance = report_document(findings, counts, exit_code)["gate_acceptance"]
+    print(
+        f"Gate acceptance: {acceptance} (exit {exit_code}); interaction reconciliation: "
+        f"{counts.interaction_reconciliation_state()}; discovered={counts.discovered}, "
+        f"checked={counts.checked}, unresolved={counts.unresolved}, "
+        f"undeclared warnings={counts.undeclared_warnings}, "
+        f"undeclared blocking={counts.undeclared_blocking}, "
+        f"configuration mismatches={counts.configuration_mismatches}"
+    )
 
     if errors:
         print(f"FAIL: {len(errors)} blocking finding(s)")
@@ -458,7 +572,7 @@ def report_findings(findings: list[Finding], counts: Reconciliation) -> int:
             print(f"plus {len(decisions)} finding(s) awaiting a human risk decision")
             for f in decisions:
                 print(f"  - {f}")
-        return EXIT_BLOCKED
+        return exit_code
 
     if decisions:
         print(f"DECISION REQUIRED: {len(decisions)} medium-risk finding(s) need a human decision")
@@ -468,14 +582,14 @@ def report_findings(findings: list[Finding], counts: Reconciliation) -> int:
             "Raise or lower each tier deliberately (risk_tier_source: human, with its own review "
             "block) and re-run -- an unexamined medium never silently passes"
         )
-        return EXIT_DECISION_REQUIRED
+        return exit_code
 
     if warns:
         print(f"OK: R1 and G16 pass with {len(warns)} warning(s) -- undeclared cross-concept "
               "calls reported above, not counted as checked against I")
     else:
         print("OK: R1 and G16 pass")
-    return EXIT_OK
+    return exit_code
 
 
 def main(argv: list[str]) -> int:

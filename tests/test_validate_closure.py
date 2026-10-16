@@ -73,6 +73,26 @@ class ProfileSchemaTest(unittest.TestCase):
     def test_canonical_profile_passes(self):
         self.assertEqual(findings_for(valid_profile(), PROFILE_PATH), [])
 
+    def test_optional_expected_obligations_accepts_a_reviewed_exact_id_list(self):
+        profile = valid_profile()
+        profile["expected_obligations"] = ["Scheduler.C001", "TaskQueue.C003"]
+        self.assertEqual(findings_for(profile, PROFILE_PATH), [])
+
+    def test_optional_expected_obligations_rejects_duplicate_ids(self):
+        profile = valid_profile()
+        profile["expected_obligations"] = ["Scheduler.C001", "Scheduler.C001"]
+        self.assertTrue(findings_for(profile, PROFILE_PATH))
+
+    def test_optional_expected_obligations_accepts_a_reviewed_exact_id_list(self):
+        profile = valid_profile()
+        profile["expected_obligations"] = ["Scheduler.C001", "TaskQueue.C003"]
+        self.assertEqual(findings_for(profile, PROFILE_PATH), [])
+
+    def test_optional_expected_obligations_rejects_duplicate_ids(self):
+        profile = valid_profile()
+        profile["expected_obligations"] = ["Scheduler.C001", "Scheduler.C001"]
+        self.assertTrue(findings_for(profile, PROFILE_PATH))
+
     def test_every_condition_key_is_required(self):
         for key in CONDITION_KEYS:
             with self.subTest(condition=key):

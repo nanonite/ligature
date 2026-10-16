@@ -256,7 +256,7 @@ def _load_authoritative_state(
         bridge_dir = bridge_dir_for(crate, workspace)
 
         boundary_lookup = validate_boundary_contracts.load_boundaries_by_id(
-            boundary_dir, specs_root
+            boundary_dir, specs_root, workspace
         )
         boundaries.extend(boundary_lookup.values())
         interaction_lookup = validate_interaction.load_interactions_by_id(
@@ -269,7 +269,7 @@ def _load_authoritative_state(
             crate_root, exemption_dir, interaction_lookup
         )
         boundary_edges = validate_boundary_contracts.valid_boundary_edges_from_crate(
-            crate_root, boundary_dir, specs_root
+            crate_root, boundary_dir, specs_root, workspace
         )
         interaction_findings = validate_interaction.validate_crate(
             crate_root, interaction_dir, debt_ids, boundary_edges, exemption_ids

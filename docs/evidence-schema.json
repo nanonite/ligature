@@ -19,7 +19,8 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["requirement", "source-artifact", "observed-behavior", "test", "comment"]
+      "enum": ["requirement", "source-artifact", "observed-behavior", "test", "comment", "compile-time"],
+      "description": "Evidence classification only. `compile-time` describes source or preserved output concerning compiler-enforced assertions or const evaluation; it does not attest that a compiler or verifier ran successfully and is not an assurance-report evidence kind."
     },
     "claim": {
       "type": "string",

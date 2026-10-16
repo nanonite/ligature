@@ -51,6 +51,13 @@ class ValidEvidenceTest(unittest.TestCase):
         findings = run(load_valid())
         self.assertEqual(findings, [], [str(f) for f in findings])
 
+    def test_compile_time_evidence_kind_is_schema_valid(self):
+        data = load_valid()
+        data["kind"] = "compile-time"
+        data["claim"] = "The source contains a compile-time assertion for queue capacity"
+        findings = run(data)
+        self.assertEqual(findings, [], [str(f) for f in findings])
+
 
 class G1aFailureTest(unittest.TestCase):
     def test_missing_claim_is_rejected(self):

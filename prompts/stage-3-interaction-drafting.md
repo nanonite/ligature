@@ -56,6 +56,11 @@ document.
 
 ## Inputs
 
+- {{verifier_policy}} — the validated project descriptor's verifier policy,
+  supplied by ligature draft. For each spec's cluster, the matching clusters
+  entry is the owner; otherwise default is the owner. Supporting verifiers
+  may add evidence kinds but cannot replace the owner's evidence kind.
+
 - `{{interaction_id}}` — the target artifact id, precomputed by the caller
   (unlike a boundary contract's `boundary_id`, `interaction_id` has no
   fixed derivation from caller/callee — it is assigned once and must equal
@@ -76,6 +81,20 @@ document.
   redraft from scratch and do not touch anything the finding didn't flag.
 
 ## Task
+
+The accepted evidence kinds in every reliance must agree with the callee
+cluster's effective owner and declared supporting verifiers in
+{{verifier_policy}}. Include the owner's evidence kind; supporting verifiers
+are additional evidence, not substitutes. Do not infer a verifier from
+edge_class or change the descriptor policy to make a requested evidence kind
+fit.
+
+If the edge crosses verifier systems, describe that fact honestly. An
+interaction's accepted evidence kinds do not prove that the systems compose.
+G14 determines whether the achieved closure actually uses more than one
+verifier; if it does, CG1 requires an accepted reviewed degradation record
+with the harness-tested ceiling. Do not describe such a result as a
+single-verifier deductive closure.
 
 Given the caller and callee concept specs, draft the interaction record for
 `{{caller_concept}}::{{caller_method}} -> {{callee_concept}}::{{callee_method}}`.
@@ -188,8 +207,10 @@ template does not draft the protocol-debt record itself).
 and behaves as described — not a restatement of the schema fields.
 `evidence_links` (optional): ids of evidence records (`E-<n>`,
 `docs/evidence-schema.json`) that ground this interaction, if any already
-exist. Omit rather than invent an id that doesn't correspond to real
-evidence.
+exist. Every supplied id must identify one unique, schema-valid workspace
+record in `evidence/`; draft checks G4 before staging and rejects a dangling
+id. Omit the field rather than invent an id or refer to an evidence draft
+that has not been promoted.
 
 ## Schema
 

@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.3.12] - 2026-10-15
+
+### Added
+- #157: inspect and export the JSON Schemas bundled with the installed executable.
+- #156: classify compile-time evidence separately from verifier assurance and document its supported Stage 0 workflow and limits.
+- #159: report the transitive manifest obligations, consumed assurance records, proof references, and explicit G14 scope through versioned JSON.
+- #160: expose R1/G16 source resolution, interaction reconciliation, gate acceptance, and per-report counts; allow projects to opt into complete reconciliation.
+
+### Fixed
+- #144/#146/#155: make doctor and crate-root consumers fail closed on invalid or escaping descriptor roots, and state the supported plan-driven generator's limits.
+- #145: require a hash-bound human decision before retaining an unchanged shipped oracle command.
+- #147: render and migrate the boundary prompt using the initialized project policy path.
+- #148: reject draft paths outside the declared write set before prompt rendering or backend invocation.
+- #149/#154: resolve concept references only under the descriptor search root and give actionable guidance for missing stable constraint IDs.
+- #150: document each registered CLI command's exit behavior and JSON support.
+- #151/#153: apply verifier policy and resolve evidence links during interaction drafting; invalid and dangling evidence is rejected before staging.
+- #152: identify the current hash-bound human ruling as a pending checkpoint without automating the decision.
+- #158: count manifest-declared and evaluated G14 obligations independently of dependency edges, including isolated and bridge-only scope.
+
 ## [1.3.11] - 2026-10-14
 
 ### Added
@@ -276,6 +295,10 @@ First tagged release. The built `ligature.pyz` (with checksums and provenance) i
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- Distinguish R1 gate acceptance from complete interaction reconciliation (#160)
+- Separate R1/G16 gate acceptance, source resolution, and interaction reconciliation; expose per-report counts and an explicit opt-in complete-reconciliation policy (#160)
+- Expose the obligations and proof artifacts actually consumed by G14 (#159)
+- Expose bundled schemas through a supported local inspection workflow (#157)
 - v1.0 limitations found via black-box Mode P pilot testing (date-creusot, HowardHinnant/date) (#71)
 - ligature.pyz: no assurance-recording path for Creusot proof evidence (#87)
 - ligature.pyz: generic_callees HUMAN DECLARATION is never checked (#86)

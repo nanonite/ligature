@@ -48,6 +48,7 @@ import resources  # noqa: E402
 import exit_codes  # noqa: E402
 from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import load_project_descriptor  # noqa: E402
+from project_descriptor import crate_root_scope_diagnostics  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 import write_set  # noqa: E402
@@ -1174,7 +1175,9 @@ def _validate_boundaries_with_descriptor(
         if not crate_dir or not specs_root:
             continue
         try:
-            raw = validate_boundary_contracts.validate(workspace / crate_dir, workspace / specs_root)
+            raw = validate_boundary_contracts.validate(
+                workspace / crate_dir, workspace / specs_root, workspace
+            )
         except FileNotFoundError:
             continue
         findings.extend(
@@ -1188,6 +1191,78 @@ def _validate_boundaries_with_descriptor(
     return findings
 
 
+def _validate_interactions_with_descriptor(
+    workspace: Path, descriptor: dict | None
+) -> list[NormalizedFinding]:
+    """Pass project ownership policy into the interaction scan when available."""
+    import validate_interaction
+
+    try:
+        raw = validate_interaction.validate(
+            workspace, descriptor=descriptor, workspace_root=workspace if descriptor is not None else None
+        )
+    except FileNotFoundError:
+        return []
+    return [
+        _normalize_finding(
+            finding, str(getattr(finding, "gate", "") or "G1a/G1b"),
+            "scripts/validate_interaction.py:validate",
+        )
+        for finding in raw
+    ]
+
+
+def _validate_witnesses_with_descriptor(
+    workspace: Path, descriptor: dict | None
+) -> list[NormalizedFinding]:
+    """Run witness G2 against each crate's declared concept search root.
+
+    The standalone witness validator has no project descriptor and therefore
+    cannot choose a root. `status` and `check` do have one; forwarding it here
+    keeps their cross-reference behavior aligned with `validate-witness` and
+    prevents an omitted descriptor argument from degrading every query check
+    to an informational no-root result.
+    """
+    import validate_witness
+
+    if descriptor is None:
+        try:
+            raw = validate_witness.validate(workspace)
+        except FileNotFoundError:
+            return []
+        return [
+            _normalize_finding(
+                finding, str(getattr(finding, "gate", "") or "G1a/G1b/G2"),
+                "scripts/validate_witness.py:validate",
+            )
+            for finding in raw
+        ]
+
+    findings: list[NormalizedFinding] = []
+    for crate in descriptor.get("crates", []):
+        crate_dir = crate.get("crate_dir")
+        specs_root = crate.get("specs_search_root")
+        if not crate_dir or not specs_root:
+            continue
+        try:
+            raw = validate_witness.validate_crate(
+                workspace / crate_dir,
+                validate_witness.witness_dir_for(crate, workspace),
+                workspace / specs_root,
+                workspace,
+            )
+        except FileNotFoundError:
+            continue
+        findings.extend(
+            _normalize_finding(
+                finding, str(getattr(finding, "gate", "") or "G1a/G1b/G2"),
+                "scripts/validate_witness.py:validate_crate",
+            )
+            for finding in raw
+        )
+    return findings
+
+
 def _run_standalone_validators(workspace: Path, descriptor: dict | None = None) -> list[NormalizedFinding]:
     findings: list[NormalizedFinding] = []
     for module_name, _ in _VALIDATE_MODULES:
@@ -1196,6 +1271,12 @@ def _run_standalone_validators(workspace: Path, descriptor: dict | None = None) 
             # crates[].specs_search_root; pass it per-crate, the same way
             # cmd_validate/cmd_validate_interaction/cmd_validate_bridge do.
             findings.extend(_validate_boundaries_with_descriptor(workspace, descriptor))
+            continue
+        if module_name == "validate_interaction":
+            findings.extend(_validate_interactions_with_descriptor(workspace, descriptor))
+            continue
+        if module_name == "validate_witness":
+            findings.extend(_validate_witnesses_with_descriptor(workspace, descriptor))
             continue
         try:
             module = __import__(module_name)
@@ -1253,16 +1334,26 @@ def _descriptor_placeholder_findings(
     fields = descriptor_placeholder_fields(descriptor)
     if not fields:
         return []
+    replace_only = [field for field in fields if field in {"review.reviewer", "port_source.repository"}]
+    reviewable = [field for field in fields if field not in replace_only]
+    details = []
+    if replace_only:
+        details.append("replace sentinel value(s): " + ", ".join(replace_only))
+    if reviewable:
+        details.append(
+            "replace or explicitly accept unchanged value(s): " + ", ".join(reviewable)
+            + "; use `ligature accept-fixture-value --path <field> --reviewer <name>` "
+            "to record a hash-bound human decision"
+        )
     return [
         NormalizedFinding(
             gate_id="P0",
             severity="high",
             subject=str(descriptor_path),
             reason=(
-                "project descriptor is still the init template: "
-                + ", ".join(fields)
-                + " still hold the shipped example-fixture value(s); replace them with real "
-                "project values before running any stage (chainlink #67)"
+                "project descriptor retains shipped example-fixture value(s): "
+                + "; ".join(details)
+                + " before running any stage (chainlink #67/#145)"
             ),
             authority="human-decision-pending",
             provenance="scripts/ligature_install.py:descriptor_placeholder_fields",
@@ -1273,8 +1364,9 @@ def _descriptor_placeholder_findings(
 def _descriptor_invalid_findings(
     descriptor_state: str, descriptor_diagnostics: list[str], descriptor_path: Path
 ) -> list[NormalizedFinding]:
-    """A descriptor that fails schema validation is a user-fixable input
-    error, so `check` names the offending property -- JSON path, what was
+    """A descriptor that fails schema or workspace-semantic validation is
+    a user-fixable input error, so the command names the offending property
+    or crate root -- JSON path, what was
     wrong, and the permitted alternatives -- instead of reporting an
     empty findings list next to `conditions: [invalid_input]`, and
     `status` carries it as an open finding (chainlink #73).
@@ -1299,7 +1391,7 @@ def _descriptor_invalid_findings(
                 + " (chainlink #73)"
             ),
             authority="mechanized-gate",
-            provenance="scripts/project_descriptor.py:schema_diagnostics",
+            provenance="scripts/project_descriptor.py:descriptor_validation",
         )
     ]
 
@@ -1396,7 +1488,13 @@ def _run_gates(
                 for crate in descriptor.get("crates", [])
                 if crate.get("crate_dir")
             }
-            raw, _ = gate_r1_g16.gate_workspace(workspace, interaction_dirs)
+            raw, _ = gate_r1_g16.gate_workspace(
+                workspace,
+                interaction_dirs,
+                require_complete_reconciliation=descriptor.get("interaction_policy", {}).get(
+                    "require_complete_reconciliation", False
+                ),
+            )
             runs.append({"gate_id": "r1-g16", "outcome": "executed"})
             for f in raw:
                 findings.append(_normalize_finding(f, "r1-g16", "scripts/gate_r1_g16.py:gate_workspace"))
@@ -1544,6 +1642,96 @@ def _lifecycle_findings(artifacts: list[dict]) -> list[NormalizedFinding]:
     return findings
 
 
+def _approval_checkpoint_findings(
+    workspace: Path, artifacts: list[dict]
+) -> list[NormalizedFinding]:
+    """Report reviewed artifacts that still need a human approval decision.
+
+    A JSON `review` object is only a claim. First compare it with the
+    workspace-scoped approval audit trail; only then check whether a
+    hash-bound human ruling covers the current artifact bytes. This keeps a
+    self-authored reviewer name from being treated as an approval and keeps
+    a sanctioned `approve` event from being mistaken for the separate human
+    ratification required before Stage 4.5.
+    """
+    reviewed_kinds = {
+        kind for kind, (_schema, review_required, _id_field) in _ARTIFACT_KINDS.items()
+        if review_required
+    }
+    candidates = [
+        artifact for artifact in artifacts
+        if artifact["kind"] in reviewed_kinds
+        and artifact["lifecycle"] in ("validated", "promoted")
+        and isinstance(artifact.get("content_hash"), str)
+    ]
+    if not candidates:
+        return []
+
+    try:
+        import generate_promotion_receipt as promotion_receipts
+        import review_checkpoint
+
+        review_log = review_checkpoint.review_log_path(workspace)
+        ruling_log = promotion_receipts.ruling_log_path(workspace)
+        blocks = promotion_receipts.collect_review_blocks(
+            workspace, [artifact["path"] for artifact in candidates]
+        )
+    except (ImportError, OSError, ValueError):
+        return []
+
+    findings: list[NormalizedFinding] = []
+    for artifact in candidates:
+        rel = artifact["path"]
+        review = blocks.get(rel)
+        if not isinstance(review, dict):
+            continue
+        provenance_gaps = promotion_receipts.review_provenance_gaps(
+            workspace, {rel: review}, review_log
+        )
+        if provenance_gaps:
+            findings.append(NormalizedFinding(
+                gate_id="review-provenance",
+                severity="medium",
+                subject=rel,
+                reason=(
+                    f"{rel} carries a reviewer field but has no matching sanctioned approval "
+                    f"entry: {provenance_gaps[0]}; an authorized human must review and promote "
+                    "the staged artifact through `ligature approve`"
+                ),
+                authority="human-decision-pending",
+                provenance="scripts/generate_promotion_receipt.py:review_provenance_gaps",
+            ))
+            continue
+
+        ruling_gaps = promotion_receipts.ruling_gaps(
+            workspace,
+            [{"path": rel, "hash": artifact["content_hash"]}],
+            ruling_log,
+        )
+        if not ruling_gaps:
+            continue
+        gap = ruling_gaps[0]
+        # A rejection is already a recorded human decision. It must not be
+        # re-labelled as pending approval; accept-promotion reports it if
+        # someone attempts to include the artifact in an accepted set.
+        if "a human ruling REJECTED" in gap:
+            continue
+        findings.append(NormalizedFinding(
+            gate_id="human-ruling",
+            severity="medium",
+            subject=rel,
+            reason=(
+                f"{rel} has sanctioned approval provenance but no current ratified human ruling "
+                f"for its exact content hash: {gap}; an authorized human must review the artifact "
+                "and record `ligature record-ruling --reviewer <your-name> "
+                "--verdict ratified|rejected --artifact <path>` before Stage 4.5"
+            ),
+            authority="human-decision-pending",
+            provenance="scripts/generate_promotion_receipt.py:ruling_gaps",
+        ))
+    return findings
+
+
 def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None) -> Analysis:
     workspace = workspace.resolve()
     descriptor: dict | None = None
@@ -1553,7 +1741,14 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
     if descriptor_path.is_file():
         try:
             descriptor = load_project_descriptor(descriptor_path)
-            descriptor_state = "present-valid"
+            crate_diagnostics = crate_root_scope_diagnostics(workspace, descriptor)
+            if crate_diagnostics:
+                descriptor_state = "present-invalid"
+                descriptor_error = "; ".join(crate_diagnostics)
+                descriptor_diagnostics = crate_diagnostics
+                descriptor = None
+            else:
+                descriptor_state = "present-valid"
         except (ProjectDescriptorError, ValueError) as exc:
             descriptor_state = "present-invalid"
             descriptor_error = str(exc)
@@ -1674,6 +1869,7 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
     )
     findings.extend(gate_findings)
     findings.extend(_lifecycle_findings(artifacts))
+    findings.extend(_approval_checkpoint_findings(workspace, artifacts))
     for finding in findings:
         finding.subject = _relativize(finding.subject, workspace)
 
@@ -1881,6 +2077,30 @@ def _next_action(analysis: Analysis) -> dict | None:
                 "description": f"{f.reason} (subject: {f.subject})",
                 "command": None,
             }
+
+    # An artifact's reviewer text is not human authority. Before recommending
+    # extraction or authoring, surface a pending approval/ruling only when the
+    # audit ledgers establish the exact checkpoint that remains outstanding.
+    approval_findings = [
+        f for f in analysis.findings
+        if f.gate_id in {"review-provenance", "human-ruling"}
+        and f.authority == "human-decision-pending"
+    ]
+    if approval_findings:
+        detail = " ".join(
+            f"{finding.subject}: {finding.reason}"
+            for finding in sorted(approval_findings, key=lambda item: (item.subject, item.gate_id))[:5]
+        )
+        if len(approval_findings) > 5:
+            detail += f" and {len(approval_findings) - 5} more artifact(s)"
+        return {
+            "kind": "human-decision",
+            "description": (
+                f"Human approval is the next required action. {detail} The reviewer named in an "
+                "artifact is not proof of human review; the authorized human must make this decision."
+            ),
+            "command": None,
+        }
 
     # 0.5. A staged evidence draft is inert (validate-evidence skips *.draft,
     #    chainlink #79) so it raises no finding -- but it is a ready,

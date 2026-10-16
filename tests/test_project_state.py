@@ -16,11 +16,14 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -156,6 +159,7 @@ class WorkspaceFixture(unittest.TestCase):
         # case: a real project that happens to pick the same verifier must
         # not be flagged on that field alone (chainlink #67).
         descriptor["review"]["reviewer"] = "real-reviewer"
+        descriptor["review"]["reviewed_at"] = "2026-09-05"
         self.descriptor_path.write_text(json.dumps(descriptor))
         # The descriptor declares compatibility_policy.reliance_policy_path
         # (docs/reliance-policy.md) -- a real workspace has that file
@@ -196,7 +200,13 @@ class WorkspaceFixture(unittest.TestCase):
             for crate in crates
         ]
         descriptor["review"]["reviewer"] = "real-reviewer"
+        descriptor["review"]["reviewed_at"] = "2026-09-05"
         self.descriptor_path.write_text(json.dumps(descriptor))
+        # The descriptor declares these roots. A normal initialized fixture
+        # represents a workspace that has already scaffolded its crates;
+        # tests of the missing-root prerequisite remove them explicitly.
+        for crate in crates:
+            (self.workspace / crate).mkdir(parents=True, exist_ok=True)
         return descriptor
 
     def write(self, relative: str, data) -> Path:
@@ -507,6 +517,11 @@ class ProjectStateDocumentTest(WorkspaceFixture):
             closure_kind="deductive",
             work_packages=1,
             obligations=1,
+            provided_obligation_count=1,
+            required_obligation_count=0,
+            evaluated_obligation_count=1,
+            required_bridge_count=0,
+            evaluated_bridge_record_count=0,
             cycles=[],
             findings=[
                 gate_g14.Finding(
@@ -1042,8 +1057,70 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         self.assertEqual(doc["findings"], [])
         self.assertEqual(doc["result"]["exit_code"], 0)
 
+    def test_review_block_without_approval_provenance_is_not_treated_as_approved(self):
+        self.init_workspace()
+        relative = "crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"
+        self.write(relative, BOUNDARY)
+
+        _code, doc = self.check()
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        finding = next(f for f in doc["findings"] if f["gate_id"] == "review-provenance")
+        self.assertEqual(finding["authority"], "human-decision-pending")
+        self.assertEqual(doc["next_action"]["kind"], "human-decision")
+        self.assertIsNone(doc["next_action"]["command"])
+        self.assertIn(relative, doc["next_action"]["description"])
+        self.assertIn("ligature approve", doc["next_action"]["description"])
+        self.assertIn("not proof of human review", doc["next_action"]["description"])
+
+    def test_provenanced_approval_without_current_human_ruling_is_next_action(self):
+        """Chainlink #152: the reviewer field and approve log are distinct
+        from the second, explicit human ruling. The recommended action names
+        that ruling and its supported command but leaves `command: null`, so
+        an automation consumer cannot cross the human checkpoint."""
+        self.init_workspace()
+        relative = "crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"
+        body = {
+            **BOUNDARY,
+            "review": {"reviewer": "machine-labelled reviewer", "reviewed_at": "2026-08-25"},
+        }
+        self.write(relative, body)
+        self.approve_record(
+            relative, reviewer="machine-labelled reviewer", reviewed_at="2026-08-25"
+        )
+
+        _code, doc = self.check()
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        finding = next(f for f in doc["findings"] if f["gate_id"] == "human-ruling")
+        self.assertEqual(finding["authority"], "human-decision-pending")
+        self.assertEqual(doc["next_action"]["kind"], "human-decision")
+        self.assertIsNone(doc["next_action"]["command"])
+        self.assertNotIn("action_id", doc["next_action"])
+        self.assertIn(relative, doc["next_action"]["description"])
+        self.assertIn("ligature record-ruling", doc["next_action"]["description"])
+        self.assertIn("<your-name>", doc["next_action"]["description"])
+        self.assertNotIn("machine-labelled reviewer", doc["next_action"]["description"])
+
+        # A hash-matched ratification resolves this checkpoint. A later
+        # edit would make ruling_gaps report the ruling as stale again.
+        self.rule_on_record(relative)
+        _code, ruled = self.check()
+        self.assertFalse(
+            [f for f in ruled["findings"] if f["gate_id"] == "human-ruling"],
+            [str(f) for f in ruled["findings"]],
+        )
+
+        # The ruling is bound to the exact bytes. Even a valid edit makes
+        # it stale and restores the human checkpoint.
+        artifact_path = self.workspace / relative
+        artifact_path.write_text(artifact_path.read_text() + "\n")
+        _code, edited = self.check()
+        stale = next(f for f in edited["findings"] if f["gate_id"] == "human-ruling")
+        self.assertIn("different version", stale["reason"])
+        self.assertEqual(edited["next_action"]["kind"], "human-decision")
+
     def test_missing_c_static_blocks_r1_g16_and_recommends_refresh(self):
         self.write_descriptor()
+        (self.workspace / "crates" / "a").mkdir(parents=True)
         code, doc = self.check()
         self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
         r1 = next(g for g in doc["gates"] if g["gate_id"] == "r1-g16")
@@ -1052,6 +1129,21 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         self.assertEqual(doc["next_action"]["action_id"], "refresh-c-static")
         # check never writes -- no C_static directory appears.
         self.assertFalse((self.workspace / "ci" / "results" / "c_static").exists())
+
+    def test_check_passes_the_explicit_complete_reconciliation_policy_to_r1(self):
+        descriptor = self.write_descriptor()
+        descriptor["interaction_policy"] = {"require_complete_reconciliation": True}
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        self.write("crates/a/src/lib.rs", "pub fn empty() {}\n")
+        self.write("ci/results/c_static/placeholder.json", "{}")
+
+        import gate_r1_g16
+
+        with mock.patch.object(gate_r1_g16, "gate_workspace", wraps=gate_r1_g16.gate_workspace) as gate:
+            self.check()
+
+        self.assertTrue(gate.called)
+        self.assertTrue(gate.call_args.kwargs["require_complete_reconciliation"])
 
     def test_invalid_artifact_is_a_blocking_finding(self):
         self.init_workspace()
@@ -1251,6 +1343,7 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
 
     def test_next_flag_prints_only_the_recommended_command(self):
         self.write_descriptor()
+        (self.workspace / "crates" / "a").mkdir(parents=True)
         _, out = self.run_cli("check", "next")
         self.assertIn("refresh-c-static", out)
         self.assertNotIn("gate g14:", out)
@@ -1379,12 +1472,23 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
         finding in a test about descriptor placeholders."""
         code, _ = self.run_cli("init", "--mode", mode, "--name", name)
         self.assertEqual(code, 0)
+        # Satisfy the descriptor's declared crate prerequisite so the test
+        # observes P0 only, not check's separate missing-crate finding.
+        (self.workspace / "crates" / f"{name}-core").mkdir(parents=True)
         code, out = self.run_cli("accept-policy", "--reviewer", "real-reviewer", "--version", "reliance-policy@1.0")
         self.assertEqual(code, 0, out)
         return json.loads(self.descriptor_path.read_text())
 
     def p0_findings(self, doc: dict) -> list[dict]:
         return [f for f in doc["findings"] if f["gate_id"] == "P0"]
+
+    def accept_fixture_values(self, *fields: str) -> None:
+        for field in fields:
+            code, out = self.run_cli(
+                "accept-fixture-value", "--path", field, "--reviewer", "real-reviewer",
+                "--accepted-at", "2026-10-01",
+            )
+            self.assertEqual(code, 0, out)
 
     def test_untouched_port_descriptor_is_flagged(self):
         self.write_init_descriptor("port")
@@ -1395,6 +1499,9 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
         self.assertEqual(len(p0), 1)
         self.assertIn("review.reviewer", p0[0]["reason"])
         self.assertIn("port_source.repository", p0[0]["reason"])
+        self.assertIn("review.reviewed_at", p0[0]["reason"])
+        self.assertIn("port_source.language", p0[0]["reason"])
+        self.assertIn("port_source.oracle_build_command", p0[0]["reason"])
         self.assertEqual(p0[0]["authority"], "human-decision-pending")
         # The next action is the descriptor edit, not a downstream refresh.
         self.assertEqual(doc["next_action"]["kind"], "human-decision")
@@ -1414,6 +1521,9 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
         descriptor["review"]["reviewer"] = "real-reviewer"
         descriptor["port_source"]["repository"] = "/srv/real-project"
         self.descriptor_path.write_text(json.dumps(descriptor))
+        self.accept_fixture_values(
+            "review.reviewed_at", "port_source.language", "port_source.oracle_build_command"
+        )
         code, doc = self.check()
         self.assertEqual(self.p0_findings(doc), [])
         self.assertEqual(code, 0)
@@ -1427,6 +1537,9 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
         descriptor["port_source"]["repository"] = "/srv/real-project"
         self.assertEqual(descriptor["verifier_policy"]["default"], "creusot")
         self.descriptor_path.write_text(json.dumps(descriptor))
+        self.accept_fixture_values(
+            "review.reviewed_at", "port_source.language", "port_source.oracle_build_command"
+        )
         code, doc = self.check()
         self.assertEqual(self.p0_findings(doc), [])
 
@@ -1436,12 +1549,52 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
         descriptor["review"]["reviewer"] = "real-reviewer"
         self.descriptor_path.write_text(json.dumps(descriptor))
         self.assertEqual(
-            ligature_install.descriptor_placeholder_fields(descriptor),
-            ["port_source.repository"],
+            set(ligature_install.descriptor_placeholder_fields(descriptor)),
+            {
+                "port_source.repository", "review.reviewed_at", "port_source.language",
+                "port_source.oracle_build_command",
+            },
         )
         _, doc = self.check()
         self.assertEqual(len(self.p0_findings(doc)), 1)
         self.assertIn("port_source.repository", self.p0_findings(doc)[0]["reason"])
+
+    def test_oracle_command_requires_hash_bound_acceptance_after_other_fields_change(self):
+        descriptor = self.write_init_descriptor("port")
+        descriptor["review"]["reviewer"] = "real-reviewer"
+        descriptor["port_source"]["repository"] = "/srv/real-project"
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        code, doc = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn("port_source.oracle_build_command", self.p0_findings(doc)[0]["reason"])
+
+        code, out = self.run_cli(
+            "accept-fixture-value", "--path", "port_source.oracle_build_command",
+            "--reviewer", "operator", "--accepted-at", "2026-10-02",
+        )
+        self.assertEqual(code, 0, out)
+        descriptor = json.loads(self.descriptor_path.read_text())
+        record = descriptor["review"]["accepted_fixture_values"][0]
+        self.assertEqual(record["path"], "port_source.oracle_build_command")
+        self.assertRegex(record["value_sha256"], r"^sha256:[a-f0-9]{64}$")
+        _, doc = self.check()
+        self.assertNotIn("port_source.oracle_build_command", self.p0_findings(doc)[0]["reason"])
+
+        descriptor["review"]["accepted_fixture_values"][0]["value_sha256"] = "sha256:" + "0" * 64
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        _, doc = self.check()
+        self.assertIn("port_source.oracle_build_command", self.p0_findings(doc)[0]["reason"])
+
+    def test_init_does_not_accept_fixture_values_and_sentinels_cannot_be_accepted(self):
+        descriptor = self.write_init_descriptor("port")
+        self.assertNotIn("accepted_fixture_values", descriptor["review"])
+        original = self.descriptor_path.read_bytes()
+        code, out = self.run_cli(
+            "accept-fixture-value", "--path", "port_source.repository",
+            "--reviewer", "operator", "--accepted-at", "2026-10-02",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(self.descriptor_path.read_bytes(), original)
 
     def test_status_surfaces_the_placeholder_as_an_open_finding(self):
         self.write_init_descriptor("port")
@@ -1452,6 +1605,98 @@ class DescriptorPlaceholderTest(WorkspaceFixture):
     def test_descriptor_placeholder_fields_ignores_missing_or_unknown_mode(self):
         self.assertEqual(ligature_install.descriptor_placeholder_fields({"mode": "other"}), [])
         self.assertEqual(ligature_install.descriptor_placeholder_fields({}), [])
+
+
+class CrateRootScopeTest(WorkspaceFixture):
+    """Chainlink #146: crate roots are workspace-relative references.
+    Missing roots are a prerequisite finding; roots that escape via an
+    absolute path, parent traversal, or symlink invalidate the descriptor
+    before validators or C_static extraction can follow them."""
+
+    def port_workspace(self) -> dict:
+        descriptor = self.init_workspace(mode="port", crates=("crates/core",))
+        (self.workspace / "crates" / "core").mkdir(parents=True, exist_ok=True)
+        (self.workspace / "crates" / "core" / "src").mkdir()
+        (self.workspace / "crates" / "core" / "src" / "lib.rs").write_text("pub fn local() {}\n")
+        return descriptor
+
+    def set_crate_root(self, crate_dir: str) -> None:
+        descriptor = json.loads(self.descriptor_path.read_text())
+        descriptor["crates"][0]["crate_dir"] = crate_dir
+        self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+
+    def assert_invalid_crate_root(self, crate_dir: str) -> None:
+        self.set_crate_root(crate_dir)
+        code, check = self.check()
+        self.assertEqual(code, 5)
+        self.assertEqual(check["result"]["exit_code"], 5)
+        self.assertIn("invalid_input", check["result"]["conditions"])
+        self.assertEqual(check["next_action"]["kind"], "human-decision")
+        self.assertIn("workspace", check["next_action"]["description"])
+        self.assertFalse(any(f["gate_id"] == "crate-prerequisite" for f in check["findings"]))
+        _, status = self.status()
+        self.assertEqual(status["descriptor"]["state"], "present-invalid")
+
+    def test_absolute_and_parent_traversal_roots_fail_check_and_extraction(self):
+        self.port_workspace()
+        outside = self.workspace.parent / f"{self.workspace.name}-outside"
+        outside.mkdir()
+        (outside / "src").mkdir()
+        (outside / "src" / "lib.rs").write_text("pub fn external() {}\n")
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+
+        for crate_dir in (str(outside), os.path.relpath(outside, self.workspace)):
+            with self.subTest(crate_dir=crate_dir):
+                self.assert_invalid_crate_root(crate_dir)
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    code, _ = self.run_cli("extract-c-static", "--target", "x86_64-unknown-linux-gnu")
+                self.assertEqual(code, 1)
+                self.assertIn("crate-root paths outside the workspace", stderr.getvalue())
+                self.assertFalse((self.workspace / "ci/results/c_static").exists())
+
+    def test_external_symlink_is_rejected_but_internal_symlink_is_allowed(self):
+        self.port_workspace()
+        outside = self.workspace.parent / f"{self.workspace.name}-outside-link"
+        outside.mkdir()
+        (outside / "src").mkdir()
+        (outside / "src" / "lib.rs").write_text("pub fn external() {}\n")
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        (self.workspace / "crates" / "escape").symlink_to(outside, target_is_directory=True)
+        self.assert_invalid_crate_root("crates/escape")
+
+        (self.workspace / "crates" / "alias").symlink_to(
+            self.workspace / "crates" / "core", target_is_directory=True
+        )
+        self.set_crate_root("crates/alias")
+        check_code, check = self.check()
+        self.assertNotIn("invalid_input", check["result"]["conditions"])
+        self.assertFalse(any(f["gate_id"] == "crate-prerequisite" for f in check["findings"]))
+
+    def test_missing_root_remains_a_prerequisite_and_valid_relative_root_passes(self):
+        self.init_workspace(mode="port", crates=("crates/missing",))
+        shutil.rmtree(self.workspace / "crates" / "missing")
+        descriptor = json.loads(self.descriptor_path.read_text())
+        descriptor["port_source"]["repository"] = "/scratch/source"
+        self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        for field in ("port_source.language", "port_source.oracle_build_command"):
+            code, out = self.run_cli(
+                "accept-fixture-value", "--path", field, "--reviewer", "scratch-reviewer",
+                "--accepted-at", "2026-10-01",
+            )
+            self.assertEqual(code, 0, out)
+        code, check = self.check()
+        self.assertEqual(code, 1)
+        _, status = self.status()
+        self.assertEqual(status["descriptor"]["state"], "present-valid")
+        self.assertTrue(any(f["gate_id"] == "crate-prerequisite" for f in check["findings"]))
+        self.assertIn("scaffold-crate", check["next_action"]["description"])
+
+        (self.workspace / "crates" / "missing").mkdir(parents=True)
+        code, check = self.check()
+        _, status = self.status()
+        self.assertEqual(status["descriptor"]["state"], "present-valid")
+        self.assertFalse(any(f["gate_id"] == "crate-prerequisite" for f in check["findings"]))
 
 
 class InvalidDescriptorDiagnosticTest(WorkspaceFixture):
@@ -1926,10 +2171,24 @@ class BoundaryG2PlusSearchRootTest(WorkspaceFixture):
     in every command reachable from the CLI."""
 
     def _write_concept_spec(self, constraint_id="C003", applies_to=("pop_ready",)):
-        self.write(
+        return self.write(
             "crates/a/specs/task_queue.json",
             {
+                "schema_version": "1.0",
                 "concept": "TaskQueue",
+                "cluster": "scheduling",
+                "kind": "struct",
+                "english_description": "A queue of tasks ordered by their deadlines for scheduling.",
+                "verifier": "creusot",
+                "queries": [
+                    {
+                        "english": "How many tasks are ready?",
+                        "rust_sig": "fn ready_count(&self) -> usize",
+                        "pure": True,
+                    }
+                ],
+                "commands": [],
+                "review": {"reviewer": "alice", "reviewed_at": "2026-09-04"},
                 "constraints": [
                     {
                         "id": constraint_id,
@@ -1937,6 +2196,13 @@ class BoundaryG2PlusSearchRootTest(WorkspaceFixture):
                         "logic": "true",
                         "kind": "postcondition",
                         "applies_to": list(applies_to),
+                    }
+                ],
+                "adversary_table": [
+                    {
+                        "scenario": "a task has no deadline",
+                        "violates": "deadline order",
+                        "resolution": "reject",
                     }
                 ],
             },
@@ -2000,6 +2266,95 @@ class BoundaryG2PlusSearchRootTest(WorkspaceFixture):
         self.assertEqual(len(g2_findings), 1, [f["summary"] for f in g2_findings])
         self.assertEqual(g2_findings[0]["severity"], "high")
         self.assertIn("applies_to", g2_findings[0]["summary"])
+
+    def test_missing_concept_reference_names_the_exact_root_and_repair(self):
+        self.write_descriptor()
+        boundary = "crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json"
+        self.write(boundary, BOUNDARY)
+        _, doc = self.status()
+        findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], "info")
+        self.assertIn("no valid concept spec declares 'TaskQueue'", findings[0]["summary"])
+        self.assertIn(str(self.workspace / "crates"), findings[0]["summary"])
+        self.assertIn("correct crates[].specs_search_root", findings[0]["summary"])
+
+    def test_concept_spec_outside_declared_root_is_diagnosed_not_used(self):
+        self.write_descriptor()
+        source = self._write_concept_spec()
+        misplaced = self.workspace / "docs/task_queue.json"
+        misplaced.parent.mkdir(parents=True, exist_ok=True)
+        misplaced.write_bytes(source.read_bytes())
+        source.unlink()
+        self.write("crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json", BOUNDARY)
+        _, doc = self.status()
+        findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertTrue(any("outside declared specs_search_root" in f["summary"] for f in findings))
+        self.assertTrue(any(str(self.workspace / "crates") in f["summary"] for f in findings))
+
+    def test_multiple_valid_specs_under_root_are_ambiguous(self):
+        self.write_descriptor()
+        source = self._write_concept_spec()
+        duplicate = self.workspace / "crates/other/specs/task_queue.json"
+        duplicate.parent.mkdir(parents=True)
+        duplicate.write_bytes(source.read_bytes())
+        self.write("crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json", BOUNDARY)
+        _, doc = self.status()
+        findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertTrue(any("more than one spec under declared specs_search_root" in f["summary"] for f in findings))
+
+    def test_missing_stable_constraint_ids_remain_a_separate_information_finding(self):
+        self.write_descriptor()
+        spec_path = self._write_concept_spec()
+        spec = json.loads(spec_path.read_text())
+        del spec["constraints"][0]["id"]
+        spec_path.write_text(json.dumps(spec))
+        self.write("crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json", BOUNDARY)
+        _, doc = self.status()
+        findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], "info")
+        self.assertIn("stable id", findings[0]["summary"])
+
+    def test_invalid_concept_spec_is_not_trusted(self):
+        self.write_descriptor()
+        invalid = {
+            "schema_version": "1.0",
+            "concept": "TaskQueue",
+            "cluster": "scheduling",
+            "kind": "struct",
+            "english_description": "A queue of tasks ordered by their deadlines for scheduling.",
+            "verifier": "creusot",
+            "queries": "not-an-array",
+            "commands": [],
+            "constraints": [{"id": "C003"}],
+            "adversary_table": [],
+        }
+        self.write("crates/a/specs/task_queue.json", invalid)
+        self.write("crates/a/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json", BOUNDARY)
+        _, doc = self.status()
+        findings = [f for f in doc["open_findings"] if f["gate_id"] == "G2+"]
+        self.assertTrue(any("candidate" in f["summary"] and "invalid" in f["summary"] for f in findings))
+        self.assertTrue(any(str(self.workspace / "crates") in f["summary"] for f in findings))
+
+    def test_descriptor_driven_check_uses_the_witness_search_root(self):
+        from tests.test_validate_witness import concept_spec as witness_concept_spec
+        from tests.test_validate_witness import witness_spec as witness_artifact
+
+        self.write_descriptor()
+        concept = witness_concept_spec()
+        concept["queries"][0]["rust_sig"] = "fn load_factor(&self) -> f64"
+        self.write("crates/a/specs/task_queue.json", concept)
+        self.write(
+            "crates/a/specs/_witnesses/task_queue.load_factor.json",
+            witness_artifact(),
+        )
+        _, doc = self.check()
+        witness_g2 = [
+            f for f in doc["findings"]
+            if f["gate_id"] == "G2" and "query cross-reference" in f["reason"]
+        ]
+        self.assertEqual(witness_g2, [], [f["reason"] for f in witness_g2])
 
     def test_without_a_descriptor_the_check_still_degrades_to_info(self):
         """The fallback is unchanged: with no descriptor at all there is no

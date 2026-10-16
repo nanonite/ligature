@@ -1,10 +1,9 @@
 """The reconciled exit-code contract (plan.md's own CLI, chainlink #55,
 docs/exit-code-contract.md). A pure precedence resolver only -- it does not
-read the filesystem, run a gate, or change what any `cmd_*` in pipeline.py
-returns today. #56/#57/#58 are expected to call `resolve()` from their own
-`check`/`status` dispatch instead of re-deriving this table by hand; this
-module makes that table exist in exactly one place so it can't drift
-between whichever of them touches exit codes next.
+read the filesystem or run a gate. The consolidated `check` path currently
+uses `resolve()`; most other command handlers retain their own return
+conventions, documented in docs/exit-code-contract.md's current-dispatcher
+matrix. In particular, `status` returns 0 when it emits a report.
 """
 from __future__ import annotations
 

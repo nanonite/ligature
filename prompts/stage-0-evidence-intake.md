@@ -14,7 +14,7 @@ authoritative, not this prose copy.
 {
   "schema_version": "1.0",
   "id": "E-<sequential>",
-  "kind": "requirement | source-artifact | observed-behavior | test | comment",
+  "kind": "requirement | source-artifact | observed-behavior | test | comment | compile-time",
   "claim": "<the proposition this evidence supports, in one sentence — not just a hash+location. A hash and a file path identify bytes, not the claim being relied on.>",
   "origin": {
     "repository": "<from the project descriptor's port_source.repository if mode: port, otherwise this project's own repo>",
@@ -75,6 +75,13 @@ itself), and `additionalProperties: false` rejects one outright.
 5. `confidence` reflects your own certainty in `claim`, not in the
    `origin` bytes being correctly captured (that's mechanical — either the
    hash matches or it doesn't).
+6. Use `kind: compile-time` for evidence about compiler-enforced assertions
+   or const-evaluation conditions. This is only an evidence classification:
+   a source file containing an assertion does not prove it compiled or ran.
+   For a claim about an actual compiler result, point `origin` at preserved
+   output with its exact repository, commit, path, content hash, and line
+   range. This schema does not attest the compiler command or toolchain, and
+   this kind never establishes verifier assurance or G14 closure by itself.
 
 ## Not this template's job
 

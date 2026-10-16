@@ -83,11 +83,18 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from concept_spec_lookup import find_concept_spec  # noqa: E402
 from review_checkpoint import is_staged_draft  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from schema_utils import make_validator_without_required  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 from validate_evidence import valid_evidence_ids  # noqa: E402
+from verifier_policy import (  # noqa: E402
+    VERIFIER_EVIDENCE_KIND,
+    assurance_policy_mismatches,
+    policy_for_cluster,
+    verifier_is_declared,
+)
 
 SCHEMA_PATH = resources.resource_path("docs", "interaction-schema.json")
 
@@ -326,6 +333,158 @@ def check_g2_plus_plus(path: Path, data: dict) -> list[Finding]:
     return []
 
 
+def _concept_spec_for_policy(
+    concept: str, workspace_root: Path, descriptor: dict
+) -> tuple[dict | None, str | None]:
+    """Resolve one concept across the descriptor's declared spec roots.
+
+    A missing or ambiguous concept cannot be assigned an inferred owner.
+    The same resolver used by boundary and witness checks is authoritative;
+    candidates outside its root remain diagnostic-only.
+    """
+    roots = sorted({
+        str((workspace_root / crate["specs_search_root"]).resolve())
+        for crate in descriptor.get("crates", [])
+        if isinstance(crate, dict) and isinstance(crate.get("specs_search_root"), str)
+    })
+    if not roots:
+        return None, "project descriptor declares no specs_search_root for concept-policy resolution"
+
+    found: dict[Path, dict] = {}
+    diagnostics: list[str] = []
+    for root_text in roots:
+        lookup = find_concept_spec(concept, Path(root_text), workspace_root)
+        if lookup.status == "resolved" and lookup.path is not None and lookup.document is not None:
+            found[lookup.path.resolve()] = lookup.document
+        elif lookup.status != "spec_not_found":
+            diagnostics.append(lookup.diagnostic())
+
+    if diagnostics:
+        return None, sorted(diagnostics)[0]
+    if len(found) > 1:
+        return None, (
+            f"concept {concept!r} has multiple authoritative specs across declared roots: "
+            + ", ".join(str(path) for path in sorted(found))
+        )
+    if not found:
+        return None, (
+            f"no valid concept spec declares {concept!r} under the descriptor's declared "
+            f"specs_search_root values ({', '.join(roots)}); add it under an authoritative root "
+            "or correct crates[].specs_search_root"
+        )
+    return next(iter(found.values())), None
+
+
+def check_verifier_policy(
+    path: Path,
+    data: dict,
+    workspace_root: Path | None,
+    descriptor: dict | None,
+) -> list[Finding]:
+    """Check reliance evidence against the callee cluster's declared owner.
+
+    Descriptor-free low-level validation deliberately does not guess policy.
+    In descriptor-aware draft/approve/validate flows, a reliance or explicit
+    cross-verifier edge must resolve its concepts through the declared roots.
+    The descriptor's supporting list permits additional evidence kinds, but
+    never substitutes for the owning verifier's evidence kind. G14 remains
+    authoritative for actual closure composition and CG1 degradation.
+    """
+    if workspace_root is None or descriptor is None:
+        return []
+
+    reliances = data.get("reliances") or []
+    cross_verifier = "cross-verifier" in (data.get("edge_class") or [])
+    if not reliances and not cross_verifier:
+        return []
+
+    concepts = {"callee": (data.get("callee") or {}).get("concept")}
+    if cross_verifier:
+        concepts["caller"] = (data.get("caller") or {}).get("concept")
+    resolved: dict[str, tuple[dict, dict]] = {}
+    findings: list[Finding] = []
+    for role, concept in concepts.items():
+        if not isinstance(concept, str) or not concept:
+            continue
+        spec, error = _concept_spec_for_policy(concept, workspace_root, descriptor)
+        if error:
+            findings.append(Finding(
+                "G2-policy", path,
+                f"cannot establish {role} verifier policy for concept {concept!r}: {error}; "
+                "Ligature will not infer an owner",
+            ))
+            continue
+        cluster = spec.get("cluster")
+        policy = policy_for_cluster(descriptor, cluster)
+        if not policy.get("owning"):
+            findings.append(Finding(
+                "G2-policy", path,
+                f"descriptor verifier_policy assigns no owning verifier to concept {concept!r}'s "
+                f"cluster {cluster!r}",
+            ))
+            continue
+        resolved[role] = (spec, policy)
+        spec_verifier = spec.get("verifier")
+        if not verifier_is_declared(spec_verifier, policy):
+            supporting = sorted(set(policy.get("supporting") or ()))
+            findings.append(Finding(
+                "G2-policy", path,
+                f"concept {concept!r} declares verifier {spec_verifier!r} for cluster {cluster!r}, "
+                f"but descriptor policy permits owner {policy['owning']!r} and supporting "
+                f"verifiers {supporting!r}; align the concept spec or the cluster policy",
+            ))
+
+    callee_policy = resolved.get("callee", (None, None))[1]
+    if callee_policy is not None:
+        for reliance in reliances:
+            assurance = reliance.get("required_assurance") or {}
+            unsupported, owner_missing = assurance_policy_mismatches(assurance, callee_policy)
+            obligation = reliance.get("obligation_id", "(unknown obligation)")
+            allowed_verifiers = sorted({callee_policy["owning"], *callee_policy["supporting"]})
+            allowed_kinds = sorted({
+                VERIFIER_EVIDENCE_KIND[verifier]
+                for verifier in allowed_verifiers
+                if verifier in VERIFIER_EVIDENCE_KIND
+            })
+            accepted = sorted(set(assurance.get("accepted_evidence_kinds") or ()))
+            if unsupported:
+                findings.append(Finding(
+                    "G2-policy", path,
+                    f"reliance {obligation!r} accepts evidence kind(s) {unsupported!r} that are not "
+                    f"produced by callee cluster {callee_policy['owning']!r} or its declared "
+                    f"supporting verifiers {sorted(set(callee_policy['supporting']))!r}; "
+                    f"policy permits {allowed_kinds!r}",
+                ))
+            owner_kind = VERIFIER_EVIDENCE_KIND.get(callee_policy["owning"])
+            if owner_missing:
+                findings.append(Finding(
+                    "G2-policy", path,
+                    f"reliance {obligation!r} accepts {accepted!r} but omits owning verifier evidence "
+                    f"kind {owner_kind!r} for callee cluster {callee_policy['owning']!r}; a supporting "
+                    "verifier is additional evidence and cannot replace the declared owner",
+                ))
+
+    caller_pair = resolved.get("caller")
+    callee_pair = resolved.get("callee")
+    if cross_verifier and caller_pair and callee_pair:
+        caller_spec, caller_policy = caller_pair
+        callee_spec, callee_policy = callee_pair
+        caller_system = caller_spec.get("verifier")
+        callee_system = callee_spec.get("verifier")
+        if caller_system != callee_system or caller_policy["owning"] != callee_policy["owning"]:
+            findings.append(Finding(
+                "G2-policy", path,
+                f"cross-verifier edge joins {caller_spec.get('cluster')!r}/{caller_system!r} to "
+                f"{callee_spec.get('cluster')!r}/{callee_system!r}; declared supporting verifiers "
+                "permit evidence intake but do not prove verifier composition. If G14's achieved "
+                "closure actually uses multiple verifier systems, CG1 limits the accepted degraded "
+                "claim to the harness-tested ceiling and requires its reviewed degradation record; "
+                "G14 remains authoritative for that decision",
+                severity="warning",
+            ))
+    return findings
+
+
 def check_g15_protocol_coverage(
     path: Path, data: dict, valid_debt_interaction_ids: set[str] | None
 ) -> list[Finding]:
@@ -522,17 +681,21 @@ def validate_draft_data(
     data: dict,
     validator: Draft202012Validator,
     evidence_ids: set[str] | None = None,
+    workspace_root: Path | None = None,
+    descriptor: dict | None = None,
 ) -> list[Finding]:
     """Stage 0/3 immediate feedback (plan.md §6.1). `validator` must come
     from load_draft_validator(), not load_validator() -- `review` isn't
     required yet at draft time. Includes computed-eligibility and
-    reliance-obligation-uniqueness (both G1b, self-contained, no
-    cross-file lookup -- plan.md's own "cheap ... eligibility checks"
-    language). G5 reports an ungrounded reliance as a warning. Deliberately
-    excludes G2++ (declared-assurance) and G15
-    (protocol coverage) -- both are plan.md gate-table entries distinct
-    from G1a/G1b, and G15 specifically needs cross-file protocol-debt
-    context this function is never given. External review, high
+    reliance-obligation-uniqueness (both G1b, self-contained). With workspace
+    evidence context, G4 rejects dangling links before staging; without that
+    context it emits a visible info finding rather than implying that links
+    were resolved. G5 reports an ungrounded reliance as a warning. With
+    descriptor context, the declared verifier policy is also checked now so
+    an incompatible evidence claim is refused before staging. The remaining
+    G2++ (declared-assurance) and G15 (protocol coverage) are deliberately
+    deferred; G15 needs cross-file protocol-debt context this function is
+    never given. External review, high
     severity: the first version of this dispatcher reused approve()'s
     full validate_data(), which rejected every review-less draft outright
     via G1a; reproduced directly before this fix."""
@@ -546,7 +709,9 @@ def validate_draft_data(
     findings.extend(check_naming(path, data))
     findings.extend(check_computed_eligibility(path, data))
     findings.extend(check_reliance_obligation_uniqueness(path, data))
+    findings.extend(check_evidence_links(path, data, evidence_ids))
     findings.extend(check_g5_grounding(path, data, evidence_ids))
+    findings.extend(check_verifier_policy(path, data, workspace_root, descriptor))
     return findings
 
 
@@ -559,6 +724,8 @@ def validate_data(
     valid_exemption_interaction_ids: set[str] | None = None,
     evidence_ids: set[str] | None = None,
     block_ungrounded_obligations: bool = False,
+    workspace_root: Path | None = None,
+    descriptor: dict | None = None,
 ) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
@@ -571,6 +738,7 @@ def validate_data(
     findings.extend(check_evidence_links(path, data, evidence_ids))
     findings.extend(check_g5_grounding(path, data, evidence_ids, block_ungrounded_obligations))
     findings.extend(check_g2_plus_plus(path, data))
+    findings.extend(check_verifier_policy(path, data, workspace_root, descriptor))
     findings.extend(check_g15_protocol_coverage(path, data, valid_debt_interaction_ids))
     findings.extend(check_r2_coverage(path, data, covering_boundary_edges, valid_exemption_interaction_ids))
     return findings
@@ -584,6 +752,8 @@ def validate_file(
     valid_exemption_interaction_ids: set[str] | None = None,
     evidence_ids: set[str] | None = None,
     block_ungrounded_obligations: bool = False,
+    workspace_root: Path | None = None,
+    descriptor: dict | None = None,
 ) -> list[Finding]:
     try:
         text = path.read_text()
@@ -596,6 +766,7 @@ def validate_file(
     return validate_data(
         path, data, validator, valid_debt_interaction_ids, covering_boundary_edges,
         valid_exemption_interaction_ids, evidence_ids, block_ungrounded_obligations,
+        workspace_root, descriptor,
     )
 
 
@@ -734,6 +905,8 @@ def validate(
     covering_boundary_edges: set[tuple] | None = None,
     valid_exemption_interaction_ids: set[str] | None = None,
     evidence_ids: set[str] | None = None,
+    descriptor: dict | None = None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     """Recursive, unanchored scan for the standalone CLI: finds every
     `_interactions` directory anywhere under `root`. External review,
@@ -779,7 +952,10 @@ def validate(
             boundary_edges_by_dir, exemption_ids_by_dir = r2_by_interaction_dir
             edges = boundary_edges_by_dir.get(interaction_dir, set())
             exemption_ids = exemption_ids_by_dir.get(interaction_dir, set())
-        findings.extend(validate_file(path, validator, coverage, edges, exemption_ids, evidence_ids))
+        findings.extend(validate_file(
+            path, validator, coverage, edges, exemption_ids, evidence_ids,
+            workspace_root=workspace_root, descriptor=descriptor,
+        ))
     return findings
 
 
@@ -790,6 +966,8 @@ def validate_crate(
     covering_boundary_edges: set[tuple],
     valid_exemption_interaction_ids: set[str],
     evidence_ids: set[str] | None = None,
+    descriptor: dict | None = None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     """The descriptor-driven scan pipeline.py's cmd_validate_interaction
     uses: discovers every interaction-shaped candidate anywhere under
@@ -829,6 +1007,7 @@ def validate_crate(
             validate_file(
                 path, validator, valid_debt_interaction_ids, covering_boundary_edges,
                 valid_exemption_interaction_ids, evidence_ids,
+                workspace_root=workspace_root, descriptor=descriptor,
             )
         )
     return findings

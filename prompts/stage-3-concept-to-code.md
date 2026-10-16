@@ -136,13 +136,14 @@ Each constraint has:
 - `applies_to` — optional query or command names this constraint applies
   to.
 - `id` — **author-assigned stable obligation identifier**, pattern
-  `^C\d{3}$` (e.g. `C001`, `C002`). Required once chainlink #40 is applied
-  upstream; optional today but strongly recommended — the reliance-graph
-  pipeline references obligations by stable id everywhere
-  (`callee_guarantees: [TaskQueue.C003]`, `reliances[].obligation_id`,
-  work-package `obligations`). Assign ids sequentially starting from
-  `C001`. Stable under reordering by construction, unlike a positional
-  scheme.
+  `^C\d{3}$` (e.g. `C001`, `C002`). Optional for compatibility, but assign
+  one whenever the human-reviewed concept specification has a normative
+  constraint that downstream boundaries, reliances, or work packages must
+  name. Preserve existing IDs when revising a spec. A human author chooses
+  and records the semantic mapping; do not derive IDs from array position,
+  source symbols, or generated ordering. IDs must be unique within the spec
+  and must not be recycled for a different constraint. Use the next unused
+  ID only after deciding which distinct constraint it names.
 
 ### 5. `adversary_table` — required counterexample table
 
@@ -175,6 +176,15 @@ and #105), recorded at `docs/concept-to-code-witness-required-schema.json`,
 optional by this pipeline's drafting and discovery tooling (`review` is
 required only in the approved form); the vendored schema itself does not
 yet include them.
+
+When an existing spec lacks IDs, revise it through this template: run
+`ligature draft 3 concept-to-code <crate>/specs/<concept_snake_case>.json`,
+review the staged `.draft`, and promote it with
+`ligature approve --reviewer <human> <target>`. Approval remains mandatory
+because these IDs define the vocabulary used by G2+ and other gates. A
+boundary with a reference such as `TaskQueue.C003` remains unresolved until
+the promoted spec contains that exact author-assigned ID; Ligature never
+fills it in automatically.
 
 ## Filename
 

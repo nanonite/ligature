@@ -147,6 +147,37 @@ class FreshInitTest(InstallFixture):
                     "the installed copy must be the shipped prompt, not a stale one",
                 )
 
+    def test_boundary_prompt_init_and_migration_name_the_project_policy_path(self):
+        code, _, _ = self.init("greenfield", name="myproj")
+        self.assertEqual(code, 0)
+        relative = ".ligature/prompts/stage-3-boundary-drafting.md"
+        prompt_path = self.workspace / relative
+        expected = (ROOT / "prompts/stage-3-boundary-drafting.md").read_text()
+        installed = prompt_path.read_text()
+        self.assertIn("contents read from this project's", installed)
+        self.assertIn("docs/reliance-policy.md", installed)
+        self.assertIn("the project file is the policy authority", installed)
+        self.assertNotIn("copied from docs/reliance-policy.template.md", installed)
+
+        # Model an older managed prompt from before the path correction.
+        stale = expected.replace(
+            "contents read from this project's", "copied from docs/reliance-policy.template.md"
+        )
+        prompt_path.write_text(stale)
+        manifest = self.manifest()
+        record = next(item for item in manifest["files"] if item["path"] == relative)
+        stale_hash = "sha256:" + hashlib.sha256(stale.encode("utf-8")).hexdigest()
+        record["base_hash"] = stale_hash
+        record["expected_hash"] = stale_hash
+        self.write_manifest(manifest)
+        code, out, err = self.run_cli("migrate", "--upgrade")
+        self.assertEqual(code, 0, err + out)
+        migrated = prompt_path.read_text()
+        self.assertEqual(migrated, expected)
+        self.assertIn("docs/reliance-policy.md", migrated)
+        self.assertIn("the project file is the policy authority", migrated)
+        self.assertNotIn("copied from docs/reliance-policy.template.md", migrated)
+
     def test_initialized_files_get_the_umask_derived_mode(self):
         """Chainlink #63, end to end through the CLI: every file init writes
         must get what a umask-respecting open() would have produced, not
@@ -670,6 +701,35 @@ class DoctorDescriptorSchemaTest(InstallFixture):
         # The installation itself is still current; the descriptor is the
         # fail-closed condition, exactly as `check` reports it.
         self.assertIn("installation: current", out)
+
+    def test_doctor_reports_write_set_overlap_as_semantically_invalid(self):
+        self.init("greenfield", name="myproj")
+        self.stamp_policy()
+        self.invalidate_descriptor(
+            lambda d: d["write_set"]["allowed_roots"].append("docs/*.md")
+        )
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("schema: invalid", out)
+        self.assertIn("descriptor diagnostic:", out)
+        self.assertIn("allowed_roots pattern 'docs/*.md'", out)
+        self.assertIn("protected_roots pattern 'docs/reliance-policy.md'", out)
+        self.assertIn("narrow or otherwise revise the patterns", out)
+        status_code, status_out, _ = self.run_cli("status", "--json")
+        self.assertEqual(status_code, 0)
+        self.assertEqual(json.loads(status_out)["descriptor"]["state"], "present-invalid")
+
+    def test_doctor_reports_an_escaping_crate_root_as_semantically_invalid(self):
+        self.init("port", name="myproj")
+        descriptor_path = self.workspace / "project-descriptor.json"
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor["crates"][0]["crate_dir"] = str(self.workspace.parent / "outside-crate")
+        descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("schema: invalid", out)
+        self.assertIn("crate_dir", out)
+        self.assertIn("workspace-relative", out)
 
     def test_doctor_reports_an_invalid_enum_value_and_exits_non_zero(self):
         self.init("greenfield", name="myproj")

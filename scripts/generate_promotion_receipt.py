@@ -389,7 +389,7 @@ def _crate_context(crate: dict, workspace_root: Path, cache: dict[str, dict]) ->
             crate_root, protocol_debt_dir_for(crate, workspace_root), interactions_by_id
         ),
         "covering_boundary_edges": valid_boundary_edges_from_crate(
-            crate_root, boundary_dir_for(crate, workspace_root), specs_search_root
+            crate_root, boundary_dir_for(crate, workspace_root), specs_search_root, workspace_root
         ),
         "valid_exemption_interaction_ids": valid_exemption_interaction_ids_from_crate(
             crate_root, exemption_dir_for(crate, workspace_root), interactions_by_id

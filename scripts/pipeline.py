@@ -368,17 +368,15 @@ Implemented now, against schemas that actually exist:
             never global: closes / degraded-under-an-accepted-record /
             blocked.
 
-Not yet implemented -- the schemas these stages need don't exist yet
-(tracked as the named chainlink issues, not guessed at here):
-  emission, attach, manifest and promotion-receipt *generation* (the
-  schemas/validators exist as of #14/#15; the generators that read
-  promoted I/O and emit these don't, since they need the rest of the
-  I-schema machinery M3 builds). Stage 8A is now partly real (#24's
-  three commands above, plus #23's satisfies() mechanism), and Stage 8C
-  is real (#25's validate-closure/gate-g14); bridge harness
-  generation/dispatch (#47) and Stage 8B acceptance (#26) remain open.
-  `pipeline status` reports this honestly instead of a stage silently
-  no-op'ing.
+Not yet implemented:
+  Stage 5 emission and Stage 6 attachment are still unbuilt. Automatic
+  synthesis of a Stage 7 work-package plan from promoted I/O is also not
+  implemented: `generate-work-package` (#122/#134) is the supported,
+  plan-driven manifest generator and requires an explicit validated plan.
+  Stage 8A has C_static extraction/reconciliation (#24), bridge harness
+  generation/dispatch (#47), and G9; Stage 8C has validate-closure/G14
+  (#25). Stage 8B acceptance (#26) remains open. `doctor` reports these
+  remaining capabilities separately from commands that already exist.
 """
 from __future__ import annotations
 
@@ -392,6 +390,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adjudicator  # noqa: E402
 import resources  # noqa: E402
+from schema_cli import SchemaError, export_schema, render_schema, render_schema_list  # noqa: E402
 import configure_cargo_profile  # noqa: E402
 import configure_crate_profile  # noqa: E402
 from extract_c_static import ExtractionError  # noqa: E402
@@ -423,6 +422,7 @@ from project_descriptor import ProjectDescriptorError  # noqa: E402
 from project_descriptor import boundary_dir_for as _boundary_dir_for  # noqa: E402
 from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
 from project_descriptor import bridge_dir_for as _bridge_dir_for  # noqa: E402
+from project_descriptor import crate_root_scope_diagnostics  # noqa: E402
 from project_descriptor import conflict_dir_for as _conflict_dir_for  # noqa: E402
 from project_descriptor import evidence_dir_for as _evidence_dir_for  # noqa: E402
 from project_descriptor import exemption_dir_for as _exemption_dir_for  # noqa: E402
@@ -542,6 +542,7 @@ import scaffold_crate  # noqa: E402
 from ligature_install import MANIFEST_RELATIVE_PATH  # noqa: E402
 from ligature_install import InstallError  # noqa: E402
 from ligature_install import accept_policy  # noqa: E402
+from ligature_install import accept_fixture_value as accept_descriptor_fixture_value  # noqa: E402
 from ligature_install import default_project_name  # noqa: E402
 from ligature_install import inspect_adjudicator_pin  # noqa: E402
 from ligature_install import init_workspace  # noqa: E402
@@ -556,6 +557,11 @@ from assumption_registry import render_migration_text  # noqa: E402
 ROOT = resources.resource_root()
 PROMPTS = ROOT / "prompts"
 
+WORK_PACKAGE_GENERATION_CAPABILITY = (
+    "plan-driven Stage 7 manifest generation from an explicit validated plan; "
+    "it does not infer package scope or synthesize plans from promoted I/O"
+)
+
 NOT_YET_IMPLEMENTED = {
     "G4/G5 evidence tracing/grounding": "implemented for interaction-level traceability -- G4 rejects "
     "evidence_links that do not resolve to valid workspace evidence during validation, approval, and "
@@ -565,8 +571,8 @@ NOT_YET_IMPLEMENTED = {
     "collectively; semantic evidence-to-obligation matching remains a human review",
     "emission": "M3's I-schema is now complete (#16-#20); emission (Stage 5) itself is still not built",
     "attach": "M3's I-schema is now complete (#16-#20); attach (Stage 6) itself is still not built",
-    "manifest generation": "#14's schema+validator exist (`validate-work-package`); M3's I-schema is now "
-    "complete (#16-#20), but the generator that reads promoted I/O and emits a manifest from it is still not built",
+    "automatic promoted-I/O synthesis": "not implemented: there is no generator that infers a Stage 7 plan "
+    f"from promoted I/O. The supported command provides {WORK_PACKAGE_GENERATION_CAPABILITY} (#122/#134)",
     "8A": "partly implemented -- C_static extraction and R1/G16 are real (#24), bridge harness "
     "generation, verifier dispatch and G9 are real (#47: check-bridges, gate-g9), and per-obligation "
     "assurance records have a record schema (#23) plus the report container G14 reads (#25). What is "
@@ -583,17 +589,27 @@ class PipelineError(Exception):
     pass
 
 
-def load_project_descriptor(path: Path) -> dict:
+def load_project_descriptor(path: Path, workspace: Path | None = None) -> dict:
     """Thin wrapper: the real logic lives in project_descriptor.py, shared
     with validate_work_package.py (which can't import this module back --
     pipeline.py already imports from validate_work_package.py, so the
     reverse would be circular). Re-raises as PipelineError so main()'s
     existing exception handling doesn't need to know about a second
-    exception type."""
+    exception type. When a workspace is supplied, also enforce the
+    workspace-relative crate-root boundary before a command follows one
+    (date-ligature-009)."""
     try:
-        return _load_project_descriptor(path)
+        descriptor = _load_project_descriptor(path)
     except ProjectDescriptorError as e:
         raise PipelineError(str(e))
+    if workspace is not None:
+        diagnostics = crate_root_scope_diagnostics(workspace, descriptor)
+        if diagnostics:
+            raise PipelineError(
+                "project descriptor has crate-root paths outside the workspace:\n"
+                + "\n".join(f"  - {line}" for line in diagnostics)
+            )
+    return descriptor
 
 
 def render_prompt(template_path: Path, variables: dict[str, str]) -> str:
@@ -682,7 +698,7 @@ def parse_llm_json_output(raw: str) -> dict:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     findings_total = []
     discovered = 0
     valid_boundaries: list[dict] = []
@@ -690,7 +706,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         crate_root = args.workspace / crate["crate_dir"]
         specs_search_root = args.workspace / crate["specs_search_root"]
         try:
-            findings_total.extend(validate_boundaries(crate_root, specs_search_root))
+            findings_total.extend(validate_boundaries(crate_root, specs_search_root, args.workspace))
             discovered += _count_boundaries(crate_root)
         except FileNotFoundError as e:
             # A crate_dir typo in the descriptor must be a loud failure,
@@ -698,7 +714,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
             # review finding, high severity).
             raise PipelineError(f"crate {crate['crate_dir']!r} in the project descriptor: {e}")
         valid_boundaries.extend(
-            load_boundaries_by_id(_boundary_dir_for(crate, args.workspace), specs_search_root).values()
+            load_boundaries_by_id(
+                _boundary_dir_for(crate, args.workspace), specs_search_root, args.workspace
+            ).values()
         )
 
     # chainlink #6: composite assumption identity (boundary_id/tracking_issue/
@@ -751,7 +769,7 @@ def cmd_validate_work_package(args: argparse.Namespace) -> int:
     # _boundaries counts as "a real boundary contract" (external review:
     # reproduced with junk/not-a-crate/_boundaries/anything.json).
     try:
-        descriptor = load_project_descriptor(args.descriptor)
+        descriptor = load_project_descriptor(args.descriptor, args.workspace)
     except OSError as e:
         # Same defect class, same command (chainlink #83): an absent
         # default descriptor used to escape as a FileNotFoundError
@@ -796,7 +814,7 @@ def cmd_validate_promotion(args: argparse.Namespace) -> int:
     # exist, canonical crate-scoped witness specs in artifact_manifest
     # are recognized and hashed with the witness promotion-digest
     # instead of a plain byte hash (plan.md §16.5).
-    descriptor = load_project_descriptor(args.descriptor) if args.descriptor.is_file() else None
+    descriptor = load_project_descriptor(args.descriptor, args.workspace) if args.descriptor.is_file() else None
     validator = load_promotion_validator()
     findings = validate_promotion_file(args.receipt, validator, args.workspace, descriptor)
 
@@ -905,6 +923,29 @@ def cmd_accept_policy(args: argparse.Namespace) -> int:
     print(f"policy version: {result['policy_version']}")
     print(f"previous hash: {result['previous_hash']}")
     print(f"accepted hash: {result['accepted_hash']}")
+    return 0
+
+
+def cmd_accept_fixture_value(args: argparse.Namespace) -> int:
+    """`ligature accept-fixture-value --path FIELD --reviewer NAME`:
+    record an explicit decision to retain a legitimate shipped descriptor
+    value. The value hash is checked by P0, so changing the field invalidates
+    the acceptance. This is a human checkpoint and is never implicit in
+    `init`."""
+    try:
+        record = accept_descriptor_fixture_value(
+            args.workspace,
+            args.descriptor,
+            args.path,
+            args.reviewer,
+            args.accepted_at,
+        )
+    except InstallError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"accepted fixture value: {record['path']}")
+    print(f"reviewer: {record['reviewer']} at {record['accepted_at']}")
+    print(f"value hash: {record['value_sha256']}")
     return 0
 
 
@@ -1192,7 +1233,10 @@ def cmd_generate_work_package(args: argparse.Namespace) -> int:
 
 
 def _require_crate_root_exists(crate: dict, workspace: Path) -> Path:
-    crate_root = workspace / crate["crate_dir"]
+    diagnostics = crate_root_scope_diagnostics(workspace, {"crates": [crate]})
+    if diagnostics:
+        raise PipelineError("invalid crate root: " + "; ".join(diagnostics))
+    crate_root = (workspace / crate["crate_dir"]).resolve()
     if not crate_root.is_dir():
         raise PipelineError(
             f"crate {crate['crate_dir']!r} in the project descriptor: crate root does not "
@@ -1229,7 +1273,7 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
     # ones that are themselves fully valid, and pass both coverage sets
     # into the scan so an eligible interaction with neither a covering
     # boundary nor a reviewed exemption is rejected.
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     evidence_ids = valid_evidence_ids(_evidence_dir_for(args.workspace))
     findings_total = []
     discovered = 0
@@ -1243,7 +1287,7 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
             crate_root, _protocol_debt_dir_for(crate, args.workspace), interactions_by_id
         )
         covering_boundary_edges = valid_boundary_edges_from_crate(
-            crate_root, _boundary_dir_for(crate, args.workspace), specs_search_root
+            crate_root, _boundary_dir_for(crate, args.workspace), specs_search_root, args.workspace
         )
         valid_exemption_interaction_ids = valid_exemption_interaction_ids_from_crate(
             crate_root, _exemption_dir_for(crate, args.workspace), interactions_by_id
@@ -1253,6 +1297,7 @@ def cmd_validate_interaction(args: argparse.Namespace) -> int:
             validate_interaction_crate(
                 crate_root, _interaction_dir_for(crate, args.workspace), valid_debt_interaction_ids,
                 covering_boundary_edges, valid_exemption_interaction_ids, evidence_ids,
+                descriptor=descriptor, workspace_root=args.workspace,
             )
         )
 
@@ -1289,7 +1334,7 @@ def cmd_validate_exemption(args: argparse.Namespace) -> int:
     # interaction_id must resolve to a real, boundary-required interaction
     # -- fail-closed the same way cmd_validate_protocol_debt's own
     # interaction cross-reference already is.
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     evidence_ids = valid_evidence_ids(_evidence_dir_for(args.workspace))
     findings_total = []
     discovered = 0
@@ -1320,7 +1365,7 @@ def cmd_validate_protocol_debt(args: argparse.Namespace) -> int:
     # cmd_validate_interaction/cmd_validate_exemption, for
     # <crate_dir>/specs/_protocol_debt, plus the same interaction
     # cross-reference cmd_validate_interaction's G15 check relies on.
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     evidence_ids = valid_evidence_ids(_evidence_dir_for(args.workspace))
     findings_total = []
     discovered = 0
@@ -1357,13 +1402,15 @@ def cmd_validate_bridge(args: argparse.Namespace) -> int:
     # themselves fully valid (schema + naming) are trusted, the same
     # "must be genuinely valid, not just present" bar every other
     # cross-reference in this pipeline applies.
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     findings_total = []
     discovered = 0
     for crate in descriptor["crates"]:
         crate_root = _require_crate_root_exists(crate, args.workspace)
         specs_search_root = args.workspace / crate["specs_search_root"]
-        boundaries_by_id = load_boundaries_by_id(_boundary_dir_for(crate, args.workspace), specs_search_root)
+        boundaries_by_id = load_boundaries_by_id(
+            _boundary_dir_for(crate, args.workspace), specs_search_root, args.workspace
+        )
         discovered += _count_bridges(crate_root)
         findings_total.extend(
             validate_bridge_crate(crate_root, _bridge_dir_for(crate, args.workspace), boundaries_by_id)
@@ -1396,7 +1443,7 @@ def cmd_extract_c_static(args: argparse.Namespace) -> int:
     report at the output path is passed back in as `--previous` so a
     human-set risk tier survives re-extraction (extractor defaults are
     re-derived, as they should be)."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     out_dir = _callsite_report_dir_for(workspace)
     config_scope = {
@@ -1479,7 +1526,7 @@ def cmd_validate_witness(args: argparse.Namespace) -> int:
     concept's query, and a concept lives in a crate. G18 coverage (#29),
     G19 determinism (#30) and G20 degeneracy (#31) are separate gates and
     are deliberately not here."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     findings_total = []
     discovered = 0
@@ -1488,7 +1535,9 @@ def cmd_validate_witness(args: argparse.Namespace) -> int:
         specs_search_root = workspace / crate["specs_search_root"]
         discovered += _count_witnesses(crate_root)
         findings_total.extend(
-            validate_witness_crate(crate_root, _witness_dir_for(crate, workspace), specs_search_root)
+            validate_witness_crate(
+                crate_root, _witness_dir_for(crate, workspace), specs_search_root, workspace
+            )
         )
 
     findings_total.extend(validate_witness_results(workspace))
@@ -1542,7 +1591,7 @@ def cmd_measure_gold_set(args: argparse.Namespace) -> int:
 
     Not a gate: a non-zero omission count is a finding a human reads, not
     a block. What fails is being unable to measure at all."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     measurements, findings = measure_gold_set_workspace(workspace, descriptor, write=not args.no_write)
     return report_gold_set_measurements(measurements, findings, workspace)
@@ -1559,7 +1608,7 @@ def cmd_check_bridges(args: argparse.Namespace) -> int:
     configured. Anything that could not be checked is a finding and no
     record -- a bridge with no record blocks at gate-g9, which is the
     honest outcome for a bridge nothing verified."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     written, findings = check_bridges_g9(workspace, descriptor)
 
@@ -1582,7 +1631,7 @@ def cmd_gate_g9(args: argparse.Namespace) -> int:
     harness hash equal to the recomputed one, owning verifier, passing
     claim, and no work-package assurance report asserting a bridge_record
     that disagrees with the check."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     findings, discovered = gate_g9_workspace(workspace, descriptor)
     return report_g9_findings(findings, discovered, workspace)
@@ -1619,7 +1668,7 @@ def cmd_gate_g14(args: argparse.Namespace) -> int:
     boundary context at all, which degrades G2 to a non-blocking info
     note and let a cluster close over a bridge whose boundary_id resolved
     nowhere)."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     if not _closure_dir_for(workspace).is_dir():
         raise PipelineError(
@@ -1628,7 +1677,7 @@ def cmd_gate_g14(args: argparse.Namespace) -> int:
             "(docs/closure-profile-schema.json)"
         )
     outcomes, workspace_findings = gate_g14_workspace(workspace, descriptor)
-    return report_g14_outcomes(outcomes, workspace_findings)
+    return report_g14_outcomes(outcomes, workspace_findings, as_json=getattr(args, "json", False))
 
 
 def cmd_select_pilot_cluster(args: argparse.Namespace) -> int:
@@ -1637,7 +1686,7 @@ def cmd_select_pilot_cluster(args: argparse.Namespace) -> int:
     reachable from the descriptor's own crates, applied fresh to
     whichever project's descriptor and workspace are supplied -- never a
     fixed-name table."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     candidates, ranked, findings = select_pilot(workspace, descriptor)
     print(_render_pilot_report(candidates, ranked, findings))
@@ -1648,7 +1697,7 @@ def cmd_gate_g18(args: argparse.Namespace) -> int:
     """Stage 4's G18 (chainlink #29): every query marked
     witness_required has a witness spec and a generated rendering,
     checked against the declared feature set only (plan.md §16.2)."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     findings, discovered = gate_g18_workspace(workspace, descriptor)
     return report_g18_findings(findings, discovered, workspace)
@@ -1659,7 +1708,7 @@ def cmd_gate_g19(args: argparse.Namespace) -> int:
     witness_backend fresh for every genuinely valid witness spec and
     compare the regenerated value_hash against determinism.value_hash
     -- never render_hash (plan.md §16.2)."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     findings, discovered = gate_g19_workspace(workspace, descriptor)
     return report_g19_findings(findings, discovered, workspace)
@@ -1672,7 +1721,7 @@ def cmd_gate_g20(args: argparse.Namespace) -> int:
     -- both WARN severity (plan.md §12's gate table), exit code
     distinguishing pass/warn/blocked three ways like gate-r1-g16's own
     EXIT_DECISION_REQUIRED tier."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     findings, discovered = gate_g20_workspace(workspace, descriptor)
     return report_g20_findings(findings, discovered, workspace)
@@ -1689,7 +1738,7 @@ def cmd_generate_feature_ledger(args: argparse.Namespace) -> int:
     #88) to overwrite an assurance report already at the destination:
     run `record-assurance` after `report feature-ledger`, or point the
     manifest's report.emit at a free ci/results/*.json path."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     try:
         destination = write_feature_ledger(workspace, descriptor)
@@ -1714,7 +1763,7 @@ def cmd_generate_contact_sheet(args: argparse.Namespace) -> int:
     declaration or a ledger that fails its own schema, and writes
     atomically so a failed generation leaves the previous complete
     contact sheet untouched."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     try:
         destination, count = write_contact_sheet(workspace, descriptor)
@@ -1728,13 +1777,11 @@ def cmd_generate_contact_sheet(args: argparse.Namespace) -> int:
 
 
 def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
-    """Stage 8A's R1 + G16 (chainlink #24). Exit codes are three-valued,
-    matching plan.md §9.1's own three dispositions: 0 pass, 1 blocked
-    (critical/high unresolved, or a definite cross-concept call absent
-    from I), 3 a human risk decision is outstanding. A medium tier is
-    never collapsed into either neighbour -- that collapse is exactly
-    what §9.1 rejects in both directions."""
-    descriptor = load_project_descriptor(args.descriptor)
+    """Stage 8A's R1 + G16 (chainlink #24). Exit codes remain three-valued:
+    0 accepted under the current project policy, 1 blocked, or 3 when a
+    human risk decision is outstanding. The text and optional JSON result
+    separately report target resolution and interaction reconciliation."""
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     workspace = _require_workspace_root_exists(args.workspace)
     if not _callsite_report_dir_for(workspace).is_dir():
         raise PipelineError(
@@ -1744,8 +1791,13 @@ def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
     interaction_dirs = {
         crate["crate_dir"]: _interaction_dir_for(crate, workspace) for crate in descriptor["crates"]
     }
-    findings, counts = gate_r1_g16_workspace(workspace, interaction_dirs)
-    return report_r1_g16_findings(findings, counts)
+    interaction_policy = descriptor.get("interaction_policy", {})
+    findings, counts = gate_r1_g16_workspace(
+        workspace,
+        interaction_dirs,
+        require_complete_reconciliation=interaction_policy.get("require_complete_reconciliation", False),
+    )
+    return report_r1_g16_findings(findings, counts, as_json=getattr(args, "json", False))
 
 
 def _require_workspace_root_exists(workspace: Path) -> Path:
@@ -1805,7 +1857,7 @@ def cmd_validate_conflict_resolution(args: argparse.Namespace) -> int:
 
 
 def cmd_draft(args: argparse.Namespace) -> int:
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
     backend = descriptor.get("llm_backend", {"kind": "manual"})
 
@@ -1821,6 +1873,14 @@ def cmd_draft(args: argparse.Namespace) -> int:
     template = draft_template_find(args.stage, args.template_name)
     if template is None:
         raise PipelineError(unknown_template_error(args.stage, args.template_name))
+    # Decide whether this destination is writable before rendering a prompt
+    # or invoking an LLM. `draft` is itself a writer: crate membership alone
+    # is not the write-set authority. Canonical artifact destinations in a
+    # protected tree remain available through this reviewed pipeline route;
+    # other protected writes belong to commands with an explicit grant
+    # consumer, and grants cannot authorize arbitrary draft destinations.
+    _require_draft_destination_write_scope(args.target, args.workspace, descriptor)
+    validate_fn = _select_draft_validate_fn(args.target, args.workspace, descriptor)
     template_path = PROMPTS / template.filename
     if not template_path.exists():
         # A registered template whose prompt file is not in the bundle: a
@@ -1833,6 +1893,14 @@ def cmd_draft(args: argparse.Namespace) -> int:
         )
 
     variables = dict(pair.split("=", 1) for pair in args.var)
+    if template.name == "interaction-drafting":
+        # This input is policy-bearing, so it comes from the validated
+        # descriptor rather than caller-supplied --var text. The validator
+        # independently checks the generated reliance against the same
+        # descriptor after the backend returns.
+        variables["verifier_policy"] = json.dumps(
+            descriptor.get("verifier_policy") or {}, sort_keys=True, separators=(",", ":")
+        )
     if template.name == "closure-profile-drafting":
         if "work_packages" not in variables:
             raise PipelineError(
@@ -1872,11 +1940,12 @@ def cmd_draft(args: argparse.Namespace) -> int:
 
     data = parse_llm_json_output(raw)
 
-    # plan.md §6.1: generated output is immediately run through G1a/G1b
-    # for fast local feedback, full Stage 4 adjudication unchanged. Failed
+    # plan.md §6.1: generated output is immediately run through its
+    # schema/naming checks, workspace evidence-link resolution and any
+    # descriptor-backed policy checks for fast local feedback, full Stage 4
+    # adjudication unchanged. Failed
     # candidates never reach disk, so the ordinary .draft suffix continues
     # to mean "ready for human review", not "generation failed".
-    validate_fn = _select_draft_validate_fn(args.target, args.workspace, descriptor)
     findings = validate_fn(args.target, data)
     errors = [f for f in findings if getattr(f, "severity", "error") == "error"]
     infos = [f for f in findings if getattr(f, "severity", "error") == "info"]
@@ -1893,15 +1962,76 @@ def cmd_draft(args: argparse.Namespace) -> int:
             print(f"  - {f}")
 
     if errors:
-        print(f"FAIL: generated draft has {len(errors)} G1a/G1b finding(s) -- fix before approve()")
+        print(f"FAIL: generated draft has {len(errors)} immediate validation finding(s) -- fix before approve()")
         for f in errors:
             print(f"  - {f}")
         return 1
 
     draft_path = stage_draft(data, args.target)
     print(f"staged draft: {draft_path}")
-    print("OK: generated draft passes G1a/G1b immediate checks")
+    print("OK: generated draft passed its immediate checks")
     return 0
+
+
+def _require_draft_destination_write_scope(
+    target: Path, workspace: Path, descriptor: dict
+) -> None:
+    """Require a draft destination to be in `allowed_roots` or to be a
+    recognized, supported pipeline artifact destination.
+
+    `draft` writes `<target>.draft`; checking only that the target is in a
+    declared crate lets a misspelled path under that crate invoke a model
+    before the eventual validator notices it cannot be promoted. Use the
+    exact same glob matcher as `write-set-check`, with its precedence:
+    `allowed_roots` permits first; a protected root is permitted only when
+    the destination is one of this command's canonical artifact routes.
+    Generic protected-write grants are intentionally not consumed here:
+    this command has no issue-scoped grant contract, and a grant may not
+    widen the write set or make an unsupported destination promotable.
+    """
+    workspace_root = workspace.resolve()
+    try:
+        rel = target.resolve().relative_to(workspace_root).as_posix()
+    except (OSError, ValueError) as exc:
+        raise PipelineError(
+            f"draft target {target} cannot be resolved inside workspace {workspace} -- refusing"
+        ) from exc
+
+    write_set_data = descriptor.get("write_set")
+    write_set_data = write_set_data if isinstance(write_set_data, dict) else {}
+    allowed_roots = [
+        pattern for pattern in (write_set_data.get("allowed_roots") or [])
+        if isinstance(pattern, str)
+    ]
+    protected_roots = [
+        pattern for pattern in (write_set_data.get("protected_roots") or [])
+        if isinstance(pattern, str)
+    ]
+    if any(write_set._pattern_covers_path(pattern, rel) for pattern in allowed_roots):
+        return
+
+    protected = next(
+        (pattern for pattern in protected_roots if write_set._pattern_covers_path(pattern, rel)),
+        None,
+    )
+    if protected is not None:
+        try:
+            _select_draft_validate_fn(target, workspace, descriptor)
+        except PipelineError as exc:
+            raise PipelineError(
+                f"draft target {rel!r} is inside protected_roots pattern {protected!r}, "
+                "but is not a supported pipeline artifact destination; `draft` does not "
+                "consume generic protected-write grants. Use a supported artifact path or "
+                "the command that owns the sanctioned protected write"
+            ) from exc
+        return
+
+    allowed = ", ".join(repr(pattern) for pattern in allowed_roots) or "(none)"
+    raise PipelineError(
+        f"draft target {rel!r} is outside every allowed_roots pattern ({allowed}) and is "
+        "not a sanctioned protected-artifact destination -- refusing before prompt rendering; "
+        "choose a supported artifact path or update the project write-set declaration"
+    )
 
 
 def _crate_for(target: Path, workspace: Path, descriptor: dict) -> dict | None:
@@ -2080,7 +2210,7 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
                 crate_root, _protocol_debt_dir_for(crate, workspace), interactions_by_id
             )
             covering_boundary_edges = valid_boundary_edges_from_crate(
-                crate_root, _boundary_dir_for(crate, workspace), specs_search_root
+                crate_root, _boundary_dir_for(crate, workspace), specs_search_root, workspace
             )
             valid_exemption_interaction_ids = valid_exemption_interaction_ids_from_crate(
                 crate_root, _exemption_dir_for(crate, workspace), interactions_by_id
@@ -2088,6 +2218,7 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
             return lambda path, data: validate_interaction_data(
                 path, data, validator, valid_debt_interaction_ids, covering_boundary_edges,
                 valid_exemption_interaction_ids, evidence_ids,
+                workspace_root=workspace, descriptor=descriptor,
             )
         if resolved_parent == _exemption_dir_for(crate, workspace):
             validator = load_exemption_validator()
@@ -2105,7 +2236,7 @@ def _select_validate_fn(target: Path, workspace: Path, descriptor: dict):
             validator = load_bridge_validator()
             boundary_specs_search_root = _specs_search_root_for(target, workspace, descriptor)
             boundaries_by_id = load_boundaries_by_id(
-                _boundary_dir_for(crate, workspace), boundary_specs_search_root
+                _boundary_dir_for(crate, workspace), boundary_specs_search_root, workspace
             )
             return lambda path, data: validate_bridge_data(path, data, validator, boundaries_by_id)
         if resolved_parent == _witness_dir_for(crate, workspace):
@@ -2272,7 +2403,7 @@ def _select_draft_validate_fn(target: Path, workspace: Path, descriptor: dict):
             validator = load_interaction_draft_validator()
             evidence_ids = valid_evidence_ids(_evidence_dir_for(workspace))
             return lambda path, data: validate_interaction_draft_data(
-                path, data, validator, evidence_ids
+                path, data, validator, evidence_ids, workspace_root=workspace, descriptor=descriptor
             )
         if resolved_parent == _exemption_dir_for(crate, workspace):
             validator = load_exemption_draft_validator()
@@ -2400,7 +2531,7 @@ def _select_pair_validate_fn(
         # other interaction does -- from the crate's EXISTING promoted
         # boundaries/exemptions, not from anything in this transaction.
         covering_boundary_edges = valid_boundary_edges_from_crate(
-            crate_root, _boundary_dir_for(interaction_crate, workspace), specs_search_root
+            crate_root, _boundary_dir_for(interaction_crate, workspace), specs_search_root, workspace
         )
         valid_exemption_interaction_ids = valid_exemption_interaction_ids_from_crate(
             crate_root, _exemption_dir_for(interaction_crate, workspace), interactions_by_id
@@ -2409,6 +2540,7 @@ def _select_pair_validate_fn(
         interaction_findings = validate_interaction_data(
             interaction_target, candidate_interaction, interaction_validator, interaction_coverage,
             covering_boundary_edges, valid_exemption_interaction_ids, evidence_ids,
+            workspace_root=workspace, descriptor=descriptor,
         )
         interaction_errors = [
             finding for finding in interaction_findings if getattr(finding, "severity", "error") == "error"
@@ -2514,7 +2646,7 @@ def _select_interaction_exemption_pair_validate_fn(
         # Boundary coverage is likewise unaffected -- a boundary contract
         # isn't part of this pairing.
         covering_boundary_edges = valid_boundary_edges_from_crate(
-            crate_root, _boundary_dir_for(interaction_crate, workspace), specs_search_root
+            crate_root, _boundary_dir_for(interaction_crate, workspace), specs_search_root, workspace
         )
 
         existing_exemption_coverage = valid_exemption_interaction_ids_from_crate(
@@ -2531,6 +2663,7 @@ def _select_interaction_exemption_pair_validate_fn(
         interaction_findings = validate_interaction_data(
             interaction_target, candidate_interaction, interaction_validator, valid_debt_interaction_ids,
             covering_boundary_edges, exemption_coverage, evidence_ids,
+            workspace_root=workspace, descriptor=descriptor,
         )
         interaction_errors = [
             finding for finding in interaction_findings if getattr(finding, "severity", "error") == "error"
@@ -2568,7 +2701,7 @@ def _workspace_review_log(workspace: Path) -> Path:
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
     validate_fn = _select_validate_fn(args.target, args.workspace, descriptor)
 
@@ -2598,7 +2731,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
 
 def cmd_approve_pair(args: argparse.Namespace) -> int:
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     _require_target_in_workspace(args.interaction_target, args.workspace, descriptor)
     _require_target_in_workspace(args.protocol_debt_target, args.workspace, descriptor)
     validate_fn = _select_pair_validate_fn(
@@ -2624,7 +2757,7 @@ def cmd_approve_pair(args: argparse.Namespace) -> int:
 
 
 def cmd_approve_exemption_pair(args: argparse.Namespace) -> int:
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     _require_target_in_workspace(args.interaction_target, args.workspace, descriptor)
     _require_target_in_workspace(args.exemption_target, args.workspace, descriptor)
     validate_fn = _select_interaction_exemption_pair_validate_fn(
@@ -2667,7 +2800,7 @@ def cmd_promote_evidence(args: argparse.Namespace) -> int:
     not a human checkpoint. Refuses (exit 1) without writing anything if
     the draft is missing, unreadable, or fails G1a/G1b -- the draft is
     left intact for correction."""
-    descriptor = load_project_descriptor(args.descriptor)
+    descriptor = load_project_descriptor(args.descriptor, args.workspace)
     _require_target_in_workspace(args.target, args.workspace, descriptor)
     if args.target.suffix != ".json" or args.target.resolve().parent != _evidence_dir_for(args.workspace):
         raise PipelineError(
@@ -2781,6 +2914,19 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_schema(args: argparse.Namespace) -> int:
+    """List, inspect, or export JSON Schemas shipped in this Ligature build."""
+    if args.schema_action == "list":
+        sys.stdout.write(render_schema_list(as_json=args.json))
+    elif args.schema_action == "show":
+        sys.stdout.write(render_schema(args.name, as_json=args.json))
+    elif args.schema_action == "export":
+        sys.stdout.write(export_schema(args.name, args.output))
+    else:  # pragma: no cover - argparse constrains the action
+        raise AssertionError(f"unknown schema action {args.schema_action!r}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """The capability manifest (docs/cli-contract.md §8). This used to be
     `status`'s body; it moved here when #56 rewired `status` to the real
@@ -2799,6 +2945,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "validate-evidence (Stage 4 G1a/G1b, workspace-level), "
         "validate-conflict-resolution (Stage 4 G1a/G1b/G11, workspace-level), "
         "validate-work-package (Stage 7 schema + §10.1, standalone), "
+        f"generate-work-package ({WORK_PACKAGE_GENERATION_CAPABILITY}, chainlink #122/#134), "
         "validate-promotion (Stage 4.5 schema + §7.1, standalone), "
         "accept-promotion (Stage 4.5's own generator, chainlink #45), "
         "extract-c-static (Stage 8A's coarse syntactic C_static extractor, chainlink #24), "
@@ -2832,6 +2979,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "accept-policy (record a reviewed change to the normative reliance-policy document, "
         "stamping its `Policy version:` marker with --version while the template placeholder is "
         "still in place -- chainlink #78, #113), "
+        "accept-fixture-value (record a hash-bound human decision to retain a legitimate "
+        "descriptor example value -- chainlink #145), "
         "promote-evidence (mechanically promote a staged evidence draft to its target and record "
         "the move -- the Stage 0 promotion path approve() cannot provide, chainlink #79), "
         "record-assurance (assemble a work package's assurance report from verifier proof "
@@ -3033,7 +3182,7 @@ def cmd_write_set_check(args: argparse.Namespace) -> int:
     descriptor_state = "absent"
     if descriptor_path.is_file():
         try:
-            descriptor = load_project_descriptor(descriptor_path)
+            descriptor = load_project_descriptor(descriptor_path, args.workspace)
             descriptor_state = "present-valid"
         except PipelineError as e:
             # pipeline.py's load_project_descriptor wrapper re-raises the
@@ -3185,6 +3334,12 @@ def cmd_gate(args: argparse.Namespace) -> int:
     stable spelling of the six standalone cross-artifact gates. Dispatches
     to the same handler the flat legacy alias uses -- one implementation,
     never a second that can drift from the first (docs/cli-contract.md §9)."""
+    if getattr(args, "json", False):
+        if args.gate_id == "g14":
+            return cmd_gate_g14(args)
+        if args.gate_id == "r1-g16":
+            return cmd_gate_r1_g16(args)
+        raise PipelineError("--json is currently supported only by `gate g14` and `gate r1-g16`")
     return _GATE_VERBS[args.gate_id](args)
 
 
@@ -3207,7 +3362,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Global options such as --workspace and --descriptor must precede the subcommand.",
+        epilog=(
+            "Global options such as --workspace and --descriptor must precede the subcommand.\n"
+            "Exit codes and JSON support are command-specific. Only commands whose usage lists "
+            "--json accept it; see the shipped CLI contract for per-command outcomes."
+        ),
     )
     parser.add_argument(
         "--workspace", type=Path, default=Path("."),
@@ -3221,7 +3380,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    validate_p = sub.add_parser("validate", help="Stage 4: G1a/G1b/G2+ over boundary contracts")
+    validate_p = sub.add_parser(
+        "validate",
+        description=(
+            "Boundary checks resolve concept references under each crate's declared "
+            "specs_search_root in project-descriptor.json."
+        ),
+        help=(
+            "Stage 4: G1a/G1b/G2+ over boundaries; resolves concept references under "
+            "each crate's declared specs_search_root"
+        ),
+    )
     validate_p.set_defaults(func=cmd_validate)
 
     validate_interaction_p = sub.add_parser(
@@ -3354,9 +3523,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     accept_policy_p.set_defaults(func=cmd_accept_policy)
 
+    accept_fixture_p = sub.add_parser(
+        "accept-fixture-value",
+        help="Record explicit acceptance of an unchanged legitimate descriptor example value (#145)",
+    )
+    accept_fixture_p.add_argument(
+        "--path", required=True,
+        help="descriptor field path, such as port_source.oracle_build_command",
+    )
+    accept_fixture_p.add_argument("--reviewer", required=True, help="human identity making the decision")
+    accept_fixture_p.add_argument(
+        "--accepted-at", default=None, metavar="YYYY-MM-DD",
+        help="review date (defaults to today); binds the acceptance record to a human decision",
+    )
+    accept_fixture_p.set_defaults(func=cmd_accept_fixture_value)
+
     draft_p = sub.add_parser(
         "draft",
-        help="Stage 0/3: one-shot LLM draft",
+        help="Stage 0/3: one-shot LLM draft (destination checked against the write set before generation)",
         epilog=draft_template_registry_help(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -3526,8 +3710,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     gate_r1_g16_p = sub.add_parser(
         "gate-r1-g16",
-        help="Stage 8A: reconcile C_static against I (R1) and apply the unresolved risk policy (G16)",
+        help="Stage 8A: reconcile C_static against I (R1) and apply G16; --json separates acceptance and completeness",
     )
+    gate_r1_g16_p.add_argument("--json", action="store_true", help="emit the versioned R1/G16 reconciliation report")
     gate_r1_g16_p.set_defaults(func=cmd_gate_r1_g16)
 
     render_witness_p = sub.add_parser(
@@ -3540,7 +3725,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_witness_p = sub.add_parser(
         "validate-witness",
-        help="G1a/G1b/G2 over witness specs and canonical results (chainlink #27)",
+        description=(
+            "Witness query references resolve under each crate's declared "
+            "specs_search_root in project-descriptor.json."
+        ),
+        help=(
+            "G1a/G1b/G2 over witness specs and canonical results; query references resolve "
+            "under each crate's declared specs_search_root (chainlink #27/#149)"
+        ),
     )
     validate_witness_p.set_defaults(func=cmd_validate_witness)
 
@@ -3582,6 +3774,7 @@ def build_parser() -> argparse.ArgumentParser:
         "gate-g14",
         help="Stage 8C: G14 transitive closure + CG6 discharge, per cluster (chainlink #25)",
     )
+    gate_g14_p.add_argument("--json", action="store_true", help="emit the versioned G14 scope/evidence report")
     gate_g14_p.set_defaults(func=cmd_gate_g14)
 
     select_pilot_cluster_p = sub.add_parser(
@@ -3649,7 +3842,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     version_p.set_defaults(func=cmd_version)
 
-    status_p = sub.add_parser("status", help="Project state: artifact lifecycles, obligations, clusters, integrity (chainlink #56)")
+    schema_p = sub.add_parser(
+        "schema",
+        help="Inspect or export JSON Schemas shipped with this offline Ligature build",
+        description=(
+            "Inspect the exact JSON Schemas packaged with this Ligature build. "
+            "No checkout or network access is required."
+        ),
+    )
+    schema_sub = schema_p.add_subparsers(dest="schema_action", required=True)
+    schema_list_p = schema_sub.add_parser(
+        "list",
+        help="List bundled schemas and their hashes",
+        description="List JSON Schemas shipped in this Ligature build, with versions, hashes, and build identity.",
+    )
+    schema_list_p.add_argument("--json", action="store_true", help="emit the versioned schema catalog JSON")
+    schema_list_p.set_defaults(func=cmd_schema)
+    schema_show_p = schema_sub.add_parser(
+        "show",
+        help="Inspect one bundled schema by catalog name",
+        description="Print the exact bundled schema and any related bundled schema documents.",
+    )
+    schema_show_p.add_argument("name", help="schema name printed by schema list, such as closure-profile")
+    schema_show_p.add_argument("--json", action="store_true", help="emit a versioned schema export envelope")
+    schema_show_p.set_defaults(func=cmd_schema)
+    schema_export_p = schema_sub.add_parser(
+        "export",
+        help="Write a self-contained versioned schema export",
+        description="Export an offline, self-contained schema envelope pinned to this build's identity and schema hashes.",
+    )
+    schema_export_p.add_argument("name", help="schema name printed by schema list")
+    schema_export_p.add_argument("--output", type=Path, required=True, help="new output path; existing paths are refused")
+    schema_export_p.set_defaults(func=cmd_schema)
+
+    status_p = sub.add_parser(
+        "status",
+        description=(
+            "Project-state validation uses each crate's declared specs_search_root "
+            "when resolving concept references."
+        ),
+        help=(
+            "Project state and gates; concept references resolve under each crate's declared "
+            "specs_search_root (chainlink #56/#149)"
+        ),
+    )
     status_p.add_argument("--json", action="store_true", help="emit schemas/project-state.schema.json JSON")
     status_p.add_argument(
         "--issue",
@@ -3665,7 +3901,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status_p.set_defaults(func=cmd_status)
 
-    check_p = sub.add_parser("check", help="Read-only consolidated gate run + one recommended next action (chainlink #56)")
+    check_p = sub.add_parser(
+        "check",
+        description=(
+            "Consolidated checks use each crate's declared specs_search_root when "
+            "resolving concept references."
+        ),
+        help=(
+            "Read-only consolidated gate run + next action; concept references use each crate's "
+            "declared specs_search_root (chainlink #56/#149)"
+        ),
+    )
     check_p.add_argument("--json", action="store_true", help="emit schemas/consolidated-check.schema.json JSON")
     check_p.add_argument("next", nargs="?", help="print only the recommended next action")
     check_p.add_argument(
@@ -3963,9 +4209,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate_wp_p = sub.add_parser(
         "generate-work-package",
-        help=(
-            "derive a canonical Stage 7 manifest from a plan and validated workspace artifacts; "
-            "requires an exact issue-scoped protected-write grant"
+        help=WORK_PACKAGE_GENERATION_CAPABILITY,
+        description=(
+            f"{WORK_PACKAGE_GENERATION_CAPABILITY}; requires an exact issue-scoped protected-write grant"
         ),
     )
     generate_wp_p.add_argument("--plan", type=Path, default=None, help="required JSON or YAML Stage 7 plan")
@@ -3979,6 +4225,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     gate_p = sub.add_parser("gate", help="Cross-artifact gate runner: `gate <gate-id>` (docs/cli-contract.md §3)")
     gate_p.add_argument("gate_id", choices=sorted(_GATE_VERBS), metavar="GATE-ID")
+    gate_p.add_argument("--json", action="store_true", help="emit structured output for supported gates (currently g14)")
     gate_p.set_defaults(func=cmd_gate)
 
     report_p = sub.add_parser("report", help="Reporting commands: `report <report-id>` (docs/cli-contract.md §6)")
@@ -3990,6 +4237,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report_p.set_defaults(func=cmd_report)
 
+    # Put the same contract pointer on every subcommand's own --help output;
+    # users often discover an operation without first reading top-level help.
+    for command_parser in registered_commands(parser).values():
+        command_parser.epilog = (
+            "Exit codes and JSON support are command-specific. Only commands whose usage lists "
+            "--json accept it; see the shipped CLI contract for per-command outcomes."
+        )
     return parser
 
 
@@ -4024,7 +4278,7 @@ def main(argv: list[str]) -> int:
 
     try:
         return args.func(args)
-    except (PipelineError, ManifestInputError) as e:
+    except (PipelineError, ManifestInputError, SchemaError) as e:
         # One error surface for both: a bad argument (a missing/directory
         # manifest or receipt path, chainlink #83) and every other
         # fail-closed pipeline refusal print the same one line and exit 1,

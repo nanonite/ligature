@@ -268,8 +268,10 @@ FIELD_SOURCES: tuple[FieldSource, ...] = (
     ),
     FieldSource(
         "definition_of_done.provided_guarantees",
-        "interaction reliances + plan",
-        "content from the reliance; plan selects and names the harness",
+        "interaction reliances, else a reviewed concept constraint + verifier policy",
+        "content from the reliance; for a standalone obligation (no reliance), the reviewed "
+        "concept spec's own constraint kind + the owning verifier policy; plan selects and "
+        "names the harness (chainlink #162)",
     ),
     FieldSource(
         "definition_of_done.required_preconditions_to_establish",
@@ -479,6 +481,13 @@ class AuthoritativeState:
     boundary_contracts: tuple[Mapping[str, Any], ...] = ()
     interactions: tuple[Mapping[str, Any], ...] = ()
     bridge_specs: tuple[Mapping[str, Any], ...] = ()
+    #: Reviewed, approved concept specs (each carrying a `review` block).
+    #: They are the authoritative source of a *standalone* provided
+    #: obligation's assurance requirement: an obligation no interaction
+    #: reliance declares is resolved from the owning concept's own reviewed
+    #: constraint plus the descriptor's verifier policy, never from an
+    #: invented interaction or an unrelated reliance (chainlink #162).
+    concept_specs: tuple[Mapping[str, Any], ...] = ()
     base_commit: str = ""
     toolchain: str = ""
     target: str = ""
@@ -618,6 +627,7 @@ def _validate_authoritative_shape(state: AuthoritativeState) -> None:
         "boundary_contracts",
         "interactions",
         "bridge_specs",
+        "concept_specs",
     ):
         values = getattr(state, field_name)
         if isinstance(values, (str, bytes, Mapping)) or not isinstance(
@@ -779,10 +789,168 @@ def _reliance_for_obligation(
 
 
 def _resolve_obligation_assurance(
-    state: AuthoritativeState, obligation_id: str
+    state: AuthoritativeState,
+    request: WorkPackageRequest,
+    obligation_id: str,
+    policy: Mapping[str, Any],
 ) -> dict[str, Any]:
-    _, reliance = _reliance_for_obligation(state, obligation_id)
-    return dict(reliance["required_assurance"])
+    """The authoritative ``required_assurance`` for one provided/required
+    obligation.
+
+    Precedence is unchanged for an obligation some interaction declares: the
+    interaction's reviewed ``reliances[]`` wins. An obligation **no**
+    interaction declares (a standalone method obligation, chainlink #162) is
+    resolved instead from the owning concept's own reviewed constraint plus
+    the descriptor's verifier policy -- never by inventing a caller edge or
+    borrowing an unrelated reliance's assurance. If no concept spec resolves
+    the obligation either, the derivation still refuses rather than invent
+    one."""
+    found = _matching_reliances(state, obligation_id)
+    if found:
+        _, reliance = _reliance_for_obligation(state, obligation_id)
+        return dict(reliance["required_assurance"])
+    return _standalone_obligation_assurance(
+        state, request, obligation_id, policy
+    )
+
+
+def _standalone_obligation_assurance(
+    state: AuthoritativeState,
+    request: WorkPackageRequest,
+    obligation_id: str,
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive assurance for an obligation with no interaction reliance.
+
+    The sanctioned source is the reviewed concept spec's own constraint for
+    the obligation, together with the descriptor's owning-verifier policy:
+
+    * the concept spec must be approved (its `review` block is what makes
+      the constraint a reviewed declaration, not an agent suggestion);
+    * the constraint's `kind` fixes the claim (`postcondition`/`invariant`
+      -> `postcondition-holds`); a `precondition` is a caller obligation
+      discharged by a bridge, not a provided/required guarantee, and is
+      refused rather than silently re-typed;
+    * the owning verifier's evidence kind comes from the one shared mapping
+      (`verifier_policy.VERIFIER_EVIDENCE_KIND`), so the record this
+      requirement admits is the one that verifier actually emits;
+    * no assumption is allowed, matching every reviewed reliance and
+      `satisfies()`'s own fail-closed reading of an absent allow-list;
+    * when the constraint names methods (`applies_to`), at least one must be
+      a method this package owns, so the obligation's proof mapping stays
+      traceable to the plan's own functions.
+    """
+    concept, separator, constraint_id = obligation_id.rpartition(".")
+    if not separator or not concept or not constraint_id:
+        raise ManifestDerivationError(
+            "invalid-plan",
+            f"obligation {obligation_id!r} is not <Concept>.<id>; a standalone "
+            "assurance source cannot be resolved from it",
+        )
+    matches = [
+        entry
+        for entry in state.concept_specs
+        if isinstance(entry, Mapping) and entry.get("concept") == concept
+    ]
+    if not matches:
+        raise ManifestDerivationError(
+            "missing-source",
+            f"no interaction reliance declares required_assurance for obligation "
+            f"{obligation_id!r}, and no reviewed concept spec declares concept {concept!r}; the "
+            "derivation will not invent one",
+        )
+    if len(matches) > 1:
+        raise ManifestDerivationError(
+            "ambiguous-source",
+            f"{len(matches)} reviewed concept specs declare concept {concept!r}; the standalone "
+            "assurance source must be unique",
+        )
+    spec = matches[0]
+    declared_verifier = spec.get("verifier")
+    if declared_verifier and declared_verifier != policy.get("owning"):
+        raise ManifestDerivationError(
+            "contradictory-source",
+            f"standalone obligation {obligation_id!r} resolves to concept spec {concept!r} "
+            f"whose verifier is {declared_verifier!r}, but the descriptor assigns cluster "
+            f"{request.cluster!r} owning verifier {policy.get('owning')!r}",
+        )
+    constraint = next(
+        (
+            entry
+            for entry in spec.get("constraints") or ()
+            if isinstance(entry, Mapping) and entry.get("id") == constraint_id
+        ),
+        None,
+    )
+    if constraint is None:
+        raise ManifestDerivationError(
+            "missing-source",
+            f"no interaction reliance declares required_assurance for obligation "
+            f"{obligation_id!r}, and reviewed concept spec {concept!r} declares no constraint "
+            f"{constraint_id!r}; the derivation will not invent one",
+        )
+    # The concept spec is the *reviewed* source: reject a spec that is only
+    # a suggestion so assurance can never be derived from an agent draft.
+    if not isinstance(spec.get("review"), Mapping):
+        raise ManifestDerivationError(
+            "unreviewed-source",
+            f"standalone obligation {obligation_id!r} resolves to concept spec {concept!r} "
+            "without a `review` block; only a human-approved concept spec is an authoritative "
+            "assurance source",
+        )
+    _check_standalone_method_mapping(request, obligation_id, constraint)
+    kind = constraint.get("kind", "invariant")
+    if kind == "precondition":
+        raise ManifestDerivationError(
+            "unsupported-source",
+            f"standalone obligation {obligation_id!r} resolves to a constraint of kind "
+            "'precondition'; a precondition is a caller obligation a bridge discharges, not a "
+            "provided or required guarantee -- declare the bridge, or select a postcondition/"
+            "invariant constraint",
+        )
+    evidence_kind = VERIFIER_EVIDENCE_KIND.get(str(policy.get("owning")))
+    if evidence_kind is None:
+        raise ManifestDerivationError(
+            "missing-source",
+            f"descriptor declares owner verifier {policy.get('owning')!r} for cluster "
+            f"{request.cluster!r}, which maps to no evidence kind "
+            f"({sorted(VERIFIER_EVIDENCE_KIND)}); a standalone assurance requirement cannot be "
+            "derived",
+        )
+    return {
+        "required_claims": ["postcondition-holds"],
+        "accepted_evidence_kinds": [evidence_kind],
+        "trust_policy": {"assumptions_allowed": []},
+    }
+
+
+def _check_standalone_method_mapping(
+    request: WorkPackageRequest,
+    obligation_id: str,
+    constraint: Mapping[str, Any],
+) -> None:
+    """When a reviewed constraint declares `applies_to`, at least one named
+    method must be a method this work package owns. Absent `applies_to`, no
+    method claim was made and nothing is checked -- an optional field never
+    becomes a mandatory one here."""
+    applies_to = constraint.get("applies_to")
+    if not isinstance(applies_to, Sequence) or isinstance(applies_to, (str, bytes)):
+        return
+    names = {entry for entry in applies_to if isinstance(entry, str)}
+    if not names:
+        return
+    owned = {
+        function.split("::")[-1]
+        for function in request.functions
+        if isinstance(function, str) and function
+    }
+    if not (names & owned):
+        raise ManifestDerivationError(
+            "dangling-reference",
+            f"standalone obligation {obligation_id!r} resolves to a reviewed constraint whose "
+            f"applies_to {sorted(names)} names no function this work package owns "
+            f"({sorted(owned)}); the obligation's proof mapping must stay traceable to the plan",
+        )
 
 
 def _matching_reliances(
@@ -1519,7 +1687,7 @@ def _derive_provided_guarantees(
             "invalid-plan",
             f"harness {harness!r} for {obligation_id!r} must be an exact Rust identifier, no wildcards",
         )
-        assurance = _resolve_obligation_assurance(state, obligation_id)
+        assurance = _resolve_obligation_assurance(state, request, obligation_id, policy)
         _check_assurance_against_policy(
             assurance, policy, f"provided guarantee {obligation_id!r}"
         )
@@ -1545,7 +1713,7 @@ def _derive_required_guarantees(
             "invalid-plan",
             f"required obligation {obligation_id!r} is not <Concept>.<id>",
         )
-        assurance = _resolve_obligation_assurance(state, obligation_id)
+        assurance = _resolve_obligation_assurance(state, request, obligation_id, policy)
         _check_assurance_against_policy(
             assurance, policy, f"required guarantee {obligation_id!r}"
         )

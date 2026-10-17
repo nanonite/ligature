@@ -57,6 +57,47 @@ class SatisfiesPositiveTest(unittest.TestCase):
         )
         self.assertTrue(result.holds, result.reasons)
 
+    def test_universal_deductive_scope_is_stronger_than_a_narrower_requirement(self):
+        """chainlink #163: a complete deductive proof records the whole
+        verified source contract as its input domain, which satisfies any
+        narrower minimum_scope.input_domain -- without copying the
+        requirement's own text into the record."""
+        from satisfies import UNIVERSAL_SCOPE_VALUE
+
+        record = achieved_record(evidence={
+            "kind": "creusot-deductive-check", "verifier": "creusot", "harness": "creusot",
+            "scope": {"input_domain": UNIVERSAL_SCOPE_VALUE, "proof_targets": "verif/x/proof.json"},
+        })
+        result = satisfies(
+            required_profile(
+                required_claims=["postcondition-holds"],
+                accepted_evidence_kinds=["creusot-deductive-check"],
+                minimum_scope={"input_domain": "year in [-32767, 32767]"},
+            ),
+            {**record, "claim": {"kind": "postcondition-holds", "result": "pass"}},
+        )
+        self.assertTrue(result.holds, result.reasons)
+
+    def test_universal_scope_does_not_satisfy_a_missing_required_key(self):
+        """The universal value answers `input_domain`, not every possible
+        scope key: a requirement on a key the record never sets still fails."""
+        from satisfies import UNIVERSAL_SCOPE_VALUE
+
+        record = achieved_record(evidence={
+            "kind": "creusot-deductive-check", "verifier": "creusot", "harness": "creusot",
+            "scope": {"input_domain": UNIVERSAL_SCOPE_VALUE},
+        })
+        result = satisfies(
+            required_profile(
+                required_claims=["postcondition-holds"],
+                accepted_evidence_kinds=["creusot-deductive-check"],
+                minimum_scope={"unwind": "8"},
+            ),
+            {**record, "claim": {"kind": "postcondition-holds", "result": "pass"}},
+        )
+        self.assertFalse(result.holds)
+        self.assertTrue(any("minimum_scope['unwind']" in reason for reason in result.reasons), result.reasons)
+
     def test_no_minimum_scope_declared_is_vacuously_satisfied(self):
         """required_profile with minimum_scope entirely absent (the
         work-package-manifest schema variant, where it's optional) --

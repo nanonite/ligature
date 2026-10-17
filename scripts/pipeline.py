@@ -1199,6 +1199,7 @@ def cmd_generate_work_package(args: argparse.Namespace) -> int:
             target=args.target,
             features=args.feature,
             grant_id=args.grant_id,
+            regenerate=args.regenerate,
         )
     except generate_work_package.GenerationError as error:
         if args.json:
@@ -4220,6 +4221,15 @@ def build_parser() -> argparse.ArgumentParser:
     generate_wp_p.add_argument("--target", default=None, metavar="TRIPLE", help="required target triple; must agree with selected interaction scopes")
     generate_wp_p.add_argument("--feature", action="append", default=[], metavar="NAME", help="enabled feature in this package configuration; repeatable")
     generate_wp_p.add_argument("--grant-id", default=None, metavar="GW-ID", help="require this exact active grant id")
+    generate_wp_p.add_argument(
+        "--regenerate",
+        action="store_true",
+        help=(
+            "atomically replace this package's own existing generated manifest when the derived "
+            "candidate differs; requires a fresh exact-path grant and leaves the old bytes on any "
+            "refusal (chainlink #164)"
+        ),
+    )
     generate_wp_p.add_argument("--json", action="store_true", help="emit the protected-write audit result or a structured refusal")
     generate_wp_p.set_defaults(func=cmd_generate_work_package)
 

@@ -435,7 +435,7 @@ class PackagedWorkspace:
             text=True,
         )
 
-    def authorize(self, path: str) -> dict:
+    def authorize(self, path: str, *extra: str) -> dict:
         result = self.run(
             "authorize-write",
             "--issue",
@@ -448,6 +448,7 @@ class PackagedWorkspace:
             "black-box-test-reviewer",
             "--one-shot",
             "--json",
+            *extra,
         )
         assert result.returncode == 0, result.stderr + result.stdout
         return json.loads(result.stdout)
@@ -456,7 +457,7 @@ class PackagedWorkspace:
         for file in sorted((self.root / "crates/black-box-fixture-core/specs").rglob("*.json")):
             self.authorize(file.relative_to(self.root).as_posix())
 
-    def generate(self) -> subprocess.CompletedProcess[str]:
+    def generate(self, *extra: str) -> subprocess.CompletedProcess[str]:
         return self.run(
             "generate-work-package",
             "--plan",
@@ -470,6 +471,7 @@ class PackagedWorkspace:
             "--feature",
             "default",
             "--json",
+            *extra,
         )
 
 
@@ -613,6 +615,39 @@ def test_packaged_generation_reports_refusals_without_creating_a_manifest(
     assert "manifest not found" in missing_manifest.stderr
 
 
+def test_packaged_regeneration_is_grant_bound_and_preserves_on_refusal(packaged_workspace):
+    """chainlink #164 through the packaged binary: the separately built
+    artifact regenerates an existing generated manifest under a fresh grant,
+    refuses without the flag, and keeps the old bytes on a refusal."""
+    project = packaged_workspace
+    project.authorize_sources()
+    creation = project.authorize("ci/manifest/WP-BLACK-BOX-001.json")
+    first = project.generate()
+    assert first.returncode == 0, first.stderr + first.stdout
+    original = project.manifest.read_bytes()
+
+    plan = json.loads(project.plan_path.read_text())
+    plan["coupling_notes"] = ["changed after review"]
+    project.plan_path.write_text(json.dumps(plan, indent=2) + "\n")
+
+    refused = project.generate()
+    assert refused.returncode == 2
+    assert json.loads(refused.stdout)["error"]["code"] == "target-conflict"
+    assert project.manifest.read_bytes() == original
+
+    fresh = project.authorize(
+        "ci/manifest/WP-BLACK-BOX-001.json", "--ttl", "1800"
+    )
+    regenerated = project.generate("--regenerate")
+    assert regenerated.returncode == 0, regenerated.stderr + regenerated.stdout
+    record = json.loads(regenerated.stdout)
+    assert record["result"] == "regenerated"
+    assert record["before_hash"] == "sha256:" + hashlib.sha256(original).hexdigest()
+    assert record["grant_id"] == fresh["grant_id"]
+    assert record["grant_id"] != creation["grant_id"]
+    assert project.manifest.read_bytes() != original
+
+
 def test_cli_help_and_missing_inputs_name_the_required_values():
     help_text = pipeline.registered_commands()["generate-work-package"].format_help()
     for required in (
@@ -622,6 +657,7 @@ def test_cli_help_and_missing_inputs_name_the_required_values():
         "--target",
         "--feature",
         "--grant-id",
+        "--regenerate",
         "--json",
     ):
         assert required in help_text
@@ -658,6 +694,45 @@ def test_authoritative_loader_uses_the_repository_validators(workspace, monkeypa
     assert state.boundary_contracts
     assert len(state.promotion_receipts) == 1
     assert state.promotion_receipts[0]["cluster"] == "scheduling"
+
+
+def test_authoritative_loader_loads_only_approved_concept_specs(workspace, monkeypatch):
+    """chainlink #162: only a *reviewed* concept spec is a standalone
+    obligation's authoritative assurance source; a draft and an artifact
+    buried under an underscore directory are both excluded."""
+    # The `workspace` fixture stubs the whole loader for its other tests;
+    # this one exercises the real loader, so undo that stub.
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        generate_work_package, "_git_head", lambda _workspace: "a1b2c3d"
+    )
+    specs_dir = workspace.root / "crates/scheduler/specs"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+    approved = json.loads(
+        (
+            ROOT / "tests/fixtures/boundary_contracts/valid_crate/specs/task_queue.json"
+        ).read_text()
+    )
+    (specs_dir / "task_queue.json").write_text(json.dumps(approved, indent=2) + "\n")
+    unreviewed = dict(approved)
+    unreviewed["concept"] = "Scheduler"
+    del unreviewed["review"]
+    (specs_dir / "scheduler.json").write_text(json.dumps(unreviewed, indent=2) + "\n")
+    buried = specs_dir / "_interactions"
+    buried.mkdir(parents=True, exist_ok=True)
+    hidden = dict(approved)
+    hidden["concept"] = "Hidden"
+    (buried / "hidden.json").write_text(json.dumps(hidden, indent=2) + "\n")
+
+    state = generate_work_package._load_authoritative_state(
+        workspace.root,
+        workspace.descriptor_path,
+        toolchain="nightly-2026-05-01",
+        target="x86_64-unknown-linux-gnu",
+        features=["default"],
+    )
+
+    assert [spec["concept"] for spec in state.concept_specs] == ["TaskQueue"]
 
 
 def test_authorized_generation_appends_complete_audit_and_identical_rerun_is_noop(
@@ -757,6 +832,87 @@ def test_conflicting_manifest_is_not_overwritten(workspace):
     assert code == 2
     assert refusal["error"]["code"] == "target-conflict"
     assert workspace.manifest.read_bytes() == b"operator content\n"
+
+
+def test_regeneration_replaces_changed_manifest_under_a_fresh_grant(workspace):
+    """chainlink #164: a grant-bound, atomically validated in-place update
+    of an existing generated manifest whose derived bytes changed."""
+    creation_grant = workspace.authorize()
+    code, first, error = workspace.generate("--grant-id", creation_grant)
+    assert code == 0, error
+    original = workspace.manifest.read_bytes()
+
+    plan = json.loads(workspace.plan_path.read_text())
+    plan["coupling_notes"] = ["scope refined after review"]
+    workspace.plan_path.write_text(json.dumps(plan, indent=2) + "\n")
+
+    # The default path still refuses a change, preserving the old bytes.
+    code, refusal, _ = workspace.generate()
+    assert code == 2
+    assert refusal["error"]["code"] == "target-conflict"
+    assert workspace.manifest.read_bytes() == original
+
+    # A distinct grant (different TTL changes the binding hash): the grant
+    # that created the manifest cannot authorize a later change.
+    fresh_grant = workspace.authorize(extra=("--ttl", "1800"))
+    code, record, error = workspace.generate(
+        "--grant-id", fresh_grant, "--regenerate"
+    )
+    assert code == 0, error
+    assert record["result"] == "regenerated"
+    assert record["before_hash"] == "sha256:" + hashlib.sha256(original).hexdigest()
+    assert workspace.manifest.read_bytes() != original
+    make_validator(AUDIT_SCHEMA).validate(record)
+    rows = [
+        json.loads(line)
+        for line in workspace.ledger.read_text().splitlines()
+        if json.loads(line).get("event") == "work-package-generation"
+    ]
+    assert [row["result"] for row in rows] == ["created", "regenerated"]
+    # An identical rerun after regeneration is still a no-op.
+    code, again, error = workspace.generate(
+        "--grant-id", fresh_grant, "--regenerate"
+    )
+    assert code == 0, error
+    assert again["result"] == "unchanged"
+    assert workspace.manifest.read_bytes() != original
+
+
+def test_regeneration_reusing_the_creating_grant_is_refused(workspace):
+    grant = workspace.authorize()
+    code, _first, error = workspace.generate("--grant-id", grant)
+    assert code == 0, error
+    original = workspace.manifest.read_bytes()
+
+    plan = json.loads(workspace.plan_path.read_text())
+    plan["coupling_notes"] = ["changed"]
+    workspace.plan_path.write_text(json.dumps(plan, indent=2) + "\n")
+
+    code, refusal, _ = workspace.generate("--grant-id", grant, "--regenerate")
+    assert code == 2
+    assert refusal["error"]["code"] == "grant-replayed"
+    assert workspace.manifest.read_bytes() == original
+
+
+def test_regeneration_refuses_hand_edited_or_foreign_content(workspace):
+    workspace.authorize()
+    workspace.manifest.parent.mkdir(parents=True, exist_ok=True)
+    workspace.manifest.write_bytes(b"operator content\n")
+
+    code, refusal, _ = workspace.generate("--regenerate")
+    assert code == 2
+    assert refusal["error"]["code"] == "target-not-generated"
+    assert workspace.manifest.read_bytes() == b"operator content\n"
+
+    workspace.manifest.write_text(
+        json.dumps(
+            {"schema": "work-package-manifest/1.0", "work_package": "WP-OTHER-001"}
+        )
+        + "\n"
+    )
+    code, refusal, _ = workspace.generate("--regenerate")
+    assert code == 2
+    assert refusal["error"]["code"] == "target-not-generated"
 
 
 def test_grant_cannot_authorize_a_target_outside_protected_roots(workspace):

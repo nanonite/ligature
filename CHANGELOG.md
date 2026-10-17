@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.0] - 2026-10-17
+
+### Added
+- #162: derive a standalone provided obligation's assurance requirement from the owning concept's reviewed constraint plus the descriptor's verifier policy when no interaction reliance declares one. A concept spec must be approved (`review`) and its `verifier` must match the cluster's owning verifier; `applies_to` is checked against the plan's own functions. No interaction is invented and no unrelated reliance is borrowed.
+- #163: record a complete Creusot proof's verifier-derived input domain as the universal scope (`satisfies.UNIVERSAL_SCOPE_VALUE`) and teach `satisfies()` that it is strictly stronger than any narrower `minimum_scope.input_domain`. The achievement never copies the requirement's own domain text; proof targets and every existing contract check are retained.
+- #164: add `generate-work-package --regenerate` for a grant-bound, atomic, auditable in-place update of an existing generated manifest whose derived bytes changed. The full candidate is validated first, only this package's own generated manifest can be replaced, a grant cannot authorize a second change, and the old bytes are preserved on every refusal.
+
 ## [1.3.12] - 2026-10-15
 
 ### Added

@@ -325,6 +325,123 @@ def test_conflicting_authoritative_assurance_is_refused():
     assert error.value.code == "contradictory-source"
 
 
+def _standalone_concept_spec(**overrides):
+    spec = {
+        "concept": "Scheduler",
+        "cluster": "scheduling",
+        "verifier": "creusot",
+        "constraints": [
+            {
+                "english": "advance returns only valid positions.",
+                "logic": "result <= self.capacity",
+                "kind": "postcondition",
+                "applies_to": ["advance"],
+                "id": "C007",
+            }
+        ],
+        "review": {"reviewer": "reviewer", "reviewed_at": "2026-10-16"},
+    }
+    spec.update(overrides)
+    return spec
+
+
+def _standalone_request(**overrides):
+    values = {
+        "provided_obligations": ("Scheduler.C007",),
+        "bridges": (),
+        "harnesses": {"Scheduler.C007": "creusot"},
+        "functions": ("scheduler::Scheduler::advance",),
+    }
+    values.update(overrides)
+    return make_request(**values)
+
+
+def _standalone_state(**overrides):
+    values = {"concept_specs": (_standalone_concept_spec(),)}
+    values.update(overrides)
+    return make_state(**values)
+
+
+def test_standalone_obligation_derives_assurance_from_reviewed_constraint():
+    """chainlink #162: an obligation no interaction reliance declares gets
+    its assurance from the reviewed concept spec's own constraint plus the
+    owning verifier policy -- not from an invented interaction."""
+    manifest = derive_manifest(_standalone_request(), _standalone_state())
+    guarantee = next(
+        entry
+        for entry in manifest["definition_of_done"]["provided_guarantees"]
+        if entry["obligation_id"] == "Scheduler.C007"
+    )
+    assert guarantee["required_assurance"] == {
+        "required_claims": ["postcondition-holds"],
+        "accepted_evidence_kinds": ["creusot-deductive-check"],
+        "trust_policy": {"assumptions_allowed": []},
+    }
+    assert "Scheduler.C007" in manifest["obligations"]
+
+
+def test_standalone_obligation_refuses_without_a_reviewed_source():
+    with pytest.raises(ManifestDerivationError, match="no interaction reliance") as error:
+        derive_manifest(_standalone_request(), _standalone_state(concept_specs=()))
+    assert error.value.code == "missing-source"
+
+    with pytest.raises(ManifestDerivationError, match="declares no constraint") as error:
+        derive_manifest(
+            _standalone_request(),
+            _standalone_state(
+                concept_specs=(_standalone_concept_spec(constraints=[]),)
+            ),
+        )
+    assert error.value.code == "missing-source"
+
+
+def test_standalone_obligation_refuses_unreviewed_spec_and_wrong_verifier():
+    unreviewed = _standalone_concept_spec()
+    del unreviewed["review"]
+    with pytest.raises(ManifestDerivationError, match="without a `review` block") as error:
+        derive_manifest(
+            _standalone_request(), _standalone_state(concept_specs=(unreviewed,))
+        )
+    assert error.value.code == "unreviewed-source"
+
+    with pytest.raises(ManifestDerivationError, match="owning verifier") as error:
+        derive_manifest(
+            _standalone_request(),
+            _standalone_state(concept_specs=(_standalone_concept_spec(verifier="kani"),)),
+        )
+    assert error.value.code == "contradictory-source"
+
+
+def test_standalone_obligation_refuses_method_mismatch_and_precondition():
+    with pytest.raises(ManifestDerivationError, match="names no function this work package owns") as error:
+        derive_manifest(
+            _standalone_request(functions=("scheduler::Scheduler::other",)),
+            _standalone_state(),
+        )
+    assert error.value.code == "dangling-reference"
+
+    with pytest.raises(ManifestDerivationError, match="kind 'precondition'") as error:
+        derive_manifest(
+            _standalone_request(),
+            _standalone_state(
+                concept_specs=(
+                    _standalone_concept_spec(
+                        constraints=[
+                            {
+                                "english": "callers must pass a bounded position.",
+                                "logic": "self.position <= self.capacity",
+                                "kind": "precondition",
+                                "applies_to": ["advance"],
+                                "id": "C007",
+                            }
+                        ]
+                    ),
+                )
+            ),
+        )
+    assert error.value.code == "unsupported-source"
+
+
 def test_provenance_configuration_must_match_selected_interactions():
     with pytest.raises(
         ManifestDerivationError, match="do not match selected interaction"

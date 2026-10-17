@@ -60,10 +60,15 @@ What is derived, from where
   * `evidence.scope` -- the proof targets and verifier-specific hashes
     (what was actually checked). Deliberately NOT a copy of the
     requirement's `minimum_scope`: copying the required domain into the
-    achievement would assert coverage the certificate never states. Kani
-    records the bounded model as belonging to its exact named, hashed
-    harness; if that scope is narrower than the manifest requires, the
-    truthful record is kept and G14 reports the unsatisfied scope.
+    achievement would assert coverage the certificate never states. A
+    complete `creusot` why3find certificate is a full proof of its source
+    contract, so its verified input domain is recorded as
+    `satisfies.UNIVERSAL_SCOPE_VALUE` -- a domain strictly stronger than any
+    narrower `minimum_scope.input_domain` (chainlink #163), derived from the
+    certificate, never read from the requirement. Kani records the bounded
+    model as belonging to its exact named, hashed harness; if that scope is
+    narrower than the manifest requires, the truthful record is kept and G14
+    reports the unsatisfied scope.
 
 The declaration a human does make is checked, not trusted. Creusot uses
 `--proof Obligation=path`; Verus uses `--verus-function Obligation=function`
@@ -145,6 +150,7 @@ from gate_g14 import load_assurance_report_validator  # noqa: E402
 from gate_g14 import looks_like_work_package_manifest  # noqa: E402
 from gate_g14 import work_package_manifest_dir_for  # noqa: E402
 from generate_feature_ledger import load_validator as load_feature_ledger_validator  # noqa: E402
+from satisfies import UNIVERSAL_SCOPE_VALUE  # noqa: E402
 from satisfies import load_achieved_validator  # noqa: E402
 from satisfies import satisfies  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
@@ -1676,7 +1682,14 @@ def _record_for(
             "for"
         )
     scope = {"proof_targets": ",".join(sorted({c.relative for c in certificates}))}
-    if verifier == "verus":
+    if verifier == "creusot":
+        # A why3find certificate is a full proof of the source contract, so
+        # the verified input domain is the contract's whole domain -- recorded
+        # as the verifier-derived universal scope, never as a copy of the
+        # requirement's own minimum_scope.input_domain (chainlink #163).
+        # satisfies() is the one relation that reads it.
+        scope["input_domain"] = UNIVERSAL_SCOPE_VALUE
+    elif verifier == "verus":
         hashes = {certificate.content_hash for certificate in certificates}
         source_hashes = {certificate.source_hash for certificate in certificates}
         versions = {

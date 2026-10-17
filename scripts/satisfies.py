@@ -74,6 +74,36 @@ from schema_utils import make_validator  # noqa: E402
 
 ACHIEVED_SCHEMA_PATH = resources.resource_path("docs", "achieved-assurance-schema.json")
 
+#: The canonical achieved-scope value a complete *deductive* proof records for
+#: an input domain it has not narrowed (chainlink #163).
+#:
+#: A Creusot certificate is a full proof of a source contract: its postcondition
+#: holds for every input the contract's `requires` admits. `record-assurance`
+#: therefore records, for `input_domain`, the fact that the verified domain is
+#: the whole source contract -- a domain strictly stronger than any narrower
+#: `minimum_scope.input_domain` an interaction reliance declares. This is a
+#: sentinel, never a copy of the requirement: the recorder emits this constant
+#: and never the requested domain string, so a proof that did not establish the
+#: requirement cannot borrow the requirement's own text to pass. `satisfies()`
+#: is the single relation that reads it, and it is also what `gate-g14` calls,
+#: so recording and re-evaluation cannot disagree.
+UNIVERSAL_SCOPE_VALUE = "universal: every input admitted by the verified source contract"
+
+
+def _scope_value_satisfies(required_value: object, achieved_value: object) -> bool:
+    """Whether one achieved scope value meets one required value.
+
+    Exact string equality is the ordinary case. The single documented
+    exception is `UNIVERSAL_SCOPE_VALUE`: a complete deductive proof over the
+    source contract covers *every* input the requirement could name, so it is
+    stronger than -- and therefore satisfies -- any declared value for that
+    key. Nothing else is inferred: the scope vocabulary is untyped, so no
+    numeric or ordering relation is guessed (chainlink #163).
+    """
+    if achieved_value == UNIVERSAL_SCOPE_VALUE:
+        return True
+    return achieved_value == required_value
+
 
 def load_achieved_schema() -> dict:
     return json.loads(ACHIEVED_SCHEMA_PATH.read_text())
@@ -131,7 +161,7 @@ def satisfies(required_profile: dict, achieved_record: dict, context: dict | Non
     achieved_scope = evidence["scope"]
     for key, required_value in minimum_scope.items():
         achieved_value = achieved_scope.get(key)
-        if achieved_value != required_value:
+        if not _scope_value_satisfies(required_value, achieved_value):
             reasons.append(
                 f"minimum_scope[{key!r}] requires {required_value!r}, "
                 f"achieved evidence.scope has {achieved_value!r}"

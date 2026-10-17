@@ -42,7 +42,7 @@
           "type": "object",
           "minProperties": 1,
           "additionalProperties": { "type": "string" },
-          "description": "Verifier-specific scope keys (e.g. input_domain, unwind, harness_hash, proof_targets, verus_output_sha256, verus_source_sha256) -- deliberately open, mirroring docs/interaction-schema.json's own required_assurance.minimum_scope. satisfies() compares this against a required_profile's minimum_scope key-for-key, by exact string equality only -- no numeric ordering is inferred, since the vocabulary is not typed."
+          "description": "Verifier-specific scope keys (e.g. input_domain, unwind, harness_hash, proof_targets, verus_output_sha256, verus_source_sha256) -- deliberately open, mirroring docs/interaction-schema.json's own required_assurance.minimum_scope. satisfies() compares this against a required_profile's minimum_scope key-for-key, by exact string equality, with one documented exception (chainlink #163): a complete deductive proof records input_domain = scripts/satisfies.py's UNIVERSAL_SCOPE_VALUE, meaning every input the verified source contract admits, which is strictly stronger than any narrower declared domain and therefore satisfies it. No numeric or ordering relation is inferred, since the vocabulary is not typed."
         }
       }
     },

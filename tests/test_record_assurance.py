@@ -1050,10 +1050,16 @@ class TheIssuesBaselineTest(RecordAssuranceTestCase):
         self.assertEqual(record["evidence"]["verifier"], "creusot")
         self.assertEqual(record["evidence"]["harness"], "creusot")
         # scope names what was checked; it never copies a required
-        # minimum_scope into the achievement.
+        # minimum_scope into the achievement. A complete creusot proof
+        # records its universal input domain (chainlink #163).
+        from satisfies import UNIVERSAL_SCOPE_VALUE
+
         self.assertEqual(
             record["evidence"]["scope"],
-            {"proof_targets": "verif/weekday/weekday_from_days/proof.json"},
+            {
+                "proof_targets": "verif/weekday/weekday_from_days/proof.json",
+                "input_domain": UNIVERSAL_SCOPE_VALUE,
+            },
         )
         # config comes from the manifest's own provenance block.
         self.assertEqual(
@@ -1125,11 +1131,13 @@ class RefusalsExitOneTest(RecordAssuranceTestCase):
             "proves no goal at all",
         )
 
-    def test_a_minimum_scope_is_refused_not_copied_into_the_achievement(self):
-        """A required minimum_scope is a domain claim; copying it out of
-        the requirement into the record would be exactly the fabrication
-        docs/achieved-assurance-schema.json forbids, so the guarantee is
-        refused with satisfies()' own reasons instead."""
+    def test_a_universal_scope_is_recorded_not_the_requirements_text(self):
+        """chainlink #163: a complete deductive proof is stronger than a
+        narrower accepted minimum_scope. The record carries the
+        verifier-derived universal input domain -- never a copy of the
+        requirement's own domain string -- and satisfies() accepts it."""
+        from satisfies import UNIVERSAL_SCOPE_VALUE
+
         self.provided = [
             guarantee(
                 "Weekday.C1",
@@ -1137,11 +1145,17 @@ class RefusalsExitOneTest(RecordAssuranceTestCase):
             )
         ]
         self.write_manifest()
-        with self.assertRaises(EvidenceNotEstablished) as caught:
-            record_assurance(self.root, WORK_PACKAGE, ["Weekday.C1=verif/weekday/weekday_from_days"])
-        self.assertIn("would not satisfy the manifest's own required_assurance", str(caught.exception))
-        self.assertIn("minimum_scope", str(caught.exception))
-        self.assertFalse(self.report_exists())
+        outcome = record_assurance(
+            self.root, WORK_PACKAGE, ["Weekday.C1=verif/weekday/weekday_from_days"]
+        )
+        self.assertEqual([e.obligation_id for e in outcome.recorded], ["Weekday.C1"])
+        record = self.report()["obligation_records"][0]["record"]
+        scope = record["evidence"]["scope"]
+        self.assertEqual(scope["input_domain"], UNIVERSAL_SCOPE_VALUE)
+        self.assertNotEqual(scope["input_domain"], "every int32")
+        self.assertEqual(
+            scope["proof_targets"], "verif/weekday/weekday_from_days/proof.json"
+        )
 
 
 class InvalidInputExitTwoTest(RecordAssuranceTestCase):

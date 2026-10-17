@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/docs/work-package-generation-audit-schema.json",
   "title": "Stage 7 work-package generation audit event — v1.0",
-  "description": "One successful generate-work-package event appended to ci/results/protected-writes.jsonl (chainlink #122). Grant rows remain the only capability records: scripts/write_authorization.py ignores this event kind. The event records the concrete use of an exact issue-scoped grant so deleting a generated manifest cannot make the same grant usable for a second write. An identical no-op rerun is recorded as unchanged and does not mutate the manifest.",
+  "description": "One successful generate-work-package event appended to ci/results/protected-writes.jsonl (chainlink #122). Grant rows remain the only capability records: scripts/write_authorization.py ignores this event kind. The event records the concrete use of an exact issue-scoped grant so deleting a generated manifest cannot make the same grant usable for a second write. An identical no-op rerun is recorded as unchanged and does not mutate the manifest. `regenerated` records a grant-bound atomic replacement of an existing generated manifest whose derived bytes changed (chainlink #164): before_hash is the replaced manifest's hash, after_hash the new one, and the same grant cannot authorize a second change.",
   "type": "object",
   "required": [
     "event",
@@ -37,7 +37,7 @@
       ]
     },
     "after_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "result": { "enum": ["created", "unchanged"] },
+    "result": { "enum": ["created", "unchanged", "regenerated"] },
     "command": { "const": "generate-work-package" },
     "command_result": { "const": 0 },
     "recorded_at": {

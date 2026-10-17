@@ -1,0 +1,31 @@
+Third-party components
+=====================
+
+vendor/concept-to-code/schemas/spec.schema.json
+-----------------------------------------------
+Registered in scripts/vendored_resources.py:VENDORED_RESOURCES (the sole authoritative declaration, chainlink #55 round 3) and read via vendored_resource_path() by scripts/select_pilot_cluster.py to validate concept specs during pilot-cluster ranking. The only vendor/ file any scripts/*.py actually needs at runtime -- everything else under vendor/ is copied-not-imported logic or prose reference. #57 replaced vendored_resource_path()'s own Path(__file__)-relative body with scripts/resources.py, which uses importlib.resources from a zipapp, so a distributed binary resolves this asset outside a ligature-workspace checkout. Call sites did not change, only that one function's body.
+
+License (vendor/concept-to-code/LICENSE):
+
+MIT License
+
+Copyright (c) 2026 nanonite
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+

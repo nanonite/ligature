@@ -308,6 +308,8 @@ First tagged release. The built `ligature.pyz` (with checksums and provenance) i
 - Vacuous 'OK' from validators when zero artifacts are discovered (#48)
 
 ### Changed
+- Update generator integration fixtures for reviewed standalone assurance intake (#165)
+- Add grant-bound regeneration for existing generated work-package manifests (#164)
 - Fix G14 obligation counts for contracts without dependency edges (#158)
 - Support a documented evidence mapping for compile-time proof artifacts (#156)
 - Clarify doctor support for plan-driven work-package generation (#155)

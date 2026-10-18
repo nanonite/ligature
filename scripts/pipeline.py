@@ -1200,6 +1200,7 @@ def cmd_generate_work_package(args: argparse.Namespace) -> int:
             features=args.feature,
             grant_id=args.grant_id,
             regenerate=args.regenerate,
+            adopt_existing=args.adopt_existing,
         )
     except generate_work_package.GenerationError as error:
         if args.json:
@@ -4226,8 +4227,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "atomically replace this package's own existing generated manifest when the derived "
-            "candidate differs; requires a fresh exact-path grant and leaves the old bytes on any "
-            "refusal (chainlink #164)"
+            "candidate differs; requires a fresh exact-path grant, the existing bytes to match the "
+            "latest grant-backed generation event, and leaves the old bytes on any refusal "
+            "(chainlink #164)"
+        ),
+    )
+    generate_wp_p.add_argument(
+        "--adopt-existing",
+        action="store_true",
+        help=(
+            "record provenance for a legacy manifest with no prior generation event, only when its "
+            "exact bytes equal the fully validated candidate; requires a fresh exact-path grant and "
+            "never rewrites the manifest (chainlink #164)"
         ),
     )
     generate_wp_p.add_argument("--json", action="store_true", help="emit the protected-write audit result or a structured refusal")

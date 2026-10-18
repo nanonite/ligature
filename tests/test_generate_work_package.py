@@ -158,6 +158,20 @@ class IntegratedWorkspace:
             path.unlink()
 
         crate_specs = root / "crates/scheduler/specs"
+        # Supply the evidence the reviewed interaction fixture references
+        # (`I-SCHED-TQ-001.json` links `E-0143`). chainlink #162 makes an
+        # approved interaction's reviewed `reliances[]` the authoritative
+        # assurance source, so without the evidence the interaction fails its
+        # own G4 check and is dropped -- leaving `TaskQueue.C003` (a provided
+        # obligation *and* the bridge's own callee requirement) with no source.
+        # Copying the referenced evidence is the legitimate reviewed-reliance
+        # route; production source validation is untouched.
+        evidence_dir = root / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            ROOT / "tests/fixtures/evidence/valid/evidence/E-0143.json",
+            evidence_dir / "E-0143.json",
+        )
         (crate_specs / "_interactions").mkdir(parents=True, exist_ok=True)
         (crate_specs / "_bridges").mkdir(parents=True, exist_ok=True)
         shutil.copy2(
@@ -647,6 +661,18 @@ def test_packaged_regeneration_is_grant_bound_and_preserves_on_refusal(packaged_
     assert record["grant_id"] != creation["grant_id"]
     assert project.manifest.read_bytes() != original
 
+    # chainlink #164: a same-package edit that keeps the schema and package id
+    # is still refused, with the edited bytes preserved, even under a fresh grant.
+    generated = json.loads(project.manifest.read_text())
+    generated["report"]["emit"] = "ci/results/manually-changed.json"
+    project.manifest.write_text(json.dumps(generated) + "\n")
+    edited = project.manifest.read_bytes()
+    project.authorize("ci/manifest/WP-BLACK-BOX-001.json", "--ttl", "2400")
+    refused = project.generate("--regenerate")
+    assert refused.returncode == 2
+    assert json.loads(refused.stdout)["error"]["code"] == "target-provenance-mismatch"
+    assert project.manifest.read_bytes() == edited
+
 
 def test_cli_help_and_missing_inputs_name_the_required_values():
     help_text = pipeline.registered_commands()["generate-work-package"].format_help()
@@ -658,6 +684,7 @@ def test_cli_help_and_missing_inputs_name_the_required_values():
         "--feature",
         "--grant-id",
         "--regenerate",
+        "--adopt-existing",
         "--json",
     ):
         assert required in help_text
@@ -915,6 +942,204 @@ def test_regeneration_refuses_hand_edited_or_foreign_content(workspace):
     assert refusal["error"]["code"] == "target-not-generated"
 
 
+@pytest.mark.parametrize("edit", ["report", "scope", "formatting", "rollback"])
+def test_regeneration_requires_the_latest_generated_bytes(workspace, edit):
+    """chainlink #164: a same-package edit (report.emit or obligation scope),
+    a mere reformatting, or a rollback to a byte string an *earlier* event
+    recorded must all be refused, with the manifest and the audit ledger left
+    exactly as they were."""
+    workspace.authorize()
+    code, _record, error = workspace.generate()
+    assert code == 0, error
+    original = workspace.manifest.read_bytes()
+
+    plan = json.loads(workspace.plan_path.read_text())
+    plan["coupling_notes"] = ["reviewed change"]
+    workspace.plan_path.write_text(json.dumps(plan) + "\n")
+    fresh = workspace.authorize(extra=("--ttl", "1800"))
+
+    if edit == "rollback":
+        # A legitimate regeneration first, so the older byte string still has
+        # a matching historical event and only "latest" can reject it.
+        code, _record, error = workspace.generate("--grant-id", fresh, "--regenerate")
+        assert code == 0, error
+        workspace.manifest.write_bytes(original)
+        fresh = workspace.authorize(extra=("--ttl", "2400"))
+    elif edit == "formatting":
+        workspace.manifest.write_bytes(original + b"\n")
+    else:
+        data = json.loads(original)
+        if edit == "report":
+            data["report"]["emit"] = "ci/results/manually-changed.json"
+        else:
+            data["provided_guarantees"] = []
+        workspace.manifest.write_text(json.dumps(data) + "\n")
+
+    before = workspace.manifest.read_bytes()
+    ledger = workspace.ledger.read_bytes()
+    code, refusal, _ = workspace.generate("--grant-id", fresh, "--regenerate")
+    assert code == 2
+    assert refusal["error"]["code"] == "target-provenance-mismatch"
+    assert workspace.manifest.read_bytes() == before
+    assert workspace.ledger.read_bytes() == ledger
+
+
+def test_rolled_back_bytes_are_refused_even_when_the_plan_matches_them(workspace):
+    """chainlink #164: after a legitimate regeneration, rolling the manifest
+    and the plan back to the previous generated state is a byte-for-byte
+    no-op against the *old* derivation -- but the latest event is the newer
+    one, so the run must refuse rather than append an `unchanged` event that
+    would silently re-establish provenance for the rolled-back bytes."""
+    workspace.authorize()
+    code, _record, error = workspace.generate()
+    assert code == 0, error
+    old_manifest = workspace.manifest.read_bytes()
+    old_plan = workspace.plan_path.read_text()
+
+    plan = json.loads(old_plan)
+    plan["coupling_notes"] = ["newer reviewed scope"]
+    workspace.plan_path.write_text(json.dumps(plan) + "\n")
+    fresh = workspace.authorize(extra=("--ttl", "1800"))
+    code, _record, error = workspace.generate("--grant-id", fresh, "--regenerate")
+    assert code == 0, error
+
+    workspace.manifest.write_bytes(old_manifest)
+    workspace.plan_path.write_text(old_plan)
+
+    before = workspace.manifest.read_bytes()
+    ledger = workspace.ledger.read_bytes()
+    code, refusal, _ = workspace.generate()
+    assert code == 2
+    assert refusal["error"]["code"] == "target-provenance-mismatch"
+    assert workspace.manifest.read_bytes() == before
+    assert workspace.ledger.read_bytes() == ledger
+
+
+def test_legacy_manifest_requires_explicit_exact_candidate_adoption(workspace):
+    """chainlink #164: a manifest with no generation event is not provenance.
+    Adoption is the sanctioned path and only blesses bytes identical to the
+    fully validated candidate; it never rewrites them and its grant cannot
+    authorize a later change."""
+    workspace.authorize()
+    code, _record, error = workspace.generate()
+    assert code == 0, error
+    original = workspace.manifest.read_bytes()
+    rows = [json.loads(line) for line in workspace.ledger.read_text().splitlines()]
+    workspace.ledger.write_text(
+        "".join(
+            json.dumps(row) + "\n" for row in rows if row.get("event") == "grant"
+        )
+    )
+    fresh = workspace.authorize(extra=("--ttl", "1800"))
+
+    code, refusal, _ = workspace.generate("--grant-id", fresh, "--regenerate")
+    assert code == 2
+    assert refusal["error"]["code"] == "target-provenance-missing"
+
+    workspace.manifest.write_bytes(original + b"\n")
+    code, refusal, _ = workspace.generate(
+        "--grant-id", fresh, "--adopt-existing", "--regenerate"
+    )
+    assert code == 2
+    assert refusal["error"]["code"] == "target-adoption-refused"
+    assert workspace.manifest.read_bytes() == original + b"\n"
+
+    workspace.manifest.write_bytes(original)
+    code, record, error = workspace.generate("--grant-id", fresh, "--adopt-existing")
+    assert code == 0, error
+    assert record["result"] == "adopted"
+    assert record["before_hash"] == record["after_hash"]
+    assert workspace.manifest.read_bytes() == original
+    make_validator(AUDIT_SCHEMA).validate(record)
+
+    code, _record, error = workspace.generate("--grant-id", fresh)
+    assert code == 0, error
+
+    plan = json.loads(workspace.plan_path.read_text())
+    plan["coupling_notes"] = ["subsequent reviewed change"]
+    workspace.plan_path.write_text(json.dumps(plan) + "\n")
+    code, refusal, _ = workspace.generate("--grant-id", fresh, "--regenerate")
+    assert code == 2
+    assert refusal["error"]["code"] == "grant-replayed"
+
+    newer = workspace.authorize(extra=("--ttl", "2400"))
+    code, record, error = workspace.generate("--grant-id", newer, "--regenerate")
+    assert code == 0, error
+    assert record["result"] == "regenerated"
+
+
+@pytest.mark.parametrize(
+    "mutation", ["grant-missing", "wrong-issue", "wrong-time", "deleted"]
+)
+def test_regeneration_refuses_invalid_or_deleted_generation_provenance(
+    workspace, mutation
+):
+    """chainlink #164: a generation event with no unique backing grant, one
+    bound to the wrong issue or recorded outside its grant window, and a
+    deleted manifest with prior provenance all fail closed without touching
+    the manifest or the ledger."""
+    workspace.authorize()
+    code, _record, error = workspace.generate()
+    assert code == 0, error
+    rows = [json.loads(line) for line in workspace.ledger.read_text().splitlines()]
+    audit = next(
+        row for row in rows if row.get("event") == "work-package-generation"
+    )
+    if mutation == "grant-missing":
+        rows = [row for row in rows if row.get("event") != "grant"]
+    elif mutation == "wrong-issue":
+        audit["issue"] += 1
+    elif mutation == "wrong-time":
+        audit["recorded_at"] = "2020-01-01T00:00:00Z"
+    else:
+        workspace.manifest.unlink()
+    workspace.ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    fresh = workspace.authorize(extra=("--ttl", "1800"))
+
+    before = workspace.manifest.read_bytes() if workspace.manifest.exists() else None
+    ledger = workspace.ledger.read_bytes()
+    code, refusal, _ = workspace.generate("--grant-id", fresh, "--regenerate")
+    assert code == 2
+    assert refusal["error"]["code"] == (
+        "target-generation-missing"
+        if mutation == "deleted"
+        else "target-provenance-invalid"
+    )
+    assert (
+        workspace.manifest.read_bytes() if workspace.manifest.exists() else None
+    ) == before
+    assert workspace.ledger.read_bytes() == ledger
+
+
+def test_regeneration_keeps_the_assurance_report_and_feature_ledger_separate(
+    workspace,
+):
+    """chainlink #164: the manifest emits its assurance report at the canonical
+    ci/results/<WP>.json, and regenerating it never touches the separate
+    ci/results/feature_ledger.json projection."""
+    workspace.authorize()
+    code, _record, error = workspace.generate()
+    assert code == 0, error
+    manifest = json.loads(workspace.manifest.read_text())
+    assert manifest["report"]["emit"] == "ci/results/WP-SCHED-001.json"
+
+    feature_ledger = workspace.root / "ci/results/feature_ledger.json"
+    feature_ledger.parent.mkdir(parents=True, exist_ok=True)
+    feature_ledger.write_text('{"schema": "feature-ledger/1.0"}\n')
+    ledger_bytes = feature_ledger.read_bytes()
+
+    plan = json.loads(workspace.plan_path.read_text())
+    plan["coupling_notes"] = ["regenerated alongside the ledger"]
+    workspace.plan_path.write_text(json.dumps(plan) + "\n")
+    fresh = workspace.authorize(extra=("--ttl", "1800"))
+    code, record, error = workspace.generate("--grant-id", fresh, "--regenerate")
+    assert code == 0, error
+    assert record["result"] == "regenerated"
+    regenerated = json.loads(workspace.manifest.read_text())
+    assert regenerated["report"]["emit"] == "ci/results/WP-SCHED-001.json"
+    assert feature_ledger.read_bytes() == ledger_bytes
+
+
 def test_grant_cannot_authorize_a_target_outside_protected_roots(workspace):
     workspace.authorize()
     descriptor = dict(workspace.state.descriptor)
@@ -1049,6 +1274,21 @@ def test_invalid_authoritative_or_plan_input_never_produces_a_manifest(
         "missing-source",
         "invalid-authoritative-state",
     }
+    assert not project.manifest.exists()
+
+
+def test_standalone_integration_refuses_a_missing_reviewed_assurance_source(
+    integrated_workspace,
+):
+    """chainlink #165: the repaired fixture relies on the reviewed interaction.
+    Removing it (and there being no reviewed concept spec) must still fail
+    closed -- the fixture repair does not weaken #162's source validation."""
+    project = integrated_workspace
+    (project.root / "crates/scheduler/specs/_interactions/I-SCHED-TQ-001.json").unlink()
+
+    code, output, error = project.generate()
+    assert code == 2, error
+    assert json.loads(output)["error"]["code"] == "missing-source"
     assert not project.manifest.exists()
 
 

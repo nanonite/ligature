@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.2] - 2026-10-18
+
+### Added
+- #167: expose the exact bundled CLI contract through `ligature contract [--json]`; package the contract resource and test access after initialization and upgrade from 1.4.1.
+
+### Fixed
+- #169: bind C_static observations to crate source bytes, extractor version, and configuration; R1/G16, G14, `check`, and `status` fail closed with an extraction action when a report is stale, empty despite manifest-owned functions, or legacy-unbound.
+- #168: let write-set-check vouch only for bridge harness bytes that exactly match the current generator, keeping edited harnesses flagged and G9's missing-harness guidance actionable.
+- #166: make default `status` read recorded verifier state and freshness without launching verifiers; add `--revalidate`, version project-state JSON to 1.1, print verifier progress, and document expected cost.
+
 ## [1.4.1] - 2026-10-17
 
 ### Fixed

@@ -1242,8 +1242,15 @@ def read_kani_result(
     expected_source_hash: str | None = None,
     expected_harness_hash: str | None = None,
     expected_result_summary: str | None = None,
+    revalidate: bool = True,
 ) -> Certificate:
-    """Rerun Kani 0.67 and bind its complete result to current Rust sources."""
+    """Read a recorded Kani result, optionally rerunning Kani 0.67.
+
+    The status surface can request revalidate=False: in that mode the
+    current source and harness hashes are checked, and the previously
+    validated result summary is reported as recorded evidence without
+    spawning Cargo/Kani. Assurance commands retain the default fresh run.
+    """
     source_hash, _mtime, _newest = rust_source_snapshot(workspace, manifest)
     harness_path, harness_hash = kani_harness_source(workspace, crate_root, manifest, harness)
     if expected_harness_hash is not None and harness_hash != expected_harness_hash:
@@ -1256,6 +1263,65 @@ def read_kani_result(
             f"Rust source snapshot changed after Kani assurance was recorded for "
             f"{obligation_id}; re-run Kani and record assurance again"
         )
+    if not revalidate:
+        if not isinstance(expected_result_summary, str) or not expected_result_summary:
+            raise EvidenceNotEstablished(
+                f"Kani assurance for {obligation_id} has no recorded result summary; "
+                "use status --revalidate or re-record the assurance"
+            )
+        try:
+            summary = json.loads(expected_result_summary)
+        except json.JSONDecodeError as exc:
+            raise InvalidRecordInput(
+                f"recorded Kani result summary for {obligation_id} is malformed JSON"
+            ) from exc
+        assertions = summary.get("successful_claim_assertions") if isinstance(summary, dict) else None
+        unreachable = summary.get("unreachable_checks") if isinstance(summary, dict) else None
+        total = summary.get("total_checks") if isinstance(summary, dict) else None
+        successful = summary.get("successful_checks") if isinstance(summary, dict) else None
+        if (
+            not isinstance(total, int) or isinstance(total, bool) or total < 1
+            or not isinstance(successful, int) or isinstance(successful, bool)
+            or successful < 1 or successful > total
+            or not isinstance(assertions, list) or not assertions
+            or not all(
+                isinstance(name, str)
+                and re.fullmatch(
+                    rf"(?:[A-Za-z0-9_]+::)*{re.escape(harness)}\.assertion\.[0-9]+",
+                    name,
+                ) is not None
+                for name in assertions
+            )
+            or len(assertions) != len(set(assertions))
+            or not isinstance(unreachable, list)
+            or not all(
+                isinstance(item, dict)
+                and isinstance(item.get("check"), str)
+                and isinstance(item.get("description"), str)
+                for item in unreachable
+            )
+            or total != successful + len(unreachable)
+        ):
+            raise InvalidRecordInput(
+                f"recorded Kani result summary for {obligation_id} has an invalid shape"
+            )
+        return Certificate(
+            path=harness_path,
+            relative=kani_target(workspace, crate_root, harness),
+            proved=successful,
+            goal_count=total,
+            evidence_format="kani-0.67-recorded-run",
+            verifier_version=KANI_VERSION,
+            source_hash=source_hash,
+            harness_hash=harness_hash,
+            kani_result_summary=expected_result_summary,
+        )
+    print(
+        f"[ligature] Kani {KANI_VERSION}: revalidating {obligation_id} "
+        f"with harness {harness!r}",
+        file=sys.stderr,
+        flush=True,
+    )
     result_summary = run_kani_067(crate_root, manifest, harness)
     final_source_hash, _mtime, _newest = rust_source_snapshot(workspace, manifest)
     _final_harness_path, final_harness_hash = kani_harness_source(
@@ -1506,6 +1572,7 @@ def read_proof_target(
     expected_kani_version: str | None = None,
     expected_kani_result_summary: str | None = None,
     source_manifest: dict | None = None,
+    revalidate_kani: bool = True,
 ) -> Certificate:
     """Re-open one stored target, dispatching by its explicit evidence kind."""
     if target.startswith(VERUS_TARGET_PREFIX):
@@ -1591,6 +1658,7 @@ def read_proof_target(
             expected_source_hash=expected_kani_source_hash,
             expected_harness_hash=expected_kani_harness_hash,
             expected_result_summary=expected_kani_result_summary,
+            revalidate=revalidate_kani,
         )
     if expected_harness is not None and verifier_for_manifest_harness(expected_harness) == "kani":
         raise InvalidRecordInput(

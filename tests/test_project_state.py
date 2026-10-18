@@ -4,7 +4,7 @@
 These tests build a genuine workspace in a temp directory -- descriptor,
 artifacts, promotion receipt, degradation record, assurance report -- and
 run the real CLI through `pipeline.main()`, then validate the JSON output
-against the v1.0 contracts `schemas/project-state.schema.json` and
+against the v1.1 project-state and v1.0 consolidated-check contracts
 `schemas/consolidated-check.schema.json`. Nothing is pre-loaded from a
 hand-authored document: every state (draft/validated/promoted/stale/
 invalid/degraded) is reached by writing real files and, where the
@@ -539,7 +539,7 @@ class ProjectStateDocumentTest(WorkspaceFixture):
             ],
         )
         real_gate_workspace = gate_g14.gate_workspace
-        gate_g14.gate_workspace = lambda workspace, descriptor: ([outcome], [])
+        gate_g14.gate_workspace = lambda workspace, descriptor, **kwargs: ([outcome], [])
         try:
             _, doc = self.status()
         finally:
@@ -568,7 +568,7 @@ class ProjectStateDocumentTest(WorkspaceFixture):
             "ci/manifest/installation.json",
             {
                 "installed_product_version": project_state.PRODUCT_VERSION,
-                "installed_schema_versions": {"project-state": "1.0"},
+                "installed_schema_versions": {"project-state": "1.1"},
             },
         )
         doc = self.status()[1]
@@ -603,7 +603,7 @@ class ProjectStateDocumentTest(WorkspaceFixture):
             "ci/manifest/installation.json",
             {
                 "installed_product_version": project_state.PRODUCT_VERSION,
-                "installed_schema_versions": {"project-state": "1.0"},
+                "installed_schema_versions": {"project-state": "1.1"},
             },
         )
         self.write(
@@ -1438,7 +1438,7 @@ class GateIntegrityCheckTest(WorkspaceFixture):
             "ci/manifest/installation.json",
             {
                 "installed_product_version": project_state.PRODUCT_VERSION,
-                "installed_schema_versions": {"project-state": "1.0"},
+                "installed_schema_versions": {"project-state": "1.1"},
             },
         )
         _, doc = self.status()

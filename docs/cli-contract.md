@@ -30,7 +30,8 @@ ligature version [--verify]                  # #57
 ligature schema list [--json]                # #157 -- inspect schemas packaged with this binary
 ligature schema show <name> [--json]         # #157 -- inspect one bundled schema and its related schemas
 ligature schema export <name> --output <path>  # #157 -- write a build-pinned, self-contained schema export
-ligature status [--json]                     # #56 -- project-state query
+ligature contract [--json]                    # #167 -- print this build's bundled per-command CLI contract
+ligature status [--json] [--revalidate]      # #56/#166 -- project state; Kani reruns are explicit
 ligature check [--json] [next]               # #56 -- consolidated gate run + next action
 ligature write-set-check [--json] [--issue N]  # #77, #103, #114 -- read-only write-set conformance
 ligature authorize-write --issue N --path P --op K --issuer <name>  # #114 -- record one issue-scoped capability for a sanctioned protected-root write
@@ -152,7 +153,8 @@ including the project root or the nested crate directory. A standalone nested
 crate does not need a project-root `Cargo.toml`.
 It preserves unrelated TOML values and other declared crate manifests, restores
 the original `Cargo.lock` after validation, and runs Cargo metadata/check,
-`cargo verus verify`, `cargo verus build`, and `cargo test`. Its strict audit
+`cargo verus verify`, `cargo verus build`, and `cargo test`. It prints the
+selected crate before each Verus command on stderr. Its strict audit
 event records before/after hashes for the selected manifest, workspace and
 other declared crate manifests, plus `Cargo.lock`, and validation outcomes; the
 normal diff is printed for review, while Git retains durable history and
@@ -1694,6 +1696,21 @@ Two halves, both in the command that already owns the document:
   document remains `policy-drift`'s own signal, so one defect never
   produces two findings.
 
+### Kani cost and recorded freshness (#166)
+
+status --json is a cheap read-only query by default. It checks recorded Kani source and harness hashes against the workspace and reports verification.mode: "recorded"; it does not launch Cargo or Kani. The project-state schema is version 1.1 and includes the verification mode. Use status --revalidate only when a fresh Kani run is wanted; it reruns each recorded harness through G14 and can take minutes and several GB of memory per harness.
+
+| command | verifier work and expected cost |
+|---|---|
+| status / status --json | no verifier process; checks recorded source and harness hashes |
+| status --revalidate | reruns each recorded Kani harness; minutes and several GB per harness are possible |
+| check, gate g14, gate-g14 | G14 reruns Kani evidence for every Kani assurance record in the checked closure; minutes and several GB per harness are possible |
+| record-assurance with --kani-crate / --kani-harness | resolves the feature-selected harness and runs one exact Kani harness; minutes and several GB per harness are possible |
+| check-bridges | invokes each configured bridge verifier once per generated harness; runtime and memory depend on that verifier |
+| configure-crate --profile cargo-verus | invokes Cargo and Verus validation for the selected crate; Verus verify/build each print per-crate progress to stderr |
+
+Every Kani rerun prints the obligation and harness being checked to stderr before invoking the verifier. A recorded status does not assert that Kani was rerun in this invocation; source and harness freshness is shown separately.
+
 ## 9. Compatibility alias policy
 
 Every legacy flat command not listed in §7 (internal) becomes a
@@ -1713,7 +1730,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 51/51)
+## 10. Legacy command → disposition (complete, 52/52)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -1743,7 +1760,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `validate-closure` | alias → `validate closure` |
 | `gate-r1-g16` | alias → `gate r1-g16`; `--json` emits `ligature.r1-g16-report.v1` (§3) |
 | `gate-g9` | alias → `gate g9` |
-| `gate-g14` | alias → `gate g14`; `--json` emits `ligature.g14-report.v1` (§3) |
+| `gate-g14` | alias → `gate g14`; `--json` emits `ligature.g14-report.v1` (§3); reruns Kani evidence and can take minutes and several GB per harness (#166) |
 | `gate-g18` | alias → `gate g18` |
 | `gate-g19` | alias → `gate g19` |
 | `gate-g20` | alias → `gate g20` |
@@ -1756,16 +1773,16 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `accept-fixture-value` | stable human checkpoint; accepts only a supported unchanged shipped descriptor value, records reviewer/date and a SHA-256 of its exact JSON value under `review.accepted_fixture_values`, and lets P0 distinguish an explicit decision from initialization. Sentinel identity/repository values cannot be accepted; a later value change invalidates the record (#145, §8) |
 | `promote-evidence` | stable; mechanically promotes a staged evidence draft (`evidence/<id>.json.draft`) to its target and records the move in `ci/results/evidence_promotions.jsonl` -- the Stage 0 promotion path `approve` cannot provide (evidence carries no `review` block, so `review_checkpoint.approve()` cannot promote it). No `--reviewer`: evidence is non-normative, so promotion is mechanical, not a human checkpoint (#79, §1). The `compile-time` evidence kind is descriptive only and is not verifier assurance (#156) |
 | `record-ruling` | stable; records an explicit human verdict (`ratified`\|`rejected`) over an exact artifact set in `ci/results/human_rulings.jsonl` -- the human-ruling gate `accept-promotion` enforces: no receipt is minted until every artifact in the accepted set carries a `ratified` ruling over its current content (#82, §5) |
-| `record-assurance` | stable; assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads (#87, §1). Creusot uses `--proof <obligation>=<path>` and records a complete certificate's verifier-derived universal input domain, which `satisfies()` treats as strictly stronger than a narrower `minimum_scope.input_domain` (#163) -- never as a copy of the requirement; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function` mappings (#129); Kani uses `--kani-crate`/`--kani-harness`, resolves the manifest's bare function through feature-selected Kani 0.67 compile metadata, and reruns one exact qualified identity (#132/#133). Successful harness assertions are required; ancillary unreachable safety checks are retained in the report summary, and G14 compares that summary against its fresh rerun (#140). Kani scope names the bounded model and never copies a broader `minimum_scope`; G14 consumes the record but leaves that guarantee unmet. A package with no provided guarantees and required bridges uses `--bridges-only`, which requires a clean G9 validation and copies only the package's passing bridge records (#141). Verus requires whole-crate success and the exact proof note in its `ensures` clause. Every record is derived from verifier evidence and manifest provenance. Feature-ledger collision warns; unknown content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
+| `record-assurance` | stable; Kani evidence invokes an exact harness rerun with per-harness progress; this can take minutes and several GB per harness (#166). It assembles a work package's assurance report at its manifest's own `report.emit` path from verifier evidence and writes it atomically -- the achieved side `gate g14` reads (#87, §1). Creusot uses `--proof <obligation>=<path>` and records a complete certificate's verifier-derived universal input domain, which `satisfies()` treats as strictly stronger than a narrower `minimum_scope.input_domain` (#163) -- never as a copy of the requirement; Verus uses official `--output-json` with `--verus-json <path>` and repeatable `--verus-function` mappings (#129); Kani uses `--kani-crate`/`--kani-harness`, resolves the manifest's bare function through feature-selected Kani 0.67 compile metadata, and reruns one exact qualified identity (#132/#133). Successful harness assertions are required; ancillary unreachable safety checks are retained in the report summary, and G14 compares that summary against its fresh rerun (#140). Kani scope names the bounded model and never copies a broader `minimum_scope`; G14 consumes the record but leaves that guarantee unmet. A package with no provided guarantees and required bridges uses `--bridges-only`, which requires a clean G9 validation and copies only the package's passing bridge records (#141). Verus requires whole-crate success and the exact proof note in its `ensures` clause. Every record is derived from verifier evidence and manifest provenance. Feature-ledger collision warns; unknown content is refused. Exits 0/1/2 per docs/exit-code-contract.md |
 | `select-pilot-cluster` | alias → `report pilot-cluster` |
 | `measure-gold-set` | alias → `report gold-set-measurement` |
 | `generate-feature-ledger` | alias → `report feature-ledger` |
 | `generate-contact-sheet` | alias → `report contact-sheet` |
 | `extract-c-static` | internal operation `check` may recommend, never runs (§7) |
-| `check-bridges` | internal operation `check` may recommend, never runs (§7) |
+| `check-bridges` | internal operation `check` may recommend, never runs (§7); the command itself dispatches each generated harness to its configured verifier and prints per-harness progress |
 | `render-witness` | internal operation `check` may recommend, never runs (§7) |
-| `status` | stable project-state query (#56, §8) — reserved unconditionally, not covered by §9's floor |
-| `check` | stable read-only consolidated gate run + one recommended next action (#56, §7) |
+| `status` | stable project-state query (#56, §8); does not rerun Kani by default, while `--revalidate` opts into G14 Kani reruns (#166) |
+| `check` | stable read-only consolidated gate run + one recommended next action (#56, §7); G14 reruns Kani evidence and can take minutes and several GB per harness (#166) |
 | `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print, verifies the skill authority hash (§8, #58), reports/verifies the executable's own build attestation (#57), and fails closed on the descriptor `--descriptor` names (§8, #74/#109) |
 | `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation, and both report the build's source provenance (`source_commit`, and `source_dirty`/`working_tree_diff_hash` for a dirty tree) (§1, §8, #57, #64) |
 | `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3; `gate g14 --json` emits `ligature.g14-report.v1` (#57 grammar v1.0, #159) |
@@ -1773,9 +1790,10 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo, plus the two witness-renderer scripts G13 hash-pins (#84, §8, #58) |
 | `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C). `--upgrade` also refreshes the manifest's `gate_hashes` (the pins `gate_integrity` checks) from the actually installed managed files, updates only managed installation metadata, preserves the user-owned descriptor and normative policy, keeps a locally modified managed file's old pin instead of adopting the drifted bytes, and `--json` emits the machine-readable audit result (old/new version, changed paths, hashes, required human action) so `doctor`, `status --json`, `check --json` and `write-set-check` all read the same post-migration state (#117) |
 | `schema` | stable; `schema list` and `schema show <name>` inspect only JSON Schemas shipped in this binary; the catalog and versioned JSON envelopes include exact schema hashes and installed build/adjudicator identity. `schema export <name> --output <path>` writes a self-contained envelope including related schemas and refuses to overwrite. Offline; no checkout/network access or internal-path guessing required (#157) |
+| `contract` | stable; prints the exact `docs/cli-contract.md` shipped in this executable, without requiring a checkout or installation. `--json` emits `ligature.cli-contract.v1` with grammar version, SHA-256, and the complete contract text (#167) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 51 has a nested home, an internal-operation classification,
+every one of the 52 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

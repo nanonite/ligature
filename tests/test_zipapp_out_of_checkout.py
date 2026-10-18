@@ -114,6 +114,157 @@ class ZipappOutOfCheckoutTest(unittest.TestCase):
             [("ci/manifest/PROBE.json", "protected-write")],
         )
 
+    def test_status_kani_record_is_fast_and_does_not_spawn_cargo(self):
+        """The installed artifact's default status reads recorded Kani
+        evidence and checks its source/harness hashes without launching
+        Cargo, even when a Kani record is present."""
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_record_assurance import KaniRecordAssuranceTest
+        from unittest.mock import patch
+
+        fixture = KaniRecordAssuranceTest("test_status_reads_fresh_kani_record_without_spawning_verifier")
+        fixture.setUp()
+        try:
+            with patch(
+                "record_assurance.shutil.which",
+                side_effect=lambda executable: f"/usr/bin/{executable}",
+            ), patch(
+                "record_assurance.subprocess.run",
+                side_effect=fixture.fake_kani(),
+            ):
+                fixture.record()
+            fixture.prepare_status_workspace()
+            shutil.copytree(fixture.root, self.workspace, dirs_exist_ok=True)
+        finally:
+            fixture.doCleanups()
+
+        fake_bin = self.outside / "fake-tools"
+        fake_bin.mkdir()
+        cargo_marker = self.outside / "cargo-was-launched"
+        cargo = fake_bin / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\nprintf called > " + str(cargo_marker) + "\nexit 0\n"
+        )
+        cargo.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(self.artifact),
+                "--workspace",
+                str(self.workspace),
+                "status",
+                "--json",
+            ],
+            cwd=self.outside,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        document = json.loads(proc.stdout)
+        self.assertEqual(document["schema_version"], "1.1")
+        self.assertEqual(document["verification"]["mode"], "recorded")
+        self.assertFalse(cargo_marker.exists(), "default status must not spawn Cargo/Kani")
+
+    def test_bundled_contract_is_reachable_after_init_and_141_upgrade(self):
+        """#167: the installed executable exposes its own bundled contract,
+        both after a fresh init and after upgrading a 1.4.1 workspace."""
+        old_artifact = ROOT / "releases" / "v1.4.1" / "ligature.pyz"
+        self.assertTrue(old_artifact.is_file(), "1.4.1 fixture bundle is required")
+
+        initialized = self.run_artifact(
+            "--workspace", str(self.workspace), "init", "--mode", "port", "--name", "contract-test"
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        plain = self.run_artifact("contract")
+        self.assertEqual(plain.returncode, 0, plain.stdout + plain.stderr)
+        expected = (ROOT / "docs" / "cli-contract.md").read_text()
+        self.assertEqual(plain.stdout, expected)
+
+        encoded = self.run_artifact("contract", "--json")
+        self.assertEqual(encoded.returncode, 0, encoded.stdout + encoded.stderr)
+        envelope = json.loads(encoded.stdout)
+        self.assertEqual(envelope["format"], "ligature.cli-contract.v1")
+        self.assertEqual(envelope["grammar_version"], "v1.0")
+        self.assertEqual(envelope["contract"], expected)
+        self.assertEqual(
+            envelope["sha256"], "sha256:" + hashlib.sha256(expected.encode("utf-8")).hexdigest()
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            upgraded_workspace = Path(temp).resolve()
+            prior = subprocess.run(
+                [sys.executable, "-I", str(old_artifact), "--workspace", str(upgraded_workspace),
+                 "init", "--mode", "port", "--name", "contract-upgrade"],
+                cwd=self.outside, capture_output=True, text=True,
+            )
+            self.assertEqual(prior.returncode, 0, prior.stdout + prior.stderr)
+            migrated = subprocess.run(
+                [sys.executable, "-I", str(self.artifact), "--workspace", str(upgraded_workspace),
+                 "migrate", "--upgrade", "--json"],
+                cwd=self.outside, capture_output=True, text=True,
+            )
+            self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+            after_upgrade = subprocess.run(
+                [sys.executable, "-I", str(self.artifact), "contract"],
+                cwd=self.outside, capture_output=True, text=True,
+            )
+            self.assertEqual(after_upgrade.returncode, 0, after_upgrade.stdout + after_upgrade.stderr)
+            self.assertEqual(after_upgrade.stdout, expected)
+
+    def test_bridge_harness_artifact_contract_through_packaged_binary(self):
+        """#168: the packaged G9 generator, G9 gate, and write-set check
+        agree about the exact generated harness bytes; missing and edited
+        harnesses remain actionable violations."""
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_gate_g9 import GenerationTest, bridge_records_for
+
+        fixture = GenerationTest("test_generation_writes_a_harness_and_a_check_record")
+        fixture.setUp()
+        try:
+            descriptor = dict(fixture.descriptor)
+            descriptor["write_set"] = {
+                "allowed_roots": ["crates/**", "verif/**"],
+                "protected_roots": ["ci/harness/**"],
+            }
+            (fixture.root / "project-descriptor.json").write_text(json.dumps(descriptor, indent=2) + "\n")
+            shutil.copytree(fixture.root, self.workspace, dirs_exist_ok=True)
+        finally:
+            fixture.doCleanups()
+
+        generated = self.run_artifact("--workspace", str(self.workspace), "check-bridges")
+        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+        self.assertIn("[ligature] bridge BR-SCHED-TQ-001", generated.stderr)
+        # Workspace's prebuilt WP-A report is a fixture stub. Align its
+        # bridge evidence with the actual successful record, as the source
+        # gate tests do, before asking G9 to consume that report.
+        assurance_path = self.workspace / "ci/results/WP-A.json"
+        assurance = json.loads(assurance_path.read_text())
+        assurance["bridge_records"] = bridge_records_for(self.workspace)
+        assurance_path.write_text(json.dumps(assurance, indent=2) + "\n")
+        gated = self.run_artifact("--workspace", str(self.workspace), "gate-g9")
+        self.assertEqual(gated.returncode, 0, gated.stdout + gated.stderr)
+        clean = self.run_artifact("--workspace", str(self.workspace), "write-set-check", "--json")
+        self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
+        self.assertEqual(json.loads(clean.stdout)["write_set"]["state"], "clean")
+
+        harness = self.workspace / "ci/harness/BR-SCHED-TQ-001.creusot.rs"
+        harness.write_text(harness.read_text() + "// edited after generation\n")
+        edited = self.run_artifact("--workspace", str(self.workspace), "write-set-check", "--json")
+        self.assertEqual(edited.returncode, 1, edited.stdout + edited.stderr)
+        self.assertIn("ci/harness/BR-SCHED-TQ-001.creusot.rs", edited.stdout)
+        self.assertIn("protected-write", edited.stdout)
+
+        harness.unlink()
+        missing = self.run_artifact("--workspace", str(self.workspace), "gate-g9")
+        self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
+        self.assertIn("no generated harness", missing.stdout + missing.stderr)
+        self.assertIn("ligature.pyz check-bridges", missing.stdout + missing.stderr)
+
     def test_the_write_grant_flow_runs_end_to_end_through_the_packaged_binary(self):
         """chainlink #114 end to end through the packaged artifact and
         `python3 -I` with no source tree: the sanctioned protected-root write,
@@ -624,6 +775,73 @@ impl Year {\n\
             "require_complete_reconciliation" in finding["reason"]
             for finding in strict_report["findings"]
         ))
+
+    def test_c_static_source_binding_fails_closed_through_packaged_gates(self):
+        """#169: source, gates, and status/check in the exact zipapp all
+        reject stale, pre-source, and legacy observations, while a fresh
+        extraction remains consumable."""
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_gate_g14 import Workspace  # noqa: E402
+
+        fixture = Workspace(self.workspace)
+        source = self.workspace / "crates/scheduler/src/lib.rs"
+        original_source = source.read_text()
+        source.unlink()
+
+        empty_extract = self.run_artifact(
+            "--workspace", str(self.workspace), "extract-c-static", "--target", "x86_64-unknown-linux-gnu"
+        )
+        self.assertEqual(empty_extract.returncode, 0, empty_extract.stdout + empty_extract.stderr)
+        self.assertIn("0 discovered", empty_extract.stdout)
+
+        for command in ("gate-r1-g16", "gate-g14"):
+            with self.subTest(stage="empty-observation", command=command):
+                result = self.run_artifact("--workspace", str(self.workspace), command, "--json")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("reports no local concepts or call sites", result.stdout)
+                self.assertIn("ligature extract-c-static --target x86_64-unknown-linux-gnu", result.stdout)
+
+        source.write_text(original_source)
+        for command in ("gate-r1-g16", "gate-g14"):
+            with self.subTest(stage="source-added", command=command):
+                result = self.run_artifact("--workspace", str(self.workspace), command, "--json")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("source binding is stale", result.stdout)
+                self.assertIn("ligature extract-c-static --target x86_64-unknown-linux-gnu", result.stdout)
+
+        fresh = self.run_artifact(
+            "--workspace", str(self.workspace), "extract-c-static", "--target", "x86_64-unknown-linux-gnu"
+        )
+        self.assertEqual(fresh.returncode, 0, fresh.stdout + fresh.stderr)
+        for command in ("gate-r1-g16", "gate-g14"):
+            with self.subTest(stage="fresh", command=command):
+                result = self.run_artifact("--workspace", str(self.workspace), command, "--json")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        source.write_text(original_source + "\nimpl Scheduler { pub fn edited(&self) {} }\n")
+        for command in ("gate-r1-g16", "gate-g14"):
+            with self.subTest(stage="edited-source", command=command):
+                result = self.run_artifact("--workspace", str(self.workspace), command, "--json")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("source binding is stale", result.stdout)
+
+        report_path = self.workspace / "ci/results/c_static/crates_scheduler.json"
+        legacy = json.loads(report_path.read_text())
+        legacy["schema_version"] = "1.0"
+        legacy.pop("source_binding")
+        report_path.write_text(json.dumps(legacy, indent=2))
+        for command in ("gate-r1-g16", "gate-g14"):
+            with self.subTest(stage="legacy-unbound", command=command):
+                result = self.run_artifact("--workspace", str(self.workspace), command, "--json")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("legacy C_static report has no source binding", result.stdout)
+                self.assertIn("ligature extract-c-static --target x86_64-unknown-linux-gnu", result.stdout)
+
+        for command in ("check", "status"):
+            with self.subTest(stage="read-model", command=command):
+                result = self.run_artifact("--workspace", str(self.workspace), command, "--json")
+                payload = json.loads(result.stdout)
+                self.assertIn("legacy C_static report has no source binding", json.dumps(payload))
 
     def test_doctor_verifies_before_init(self):
         proc = self.run_artifact("--workspace", str(self.workspace), "doctor")

@@ -68,9 +68,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
 from extract_c_static import GENERAL_CALL  # noqa: E402
 from extract_c_static import VALUE_DOMAIN_INQUIRY  # noqa: E402
+from extract_c_static import EXTRACTOR_NAME  # noqa: E402
+from extract_c_static import EXTRACTOR_VERSION  # noqa: E402
 from extract_c_static import CalleeShape  # noqa: E402
 from extract_c_static import ExtractionError  # noqa: E402
 from extract_c_static import callee_shape_index  # noqa: E402
+from extract_c_static import compute_source_binding  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from scan_summary import pass_line  # noqa: E402
 
@@ -310,17 +313,112 @@ def check_callsite_identity(path: Path, data: dict) -> list[Finding]:
     return findings
 
 
+def _manifest_owns_functions_in_crate(workspace: Path, crate_dir: str) -> bool:
+    """Detect an empty observation for a crate that the package manifests
+    actually assign implementation functions to. The literal source-root
+    prefix in `allowed_write_set` ties package ownership to this crate; the
+    package must also name functions, so a broad generic write pattern alone
+    cannot make an empty observation suspicious.
+    """
+    manifest_dir = workspace / "ci" / "manifest"
+    if not manifest_dir.is_dir():
+        return False
+    for manifest_path in sorted(manifest_dir.glob("*.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("functions"), list):
+            continue
+        if not any(isinstance(function, str) and function.strip() for function in manifest["functions"]):
+            continue
+        write_policy = manifest.get("write_policy")
+        allowed = write_policy.get("allowed_write_set") if isinstance(write_policy, dict) else []
+        if not isinstance(allowed, list):
+            continue
+        for pattern in allowed:
+            if not isinstance(pattern, str):
+                continue
+            fixed_prefix = pattern.split("*", 1)[0].rstrip("/")
+            if fixed_prefix == crate_dir or fixed_prefix.startswith(crate_dir + "/"):
+                return True
+    return False
+
+
+def check_source_binding(path: Path, data: dict, workspace: Path | None) -> list[Finding]:
+    binding = data.get("source_binding")
+    target = data.get("config_scope", {}).get("target")
+    action = f"run `ligature extract-c-static --target {target}`" if isinstance(target, str) else (
+        "rerun `ligature extract-c-static --target <target-triple>`"
+    )
+    if not isinstance(binding, dict):
+        return [Finding(
+            "G1b", path,
+            "legacy C_static report has no source binding, so freshness cannot be established; "
+            f"{action}",
+        )]
+
+    scope = data.get("coverage_scope")
+    if (
+        not isinstance(scope, dict)
+        or scope.get("extractor") != EXTRACTOR_NAME
+        or scope.get("extractor_version") != EXTRACTOR_VERSION
+    ):
+        return [Finding(
+            "G1b", path,
+            "C_static report was produced by a different or unknown extractor version; "
+            f"{action}",
+        )]
+    if workspace is None:
+        return []
+
+    crate_dir = data["crate_dir"]
+    root = workspace.resolve()
+    crate_root = (workspace / crate_dir).resolve()
+    if crate_root != root and root not in crate_root.parents:
+        return [Finding("G1b", path, f"C_static crate_dir {crate_dir!r} resolves outside the workspace")]
+    try:
+        current = compute_source_binding(crate_root, crate_dir, data["config_scope"])
+    except (ExtractionError, OSError, KeyError, TypeError) as exc:
+        return [Finding(
+            "G1b", path,
+            f"cannot recompute the C_static source binding for {crate_dir!r}: {exc}; {action}",
+        )]
+
+    if binding.get("digest") != current["digest"] or binding.get("file_count") != current["file_count"]:
+        return [Finding(
+            "G1b", path,
+            f"C_static source binding is stale for {crate_dir!r}; the scanned source, extractor, "
+            f"or configuration has changed since extraction; {action}",
+        )]
+
+    if (
+        not data["attribution_scope"]["local_concepts"]
+        and not data["callsites"]
+        and _manifest_owns_functions_in_crate(workspace, crate_dir)
+    ):
+        return [Finding(
+            "G1b", path,
+            f"C_static observation for {crate_dir!r} reports no local concepts or call sites "
+            "although a work-package manifest assigns functions to this crate; this empty "
+            f"observation is suspect; {action}",
+        )]
+    return []
+
+
 def validate_data(
     path: Path,
     data: dict,
     validator: Draft202012Validator,
     resolve_shapes: ShapeIndexFor | None = None,
+    workspace: Path | None = None,
 ) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
         return g1a
     findings: list[Finding] = []
     findings.extend(check_naming(path, data))
+    findings.extend(check_source_binding(path, data, workspace))
     findings.extend(check_computed_coverage(path, data))
     findings.extend(check_callsite_identity(path, data))
     if resolve_shapes is not None:
@@ -335,6 +433,7 @@ def validate_file(
     path: Path,
     validator: Draft202012Validator,
     resolve_shapes: ShapeIndexFor | None = None,
+    workspace: Path | None = None,
 ) -> list[Finding]:
     try:
         text = path.read_text()
@@ -346,7 +445,7 @@ def validate_file(
         return [Finding("G1a", path, f"invalid JSON: {e}")]
     if not isinstance(data, dict):
         return [Finding("G1a", path, "top-level value is not a JSON object")]
-    return validate_data(path, data, validator, resolve_shapes)
+    return validate_data(path, data, validator, resolve_shapes, workspace)
 
 
 def find_report_files(root: Path) -> list[Path]:
@@ -378,7 +477,7 @@ def validate_workspace(root: Path, canonical_dir: Path) -> list[Finding]:
                 )
             )
             continue
-        findings.extend(validate_file(path, validator, resolve_shapes))
+        findings.extend(validate_file(path, validator, resolve_shapes, root))
     return findings
 
 
@@ -415,7 +514,7 @@ def load_reports(workspace: Path) -> list[tuple[Path, dict]]:
     resolve_shapes = shape_index_resolver(workspace)
     reports: list[tuple[Path, dict]] = []
     for path in sorted(p for p in canonical.iterdir() if p.is_file()):
-        findings = validate_file(path, validator, resolve_shapes)
+        findings = validate_file(path, validator, resolve_shapes, workspace)
         if any(f.severity == "error" for f in findings):
             continue
         reports.append((path, json.loads(path.read_text())))

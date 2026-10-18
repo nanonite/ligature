@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "report_id": "crates_crypto-mixed-core",
+  "crate_dir": "crates/crypto-mixed-core",
+  "coverage_scope": {
+    "extractor": "coarse-syntactic-callgraph",
+    "extractor_version": "0.2.0",
+    "extractor_backing": "syntactic",
+    "supported_call_forms": [
+      "associated-path-call",
+      "self-method-call",
+      "inherent-method-call-by-name"
+    ],
+    "unsupported_call_forms": [
+      "macro-expanded-call",
+      "generated-code",
+      "ffi-callback",
+      "call-to-non-local-type"
+    ],
+    "completeness_claim": "discovered-lower-bound"
+  },
+  "config_scope": {
+    "target": "x86_64-unknown-linux-gnu",
+    "features": [],
+    "cfg": []
+  },
+  "attribution_scope": {
+    "scanned_item_kinds": [
+      "inherent-impl-method",
+      "trait-impl-method"
+    ],
+    "local_concepts": [],
+    "unattributed_call_sites": 0,
+    "out_of_scope_call_sites": 0,
+    "macro_invocations": 0
+  },
+  "callsites": [],
+  "callsite_coverage": {
+    "discovered": 0,
+    "resolved": 0,
+    "unresolved": 0
+  }
+}

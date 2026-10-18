@@ -29,6 +29,7 @@ from measure_gold_set import (  # noqa: E402
     measurement_dir_for,
     report,
 )
+from extract_c_static import compute_source_binding  # noqa: E402
 from test_validate_gold_set import gold_set  # noqa: E402
 
 REVIEW = {"reviewer": "alice", "reviewed_at": "2026-09-04"}
@@ -140,6 +141,14 @@ class MeasurementTestCase(unittest.TestCase):
     def write(self, relative: str, data: dict) -> Path:
         path = self.workspace / relative
         path.parent.mkdir(parents=True, exist_ok=True)
+        if relative == "ci/results/c_static/crates_scheduler.json":
+            crate_root = self.workspace / data["crate_dir"]
+            crate_root.mkdir(parents=True, exist_ok=True)
+            data["schema_version"] = "1.1"
+            data["coverage_scope"]["extractor_version"] = "0.2.0"
+            data["source_binding"] = compute_source_binding(
+                crate_root, data["crate_dir"], data["config_scope"]
+            )
         path.write_text(json.dumps(data, indent=2))
         return path
 
@@ -339,6 +348,14 @@ class ModePPilotClusterTest(unittest.TestCase):
     def write(self, relative: str, data: dict) -> Path:
         path = self.workspace / relative
         path.parent.mkdir(parents=True, exist_ok=True)
+        if relative == "ci/results/c_static/crates_scheduler.json":
+            crate_root = self.workspace / data["crate_dir"]
+            crate_root.mkdir(parents=True, exist_ok=True)
+            data["schema_version"] = "1.1"
+            data["coverage_scope"]["extractor_version"] = "0.2.0"
+            data["source_binding"] = compute_source_binding(
+                crate_root, data["crate_dir"], data["config_scope"]
+            )
         path.write_text(json.dumps(data, indent=2))
         return path
 

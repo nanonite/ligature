@@ -131,9 +131,14 @@ class CurrentExitAndJsonContractTest(unittest.TestCase):
             {
                 "migrate", "status", "check", "write-set-check", "authorize-write",
                 "scaffold-crate", "configure-crate", "configure-cargo-profile",
-                "generate-work-package", "schema", "gate-g14", "gate-r1-g16", "gate",
+                "generate-work-package", "schema", "contract", "gate-g14", "gate-r1-g16", "gate",
             },
         )
+
+    def test_every_parser_subcommand_has_a_contract_entry(self):
+        names = [name for name, _profile in self._table_rows()]
+        self.assertEqual(set(names), set(pipeline.registered_commands()))
+        self.assertEqual(len(names), len(set(names)))
 
     def test_top_level_and_command_help_point_to_the_contract(self):
         parser = pipeline.build_parser()

@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from extract_c_static import VALUE_DOMAIN_INQUIRY  # noqa: E402
+from extract_c_static import VALUE_DOMAIN_INQUIRY, compute_source_binding  # noqa: E402
 from gate_r1_g16 import (  # noqa: E402
     EXIT_BLOCKED,
     EXIT_DECISION_REQUIRED,
@@ -420,11 +420,19 @@ class WorkspaceTest(unittest.TestCase):
         self.canonical = canonical
         self.interactions_dir = self.workspace / "crates" / "scheduler" / "specs" / "_interactions"
         self.interactions_dir.mkdir(parents=True)
+        (self.workspace / "crates" / "scheduler" / "src").mkdir(parents=True)
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def write_report(self, report: dict) -> None:
+        report["schema_version"] = "1.1"
+        report["coverage_scope"]["extractor_version"] = "0.2.0"
+        crate_root = self.workspace / report["crate_dir"]
+        crate_root.mkdir(parents=True, exist_ok=True)
+        report["source_binding"] = compute_source_binding(
+            crate_root, report["crate_dir"], report["config_scope"]
+        )
         (self.canonical / f"{report['report_id']}.json").write_text(json.dumps(report))
 
     def write_interaction(self, record: dict) -> None:
@@ -473,6 +481,16 @@ class WorkspaceTest(unittest.TestCase):
         self.assertIn("no coverage claimed", statement)
         self.assertNotIn(HONEST_COVERAGE_STATEMENT, statement)
         self.assertEqual(texts(findings, severity="error"), [])
+
+    def test_gate_reports_stale_source_binding_with_the_refresh_command(self):
+        self.write_report(valid_report())
+        source = self.workspace / "crates/scheduler/src/lib.rs"
+        source.write_text("pub struct Scheduler; impl Scheduler { fn fresh(&self) {} }\n")
+        findings, counts = gate_workspace(self.workspace, {"crates/scheduler": self.interactions_dir})
+        reasons = texts(findings)
+        self.assertTrue(any("source binding is stale" in reason for reason in reasons), reasons)
+        self.assertTrue(any("ligature extract-c-static --target x86_64-unknown-linux-gnu" in reason for reason in reasons), reasons)
+        self.assertEqual(counts.reports, 0)
 
     def test_cli_requires_reports_to_exist(self):
         empty = Path(self._tmp.name) / "empty"

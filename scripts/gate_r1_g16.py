@@ -82,6 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract_c_static import VALUE_DOMAIN_INQUIRY  # noqa: E402
 from validate_callsites import callsite_report_dir_for  # noqa: E402
 from validate_callsites import load_reports  # noqa: E402
+from validate_callsites import validate_workspace as validate_callsite_reports  # noqa: E402
 from validate_interaction import load_interactions_by_id  # noqa: E402
 
 HONEST_COVERAGE_STATEMENT = "source resolution is complete"
@@ -428,6 +429,10 @@ def gate_workspace(
     reports zero findings while checking zero things."""
     findings: list[Finding] = []
     totals = Reconciliation()
+    for callsite_finding in validate_callsite_reports(workspace, callsite_report_dir_for(workspace)):
+        findings.append(Finding(
+            "G1b", callsite_finding.path, callsite_finding.reason, "error"
+        ))
     for path, report in load_reports(workspace):
         crate_dir = report["crate_dir"]
         interaction_dir = interaction_dir_by_crate.get(crate_dir)
@@ -475,7 +480,8 @@ def gate_workspace(
             Finding(
                 "G16", callsite_report_dir_for(workspace),
                 "no C_static report was reconciled -- the report directory holds nothing "
-                "valid to check (an empty reconciliation is not a pass); run extract-c-static, "
+                "valid to check (an empty reconciliation is not a pass); run "
+                "`ligature extract-c-static --target <target-triple>`, "
                 "and check validate-callsites for reports rejected by G1a/G1b",
             )
         )

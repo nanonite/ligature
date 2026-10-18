@@ -76,7 +76,7 @@ ROOT = resources.resource_root()
 
 MANIFEST_SCHEMA_VERSION = "1.0"
 MANIFEST_RELATIVE_PATH = "ci/manifest/installation.json"
-SKILL_VERSION = "1.0"
+SKILL_VERSION = "1.1"
 SKILL_RELATIVE_PATH = ".codex/skills/ligature/SKILL.md"
 
 AUTHORITY_BEGIN = "<!-- LIGATURE-AUTHORITY-BEGIN"

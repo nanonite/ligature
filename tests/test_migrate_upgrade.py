@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -79,10 +80,39 @@ class MigrateUpgradeTest(unittest.TestCase):
         descriptor = self.workspace / "project-descriptor.json"
         data = json.loads(descriptor.read_text())
         data.get("verifier_policy", {}).pop("scheduling", None)
+        # The old template used recursive patterns for Cargo/build/Kani
+        # files. The current descriptor contract rejects those because they
+        # overlap the explicitly writable src/ and tests/ trees. Preserve the
+        # same intended protected files with precise crate-root patterns.
+        write_set = data.get("write_set", {})
+        protected = set(write_set.get("protected_roots", []))
+        protected.discard("**/Cargo.toml")
+        protected.discard("**/build.rs")
+        protected.discard("**/kani.toml")
+        protected.update(
+            {
+                "Cargo.toml",
+                "crates/*/Cargo.toml",
+                "build.rs",
+                "crates/*/build.rs",
+                "kani.toml",
+                "crates/*/kani.toml",
+            }
+        )
+        write_set["protected_roots"] = sorted(protected)
         # A real reviewer value, not the shipped example placeholder.
         if isinstance(data.get("review"), dict):
             data["review"]["reviewer"] = "alice"
+            data["review"]["reviewed_at"] = date.today().isoformat()
         descriptor.write_text(json.dumps(data, indent=2) + "\n")
+        # Current check also reports missing declared crate roots as a Stage
+        # 8A prerequisite. Keep this migration fixture focused on installation
+        # state by providing the empty project crate it declares.
+        for crate in data.get("crates", []):
+            crate_root = self.workspace / crate["crate_dir"]
+            src = crate_root / "src"
+            src.mkdir(parents=True, exist_ok=True)
+            (src / "lib.rs").write_text("// migration fixture crate\n")
 
     def test_upgrade_refreshes_gate_integrity_and_audit_is_machine_readable(self):
         self.init_prior()

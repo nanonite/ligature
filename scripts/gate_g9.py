@@ -296,6 +296,11 @@ def check_bridges(
             )
             continue
 
+        print(
+            f"[ligature] bridge {bridge_id}: dispatching {verifier} harness {harness.name}",
+            file=sys.stderr,
+            flush=True,
+        )
         verdict, argv, exit_code, error = dispatch(harness, harness_path, backend, runner)
         if verdict is None:
             findings.append(
@@ -441,7 +446,7 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[Finding], in
                 Finding(
                     "G9", bridge_id,
                     f"no generated harness at {_workspace_relative(harness_path, workspace)} -- run "
-                    "`pipeline.py check-bridges`",
+                    "`ligature.pyz check-bridges`",
                 )
             )
         elif harness_path.read_text() != harness.source:
@@ -592,7 +597,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--descriptor", type=Path, default=None)
     parser.add_argument(
         "--generate", action="store_true",
-        help="compile, write and dispatch first (equivalent to `pipeline.py check-bridges`)",
+        help="compile, write and dispatch first (equivalent to `ligature.pyz check-bridges`)",
     )
     args = parser.parse_args(argv)
 

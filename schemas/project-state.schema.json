@@ -1,18 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/schemas/project-state.schema.json",
-  "title": "Project state — v1.0",
-  "description": "Chainlink #55/#56. The output contract for the future `ligature status --json`, specified here so #56 implements against a fixed shape rather than inventing one mid-build. This schema does not exist because #56 is implemented -- it is not; #56 remains the task that writes the code computing a document this schema can validate. Every enum in this schema that reports a checked condition also carries an explicit 'unknown'/'not-checked' member (never omitted, never collapsed into the nearest-looking pass value) so a status command that could not determine something reports that honestly instead of defaulting to clean. Witness/implementation OBSERVATIONS (what the code and its generated projections currently show) are kept in a separate `generated_observations` object from `assurance` (what is actually verified) everywhere this schema has both, per plan.md's own witness-vs-assurance discipline (G18/G19/G20, the feature ledger's implementation_observed vs assurance_status split) -- a status document that let a witness observation stand in for an assurance verdict would be exactly the conflation that discipline exists to prevent.",
+  "title": "Project state — v1.1",
+  "description": "Chainlink #55/#56/#166. Status distinguishes recorded verifier evidence from evidence revalidated in this invocation. Default status checks current Kani source and harness hashes without rerunning Kani; --revalidate opts into that cost. Witness observations remain separate from assurance.",
   "type": "object",
   "required": [
     "schema_version", "product", "installation_manifest", "descriptor",
     "binary_identity", "artifacts", "obligations", "clusters",
     "open_findings", "human_decisions", "change_requests",
-    "gate_integrity", "write_set", "generated_observations"
+    "gate_integrity", "write_set", "verification", "generated_observations"
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "type": "string", "const": "1.0" },
+    "schema_version": { "type": "string", "const": "1.1" },
 
     "product": {
       "type": "object",
@@ -134,6 +134,18 @@
       "properties": {
         "state": { "type": "string", "enum": ["clean", "violations", "unknown"] },
         "details": { "type": "string" }
+      }
+    },
+
+    "verification": {
+      "type": "object",
+      "required": ["mode", "kani_revalidation_enabled", "source_and_harness_freshness"],
+      "additionalProperties": false,
+      "description": "How this status invocation handled recorded verifier evidence. recorded means current source and harness hashes were compared with the recorded values, while Kani itself was not rerun; revalidated means G14 reran any recorded Kani harnesses. This status metadata does not replace the per-record evidence.",
+      "properties": {
+        "mode": { "type": "string", "enum": ["recorded", "revalidation-enabled"] },
+        "kani_revalidation_enabled": { "type": "boolean" },
+        "source_and_harness_freshness": { "type": "string", "const": "checked" }
       }
     },
 

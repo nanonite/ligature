@@ -14,7 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +38,7 @@ from gate_g9 import (  # noqa: E402
 from test_gate_g14 import Workspace, bridge_spec  # noqa: E402
 from validate_bridge import load_validator as load_bridge_validator  # noqa: E402
 from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
+from write_set import check_write_set  # noqa: E402
 
 FAKE_VERIFIER = ROOT / "tests" / "fixtures" / "bridges" / "verifier" / "fake_verifier.py"
 BRIDGE_ID = "BR-SCHED-TQ-001"
@@ -111,6 +112,16 @@ class GenerationTest(G9TestCase):
         self.assertTrue((bridge_check_dir_for(self.root) / f"{BRIDGE_ID}.json").is_file())
         self.assertEqual(len(written), 2)
 
+    def test_verifier_dispatch_prints_bridge_progress_to_stderr(self):
+        progress = io.StringIO()
+        with redirect_stderr(progress):
+            _written, findings = self.generate()
+        self.assertEqual(self.errors(findings), [])
+        self.assertIn(
+            f"[ligature] bridge {BRIDGE_ID}: dispatching creusot harness bridge_br_sched_tq_001",
+            progress.getvalue(),
+        )
+
     def test_the_recorded_hash_is_the_hash_of_the_generated_harness(self):
         self.generate()
         harness = compile_bridge(bridge_spec(), "creusot")
@@ -138,6 +149,37 @@ class GenerationTest(G9TestCase):
         checks, findings = load_bridge_checks(self.root)
         self.assertEqual(findings, [])
         self.assertEqual(sorted(checks), [BRIDGE_ID])
+
+    def test_generated_bridge_harness_is_vouched_only_while_it_matches(self):
+        descriptor = dict(self.descriptor)
+        descriptor["write_set"] = {
+            "allowed_roots": ["crates/**", "verif/**"],
+            "protected_roots": ["ci/harness/**"],
+        }
+        self.generate(descriptor)
+        self.align_assurance_report()
+        gate_findings, _ = self.gate(descriptor)
+        self.assertEqual(self.errors(gate_findings), [])
+
+        clean = check_write_set(
+            self.root, descriptor, self.root / "project-descriptor.json"
+        )
+        self.assertEqual(clean.state, "clean", clean)
+
+        harness_path = harness_dir_for(self.root) / f"{BRIDGE_ID}.creusot.rs"
+        harness_path.write_text(harness_path.read_text() + "// edited\n")
+        edited = check_write_set(
+            self.root, descriptor, self.root / "project-descriptor.json"
+        )
+        self.assertEqual(edited.state, "violations")
+        self.assertTrue(
+            any(
+                v.path == "ci/harness/BR-SCHED-TQ-001.creusot.rs"
+                and v.kind == "protected-write"
+                for v in edited.violations
+            ),
+            edited.violations,
+        )
 
 
 class NoVerifierTest(G9TestCase):
@@ -477,7 +519,11 @@ class RelativeWorkspaceRootTest(G9TestCase):
         errors = self.errors(findings)
         self.assertEqual(discovered, 1)
         self.assertTrue(
-            any("no generated harness at ci/harness/BR-SCHED-TQ-001.creusot.rs" in e for e in errors),
+            any(
+                "no generated harness at ci/harness/BR-SCHED-TQ-001.creusot.rs" in e
+                and "ligature.pyz check-bridges" in e
+                for e in errors
+            ),
             errors,
         )
 

@@ -1134,8 +1134,18 @@ def configure_crate_profile(
             common = ["--manifest-path", str(manifest_path), "--package", target.package]
             _run(["cargo", "check", *common], workspace)
             validation["cargo_check"] = "cargo check passed"
+            print(
+                f"[ligature] Verus: verifying crate {target.crate_dir} ({target.package})",
+                file=sys.stderr,
+                flush=True,
+            )
             _run(["cargo", "verus", "verify", *common], workspace)
             validation["verus_verify"] = "cargo verus verify passed"
+            print(
+                f"[ligature] Verus: building crate {target.crate_dir} ({target.package})",
+                file=sys.stderr,
+                flush=True,
+            )
             _run(["cargo", "verus", "build", *common], workspace)
             validation["verus_build"] = "cargo verus build passed"
             _run(["cargo", "test", *common], workspace)

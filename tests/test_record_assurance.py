@@ -491,6 +491,89 @@ class KaniRecordAssuranceTest(RecordAssuranceTestCase):
             )
         return code, output.getvalue(), errors.getvalue()
 
+    def prepare_status_workspace(self):
+        descriptor = json.loads(
+            (ROOT / "schemas" / "examples" / "project-descriptor.greenfield.example.json").read_text()
+        )
+        descriptor["crates"] = [
+            {
+                "crate_dir": "crates/scheduler",
+                "contracts_crate": "contracts",
+                "specs_search_root": "crates",
+            }
+        ]
+        descriptor["verifier_policy"] = {"default": "kani"}
+        (self.root / "project-descriptor.json").write_text(json.dumps(descriptor, indent=2) + "\n")
+        profile = {
+            "schema_version": "1.0",
+            "cluster": CLUSTER,
+            "closure_kind": "bounded",
+            "work_packages": [WORK_PACKAGE],
+            "conditions": {
+                "single_verifier_system": True,
+                "owning_verifier": "kani",
+                "protocol_class_all_pairwise": True,
+                "unresolved_indirect_calls_at_or_above_medium": 0,
+                "generic_callees_type_universal_or_creusot_owned": True,
+                "transitive_assumptions_within_policy": True,
+                "scc_wellfoundedness_discharged": "not-applicable",
+            },
+            "review": {"reviewer": "alice", "reviewed_at": "2026-09-04"},
+        }
+        closure_path = self.root / "specs" / "_closure" / f"{CLUSTER}.json"
+        closure_path.parent.mkdir(parents=True, exist_ok=True)
+        closure_path.write_text(json.dumps(profile, indent=2) + "\n")
+
+    def run_status(self, *options):
+        output, errors = StringIO(), StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            code = pipeline.main(
+                ["--workspace", str(self.root), "status", "--json", *options]
+            )
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_status_reads_fresh_kani_record_without_spawning_verifier(self):
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani()
+        ):
+            self.record()
+        self.prepare_status_workspace()
+        with patch(
+            "record_assurance.run_kani_067",
+            side_effect=AssertionError("default status must not rerun Kani"),
+        ), patch(
+            "record_assurance.subprocess.run",
+            side_effect=AssertionError("default status must not spawn verifier processes"),
+        ):
+            code, output, errors = self.run_status()
+        self.assertEqual(code, 0, errors)
+        document = json.loads(output)
+        self.assertEqual(document["schema_version"], "1.1")
+        self.assertEqual(document["verification"]["mode"], "recorded")
+        self.assertFalse(document["verification"]["kani_revalidation_enabled"])
+        self.assertEqual(document["verification"]["source_and_harness_freshness"], "checked")
+
+    def test_status_revalidate_reruns_kani_once_and_reports_progress(self):
+        with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
+            "record_assurance.subprocess.run", side_effect=self.fake_kani()
+        ):
+            self.record()
+        self.prepare_status_workspace()
+        proof = self.kani_output()
+        summary = record_assurance_module.parse_kani_067_result(
+            proof.result_text, proof.stdout, proof.returncode, self.HARNESS_IDENTITY
+        )
+        with patch(
+            "record_assurance.run_kani_067", return_value=summary
+        ) as rerun:
+            code, output, errors = self.run_status("--revalidate")
+        self.assertEqual(code, 0, errors)
+        document = json.loads(output)
+        self.assertEqual(document["verification"]["mode"], "revalidation-enabled")
+        self.assertTrue(document["verification"]["kani_revalidation_enabled"])
+        self.assertEqual(rerun.call_count, 1)
+        self.assertIn(self.HARNESS, errors)
+
     def test_exact_harness_records_manifest_claim_and_g14_rechecks_run(self):
         with patch("record_assurance.shutil.which", side_effect=lambda exe: f"/usr/bin/{exe}"), patch(
             "record_assurance.subprocess.run", side_effect=self.fake_kani()

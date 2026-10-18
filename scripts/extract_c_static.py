@@ -898,6 +898,47 @@ def rust_sources(crate_root: Path) -> list[Path]:
     return sorted(p for p in crate_root.glob("**/*.rs") if p.is_file())
 
 
+def compute_source_binding(
+    crate_root: Path,
+    crate_dir: str,
+    config_scope: dict,
+    sources: list[Path] | None = None,
+) -> dict:
+    """Bind an observation to its exact Rust source snapshot and config.
+
+    Source paths are relative to the crate root so the binding is stable
+    across workspace copies. File names and content hashes both participate;
+    so do the extractor identity and target/features/cfg.
+    """
+    listed_sources = rust_sources(crate_root) if sources is None else sources
+    file_records = []
+    for path in listed_sources:
+        try:
+            relative = path.relative_to(crate_root).as_posix()
+            content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, ValueError) as exc:
+            raise ExtractionError(f"cannot bind source file {path}: {exc}") from exc
+        file_records.append({"path": relative, "sha256": content_hash})
+
+    normalized_scope = {
+        "target": config_scope["target"],
+        "features": sorted(config_scope["features"]),
+        "cfg": sorted(config_scope["cfg"]),
+    }
+    payload = {
+        "crate_dir": crate_dir,
+        "extractor": {"name": EXTRACTOR_NAME, "version": EXTRACTOR_VERSION},
+        "config_scope": normalized_scope,
+        "source_files": file_records,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return {
+        "algorithm": "sha256",
+        "digest": "sha256:" + hashlib.sha256(encoded).hexdigest(),
+        "file_count": len(file_records),
+    }
+
+
 def extract_crate(
     crate_root: Path,
     workspace: Path,
@@ -932,9 +973,10 @@ def extract_crate(
 
     callsites = _to_records(raw, previous, callee_shape_index_from_parsed(parsed))
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "report_id": report_id,
         "crate_dir": crate_dir,
+        "source_binding": compute_source_binding(crate_root, crate_dir, config_scope, sources),
         "coverage_scope": {
             "extractor": EXTRACTOR_NAME,
             "extractor_version": EXTRACTOR_VERSION,

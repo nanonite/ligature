@@ -381,6 +381,7 @@ Not yet implemented:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -1788,7 +1789,8 @@ def cmd_gate_r1_g16(args: argparse.Namespace) -> int:
     if not _callsite_report_dir_for(workspace).is_dir():
         raise PipelineError(
             f"no C_static reports at {_callsite_report_dir_for(workspace)} -- run "
-            "`pipeline.py extract-c-static` first; an empty reconciliation is not a pass"
+            "`ligature extract-c-static --target <target-triple>` first; "
+            "an empty reconciliation is not a pass"
         )
     interaction_dirs = {
         crate["crate_dir"]: _interaction_dir_for(crate, workspace) for crate in descriptor["crates"]
@@ -2929,6 +2931,27 @@ def cmd_schema(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_contract(args: argparse.Namespace) -> int:
+    """Print the CLI contract bundled in this build (#167)."""
+    contract_path = resources.resource_path("docs", "cli-contract.md")
+    raw = contract_path.read_bytes()
+    contract = raw.decode("utf-8")
+    match = re.search(r"(?m)^# Ligature CLI contract — grammar (v[0-9.]+)$", contract)
+    if match is None:
+        raise PipelineError("the bundled CLI contract has no recognized grammar version")
+    if args.json:
+        document = {
+            "format": "ligature.cli-contract.v1",
+            "grammar_version": match.group(1),
+            "sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "contract": contract,
+        }
+        sys.stdout.write(canonical_json(document))
+    else:
+        sys.stdout.write(contract)
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """The capability manifest (docs/cli-contract.md §8). This used to be
     `status`'s body; it moved here when #56 rewired `status` to the real
@@ -3138,8 +3161,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     `--issue N` (chainlink #114) scopes the write-set state to one issue's
     write grants; all three read-only surfaces take the same flag and mean
     the same thing, so none of them can report a different write-set verdict
-    about the same workspace and the same run."""
-    document = build_project_state(args.workspace, args.descriptor, issue=args.issue)
+    about the same workspace and the same run. Kani is not rerun unless
+    --revalidate is present; recorded source and harness hashes are still
+    checked in the default mode."""
+    document = build_project_state(
+        args.workspace,
+        args.descriptor,
+        issue=args.issue,
+        revalidate_kani=args.revalidate,
+    )
     if args.json:
         sys.stdout.write(canonical_json(document))
     else:
@@ -3367,7 +3397,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Global options such as --workspace and --descriptor must precede the subcommand.\n"
             "Exit codes and JSON support are command-specific. Only commands whose usage lists "
-            "--json accept it; see the shipped CLI contract for per-command outcomes."
+            "--json accept it; run ligature contract [--json] for the bundled CLI contract."
         ),
     )
     parser.add_argument(
@@ -3677,7 +3707,8 @@ def build_parser() -> argparse.ArgumentParser:
             "properties are not accepted as proof. The complete aggregate and "
             "VERIFICATION:- SUCCESSFUL summaries are required. G14 repeats the run and matches "
             "the recorded summary; a legacy record without one is refused if the rerun has "
-            "unreachable checks. "
+            "unreachable checks. Recording and G14 can take minutes and several GB per harness; "
+            "Ligature prints per-harness progress to stderr. "
             "Bounded scope cannot satisfy a broader manifest minimum_scope"
         ),
     )
@@ -3753,8 +3784,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_bridges_p = sub.add_parser(
         "check-bridges",
-        help="Stage 8A: compile bridge_logic to a harness, dispatch it to the owning verifier (#47)",
-        description="Generate and check bridge harnesses in the selected workspace.",
+        help="Stage 8A: compile bridge_logic and dispatch each harness to its verifier; runtime depends on configured backends (#47)",
+        description="Generate and check bridge harnesses in the selected workspace. Prints per-harness progress; verifier cost depends on the configured backend.",
         epilog="Global options must precede this command, for example: ligature --workspace <dir> check-bridges",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -3774,7 +3805,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     gate_g14_p = sub.add_parser(
         "gate-g14",
-        help="Stage 8C: G14 transitive closure + CG6 discharge, per cluster (chainlink #25)",
+        help="Stage 8C: G14 transitive closure + CG6 discharge, per cluster; reruns Kani evidence and can take minutes and several GB per harness (chainlink #25)",
     )
     gate_g14_p.add_argument("--json", action="store_true", help="emit the versioned G14 scope/evidence report")
     gate_g14_p.set_defaults(func=cmd_gate_g14)
@@ -3877,6 +3908,21 @@ def build_parser() -> argparse.ArgumentParser:
     schema_export_p.add_argument("--output", type=Path, required=True, help="new output path; existing paths are refused")
     schema_export_p.set_defaults(func=cmd_schema)
 
+    contract_p = sub.add_parser(
+        "contract",
+        help="Print the CLI contract bundled with this executable (#167)",
+        description=(
+            "Print the exact per-command CLI contract shipped in this executable. "
+            "No checkout or network access is required."
+        ),
+    )
+    contract_p.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the versioned ligature.cli-contract.v1 document",
+    )
+    contract_p.set_defaults(func=cmd_contract)
+
     status_p = sub.add_parser(
         "status",
         description=(
@@ -3885,10 +3931,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         help=(
             "Project state and gates; concept references resolve under each crate's declared "
-            "specs_search_root (chainlink #56/#149)"
+            "specs_search_root (chainlink #56/#149); recorded Kani state is read cheaply by default"
         ),
     )
     status_p.add_argument("--json", action="store_true", help="emit schemas/project-state.schema.json JSON")
+    status_p.add_argument(
+        "--revalidate",
+        action="store_true",
+        help=(
+            "rerun recorded Kani harnesses through G14; this can take minutes and several GB "
+            "per harness. Default status checks recorded source/harness hashes without running Kani"
+        ),
+    )
     status_p.add_argument(
         "--issue",
         type=int,
@@ -3911,7 +3965,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         help=(
             "Read-only consolidated gate run + next action; concept references use each crate's "
-            "declared specs_search_root (chainlink #56/#149)"
+            "declared specs_search_root (chainlink #56/#149); G14 reruns recorded Kani harnesses, "
+            "which can take minutes and several GB per harness"
         ),
     )
     check_p.add_argument("--json", action="store_true", help="emit schemas/consolidated-check.schema.json JSON")
@@ -4112,7 +4167,7 @@ def build_parser() -> argparse.ArgumentParser:
         "configure-crate",
         help=(
             "apply a declared typed profile to an existing crate manifest; "
-            "the cargo-verus profile requires an exact issue-scoped write grant"
+            "the cargo-verus profile requires an exact issue-scoped write grant and runs Verus validation"
         ),
     )
     configure_crate_p.add_argument(
@@ -4125,7 +4180,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     configure_crate_p.add_argument(
         "--profile", required=True, choices=["cargo-verus"], metavar="PROFILE",
-        help="versioned typed profile to apply; v1 supports cargo-verus",
+        help=(
+            "versioned typed profile to apply; v1 supports cargo-verus, which runs "
+            "cargo verus verify/build and prints per-crate progress to stderr"
+        ),
     )
     configure_crate_p.add_argument(
         "--grant-id", default=None, metavar="GW-ID",
@@ -4244,7 +4302,13 @@ def build_parser() -> argparse.ArgumentParser:
     generate_wp_p.add_argument("--json", action="store_true", help="emit the protected-write audit result or a structured refusal")
     generate_wp_p.set_defaults(func=cmd_generate_work_package)
 
-    gate_p = sub.add_parser("gate", help="Cross-artifact gate runner: `gate <gate-id>` (docs/cli-contract.md §3)")
+    gate_p = sub.add_parser(
+        "gate",
+        help=(
+            "Cross-artifact gate runner: `gate <gate-id>` (docs/cli-contract.md §3); "
+            "G14 reruns Kani and may take minutes and several GB per harness"
+        ),
+    )
     gate_p.add_argument("gate_id", choices=sorted(_GATE_VERBS), metavar="GATE-ID")
     gate_p.add_argument("--json", action="store_true", help="emit structured output for supported gates (currently g14)")
     gate_p.set_defaults(func=cmd_gate)
@@ -4263,7 +4327,7 @@ def build_parser() -> argparse.ArgumentParser:
     for command_parser in registered_commands(parser).values():
         command_parser.epilog = (
             "Exit codes and JSON support are command-specific. Only commands whose usage lists "
-            "--json accept it; see the shipped CLI contract for per-command outcomes."
+            "--json accept it; run ligature contract [--json] for the bundled CLI contract."
         )
     return parser
 

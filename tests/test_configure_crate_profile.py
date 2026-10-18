@@ -230,6 +230,8 @@ def test_initial_profile_hashes_only_the_selected_crate_and_preserves_other_mani
         "result": "preserved",
     }
     assert f"--- {MANIFEST_REL}" in err
+    assert "[ligature] Verus: verifying crate rust/demo-core (demo-core)" in err
+    assert "[ligature] Verus: building crate rust/demo-core (demo-core)" in err
     assert len(events(workspace.ledger)) == 2
 
 

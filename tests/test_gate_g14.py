@@ -54,6 +54,7 @@ from validate_closure import load_degradation_records  # noqa: E402
 from generate_promotion_receipt import record_ruling  # noqa: E402
 from generate_promotion_receipt import ruling_log_path  # noqa: E402
 from record_assurance import concept_segment  # noqa: E402
+from extract_c_static import compute_source_binding  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 from test_validate_closure import valid_degradation, valid_profile  # noqa: E402
@@ -283,12 +284,17 @@ def callsite_report(unresolved=0, risk_tier="medium") -> dict:
             ),
         })
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "report_id": "crates_scheduler",
         "crate_dir": "crates/scheduler",
+        "source_binding": {
+            "algorithm": "sha256",
+            "digest": "sha256:" + "a" * 64,
+            "file_count": 1,
+        },
         "coverage_scope": {
             "extractor": "coarse-syntactic-callgraph",
-            "extractor_version": "0.1.0",
+            "extractor_version": "0.2.0",
             "extractor_backing": "syntactic",
             "supported_call_forms": ["associated-path-call"],
             "unsupported_call_forms": ["macro-expanded-call"],
@@ -316,6 +322,12 @@ class Workspace:
         self.root = root
         self.descriptor = default_descriptor()
         self.write("project-descriptor.json", self.descriptor)
+        source = self.root / "crates" / "scheduler" / "src" / "lib.rs"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            "pub struct Scheduler; pub struct TaskQueue; "
+            "impl Scheduler { pub fn dispatch(&self) {} }\n"
+        )
         self.write(
             "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
             boundary_contract(),
@@ -390,6 +402,13 @@ class Workspace:
     def write(self, relative: str, data: dict) -> Path:
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
+        if relative.startswith("ci/results/c_static/") and isinstance(data, dict):
+            data["schema_version"] = "1.1"
+            data["coverage_scope"]["extractor_version"] = "0.2.0"
+            crate_root = self.root / data["crate_dir"]
+            data["source_binding"] = compute_source_binding(
+                crate_root, data["crate_dir"], data["config_scope"]
+            )
         path.write_text(json.dumps(data, indent=2))
         return path
 
@@ -439,6 +458,17 @@ class Workspace:
         (crate_root / "Cargo.lock").write_text(
             '# generated fixture lockfile\nversion = 4\n'
         )
+        self.rebind_c_static()
+
+    def rebind_c_static(self) -> None:
+        report_path = self.root / "ci/results/c_static/crates_scheduler.json"
+        if not report_path.is_file():
+            return
+        report = json.loads(report_path.read_text())
+        report["source_binding"] = compute_source_binding(
+            self.root / report["crate_dir"], report["crate_dir"], report["config_scope"]
+        )
+        report_path.write_text(json.dumps(report, indent=2))
 
     def bind_kani_record(self, work_package: str, obligation: str, harness: str) -> None:
         """Bind the fixture ledger to its exact named Kani rerun target."""
@@ -624,6 +654,28 @@ class GateTestCase(unittest.TestCase):
 
     def degraded(self, outcome) -> list[str]:
         return [str(f) for f in outcome.findings if f.severity == "degraded"]
+
+
+class CStaticFreshnessGateTest(GateTestCase):
+    def test_stale_report_is_a_g14_blocker_with_reextraction_guidance(self):
+        source = self.ws.root / "crates/scheduler/src/lib.rs"
+        source.write_text(source.read_text() + "\nimpl Scheduler { pub fn changed(&self) {} }\n")
+        exit_code, printed = self.ws.run()
+        self.assertEqual(exit_code, EXIT_BLOCKED)
+        self.assertIn("C_static source binding is stale", printed)
+        self.assertIn("ligature extract-c-static --target x86_64-unknown-linux-gnu", printed)
+
+    def test_empty_report_is_suspect_when_a_manifest_owns_crate_functions(self):
+        report = callsite_report()
+        report["attribution_scope"]["local_concepts"] = []
+        report["callsites"] = []
+        report["callsite_coverage"] = {"discovered": 0, "resolved": 0, "unresolved": 0}
+        self.ws.write("ci/results/c_static/crates_scheduler.json", report)
+        exit_code, printed = self.ws.run()
+        self.assertEqual(exit_code, EXIT_BLOCKED)
+        self.assertIn("reports no local concepts or call sites", printed)
+        self.assertIn("assigns functions to this crate", printed)
+        self.assertIn("ligature extract-c-static --target x86_64-unknown-linux-gnu", printed)
 
 
 class HappyPathTest(GateTestCase):

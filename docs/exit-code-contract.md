@@ -98,11 +98,12 @@ generic envelope.
 | command(s) | current handler outcome | `--json` |
 |---|---|---|
 | `check` | Returns `result.exit_code`: 0 clean/non-blocking, 1 blocking finding, 2 invalid input, 3 pending human decision, 4 backend unavailable, or 5 gate-integrity failure, with the shared precedence above. | yes |
-| `status` | 0 when the project-state report is produced. State findings are data, not an exit threshold. | yes |
+| `status` | 0 when the version 1.1 project-state report is produced. State findings are data, not an exit threshold. Default status checks recorded Kani source/harness freshness without rerunning Kani; `--revalidate` opts into G14 reruns. | yes |
 | `write-set-check` | 0 clean; 1 conformance violations; 2 when a valid write-set cannot be evaluated. | yes |
 | `doctor` | 0 current/healthy; 1 managed-file, descriptor, or policy state needs action; 2 installation metadata is unreadable/unavailable. | no |
 | `version` | 0 for a version report or a successful `--verify`; 1 when `--verify` rejects the executable attestation. | no |
 | `schema` | 0 when the bundled catalog/schema is inspected or exported; 1 for an unknown bundled schema, unreadable resource, or refused export. Argparse usage errors exit 2. | yes |
+| `contract` | 0 when the exact CLI contract bundled in the executable is printed as Markdown or the versioned JSON envelope. | yes |
 | `init` | 0 completed without conflicts; 1 managed conflicts/drift; 2 command-handled invalid input/refusal. | no |
 | `migrate` | 0 completed without conflicts; 1 managed conflicts/drift or unresolved migration; 2 command-handled invalid input/refusal. | yes |
 | `validate`, `validate-interaction`, `validate-exemption`, `validate-protocol-debt`, `validate-bridge`, `validate-evidence`, `validate-conflict-resolution`, `validate-work-package`, `validate-promotion`, `validate-callsites`, `validate-witness`, `validate-gold-set`, `validate-closure` | 0 no blocking validation findings; 1 findings or a dispatcher-caught refusal/error. | no |

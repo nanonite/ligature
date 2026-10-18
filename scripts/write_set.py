@@ -434,8 +434,9 @@ def _is_canonical(rel: str) -> bool:
     Only ever an accounting for a file OUTSIDE every protected root (the
     protected branch below runs first, so a declared protected root is
     never excused by this heuristic). The canonical prefix is limited to
-    `ci/results/`; generated `ci/harness/` files are audited against the
-    descriptor's roots rather than being waved through as pipeline output."""
+    `ci/results/`; generated `ci/harness/` files receive a narrower,
+    byte-verified exemption in `_pipeline_artifacts` rather than being
+    waved through by location alone."""
     if any(rel.startswith(prefix) for prefix in _CANONICAL_PREFIXES):
         return True
     # Workspace-level pipeline spec artifacts: specs/_<kind>/...
@@ -546,6 +547,10 @@ def _pipeline_artifacts(workspace: Path, descriptor: dict | None) -> tuple[set[s
     )
 
     owned_dirs = {rel_dir for rel_dir, _kind in artifact_dirs(workspace, descriptor)}
+    # G9 writes Rust sources here; it is pipeline-owned for enforcement so
+    # an edited harness under a protected root is a blocking protected
+    # write. Membership in this directory alone does not vouch for bytes.
+    owned_dirs.add("ci/harness")
     recognized: set[str] = set()
     for kind, path in _discover_artifact_files(workspace, descriptor):
         rel = _rel_to_workspace(path, workspace)
@@ -563,6 +568,35 @@ def _pipeline_artifacts(workspace: Path, descriptor: dict | None) -> tuple[set[s
             if not isinstance(data.get(id_field), str):
                 continue
         recognized.add(rel)
+
+    # Stage 8A bridge harnesses are the one generated pipeline artifact that
+    # is not JSON and therefore is not covered by project_state's artifact
+    # discovery. G9 requires these files, so treating them as ordinary
+    # out-of-set writes makes a passing G9 result incompatible with a clean
+    # write-set. Vouch for a harness only when it is byte-for-byte what the
+    # current promoted bridge compiles to for its resolved verifier. This
+    # keeps a hand-edited or stale harness visible to write-set-check.
+    if descriptor is not None:
+        from bridge_harness import CompileError, compile_bridge
+        from gate_g9 import (
+            harness_dir_for,
+            load_bridges,
+            owning_verifier_by_bridge,
+            resolve_verifier,
+        )
+
+        bridges, _findings = load_bridges(workspace, descriptor)
+        owned = owning_verifier_by_bridge(workspace, descriptor)
+        harness_root = harness_dir_for(workspace)
+        for bridge_id, bridge in bridges.items():
+            verifier = resolve_verifier(bridge_id, owned, descriptor)
+            try:
+                harness = compile_bridge(bridge, verifier)
+            except CompileError:
+                continue
+            path = harness_root / harness.filename
+            if path.is_file() and path.read_bytes() == harness.source.encode("utf-8"):
+                recognized.add(_rel_to_workspace(path, workspace))
     return recognized, owned_dirs
 
 

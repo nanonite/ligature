@@ -68,7 +68,7 @@ SCHEMAS = ROOT / "schemas"
 # classify an installed manifest as current/incompatible.
 KNOWN_SCHEMA_VERSIONS = {
     "project-descriptor": "1.0",
-    "project-state": "1.0",
+    "project-state": "1.1",
     "consolidated-check": "1.0",
 }
 
@@ -920,7 +920,12 @@ def _closure_profiles(workspace: Path) -> list[Path]:
     ]
 
 
-def _clusters(workspace: Path, descriptor: dict | None) -> list[dict]:
+def _clusters(
+    workspace: Path,
+    descriptor: dict | None,
+    *,
+    gate_outcomes: list[object] | None = None,
+) -> list[dict]:
     profiles = _closure_profiles(workspace)
     if not profiles:
         return []
@@ -938,12 +943,18 @@ def _clusters(workspace: Path, descriptor: dict | None) -> list[dict]:
     # _run_standalone_validators, gate-g14 in _run_gates), so nothing is
     # lost by not repeating it as a limitation here.
     records = load_degradation_records(workspace)
-    outcomes: dict[str, object] = {}
-    if descriptor is not None:
+    outcomes: dict[str, object] = {
+        getattr(outcome, "cluster"): outcome
+        for outcome in (gate_outcomes or [])
+        if isinstance(getattr(outcome, "cluster", None), str)
+    }
+    if gate_outcomes is None and descriptor is not None:
         try:
             import gate_g14
 
-            cluster_outcomes, _ = gate_g14.gate_workspace(workspace, descriptor)
+            cluster_outcomes, _ = gate_g14.gate_workspace(
+                workspace, descriptor, revalidate_kani=False
+            )
             outcomes = {o.cluster: o for o in cluster_outcomes}
         except Exception:
             outcomes = {}
@@ -1446,6 +1457,8 @@ def _run_gates(
     descriptor: dict | None,
     *,
     missing_crate_roots: list[str] | None = None,
+    revalidate_kani: bool = True,
+    g14_outcomes: list[object] | None = None,
 ):
     """Run the six §3 gates read-only, returning (gate_runs, findings)."""
     runs: list[dict] = []
@@ -1530,7 +1543,11 @@ def _run_gates(
         try:
             import gate_g14
 
-            outcomes, raw = gate_g14.gate_workspace(workspace, descriptor)
+            outcomes, raw = gate_g14.gate_workspace(
+                workspace, descriptor, revalidate_kani=revalidate_kani
+            )
+            if g14_outcomes is not None:
+                g14_outcomes.extend(outcomes)
             runs.append({"gate_id": "g14", "outcome": "executed"})
             for outcome in outcomes:
                 for f in outcome.findings:
@@ -1732,7 +1749,13 @@ def _approval_checkpoint_findings(
     return findings
 
 
-def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None) -> Analysis:
+def analyze(
+    workspace: Path,
+    descriptor_path: Path,
+    *,
+    issue: int | None = None,
+    revalidate_kani: bool = True,
+) -> Analysis:
     workspace = workspace.resolve()
     descriptor: dict | None = None
     descriptor_state = "absent"
@@ -1758,6 +1781,14 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
             descriptor_error = str(exc)
 
     missing_crate_roots = _missing_crate_roots(workspace, descriptor)
+    g14_outcomes: list[object] = []
+    gate_runs, gate_findings, witness_backend = _run_gates(
+        workspace,
+        descriptor,
+        missing_crate_roots=missing_crate_roots,
+        revalidate_kani=revalidate_kani,
+        g14_outcomes=g14_outcomes,
+    )
     promotions = _promotion_manifest(workspace)
     installation = _installation_manifest(workspace)
     # chainlink #78: the normative user-owned documents' drift records (the
@@ -1776,7 +1807,11 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
     policy_marker_records = _policy_marker_records(workspace)
     artifacts = _artifacts(workspace, descriptor, promotions)
     obligations = _obligations(workspace, descriptor)
-    clusters = _clusters(workspace, descriptor)
+    clusters = _clusters(
+        workspace,
+        descriptor,
+        gate_outcomes=g14_outcomes if descriptor is not None else None,
+    )
     observations = _observations(workspace, descriptor)
     gate_state, gate_details, gate_problems = _gate_integrity_evaluate(
         workspace, descriptor, installation, descriptor_state, descriptor_diagnostics
@@ -1864,9 +1899,6 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
     # validated (exists + inside the project root) rather than advisory --
     # see _descriptor_policy_path_findings.
     findings.extend(_descriptor_policy_path_findings(descriptor, workspace))
-    gate_runs, gate_findings, witness_backend = _run_gates(
-        workspace, descriptor, missing_crate_roots=missing_crate_roots
-    )
     findings.extend(gate_findings)
     findings.extend(_lifecycle_findings(artifacts))
     findings.extend(_approval_checkpoint_findings(workspace, artifacts))
@@ -1914,8 +1946,16 @@ def analyze(workspace: Path, descriptor_path: Path, *, issue: int | None = None)
 # ---------------------------------------------------------------------------
 # Document builders
 # ---------------------------------------------------------------------------
-def build_project_state(workspace: Path, descriptor_path: Path, *, issue: int | None = None) -> dict:
-    analysis = analyze(workspace, descriptor_path, issue=issue)
+def build_project_state(
+    workspace: Path,
+    descriptor_path: Path,
+    *,
+    issue: int | None = None,
+    revalidate_kani: bool = False,
+) -> dict:
+    analysis = analyze(
+        workspace, descriptor_path, issue=issue, revalidate_kani=revalidate_kani
+    )
     descriptor = analysis.descriptor
     path = _rel(descriptor_path, workspace) if descriptor_path.is_absolute() else str(descriptor_path)
 
@@ -1987,7 +2027,7 @@ def build_project_state(workspace: Path, descriptor_path: Path, *, issue: int | 
     identity = adjudicator.current_identity()
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "product": {"name": PRODUCT_NAME, "version": PRODUCT_VERSION},
         "installation_manifest": analysis.installation,
         "descriptor": descriptor_doc,
@@ -2004,6 +2044,11 @@ def build_project_state(workspace: Path, descriptor_path: Path, *, issue: int | 
         "change_requests": change_requests,
         "gate_integrity": analysis.gate_integrity,
         "write_set": analysis.write_set,
+        "verification": {
+            "mode": "revalidation-enabled" if revalidate_kani else "recorded",
+            "kani_revalidation_enabled": revalidate_kani,
+            "source_and_harness_freshness": "checked",
+        },
         "generated_observations": analysis.observations,
     }
 

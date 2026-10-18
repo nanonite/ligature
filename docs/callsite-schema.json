@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/docs/callsite-schema.json",
-  "title": "C_static extraction report — v1.0",
-  "description": "plan.md §9, chainlink #24. One generated report per crate, at ci/results/c_static/<report_id>.json, holding the realized-call (C_static) observation for one configuration: the call sites discovered, their honest resolution class (definite-direct-call / possible-dispatch / unresolved-indirect-call), the scope the extractor can actually speak for (coverage_scope), the configuration the observation is relative to (config_scope, the same shape as an interaction's realization.config_scope so R1 can compare them directly), and what the extractor could NOT attribute (attribution_scope). This is an OBSERVATION, never a normative artifact: it carries no `review` block and is never routed through draft/approve -- it is regenerated from source, and a promoted spec is never derived from it. Reconciling it against I (R1) and applying the unresolved risk policy (G16) is scripts/gate_r1_g16.py's job, not this schema's -- the same boundary #16 drew for R2 and #22 drew for harness generation.",
+  "title": "C_static extraction report — v1.1",
+  "description": "plan.md §9, chainlink #24. One generated report per crate, at ci/results/c_static/<report_id>.json, holding the realized-call (C_static) observation for one configuration: the call sites discovered, their honest resolution class (definite-direct-call / possible-dispatch / unresolved-indirect-call), the scope the extractor can actually speak for (coverage_scope), the configuration the observation is relative to (config_scope, the same shape as an interaction's realization.config_scope so R1 can compare them directly), what the extractor could NOT attribute (attribution_scope), and a source_binding over every scanned crate Rust source file, the extractor version, and configuration. Reports without a current source_binding are legacy observations and fail closed in workspace validation. This is an OBSERVATION, never a normative artifact: it carries no `review` block and is never routed through draft/approve -- it is regenerated from source, and a promoted spec is never derived from it. Reconciling it against I (R1) and applying the unresolved risk policy (G16) is scripts/gate_r1_g16.py's job, not this schema's -- the same boundary #16 drew for R2 and #22 drew for harness generation.",
   "type": "object",
   "required": [
     "schema_version",
@@ -16,7 +16,7 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "type": "string", "const": "1.0" },
+    "schema_version": { "type": "string", "enum": ["1.0", "1.1"] },
     "report_id": {
       "type": "string",
       "minLength": 1,
@@ -26,6 +26,10 @@
       "type": "string",
       "minLength": 1,
       "description": "Workspace-relative crate directory this report was extracted from -- the descriptor's own crates[].crate_dir value, so the gate can resolve which crate's _interactions/ this report reconciles against."
+    },
+    "source_binding": {
+      "$ref": "#/$defs/source_binding",
+      "description": "Version 1.1 binding over the sorted relative paths and SHA-256 content hashes of every scanned .rs file, crate_dir, extractor identity/version, and config_scope. Workspace validators recompute it against the current source before any gate may consume this report."
     },
     "coverage_scope": { "$ref": "#/$defs/coverage_scope" },
     "config_scope": { "$ref": "#/$defs/config_scope" },
@@ -37,7 +41,23 @@
     },
     "callsite_coverage": { "$ref": "#/$defs/callsite_coverage" }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "schema_version": { "const": "1.1" } }, "required": ["schema_version"] },
+      "then": { "required": ["source_binding"] }
+    }
+  ],
   "$defs": {
+    "source_binding": {
+      "type": "object",
+      "required": ["algorithm", "digest", "file_count"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "type": "string", "const": "sha256" },
+        "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "file_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "coverage_scope": {
       "type": "object",
       "required": [

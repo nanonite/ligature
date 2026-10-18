@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import sys
 import tempfile
@@ -8,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from extract_c_static import extract_crate  # noqa: E402
+from extract_c_static import compute_source_binding, extract_crate  # noqa: E402
 from validate_callsites import (  # noqa: E402
     callsite_report_dir_for,
     find_report_files,
@@ -56,12 +57,17 @@ DISPATCH_SITE = {
 
 def valid_report() -> dict:
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "report_id": "crates_scheduler",
         "crate_dir": "crates/scheduler",
+        "source_binding": {
+            "algorithm": "sha256",
+            "digest": "sha256:" + "a" * 64,
+            "file_count": 1,
+        },
         "coverage_scope": {
             "extractor": "coarse-syntactic-callgraph",
-            "extractor_version": "0.1.0",
+            "extractor_version": "0.2.0",
             "extractor_backing": "syntactic",
             "supported_call_forms": ["associated-path-call"],
             "unsupported_call_forms": ["macro-expanded-call"],
@@ -78,6 +84,17 @@ def valid_report() -> dict:
         "callsites": [copy.deepcopy(RESOLVED_SITE), copy.deepcopy(DISPATCH_SITE)],
         "callsite_coverage": {"discovered": 2, "resolved": 1, "unresolved": 1},
     }
+
+
+def bind_report(report: dict, workspace: Path) -> dict:
+    crate_root = workspace / report["crate_dir"]
+    crate_root.mkdir(parents=True, exist_ok=True)
+    report["schema_version"] = "1.1"
+    report["coverage_scope"]["extractor_version"] = "0.2.0"
+    report["source_binding"] = compute_source_binding(
+        crate_root, report["crate_dir"], report["config_scope"]
+    )
+    return report
 
 
 def findings_for(report: dict, path: Path = REPORT_PATH) -> list[str]:
@@ -98,6 +115,7 @@ class SchemaHonestyTest(unittest.TestCase):
         report["coverage_scope"]["completeness_claim"] = "sound-for-supported-forms"
         self.assertTrue(findings_for(report))
 
+
     def test_compiler_backed_extractor_may_claim_soundness(self):
         report = valid_report()
         report["coverage_scope"]["extractor_backing"] = "compiler"
@@ -114,6 +132,46 @@ class SchemaHonestyTest(unittest.TestCase):
         report = valid_report()
         report["review"] = {"reviewer": "alice", "reviewed_at": "2026-09-04"}
         self.assertTrue(findings_for(report))
+
+
+class CryptoMixedPilotRegressionTest(unittest.TestCase):
+    """The captured 1.4.1 crypto-mixed report was extracted before its
+    crate sources existed and claimed an empty call graph. Keep the exact
+    report as a fixture so a later schema or loader change cannot silently
+    turn that historical observation back into accepted zero coverage."""
+
+    def test_pre_source_pilot_report_is_rejected_with_extract_action(self):
+        fixture = ROOT / "tests/fixtures/callsites/crypto-mixed-pre-source.json"
+        self.assertEqual(
+            hashlib.sha256(fixture.read_bytes()).hexdigest(),
+            "20845eb0132a8e7ee1c6b3714a2b0f3640ac3dd6e5ea056c33b4b9f4b241d857",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = Path(temp)
+            crate_root = workspace / "crates/crypto-mixed-core"
+            crate_root.mkdir(parents=True)
+            reports = callsite_report_dir_for(workspace)
+            reports.mkdir(parents=True)
+            report_path = reports / fixture.name
+            report_path.write_bytes(fixture.read_bytes())
+            manifests = workspace / "ci/manifest"
+            manifests.mkdir(parents=True)
+            (manifests / "WP-AEAD.json").write_text(json.dumps({
+                "functions": [f"crypto_mixed::aead::function_{index}" for index in range(1, 8)],
+                "write_policy": {"allowed_write_set": ["crates/crypto-mixed-core/src/**"]},
+            }))
+            (manifests / "WP-PRIMITIVES.json").write_text(json.dumps({
+                "functions": [f"crypto_mixed::primitives::function_{index}" for index in range(1, 7)],
+                "write_policy": {"allowed_write_set": ["crates/crypto-mixed-core/src/**"]},
+            }))
+
+            findings = validate_workspace(workspace, reports)
+            rendered = "\n".join(str(finding) for finding in findings)
+            self.assertIn("legacy C_static report has no source binding", rendered)
+            self.assertIn(
+                "ligature extract-c-static --target x86_64-unknown-linux-gnu", rendered
+            )
+            self.assertEqual(load_reports(workspace), [])
 
 
 class CallsiteShapeTest(unittest.TestCase):
@@ -401,6 +459,88 @@ impl Ymd {
         (canonical / f"{report['report_id']}.json").write_text(json.dumps(report))
 
 
+class SourceBindingFreshnessTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.tmp.name)
+        self.crate = self.workspace / "crates" / "scheduler"
+        self.crate.mkdir(parents=True)
+        self.report_dir = callsite_report_dir_for(self.workspace)
+        self.report_dir.mkdir(parents=True)
+        self.report_path = self.report_dir / "crates_scheduler.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def extract(self) -> dict:
+        return extract_crate(
+            self.crate,
+            self.workspace,
+            "crates_scheduler",
+            "crates/scheduler",
+            {"target": "x86_64-unknown-linux-gnu", "features": [], "cfg": []},
+        )
+
+    def write_report(self, report: dict) -> None:
+        self.report_path.write_text(json.dumps(report))
+
+    def findings(self) -> list[str]:
+        return [str(f) for f in validate_workspace(self.workspace, self.report_dir)]
+
+    def test_source_change_after_extraction_is_refused(self):
+        source = self.crate / "src" / "lib.rs"
+        source.parent.mkdir()
+        source.write_text("pub struct Scheduler; impl Scheduler { pub fn step(&self) {} }\n")
+        self.write_report(self.extract())
+        self.assertEqual(self.findings(), [])
+        source.write_text(
+            "pub struct Scheduler; impl Scheduler { pub fn step(&self) { self.next(); } "
+            "pub fn next(&self) {} }\n"
+        )
+        findings = self.findings()
+        self.assertTrue(any("source binding is stale" in item for item in findings), findings)
+        self.assertTrue(any("ligature extract-c-static --target x86_64-unknown-linux-gnu" in item for item in findings), findings)
+
+    def test_empty_pre_source_observation_with_manifest_owned_function_is_suspect(self):
+        report = self.extract()
+        self.assertEqual(report["attribution_scope"]["local_concepts"], [])
+        self.assertEqual(report["callsites"], [])
+        self.write_report(report)
+        manifest_dir = self.workspace / "ci" / "manifest"
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "WP-SCHEDULER.json").write_text(json.dumps({
+            "functions": ["scheduler::Scheduler::step"],
+            "write_policy": {"allowed_write_set": ["crates/scheduler/src/**"]},
+        }))
+        findings = self.findings()
+        self.assertTrue(any("assigns functions to this crate" in item for item in findings), findings)
+
+        source = self.crate / "src" / "lib.rs"
+        source.parent.mkdir()
+        source.write_text("pub struct Scheduler; impl Scheduler { pub fn step(&self) {} }\n")
+        findings = self.findings()
+        self.assertTrue(any("source binding is stale" in item for item in findings), findings)
+
+    def test_fresh_extraction_is_accepted(self):
+        source = self.crate / "src" / "lib.rs"
+        source.parent.mkdir()
+        source.write_text("pub struct Scheduler; impl Scheduler { pub fn step(&self) {} }\n")
+        self.write_report(self.extract())
+        self.assertEqual(self.findings(), [])
+
+    def test_legacy_unbound_report_fails_with_exact_remediation(self):
+        source = self.crate / "src" / "lib.rs"
+        source.parent.mkdir()
+        source.write_text("pub struct Scheduler; impl Scheduler { pub fn step(&self) {} }\n")
+        report = self.extract()
+        report["schema_version"] = "1.0"
+        report.pop("source_binding")
+        self.write_report(report)
+        findings = self.findings()
+        self.assertTrue(any("legacy C_static report has no source binding" in item for item in findings), findings)
+        self.assertTrue(any("ligature extract-c-static --target x86_64-unknown-linux-gnu" in item for item in findings), findings)
+
+
 class WorkspaceScanTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -414,6 +554,7 @@ class WorkspaceScanTest(unittest.TestCase):
     def write(self, relative: str, report: dict) -> Path:
         path = self.workspace / relative
         path.parent.mkdir(parents=True, exist_ok=True)
+        bind_report(report, self.workspace)
         path.write_text(json.dumps(report))
         return path
 

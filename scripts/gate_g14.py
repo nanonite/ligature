@@ -148,6 +148,8 @@ from validate_bridge import find_bridge_files  # noqa: E402
 from validate_bridge import load_validator as load_bridge_validator  # noqa: E402
 from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
 from validate_callsites import load_reports as load_callsite_reports  # noqa: E402
+from validate_callsites import callsite_report_dir_for  # noqa: E402
+from validate_callsites import validate_workspace as validate_callsite_reports  # noqa: E402
 from validate_closure import CONDITION_KEYS  # noqa: E402
 from validate_closure import DegradationRecords  # noqa: E402
 from validate_closure import closure_dir_for  # noqa: E402
@@ -692,6 +694,8 @@ def check_record_certificates(
     closure: Closure,
     reports: dict[str, dict],
     manifests: dict[str, dict] | None = None,
+    *,
+    revalidate_kani: bool = True,
 ) -> list[Finding]:
     """chainlink #92: every obligation record's proof certificate is
     RE-OPENED here, the same way record-assurance checked it before
@@ -897,6 +901,7 @@ def check_record_certificates(
                             kani_result_summary if isinstance(kani_result_summary, str) else None
                         ),
                         source_manifest=source_manifest,
+                        revalidate_kani=revalidate_kani,
                     )
                 except RecordAssuranceError as e:
                     if target.startswith("verus-json:"):
@@ -1380,7 +1385,8 @@ def check_bridges(
                             "G14", bridge_id,
                             f"{work_package} requires all discovered call sites resolved, but no "
                             "C_static observation exists to check that against -- run "
-                            "`pipeline.py extract-c-static`; an unobserved call graph is not a "
+                            "`ligature extract-c-static --target <target-triple>`; "
+                            "an unobserved call graph is not a "
                             "resolved one",
                         )
                     )
@@ -2190,6 +2196,7 @@ def gate_cluster(
     callsite_unresolved: int | None,
     unresolved_medium_plus: int | None,
     descriptor: dict | None = None,
+    revalidate_kani: bool = True,
 ) -> ClusterOutcome:
     """Gate one cluster. `degradation` is the (path, record) pair
     validate_closure's own load_cluster_artifacts_with_invalid() returns
@@ -2246,7 +2253,11 @@ def gate_cluster(
     # re-derive every field record-assurance derives from the manifest,
     # before any of the record's claims are evaluated -- satisfies() can
     # only compare the record's own words against a requirement's words.
-    findings.extend(check_record_certificates(workspace, closure, reports, manifests))
+    findings.extend(
+        check_record_certificates(
+            workspace, closure, reports, manifests, revalidate_kani=revalidate_kani
+        )
+    )
     findings.extend(check_record_derivation(closure, manifests, reports))
 
     findings.extend(check_provided_guarantees(cluster, profile, closure, manifests, reports))
@@ -2297,7 +2308,8 @@ def gate_cluster(
             Finding(
                 "G14", cluster,
                 "no C_static observation exists, so unresolved_indirect_calls_at_or_above_medium "
-                "could not be read from the R1/G16 gate -- run `pipeline.py extract-c-static`",
+                "could not be read from the R1/G16 gate -- run "
+                "`ligature extract-c-static --target <target-triple>`",
             )
         )
     elif unresolved_medium_plus > 0:
@@ -2633,7 +2645,12 @@ def check_degradation_record_validity(
     return findings
 
 
-def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[ClusterOutcome], list[Finding]]:
+def gate_workspace(
+    workspace: Path,
+    descriptor: dict,
+    *,
+    revalidate_kani: bool = True,
+) -> tuple[list[ClusterOutcome], list[Finding]]:
     """Every cluster with a valid closure profile. Workspace-level
     findings (unreadable manifests, ambiguous providers) are returned
     separately: they are not any one cluster's fault, and attributing
@@ -2672,8 +2689,16 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[ClusterOutco
     bridges, bridge_findings = load_bridges(workspace, descriptor)
     workspace_findings.extend(bridge_findings)
 
+    callsite_findings = validate_callsite_reports(
+        workspace, callsite_report_dir_for(workspace)
+    )
+    for callsite_finding in callsite_findings:
+        workspace_findings.append(Finding(
+            "G14", str(callsite_finding.path),
+            f"C_static report is not safe to consume: {callsite_finding.reason}",
+        ))
     reports = load_callsite_reports(workspace)
-    if reports:
+    if reports and not callsite_findings:
         callsite_unresolved = sum(r["callsite_coverage"]["unresolved"] for _, r in reports)
         unresolved_medium_plus = sum(unresolved_at_or_above_medium(r) for _, r in reports)
     else:
@@ -2735,7 +2760,7 @@ def gate_workspace(workspace: Path, descriptor: dict) -> tuple[list[ClusterOutco
         outcomes.append(
             gate_cluster(
                 workspace, cluster, profile, degradation, manifests, providers, bridges,
-                callsite_unresolved, unresolved_medium_plus, descriptor,
+                callsite_unresolved, unresolved_medium_plus, descriptor, revalidate_kani,
             )
         )
     workspace_findings.extend(

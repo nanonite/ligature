@@ -33,7 +33,7 @@ def make_request(**updates) -> WorkPackageRequest:
         "required_obligations": (),
         "bridges": ("BR-SCHED-TQ-001",),
         "assumptions": (),
-        "harnesses": {"TaskQueue.C003": "task_queue_pop_ready_C003"},
+        "harnesses": {"TaskQueue.C003": "creusot"},
         "depends_on": ("WP-SCHED-000",),
         "coupling_notes": ("shared queue invariant",),
         "gates": (GateSpec("build", "cargo", ("build", "-p", "scheduler")),),
@@ -378,6 +378,14 @@ def test_standalone_obligation_derives_assurance_from_reviewed_constraint():
         "trust_policy": {"assumptions_allowed": []},
     }
     assert "Scheduler.C007" in manifest["obligations"]
+
+
+def test_work_package_plan_rejects_a_function_name_as_verifier_classification():
+    with pytest.raises(ManifestDerivationError, match="use 'creusot' or 'verus'"):
+        derive_manifest(
+            make_request(harnesses={"TaskQueue.C003": "counter_capacity"}),
+            make_state(),
+        )
 
 
 def test_standalone_obligation_refuses_without_a_reviewed_source():

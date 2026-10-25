@@ -45,7 +45,7 @@ definition_of_done:
         feature_set: default
       trust_policy:
         assumptions_allowed: []
-    harness: task_queue_pop_ready_C003
+    harness: creusot
   required_preconditions_to_establish:
   - bridge_id: BR-SCHED-TQ-001
     required_assurance:

@@ -111,8 +111,25 @@
             "properties": {
               "obligation_id": { "$ref": "#/$defs/obligation_id" },
               "required_assurance": { "$ref": "#/$defs/required_assurance" },
-              "harness": { "$ref": "#/$defs/exact_harness_name" }
-            }
+              "harness": {
+                "$ref": "#/$defs/assurance_harness",
+                "description": "Verifier declaration for provided assurance: creusot or verus names the deductive verifier; kani_<function> names the exact Kani harness. For Verus, the function key is supplied by record-assurance --verus-function, not here."
+              }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "harness": { "const": "creusot" } }, "required": ["harness"] },
+                "then": { "properties": { "required_assurance": { "properties": { "accepted_evidence_kinds": { "contains": { "const": "creusot-deductive-check" } } } } } }
+              },
+              {
+                "if": { "properties": { "harness": { "const": "verus" } }, "required": ["harness"] },
+                "then": { "properties": { "required_assurance": { "properties": { "accepted_evidence_kinds": { "contains": { "const": "verus-deductive-check" } } } } } }
+              },
+              {
+                "if": { "properties": { "harness": { "pattern": "^kani_[A-Za-z_][A-Za-z0-9_]*$" } }, "required": ["harness"] },
+                "then": { "properties": { "required_assurance": { "properties": { "accepted_evidence_kinds": { "contains": { "const": "kani-bounded-model-check" } } } } } }
+              }
+            ]
           }
         },
         "required_preconditions_to_establish": {
@@ -254,10 +271,12 @@
       "pattern": "^[A-Z][A-Za-z0-9]*\\.C[0-9]+$",
       "description": "Same grammar as docs/boundary-contract-schema.json's callee_guarantees entries."
     },
-    "exact_harness_name": {
-      "type": "string",
-      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-      "description": "plan.md §10.1: harness names are exact, no wildcards unless the runner explicitly supports them. This schema never allows one."
+    "assurance_harness": {
+      "oneOf": [
+        { "type": "string", "enum": ["creusot", "verus"] },
+        { "type": "string", "pattern": "^kani_[A-Za-z_][A-Za-z0-9_]*$" }
+      ],
+      "description": "The verifier declaration for a provided guarantee. Creusot and Verus are named directly. Kani uses the exact Rust proof-function identifier with the reserved kani_ prefix. No arbitrary function names or wildcards are accepted."
     },
     "claim_kind": {
       "type": "string",

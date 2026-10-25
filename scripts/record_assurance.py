@@ -70,9 +70,12 @@ What is derived, from where
     narrower than the manifest requires, the truthful record is kept and G14
     reports the unsatisfied scope.
 
-The declaration a human does make is checked, not trusted. Creusot uses
-`--proof Obligation=path`; Verus uses `--verus-function Obligation=function`
-with one shared `--verus-json` result file; Kani uses
+The declaration a human does make is checked, not trusted. In a provided
+guarantee, `harness` identifies the verifier: `creusot` or `verus`; Kani's
+field names the exact `kani_...` function. Verus's exact function key is a
+separate intake mapping. Creusot uses `--proof Obligation=path`; Verus uses
+`--verus-function Obligation=function` with one shared `--verus-json` result
+file; Kani uses
 `--kani-harness Obligation=harness` and `--kani-crate package-dir`:
 
   * the obligation must be one this manifest actually provides (a record
@@ -154,6 +157,7 @@ from satisfies import UNIVERSAL_SCOPE_VALUE  # noqa: E402
 from satisfies import load_achieved_validator  # noqa: E402
 from satisfies import satisfies  # noqa: E402
 from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
+from validate_work_package import format_manifest_schema_error  # noqa: E402
 from validate_work_package import _pattern_covers_path  # noqa: E402
 
 PROOF_FILE_NAME = "proof.json"
@@ -380,8 +384,9 @@ def resolve_manifest(workspace: Path, target: str) -> tuple[str, dict, Path]:
     errors = list(load_work_package_validator().iter_errors(data))
     if errors:
         raise InvalidRecordInput(
-            f"manifest {_relative(candidate, workspace)} is not schema-valid "
-            f"({errors[0].message}) -- run `validate work-package` on it first"
+            f"manifest {_relative(candidate, workspace)} is not schema-valid: "
+            f"{format_manifest_schema_error(data, errors[0])} -- run "
+            "`validate work-package` on it first"
         )
     work_package = data["work_package"]
     if work_package != candidate.stem:
@@ -2132,8 +2137,9 @@ def record_assurance(
                 )
             if obligation_id in verus_functions:
                 raise InvalidRecordInput(
-                    f"{obligation_id}: harness is {harness!r}; "
-                    "--verus-function can only map Verus guarantees"
+                    f"{obligation_id}: manifest harness is {harness!r}; a Verus guarantee "
+                    "must declare harness 'verus' (the verifier identity); the function key "
+                    "belongs in --verus-function"
                 )
             certificates = [
                 read_certificate(

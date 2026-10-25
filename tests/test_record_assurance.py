@@ -1336,15 +1336,20 @@ class InvalidInputExitTwoTest(RecordAssuranceTestCase):
         self.write_manifest(data)
         self.assert_invalid(self.specs, "is not schema-valid")
 
-    def test_a_harness_with_no_certificate_reader(self):
-        self.provided = [guarantee("Weekday.C1", harness="kani")]
+    def test_unprefixed_kani_function_name_is_rejected_by_manifest_schema(self):
+        self.provided = [guarantee("Weekday.C1", harness="weekday_from_days")]
         self.write_manifest()
-        self.assert_invalid(["Weekday.C1=verif/weekday/weekday_from_days"], "no proof-certificate reader")
+        with self.assertRaises(InvalidRecordInput) as caught:
+            record_assurance(self.root, WORK_PACKAGE, ["Weekday.C1=verif/weekday/weekday_from_days"])
+        self.assertIn("manifest field definition_of_done/provided_guarantees/0/harness", str(caught.exception))
+        self.assertIn("use 'creusot' or 'verus'", str(caught.exception))
+        self.assertIn("kani_", str(caught.exception))
+        self.assertFalse(self.report_exists(), "a refusal must leave nothing behind")
 
-    def test_an_evidence_kind_the_guarantee_does_not_accept(self):
+    def test_incompatible_evidence_kind_is_rejected_by_manifest_schema(self):
         self.provided = [guarantee("Weekday.C1", evidence=("kani-bounded-model-check",))]
         self.write_manifest()
-        self.assert_invalid(["Weekday.C1=verif/weekday/weekday_from_days"], "does not accept")
+        self.assert_invalid(["Weekday.C1=verif/weekday/weekday_from_days"], "not schema-valid")
 
     def test_a_claim_the_guarantee_does_not_require(self):
         self.provided = [guarantee("Weekday.C1", claims=("callee-precondition-established",))]

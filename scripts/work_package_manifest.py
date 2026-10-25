@@ -166,6 +166,7 @@ _FUNCTION_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(::[a-zA-Z_][a-zA-Z0-9_]*)+$"
 _OBLIGATION_RE = re.compile(r"^[A-Z][A-Za-z0-9]*\.[A-Z][0-9]+$")
 _BRIDGE_RE = re.compile(r"^BR-[A-Z][A-Z0-9-]*$")
 _HARNESS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_KANI_HARNESS_RE = re.compile(r"^kani_[A-Za-z_][A-Za-z0-9_]*$")
 _CLUSTER_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _BASE_COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -270,8 +271,8 @@ FIELD_SOURCES: tuple[FieldSource, ...] = (
         "definition_of_done.provided_guarantees",
         "interaction reliances, else a reviewed concept constraint + verifier policy",
         "content from the reliance; for a standalone obligation (no reliance), the reviewed "
-        "concept spec's own constraint kind + the owning verifier policy; plan selects and "
-        "names the harness (chainlink #162)",
+        "concept spec's own constraint kind + the owning verifier policy; plan selects the "
+        "verifier declaration (creusot/verus) or exact kani_ function (chainlink #162/#173)",
     ),
     FieldSource(
         "definition_of_done.required_preconditions_to_establish",
@@ -1679,7 +1680,7 @@ def _derive_provided_guarantees(
         if harness is None:
             raise ManifestDerivationError(
                 "missing-source",
-                f"provided obligation {obligation_id!r} has no exact harness name in the plan",
+                f"provided obligation {obligation_id!r} has no verifier/harness declaration in the plan",
             )
         _require_match(
             _HARNESS_RE,
@@ -1687,6 +1688,13 @@ def _derive_provided_guarantees(
             "invalid-plan",
             f"harness {harness!r} for {obligation_id!r} must be an exact Rust identifier, no wildcards",
         )
+        if harness not in ("creusot", "verus") and not _KANI_HARNESS_RE.fullmatch(harness):
+            raise ManifestDerivationError(
+                "invalid-plan",
+                f"harness declaration {harness!r} for {obligation_id!r} is unsupported; use "
+                "'creusot' or 'verus' as the verifier identity, or the exact Kani function "
+                "name prefixed with 'kani_'",
+            )
         assurance = _resolve_obligation_assurance(state, request, obligation_id, policy)
         _check_assurance_against_policy(
             assurance, policy, f"provided guarantee {obligation_id!r}"

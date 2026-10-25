@@ -202,6 +202,30 @@ certificate must sit under a directory named for that obligation's own
 concept. For Verus guarantees, pass the official `verus --output-json`
 result with `--verus-json <path>` and one repeatable
 `--verus-function <obligation>=<func-details-key>` mapping per guarantee.
+The provided guarantee's manifest field `harness` must be exactly
+`"verus"`; that field classifies the verifier. It does not name the Rust
+function. The function key belongs only in `--verus-function`, and the
+work-package validator rejects other values such as `"counter_capacity"`
+with the JSON field path. The accepted evidence kinds must include
+`verus-deductive-check`. For example:
+
+```json
+{
+  "obligation_id": "ChaCha20.C004",
+  "required_assurance": {
+    "required_claims": ["postcondition-holds"],
+    "accepted_evidence_kinds": ["verus-deductive-check"]
+  },
+  "harness": "verus"
+}
+```
+
+```sh
+ligature record-assurance WP-CRYPTO-VERUS-001 \
+  --verus-json analysis/p4-5-q2/verus.json \
+  --verus-function ChaCha20.C004=verus_probe::counter_capacity
+```
+
 The function key must exactly match an entry in Verus's `func-details`,
 and the function's `ensures` clause must contain the inner attribute
 `#![verifier::proof_note("ligature:<obligation>")]`. Verus JSON is
@@ -214,8 +238,9 @@ hash of Rust source files covered by the manifest's `allowed_write_set`.
 `record-assurance` refuses a JSON result older than those sources, and
 `gate g14` re-opens the same JSON, checks both hashes, and checks the
 function marker again (#129). These records establish Verus evidence for
-the named guarantees; CG3's separate `creusot_owned` disjunct remains
-limited to Creusot ownership. It writes nothing on a refusal
+the named guarantees. Creusot and Verus are both deductive and establish
+CG3's type-universal disjunct; Kani remains bounded per monomorphization.
+It writes nothing on a refusal
 and exits 0 (recorded) / 1 (the evidence does not establish the
 obligation) / 2 (invalid input), per docs/exit-code-contract.md.
 
@@ -365,10 +390,11 @@ whole workspace's work-package artifacts, not only the closure profile's
 list (chainlink #93): every obligation and bridge in the closure AND in
 every work package it reaches through a declared `depends_on`
 (transitively, with a target resolving to no manifest failing closed)
-must have its own achieved record, and ownership must be creusot's
-positively -- every record in every readable assurance ledger under the
-workspace, and every declared guarantee harness in `ci/manifest`, is
-required to be creusot. Anything else (a non-creusot record or harness
+must have its own achieved record, and verifier capability must be
+established positively -- every record in every readable assurance ledger
+under the workspace, and every declared guarantee harness in
+`ci/manifest`, must be Creusot or Verus deductive evidence. Anything else
+(a Kani or unknown record or harness
 anywhere, an unrecorded obligation, an unreadable ledger, a dangling
 `depends_on`) withholds the verdict and reports the condition as the
 capability gap it is: exit 1 unless a degradation record names the

@@ -627,7 +627,7 @@ def make_closure_kani_only(ws: Workspace) -> None:
     for name, (obligation, harness) in harnesses.items():
         ws.patch(f"ci/results/{name}.json", lambda d: [
             entry["record"]["evidence"].update(
-                {"kind": "kani-bounded-model-check", "verifier": "kani", "harness": "kani"}
+                {"kind": "kani-bounded-model-check", "verifier": "kani", "harness": harness}
             )
             for entry in d["obligation_records"] + d["bridge_records"]
         ])
@@ -1562,13 +1562,16 @@ class ClosureKindTest(GateTestCase):
         # A work package recording kani evidence declares the kani
         # harness -- gate-g14 re-derives evidence.verifier/kind from
         # exactly this field (chainlink #92).
+        harness = "kani_wp_c"
         self.ws.patch("ci/manifest/WP-C.json", lambda d: d["definition_of_done"]["provided_guarantees"][0].update(
-            {"harness": "kani"}))
+            {"harness": harness}))
         self.ws.patch("ci/manifest/WP-B.json", lambda d: d["definition_of_done"]["required_guarantees"][0][
             "required_assurance"].update({"accepted_evidence_kinds": ["kani-bounded-model-check"]}))
         self.ws.patch("ci/results/WP-C.json", lambda d: d["obligation_records"][0].update(
             {"record": achieved(kind="kani-bounded-model-check",
                                 proof_targets=certificate_path("Clock.C007"))}))
+        self.ws.add_kani_harness("WP-C", "Clock.C007", harness)
+        self.ws.bind_kani_record("WP-C", "Clock.C007", harness)
         outcome, _ = self.ws.cluster()
         errors = self.errors(outcome)
         self.assertTrue(any("makes the cluster's guarantee bounded" in e for e in errors))
@@ -1593,13 +1596,16 @@ class ClosureKindTest(GateTestCase):
         self.ws.patch("specs/_closure/scheduler-core.json", lambda d: d.update({"closure_kind": "partial"}))
         self.ws.patch("ci/manifest/WP-C.json", lambda d: d["definition_of_done"]["provided_guarantees"][0][
             "required_assurance"].update({"accepted_evidence_kinds": ["kani-bounded-model-check"]}))
+        harness = "kani_wp_c"
         self.ws.patch("ci/manifest/WP-C.json", lambda d: d["definition_of_done"]["provided_guarantees"][0].update(
-            {"harness": "kani"}))
+            {"harness": harness}))
         self.ws.patch("ci/manifest/WP-B.json", lambda d: d["definition_of_done"]["required_guarantees"][0][
             "required_assurance"].update({"accepted_evidence_kinds": ["kani-bounded-model-check"]}))
         self.ws.patch("ci/results/WP-C.json", lambda d: d["obligation_records"][0].update(
             {"record": achieved(kind="kani-bounded-model-check",
                                 proof_targets=certificate_path("Clock.C007"))}))
+        self.ws.add_kani_harness("WP-C", "Clock.C007", harness)
+        self.ws.bind_kani_record("WP-C", "Clock.C007", harness)
         outcome, _ = self.ws.cluster()
         self.assertFalse(any("closure_kind" in e for e in self.errors(outcome)))
         # the shortfall is still visible, just not as a kind refutation
@@ -1773,9 +1779,9 @@ class Cg3SoundnessTest(GateTestCase):
     KIND string among those records -- and every leg below is one place
     that proxy read less than the claim. The verdict now walks both
     dependency edges (required guarantees AND declared `depends_on`),
-    evaluates record presence per obligation, and requires creusot
-    ownership positively, from the whole workspace's manifests and
-    ledgers."""
+    evaluates record presence per obligation, and requires positive
+    Creusot/Verus deductive capability from the whole workspace's
+    manifests and ledgers."""
 
     CG3 = "generic_callees_type_universal_or_creusot_owned"
 
@@ -1887,48 +1893,124 @@ class Cg3SoundnessTest(GateTestCase):
         outcome, _ = self.ws.cluster()
         self.assert_cg3_blocked_naming(outcome, "WP-A:BR-SCHED-TQ-001")
 
-    def test_a_verus_owned_closure_does_not_satisfy_the_creusot_owned_disjunct(self):
-        """Leg B7: relabelling every record creusot -> verus used to
-        leave CG3 printing VERIFIED ('none of them is a Kani result')
-        while the condition's own name says creusot_owned. Verus is
-        neither disjunct -- type_universal has no authoring path (leg 4)
-        -- so ownership is now required positively, and this cluster's
-        ONLY error is the CG3 gap: declaration and computation agree
-        everywhere else, isolating the disjunct exactly as the leg
-        does."""
-        for name in ("WP-A", "WP-B", "WP-C"):
-            self.ws.patch(f"ci/manifest/{name}.json", lambda d: (
-                [
-                    entry.update({"harness": "verus"})
-                    for entry in d["definition_of_done"]["provided_guarantees"]
-                ],
-                [
-                    entry["required_assurance"].update(
-                        {"accepted_evidence_kinds": ["verus-deductive-check"]}
-                    )
-                    for entry in (
-                        d["definition_of_done"]["provided_guarantees"]
-                        + d["definition_of_done"]["required_guarantees"]
-                        + d["definition_of_done"]["required_preconditions_to_establish"]
-                    )
-                ],
-            ))
-            self.ws.patch(f"ci/results/{name}.json", lambda d: [
-                entry["record"]["evidence"].update({
-                    "kind": "verus-deductive-check", "verifier": "verus", "harness": "verus",
-                })
-                for entry in d["obligation_records"] + d["bridge_records"]
-            ])
+    def test_single_obligation_verus_p1_slice_recomputes_cg3(self):
+        """The P1 pilot's smallest Verus-only slice: one provided
+        obligation, no generic callees, no bridge, and fresh official
+        Verus output with its exact proof note. Intake writes the report;
+        G14 reopens it and computes CG3 from the recorded verifier
+        evidence rather than a closure declaration."""
+        work_package = "WP-A"
+        self.ws.patch(
+            f"ci/manifest/{work_package}.json",
+            lambda data: (
+                data["definition_of_done"].update({
+                    "required_guarantees": [],
+                    "required_preconditions_to_establish": [],
+                }),
+                data["definition_of_done"]["provided_guarantees"][0].update({
+                    "harness": "verus",
+                    "required_assurance": required_assurance(
+                        kinds=("verus-deductive-check",)
+                    ),
+                }),
+                data.update({"obligations": ["Scheduler.C001"]}),
+            ),
+        )
+        for name in ("WP-B", "WP-C"):
+            (self.ws.root / f"ci/manifest/{name}.json").unlink()
+            (self.ws.root / f"ci/results/{name}.json").unlink()
+        self.ws.patch(
+            f"ci/results/{work_package}.json",
+            lambda data: data.update({"bridge_records": []}),
+        )
         self.ws.patch(
             "specs/_closure/scheduler-core.json",
-            lambda d: d["conditions"].update({"owning_verifier": "verus"}),
+            lambda data: (
+                data.update({"work_packages": [work_package]}),
+                data["conditions"].update({"owning_verifier": "verus"}),
+            ),
         )
-        outcome, _ = self.ws.cluster()
-        errors = self.errors(outcome)
-        self.assert_cg3_blocked_naming(outcome, "verus-deductive-check")
-        self.assertFalse(
-            any("recomputed, never stored-and-trusted" in e for e in errors), errors
+        function = "scheduler::check_dispatch"
+        verus_json = {
+            "func-details": {
+                function: {
+                    "obligation_proof_notes": ["ligature:Scheduler.C001"],
+                    "failed_proof_notes": [],
+                }
+            },
+            "verification-results": {
+                "success": True,
+                "verified": 1,
+                "errors": 0,
+                "is-verifying-entire-crate": True,
+            },
+            "verus-build": {"version": "0.2026.10.01"},
+        }
+        (self.ws.root / "ci/results/verus-output.json").write_text(
+            json.dumps(verus_json, indent=2) + "\n"
         )
+        recorded = record_assurance_module.record_assurance(
+            self.ws.root,
+            work_package,
+            [],
+            verus_json="ci/results/verus-output.json",
+            verus_function_specs=[f"Scheduler.C001={function}"],
+        )
+        self.assertEqual([entry.obligation_id for entry in recorded.recorded], ["Scheduler.C001"])
+
+        outcome, workspace_findings = self.ws.cluster()
+        self.assertEqual(outcome.status, "closes", [str(f) for f in outcome.findings])
+        self.assertEqual(self.errors(outcome), [])
+        self.assertEqual(workspace_findings, [])
+        self.assertTrue(self.verified_infos(outcome), [str(f) for f in outcome.findings])
+
+    def test_workspace_with_creusot_and_verus_evidence_recomputes_cg3(self):
+        """The global positive-capability scan accepts a mixed deductive
+        workspace. Keep the closure itself Creusot-owned so CG1 remains
+        true, and add an unrelated package with fresh Verus evidence to
+        exercise the workspace-wide Creusot/Verus combination."""
+        work_package = "WP-VERUS"
+        verus_manifest = manifest(
+            work_package,
+            provided=[(
+                "Generic.C001",
+                required_assurance(kinds=("verus-deductive-check",)),
+            )],
+        )
+        verus_manifest["definition_of_done"]["provided_guarantees"][0]["harness"] = "verus"
+        self.ws.write("ci/manifest/WP-VERUS.json", verus_manifest)
+
+        function = "mixed_verus::check"
+        verus_json = {
+            "func-details": {
+                function: {
+                    "obligation_proof_notes": ["ligature:Generic.C001"],
+                    "failed_proof_notes": [],
+                }
+            },
+            "verification-results": {
+                "success": True,
+                "verified": 1,
+                "errors": 0,
+                "is-verifying-entire-crate": True,
+            },
+            "verus-build": {"version": "0.2026.10.01"},
+        }
+        self.ws.write("ci/results/verus-output.json", verus_json)
+        recorded = record_assurance_module.record_assurance(
+            self.ws.root,
+            work_package,
+            [],
+            verus_json="ci/results/verus-output.json",
+            verus_function_specs=[f"Generic.C001={function}"],
+        )
+        self.assertEqual([entry.obligation_id for entry in recorded.recorded], ["Generic.C001"])
+
+        outcome, workspace_findings = self.ws.cluster()
+        self.assertEqual(outcome.status, "closes", [str(f) for f in outcome.findings])
+        self.assertEqual(self.errors(outcome), [])
+        self.assertEqual(workspace_findings, [])
+        self.assertTrue(self.verified_infos(outcome), [str(f) for f in outcome.findings])
 
     def test_the_advertised_relief_path_stays_authorable(self):
         """The gap message advertises one relief: a degradation record

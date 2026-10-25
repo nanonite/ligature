@@ -188,7 +188,7 @@
       "title": "Generic-callee type universality (recomputed from closure evidence when those records determine it; tracked capability gap when they do not)",
       "stage": "Stage 8C",
       "implemented": true,
-      "module": "scripts/gate_g14.py (generic_callees_verification: verified from artifact data when no closure record is a Kani result and every work package is recorded, otherwise a CG3 gap that blocks without a degradation record naming it plus a tracking issue)",
+      "module": "scripts/gate_g14.py (generic_callees_verification: verified from complete closure/dependency records when all workspace evidence and declared harnesses are Creusot or Verus deductive; otherwise a CG3 gap blocks without an accepted degradation record naming it and a tracking issue)",
       "cli_command": "gate-g14"
     },
     {

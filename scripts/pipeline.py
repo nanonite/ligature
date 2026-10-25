@@ -361,7 +361,7 @@ Implemented now, against schemas that actually exist:
             recomputed from the workspace's own work-package artifacts
             when they determine it -- the closure AND its declared
             `depends_on` dependencies, per obligation, with
-            creusot-owned evidence and harnesses project-wide
+            Creusot/Verus deductive evidence and harnesses project-wide
             (chainlink #93) -- and is otherwise a capability gap that
             blocks without a degradation record naming it and carrying
             a tracking issue (chainlink #86). Outcome is per cluster and
@@ -3676,7 +3676,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="OBLIGATION=FUNCTION",
         help=(
-            "bind a Verus guarantee to the exact func-details key; repeatable, and the function "
+            "bind a guarantee whose manifest harness is 'verus' to the exact func-details key; "
+            "repeatable, and the function "
             "must put #![verifier::proof_note(\"ligature:<obligation>\")] inside its ensures clause"
         ),
     )

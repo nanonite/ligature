@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+## [1.4.3] - 2026-10-25
+
+### Fixed
+- #173: define provided-guarantee `harness` as the verifier declaration (`creusot` / `verus`) or an exact `kani_...` function name; validate the value and compatible evidence kind with a JSON field path, and document the Verus `--verus-function` mapping separately from verifier identity.
+- #172: let complete Verus deductive evidence establish CG3's type-universal disjunct while retaining positive workspace-wide evidence checks, dependency traversal, per-obligation completeness, and fail-closed Kani/unknown-verifier handling.
+
+### Changed
+- #173 (breaking): provided-guarantee harness declarations no longer accept arbitrary function identifiers. Kani manifests must use the exact function name with the `kani_` prefix; Creusot and Verus manifests must use the literal verifier names. Existing manifests using other names need migration before validation or assurance intake.
+
 ## [1.4.2] - 2026-10-18
 
 ### Added

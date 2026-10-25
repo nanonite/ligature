@@ -129,8 +129,10 @@ EVIDENCE_KIND_BY_VERIFIER = {
 def verifier_for_manifest_harness(harness: str) -> str:
     """Resolve the verifier encoded by a manifest's ``harness`` field.
 
-    Creusot and Verus use their verifier names directly. Kani manifests name
-    the exact Rust proof harness, using the repository's ``kani_`` prefix;
+    For deductive tools, the field is the verifier name itself: ``creusot``
+    or ``verus``. Verus's exact function key is supplied separately to
+    ``record-assurance --verus-function``. Kani manifests instead name the
+    exact Rust proof harness, using the repository's ``kani_`` prefix;
     that name remains separate from the verifier identity ``kani``.
     """
     if harness in ("creusot", "verus"):

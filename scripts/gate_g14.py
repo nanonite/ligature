@@ -33,10 +33,12 @@ condition is never taken on its declaration alone. It is computed from
 the workspace's own work-package artifacts whenever those artifacts
 determine it -- see generic_callees_verification(), which reads the
 closure AND its declared `depends_on` dependencies per obligation, and
-every manifest and assurance ledger anywhere in `ci/` positively (only
-creusot-owned evidence and harnesses establish the verdict, never the
-mere absence of the Kani kind, chainlink #93) -- and when they do not
-(a non-creusot result or harness anywhere, an unrecorded obligation, a
+every manifest and assurance ledger anywhere in `ci/` positively.
+Complete Creusot or Verus deductive evidence establishes the
+type-universal disjunct; Kani's bounded evidence does not. The manifests
+must likewise positively classify every guarantee as Creusot or Verus
+(chainlink #172/#93) -- and when they do not (a bounded or unknown result
+or harness anywhere, an unrecorded obligation, a
 declared dependency that resolves to no manifest), it is a declared
 capability gap: an error the gate refuses to pass silently, excused only
 by a degradation record that names the condition and carries a tracking
@@ -1501,13 +1503,13 @@ def generic_callees_verification(
     honestly (chainlink #86, derivation made sound in chainlink #93):
     (verifiable, the reason it is not).
 
-    `generic_callees_type_universal_or_creusot_owned` is the one
-    condition no artifact can ALWAYS settle -- which callees are generic
-    is type information nothing in this pipeline carries (CG3,
-    plan.md §3), so the `type_universal` disjunct has no authoring path
-    at all. The disjunct that CAN be established from artifacts is
-    `creusot_owned`, and the pilot report behind #93 showed the 1.1.1
-    form establishing it from a proxy that read less than the claim:
+    `generic_callees_type_universal_or_creusot_owned` is not inferred
+    from source call-site type information, which this pipeline does not
+    carry (CG3, plan.md §3). Instead, artifacts establish either
+    disjunct positively: Creusot ownership or type-universal deductive
+    evidence from Creusot or Verus. Kani remains bounded per
+    monomorphization. The pilot report behind #93 showed the 1.1.1 form
+    establishing the condition from a proxy that read less than the claim:
 
       * the claim covers every generic callee the cluster can REACH, so
         the scan walks BOTH dependency edges: the obligation closure
@@ -1524,15 +1526,14 @@ def generic_callees_verification(
         record, and the verdict is withheld while any does not (issue
         leg B2 printed VERIFIED at the same moment the gate blocked the
         cluster for "recorded no achieved assurance"); and
-      * ownership is a POSITIVE test, never "not visibly Kani": every
-        achieved record anywhere in the workspace's ledgers and every
-        declared guarantee harness in its manifests must be
-        creusot-owned (issue leg B7: a verus-owned cluster satisfied the
-        `creusot_owned` disjunct by merely not being Kani -- verus
-        establishes neither disjunct, and a harness name no verifier
-        here maps owns nothing).
+      * verifier capability is a POSITIVE test, never "not visibly
+        Kani": every achieved record anywhere in the workspace's ledgers
+        must be a Creusot or Verus deductive result, and every declared
+        guarantee harness in its manifests must map to one of those
+        verifiers. Verus establishes the type-universal disjunct; Kani or
+        an unknown verifier establishes neither.
 
-    Anything else -- a non-creusot result or harness anywhere in the
+    Anything else -- a Kani or unknown result or harness anywhere in the
     workspace, an unrecorded obligation, a report that cannot be read, a
     declared `depends_on` resolving to no manifest -- is NOT verified
     and must never read as checked: the returned reason is exactly what
@@ -1548,8 +1549,8 @@ def generic_callees_verification(
             "a declared depends_on names "
             + ", ".join(sorted(unresolved))
             + ", which resolves to no schema-valid work-package manifest in this workspace -- a "
-            "declared dependency the gate cannot read is exactly where a Kani-owned generic "
-            "callee could sit, so it fails closed rather than out of scope (CG3, chainlink #93)"
+            "declared dependency the gate cannot read could hide bounded or unsupported evidence, "
+            "so it fails closed rather than out of scope (CG3, chainlink #93/#172)"
         )
 
     scope = [*closure.work_packages, *reached]
@@ -1559,7 +1560,8 @@ def generic_callees_verification(
             "no readable assurance report for "
             + ", ".join(missing_reports)
             + " (this verdict's scope is the closure AND its declared depends_on dependencies) -- "
-            "evidence nobody wrote down cannot be ruled out as a Kani result (CG3, chainlink #93)"
+            "evidence nobody wrote down cannot be ruled out as bounded or unsupported "
+            "(CG3, chainlink #93/#172)"
         )
 
     # Premise (a), per obligation (chainlink #93): the closure used to
@@ -1627,7 +1629,7 @@ def generic_callees_verification(
             kind = evidence.get("kind") if isinstance(evidence, dict) else None
             kind = kind if isinstance(kind, str) else f"<unreadable kind {kind!r}>"
             kinds.add(kind)
-            if kind != "creusot-deductive-check":
+            if kind not in DEDUCTIVE_EVIDENCE_KINDS:
                 offending.append(f"{work_package}:{label} ({kind})")
     if unreadable:
         return False, (
@@ -1639,28 +1641,30 @@ def generic_callees_verification(
         )
     if offending:
         return False, (
-            "the workspace's own achieved records include "
-            f"{sorted(k for k in kinds if k != 'creusot-deductive-check')!r} results at "
+            "the workspace's own achieved records include bounded or unsupported "
+            "results "
+            f"{sorted(k for k in kinds if k not in DEDUCTIVE_EVIDENCE_KINDS)!r} at "
             + ", ".join(offending)
-            + " -- creusot ownership is established positively, never by the mere absence of the "
-            "Kani kind: Kani verifies generics per monomorphization, and the type_universal "
-            "disjunct needs type information no artifact in this pipeline carries "
+            + " -- CG3 is established positively by Creusot or Verus deductive evidence; Kani "
+            "verifies generics per monomorphization and cannot establish either disjunct "
             "(CG3, plan.md §3, chainlink #93)"
         )
 
-    non_creusot_harnesses = [
+    non_deductive_harnesses = [
         f"{work_package}:{entry['obligation_id']} (harness {entry.get('harness')!r})"
         for work_package in sorted(manifests)
         for entry in manifests[work_package]["definition_of_done"]["provided_guarantees"]
-        if entry.get("harness") != "creusot"
+        if not isinstance(entry.get("harness"), str)
+        or verifier_for_manifest_harness(entry["harness"]) not in ("creusot", "verus")
     ]
-    if non_creusot_harnesses:
+    if non_deductive_harnesses:
         return False, (
-            "the project's work-package manifests declare a non-creusot guarantee harness at "
-            + ", ".join(non_creusot_harnesses)
-            + " -- the creusot_owned disjunct is established from creusot-owned declarations, and "
-            "a harness that is merely 'not Kani' (verus, or a name no verifier here maps) owns "
-            "nothing this verdict can vouch for (CG3, plan.md §3, chainlink #93)"
+            "the project's work-package manifests declare a bounded or unsupported guarantee "
+            "harness at "
+            + ", ".join(non_deductive_harnesses)
+            + " -- only positively classified Creusot or Verus guarantees establish CG3; Kani "
+            "is per-monomorphization and an unmapped name establishes no verifier capability "
+            "(CG3, plan.md §3, chainlink #93/#172)"
         )
     return True, ""
 
@@ -1685,7 +1689,8 @@ def recompute_conditions(
     only when the workspace's own artifacts determine it --
     generic_callees_verification walks the closure AND its declared
     `depends_on` dependencies per obligation, and every manifest and
-    assurance ledger in `ci/` for creusot-owned evidence and harnesses
+    assurance ledger in `ci/` for Creusot/Verus deductive evidence and
+    harnesses
     (chainlink #93) -- and otherwise stays OUT of this dict with its
     refusal reason under `_cg3_unverified`: an unverifiable condition is
     a capability gap gate_cluster reports and demands a tracking record
@@ -2326,7 +2331,8 @@ def gate_cluster(
     # declaration alone. Three outcomes, in the order the evidence
     # allows them: the workspace's artifacts determine it -- the closure
     # AND its declared depends_on dependencies, per obligation, with
-    # creusot-owned evidence and harnesses project-wide (chainlink #93),
+    # Creusot/Verus deductive evidence and harnesses project-wide
+    # (chainlink #93/#172),
     # reported as verified from artifact data, and a profile bit
     # disagreeing with it is already refused by check_declared_conditions
     # above, in both directions; the artifacts do not determine it and
@@ -2351,9 +2357,10 @@ def gate_cluster(
                     "AND its declared depends_on dependencies has a recorded achievement, the "
                     f"closure's own records are {computed['_evidence_kinds']}, and every other "
                     "achieved record and declared guarantee harness in this workspace's "
-                    "work-package manifests and ledgers is creusot-owned as well -- with no "
-                    "non-creusot assurance anywhere those artifacts can name, no generic callee "
-                    "this cluster declares a dependency on is Kani-owned "
+                    "work-package manifests and ledgers is positively classified as Creusot or "
+                    "Verus deductive assurance -- with no bounded Kani assurance anywhere those "
+                    "artifacts can name, its generic callees satisfy CG3's type-universal or "
+                    "Creusot-owned condition "
                     "(CG3, plan.md §3, chainlink #93)",
                     severity="info",
                     condition=GENERIC_CALLEES_CONDITION,

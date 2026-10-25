@@ -55,8 +55,10 @@ implements the Rust code -- this schema IS the interface spec for
     trusted_assumptions is non-empty is a hard error, not an optional
     enrichment that degrades to a footnote -- this is one of this
     validator's three claimed mechanical guarantees.
-  - harness names contain no wildcard characters (schema-enforced,
-    exact_harness_name $def).
+  - provided-guarantee harnesses classify their assurance verifier:
+    ``creusot`` / ``verus`` are verifier identities, while Kani uses the
+    exact Rust function name prefixed with ``kani_``. The evidence kind
+    must match that declaration.
   - the witness renderer implementation (scripts/witness_renderer.py,
     plus scripts/xml_escape.py -- a direct helper it imports for its
     own text escaping, closing the transitive gap) has its own
@@ -105,6 +107,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +129,7 @@ from validate_boundary_naming import find_boundary_files  # noqa: E402
 from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 
 SCHEMA_PATH = resources.resource_path("docs", "work-package-manifest-schema.json")
+_KANI_HARNESS_RE = re.compile(r"^kani_[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
@@ -147,8 +151,43 @@ def load_validator() -> Draft202012Validator:
     return make_validator(load_schema())
 
 
+def format_manifest_schema_error(data: dict, error) -> str:
+    """Render schema errors with a correction for unsupported verifier names.
+
+    JSON Schema's ``oneOf`` diagnostic says only that a custom name such
+    as ``counter_capacity`` matched no alternative. Both G1a and assurance
+    intake use this formatter so callers learn that the name belongs in
+    ``--verus-function`` while the manifest declares ``verus``.
+    """
+    path = list(error.absolute_path)
+    field = "/".join(str(part) for part in path) or "<root>"
+    if (
+        len(path) == 4
+        and path[:2] == ["definition_of_done", "provided_guarantees"]
+        and path[3] == "harness"
+    ):
+        try:
+            harness = data["definition_of_done"]["provided_guarantees"][path[2]]["harness"]
+        except (KeyError, IndexError, TypeError):
+            harness = None
+        if not (
+            harness in ("creusot", "verus")
+            or isinstance(harness, str)
+            and _KANI_HARNESS_RE.fullmatch(harness)
+        ):
+            return (
+                f"manifest field {field}: unsupported verifier/harness {harness!r}; use "
+                "'creusot' or 'verus', or the exact Kani function name prefixed with "
+                "'kani_'. For Verus, put the exact function key in --verus-function"
+            )
+    return f"manifest field {field}: {error.message}"
+
+
 def gate_g1a(path: Path, data: dict, validator: Draft202012Validator) -> list[Finding]:
-    return [Finding("G1a", path, e.message) for e in validator.iter_errors(data)]
+    findings = []
+    for error in validator.iter_errors(data):
+        findings.append(Finding("G1a", path, format_manifest_schema_error(data, error)))
+    return findings
 
 
 # ---------------------------------------------------------------------------

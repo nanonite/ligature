@@ -165,6 +165,15 @@ class ConceptSearchRootHelpTest(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 0)
                 self.assertIn("specs_search_root", output.getvalue())
 
+    def test_record_assurance_help_explains_verus_manifest_classification(self):
+        parser = pipeline.build_parser()
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["record-assurance", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("manifest harness is 'verus'", output.getvalue())
+        self.assertIn("exact func-details key", output.getvalue())
+
     def test_schema_subcommand_help_describes_offline_bundled_resource_scope(self):
         parser = pipeline.build_parser()
         for argv, expected in (

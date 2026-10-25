@@ -78,6 +78,38 @@ class G1aFailureTest(unittest.TestCase):
         findings = run(data)
         self.assertTrue(any(f.gate == "G1a" for f in findings))
 
+    def test_arbitrary_function_name_is_not_a_verifier_declaration(self):
+        data = load_valid()
+        data["definition_of_done"]["provided_guarantees"][0]["harness"] = "counter_capacity"
+        findings = run(data)
+        errors = errors_of(findings)
+        self.assertTrue(any(f.gate == "G1a" for f in errors), errors)
+        self.assertTrue(
+            any(
+                "definition_of_done/provided_guarantees/0/harness" in f.reason
+                and "use 'creusot' or 'verus'" in f.reason
+                and "--verus-function" in f.reason
+                for f in errors
+            ),
+            [str(f) for f in errors],
+        )
+
+    def test_verus_verifier_declaration_accepts_the_verus_evidence_kind(self):
+        data = load_valid()
+        guarantee = data["definition_of_done"]["provided_guarantees"][0]
+        guarantee["harness"] = "verus"
+        guarantee["required_assurance"]["accepted_evidence_kinds"] = [
+            "verus-deductive-check"
+        ]
+        findings = run(data)
+        self.assertEqual(errors_of(findings), [], [str(f) for f in errors_of(findings)])
+
+    def test_verus_declaration_requires_verus_evidence_kind(self):
+        data = load_valid()
+        data["definition_of_done"]["provided_guarantees"][0]["harness"] = "verus"
+        findings = run(data)
+        self.assertTrue(any(f.gate == "G1a" for f in errors_of(findings)))
+
     def test_forbidden_action_outside_enum_is_rejected(self):
         data = load_valid()
         data["failure_policy"]["forbidden"].append("do_whatever_you_want")

@@ -161,6 +161,29 @@ and `generate-work-package` use the same grant reader for their own writes:
     category: a canonical pipeline location never excuses a declared
     protected root.
 
+**Build and runtime state is not agent output (chainlink #176).** The
+question above is "is every file in the workspace accounted for by a
+declaration the workspace itself makes?", and a `target/` tree produced by
+the documented `cargo build` / `cargo test` steps is not an implementation
+write at all: it is the build of the files the write set already governs.
+Treating it as unaccounted made the check permanently red on the Neargye
+pilot -- 664 of 721 findings were files under a 129 MB gitignored
+`target/`, and 36 were `.chainlink` runtime state -- for performing the
+documented reproduction steps. So the walk skips
+
+  * paths the workspace's own git ignore rules exclude (read from
+    `git ls-files --others --ignored --exclude-standard`; tracked files
+    are never ignored by git and stay subject to the check), and
+  * standard build/tool directories (`target/`, `node_modules/`, `.venv/`,
+    the common Python test/lint caches, and Chainlink's `.chainlink/`
+    runtime state) even when the workspace is not a git checkout, so a
+    build tree cannot turn the check red by itself.
+
+Skipping is deliberately at the walk, before any root or grant lookup:
+build output inside `allowed_roots` or `protected_roots` is still build
+output. A real out-of-set write is untouched by either rule and remains a
+violation, which is the regression the #176 test pins.
+
 Read-only by construction: this module walks the workspace and reads the
 ownership manifest and the grant ledger; it never writes.
 """
@@ -168,6 +191,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -185,10 +209,30 @@ import write_authorization  # noqa: E402
 from review_checkpoint import DRAFT_SUFFIX as _DRAFT_SUFFIX  # noqa: E402
 from validate_work_package import _pattern_covers_path  # noqa: E402
 
-# Directories pruned from the walk: VCS internals and Python bytecode
-# caches are not agent-written content, and a pilot workspace's `.git/`
-# alone would otherwise dominate every report.
-_SKIP_DIRS = frozenset({".git", "__pycache__"})
+# Directories pruned from the walk: VCS internals and build/tool state are
+# not agent-written content. `.git/` alone would otherwise dominate every
+# report; `target/` (Rust), `node_modules/` (Node) and `.venv/` (Python) are
+# the output of the documented build steps, the caches are test/lint state,
+# and `.chainlink/` is the issue tracker's local runtime state. These are
+# pruned even when git ignore rules are unavailable, so a workspace is never
+# made permanently red merely by being built or tracked (#176). Gitignored
+# paths are pruned separately, below, from the workspace's own ignore rules
+# -- this list is the standard-directory fallback.
+_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        "target",
+        "node_modules",
+        ".venv",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        ".tox",
+        ".nox",
+        ".chainlink",
+    }
+)
 
 # The pipeline's own canonical artifact and output locations (plan.md
 # §10/§11's fixed layout). The write set governs where the implementing
@@ -406,20 +450,91 @@ def _rel_to_workspace(path: Path, workspace: Path) -> str:
         return path.as_posix()
 
 
+def _gitignored_paths(workspace: Path) -> tuple[set[str], set[str]]:
+    """The workspace-relative paths its own git ignore rules exclude.
+
+    Returns `(ignored_dirs, ignored_files)`, both workspace-relative posix
+    strings. `git ls-files --others --ignored --exclude-standard
+    --directory` is exactly the declaration the workspace makes about its
+    own build/runtime state: it reports untracked paths that git would not
+    commit, and collapses a wholly-ignored directory to `dir/`. Tracked
+    files never appear (git does not ignore tracked paths), so a committed
+    file remains subject to the write set no matter what a `.gitignore`
+    says -- the check never lets an ignore rule hide repository content.
+
+    Only consulted when the workspace itself has a `.git` entry: a
+    workspace merely nested inside an unrelated parent checkout must not
+    inherit that checkout's ignores as if they were its own declarations.
+    Best-effort by design -- when git is absent, the workspace has no
+    checkout, or the command fails, the standard `_SKIP_DIRS` fallback
+    still prunes the build trees a documented reproduction produces. The
+    query is read-only (`ls-files` never writes an index), preserving this
+    module's no-write guarantee.
+    """
+    if not (workspace / ".git").exists():
+        return set(), set()
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(workspace),
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set(), set()
+    if result.returncode != 0:
+        return set(), set()
+
+    ignored_dirs: set[str] = set()
+    ignored_files: set[str] = set()
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        rel = os.fsdecode(raw)
+        if rel.endswith("/"):
+            ignored_dirs.add(rel.rstrip("/"))
+        else:
+            ignored_files.add(rel)
+    return ignored_dirs, ignored_files
+
+
 def _walk_files(workspace: Path) -> list[str]:
     """Every workspace-relative posix path of a regular file, sorted for
-    determinism. VCS internals and bytecode caches are pruned; symlinks are
-    skipped (a symlink can point outside the workspace -- hashing it would
-    be checking someone else's file, the same discipline the gate_integrity
-    and write-set-pattern checks apply)."""
+    determinism. VCS internals, standard build/tool directories and paths
+    the workspace's own git ignore rules exclude are pruned (#176); symlinks
+    are skipped (a symlink can point outside the workspace -- hashing it
+    would be checking someone else's file, the same discipline the
+    gate_integrity and write-set-pattern checks apply)."""
+    ignored_dirs, ignored_files = _gitignored_paths(workspace)
     rels: list[str] = []
     for root, dirs, filenames in os.walk(workspace, followlinks=False):
-        dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
+        kept: list[str] = []
+        for name in sorted(dirs):
+            if name in _SKIP_DIRS:
+                continue
+            rel_dir = (Path(root) / name).relative_to(workspace).as_posix()
+            if rel_dir in ignored_dirs:
+                continue
+            kept.append(name)
+        dirs[:] = kept
         for name in sorted(filenames):
             path = Path(root) / name
             if path.is_symlink():
                 continue
-            rels.append(path.relative_to(workspace).as_posix())
+            rel = path.relative_to(workspace).as_posix()
+            if rel in ignored_files:
+                continue
+            rels.append(rel)
     return sorted(rels)
 
 

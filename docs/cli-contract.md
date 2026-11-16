@@ -1215,6 +1215,22 @@ refused rather than hashed against someone else's file -- the discipline
 `validate_work_package.check_gate_integrity` already applies to
 work-package manifests.
 
+**Build and runtime state is not agent output (#176).** The filesystem
+walk skips paths the workspace's own git ignore rules exclude, read from
+`git ls-files --others --ignored --exclude-standard` when the workspace
+has a `.git` entry. Tracked files are never reported by git as ignored,
+so a committed file remains subject to the write set no matter what a
+`.gitignore` says. It also prunes standard build/tool directories --
+`target/`, `node_modules/`, `.venv/`, the common Python test/lint caches,
+and Chainlink's `.chainlink/` runtime state -- even when the workspace is
+not a git checkout. The Neargye pilot's documented `cargo build` / `cargo test` steps left a 129 MB
+`target/` tree (664 of 721 findings) and `.chainlink` runtime state (36
+findings), which made the check permanently red for following its own
+reproduction instructions. Skipping happens at the walk, before any root
+or grant lookup: build output inside `allowed_roots` or `protected_roots`
+is still build output. A real out-of-set write is untouched by either
+rule and remains a violation.
+
 Descriptor loading also rejects any `allowed_roots` / `protected_roots`
 glob pair whose languages intersect, using the same exact pattern
 intersection checker as Stage 7 G13. This runs before later work-package

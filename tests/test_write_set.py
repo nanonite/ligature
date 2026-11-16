@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -226,6 +227,93 @@ class WriteSetViolationTest(WriteSetFixture):
         code, doc = self.write_set_check()
         self.assertEqual(code, 0)
         self.assertEqual(doc["write_set"]["state"], "clean")
+
+
+class GitignoredBuildOutputTest(WriteSetFixture):
+    """chainlink #176: build/runtime state is not agent output.
+
+    The Neargye pilot's documented `cargo build` / `cargo test` steps left
+    a 129 MB gitignored `target/` tree (664 findings) plus `.chainlink`
+    runtime state (36 findings), so `write-set-check` was permanently red
+    for doing exactly what the reproduction instructions say. The walk now
+    honors the workspace's own git ignore rules and prunes standard
+    build/tool directories, while a real out-of-set write stays a
+    violation."""
+
+    def init_git(self, *ignore_lines: str) -> None:
+        subprocess.run(
+            ["git", "init", "-q", str(self.workspace)],
+            check=True,
+            capture_output=True,
+        )
+        (self.workspace / ".gitignore").write_text("\n".join(ignore_lines) + "\n")
+        # The fixture's ignore file is itself a workspace-root file outside
+        # every declared root; a real project declares its own root files,
+        # so the test does too rather than hiding it behind the fix.
+        descriptor = json.loads(self.descriptor_path.read_text())
+        descriptor["write_set"]["allowed_roots"].append(".gitignore")
+        self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+
+    def test_gitignored_target_and_runtime_state_stay_clean(self):
+        self.init_workspace()
+        self.init_git("target/", ".chainlink/")
+        self.write("target/debug/deps/libdate_creusot.rlib", "binary\n")
+        self.write("target/debug/build/foo/out.rs", "pub fn generated() {}\n")
+        self.write(".chainlink/issues.db", "sqlite\n")
+        self.write(".chainlink/last_test_run", "0\n")
+        code, doc = self.write_set_check()
+        self.assertEqual(code, 0)
+        self.assertEqual(doc["write_set"]["state"], "clean")
+        self.assertEqual(doc["write_set"]["violations"], [])
+        self.assertEqual(doc["write_set"]["protected_unvouched"], [])
+
+    def test_a_real_out_of_set_write_is_flagged_next_to_build_output(self):
+        self.init_workspace()
+        self.init_git("target/", ".chainlink/")
+        self.write("target/debug/deps/libdate_creusot.rlib", "binary\n")
+        self.write(".chainlink/issues.db", "sqlite\n")
+        self.write("docs/evil.md")
+        code, doc = self.write_set_check()
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["write_set"]["state"], "violations")
+        self.assertEqual(
+            [(v["path"], v["kind"]) for v in doc["write_set"]["violations"]],
+            [("docs/evil.md", "out-of-set")],
+        )
+
+    def test_standard_build_dirs_are_skipped_without_git(self):
+        """The standard-directory fallback covers a workspace that is not a
+        git checkout: build output cannot turn the check red by itself."""
+        self.init_workspace()
+        self.write("target/debug/foo", "binary\n")
+        self.write("node_modules/pkg/index.js", "module.exports = {};\n")
+        self.write(".venv/lib/python3.12/site.py", "import os\n")
+        self.write(".chainlink/issues.db", "sqlite\n")
+        self.write("docs/evil.md")
+        code, doc = self.write_set_check()
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [v["path"] for v in doc["write_set"]["violations"]],
+            ["docs/evil.md"],
+        )
+
+    def test_a_tracked_ignored_path_is_still_subject_to_the_write_set(self):
+        """Git ignore rules never hide repository content: a committed file
+        is not ignored by git, so it stays visible to the check."""
+        self.init_workspace()
+        self.init_git("docs/generated/")
+        self.write("docs/generated/evil.md")
+        subprocess.run(
+            ["git", "-C", str(self.workspace), "add", "-f", "docs/generated/evil.md"],
+            check=True,
+            capture_output=True,
+        )
+        code, doc = self.write_set_check()
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            [v["path"] for v in doc["write_set"]["violations"]],
+            ["docs/generated/evil.md"],
+        )
 
 
 class ProtectedWriteTest(WriteSetFixture):
@@ -676,6 +764,28 @@ class WriteSetUnitTest(unittest.TestCase):
             self.assertNotIn(".git/config", rels)
             self.assertNotIn("src/linked.txt", rels)
             self.assertIn("src/lib.rs", rels)
+
+    def test_walk_files_prunes_standard_build_and_tool_dirs(self):
+        """chainlink #176: the documented `cargo build` / `cargo test`
+        steps leave `target/`, and a JavaScript/Python workspace leaves
+        `node_modules/` / `.venv/`; none is agent-authored content."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            for rel in (
+                "target/debug/deps/libfoo.rlib",
+                "node_modules/pkg/index.js",
+                ".venv/lib/python3.12/site.py",
+                ".pytest_cache/v/cache/nodeids",
+                ".ruff_cache/0.1/data",
+                ".chainlink/issues.db",
+            ):
+                path = workspace / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x\n")
+            (workspace / "src").mkdir()
+            (workspace / "src" / "lib.rs").write_text("pub fn ok() {}\n")
+            self.assertEqual(write_set._walk_files(workspace), ["src/lib.rs"])
+
 
 
 class GateIntegrityEscapeTest(WriteSetFixture):

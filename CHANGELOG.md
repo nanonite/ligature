@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - #172: let complete Verus deductive evidence establish CG3's type-universal disjunct while retaining positive workspace-wide evidence checks, dependency traversal, per-obligation completeness, and fail-closed Kani/unknown-verifier handling.
 
 ### Changed
+- Address port feedback and verify the released Ligature before downstream remediation (#143)
 - Neargye semver: first real Mode P C++ to Rust pilot (#52)
 - Verify the fixed Ligature release in the port workspace before filing remediation issues (#161)
 - #173 (breaking): provided-guarantee harness declarations no longer accept arbitrary function identifiers. Kani manifests must use the exact function name with the `kani_` prefix; Creusot and Verus manifests must use the literal verifier names. Existing manifests using other names need migration before validation or assurance intake.

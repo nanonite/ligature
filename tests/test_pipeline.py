@@ -535,6 +535,43 @@ class DraftTemplateRegistryTest(unittest.TestCase):
                 self.assertIn(template.target, printed)
                 self.assertIn(template.promoted_by.split(" (")[0], printed)
 
+    def test_each_command_help_keeps_its_own_epilog_and_the_shared_pointer(self):
+        # chainlink #184: `build_parser()` stamps a shared "run ligature
+        # contract" pointer onto every subcommand's epilog. It used to ASSIGN
+        # that pointer, which erased `draft`'s template registry and made
+        # `draft --help` stop naming any draftable template -- the failure
+        # `test_draft_help_lists_every_template` pins from the user's side.
+        # The rule is append: a command's own epilog and the shared pointer
+        # both survive, for every command that ships one. Reading the rule off
+        # `build_parser()`'s result (rather than a hand-list) also fails when
+        # a command's own epilog is overwritten, because its parser is left
+        # with the pointer alone and drops out of `own_epilogs`.
+        pointer = (
+            "Exit codes and JSON support are command-specific. "
+            "Only commands whose usage lists --json accept it; "
+            "run ligature contract [--json] for the bundled CLI contract."
+        )
+        parser = pipeline.build_parser()
+        own_epilogs = {}
+        for command, command_parser in pipeline.registered_commands(parser).items():
+            epilog = (command_parser.epilog or "").strip()
+            if not epilog or epilog == pointer:
+                continue
+            self.assertTrue(
+                epilog.endswith(pointer),
+                f"{command}'s own epilog must keep the shared contract pointer appended, got {epilog!r}",
+            )
+            own_epilogs[command] = epilog[: -len(pointer)].strip()
+        self.assertEqual(set(own_epilogs), {"draft", "check-bridges"})
+        for command, own_epilog in own_epilogs.items():
+            buffer = io.StringIO()
+            with redirect_stdout(buffer), self.assertRaises(SystemExit):
+                parser.parse_args([command, "--help"])
+            printed = buffer.getvalue()
+            with self.subTest(command=command):
+                self.assertIn(own_epilog.splitlines()[0], printed)
+                self.assertIn(pointer, printed)
+
     def test_the_help_text_no_longer_offers_a_two_template_illustration(self):
         buffer = io.StringIO()
         with redirect_stdout(buffer):

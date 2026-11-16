@@ -85,6 +85,28 @@ class WriteSetFixture(unittest.TestCase):
         if mode == "port":
             descriptor["port_source"]["repository"] = "upstream"
         self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        # Satisfy the gates `check` runs beside write-set, so a write-set
+        # test observes the write set rather than an unrelated finding: the
+        # declared crate root must exist (crate-prerequisite), and the
+        # shipped fixture values this fixture deliberately keeps must be
+        # accepted explicitly (P0, chainlink #67/#145). Accepting them here
+        # is the same fixture shape test_project_state.py's WorkspaceFixture
+        # uses; it changes no write-set input.
+        (self.workspace / "rust" / "date-creusot-core").mkdir(parents=True, exist_ok=True)
+        fixture_fields = ["review.reviewed_at"]
+        if mode == "port":
+            fixture_fields.extend(("port_source.language", "port_source.oracle_build_command"))
+        for field in fixture_fields:
+            code, out = self.run_cli(
+                "accept-fixture-value",
+                "--path",
+                field,
+                "--reviewer",
+                "pilot-reviewer",
+                "--accepted-at",
+                "2026-10-01",
+            )
+            self.assertEqual(code, 0, out)
         return descriptor
 
     def write(self, relative: str, data: str = "rogue\n") -> Path:
@@ -614,15 +636,39 @@ class VacuousWriteSetTest(WriteSetFixture):
     """The descriptor-shape matrix from the report: the schema accepts
     shapes that declare no enforcement boundary at all."""
 
-    def test_allowed_roots_matching_every_path_is_a_violation(self):
+    def test_allowed_roots_matching_every_path_is_rejected_as_an_overlap(self):
+        """`**` overlaps every protected root the pilot declared, and
+        chainlink #133 rejects that at descriptor load, before
+        write-set-check can report the vacuous declaration. Exit 2 with an
+        unknown write set is the stronger fail-closed outcome, so the test
+        pins that rather than the pre-#133 declaration finding."""
         self.init_workspace()
         descriptor = json.loads(self.descriptor_path.read_text())
         descriptor["write_set"]["allowed_roots"] = ["**"]
         self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
         code, doc = self.write_set_check()
+        self.assertEqual(code, 2)
+        self.assertEqual(doc["descriptor"]["state"], "present-invalid")
+        self.assertEqual(doc["write_set"]["state"], "unknown")
+
+    def test_allowed_roots_matching_every_path_is_a_declaration_violation(self):
+        """With protected_roots empty there is no allowed/protected overlap
+        for #133's loader check to reject, so write-set-check's own
+        declaration finding for `**` stays reachable and is pinned here."""
+        self.init_workspace()
+        descriptor = json.loads(self.descriptor_path.read_text())
+        descriptor["write_set"]["allowed_roots"] = ["**"]
+        descriptor["write_set"]["protected_roots"] = []
+        self.descriptor_path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        code, doc = self.write_set_check()
         self.assertEqual(code, 1)
         self.assertEqual(doc["write_set"]["state"], "violations")
-        self.assertTrue(any("**" in v["reason"] for v in doc["write_set"]["violations"]))
+        self.assertTrue(
+            any(
+                "matches every path" in v["reason"]
+                for v in doc["write_set"]["violations"]
+            )
+        )
 
     def test_empty_protected_roots_is_a_violation(self):
         self.init_workspace()
@@ -727,7 +773,12 @@ class WriteSetUnitTest(unittest.TestCase):
         self.assertFalse(write_set._matches_every_path("rust/*/specs/**"))
 
     def test_is_canonical(self):
-        self.assertTrue(write_set._is_canonical("ci/manifest/installation.json"))
+        # chainlink #103 narrowed the canonical prefixes from `ci/` to
+        # `ci/results/`: a protected file under `ci/` (the pilot's
+        # `ci/manifest/**`) must not be excused by location alone. The
+        # ownership manifest is still accounted for -- as itself, through
+        # write_set._OWNERSHIP_MANIFEST_REL -- not as a canonical location.
+        self.assertFalse(write_set._is_canonical("ci/manifest/installation.json"))
         self.assertTrue(write_set._is_canonical("ci/results/c_static/target.json"))
         self.assertTrue(write_set._is_canonical("evidence/E-0001.json"))
         self.assertTrue(write_set._is_canonical("specs/_closure/date-creusot.json"))

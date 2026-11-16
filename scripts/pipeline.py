@@ -3304,7 +3304,19 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         sys.stdout.write(canonical_json(report.audit or {"action": "migrate", "result": report.status}))
     else:
         sys.stdout.write(render_installation_report(report))
-    return 1 if report.status in ("conflict", "drifted", "incompatible") else 0
+    # chainlink #175: an upgrade that wrote successfully but left a
+    # post-upgrade validation finding (invalid user-owned descriptor,
+    # work-package manifest, or concept spec) is a fail-closed result, not
+    # a failed write -- the audit distinguishes the two. See
+    # docs/exit-code-contract.md.
+    post_upgrade = (report.audit or {}).get("post_upgrade_validation") or {}
+    post_upgrade_findings = post_upgrade.get("state") == "findings"
+    return (
+        1
+        if report.status in ("conflict", "drifted", "incompatible")
+        or post_upgrade_findings
+        else 0
+    )
 
 
 def _descriptor_relative_to_workspace(workspace: Path, descriptor: Path) -> str:

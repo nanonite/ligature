@@ -106,7 +106,7 @@ generic envelope.
 | `schema` | 0 when the bundled catalog/schema is inspected or exported; 1 for an unknown bundled schema, unreadable resource, or refused export. Argparse usage errors exit 2. | yes |
 | `contract` | 0 when the exact CLI contract bundled in the executable is printed as Markdown or the versioned JSON envelope. | yes |
 | `init` | 0 completed without conflicts; 1 managed conflicts/drift; 2 command-handled invalid input/refusal. | no |
-| `migrate` | 0 completed without conflicts; 1 managed conflicts/drift or unresolved migration; 2 command-handled invalid input/refusal. | yes |
+| `migrate` | 0 completed without conflicts and, after `--upgrade`/`--force`, without post-upgrade validation findings; 1 managed conflicts/drift, unresolved migration, or post-upgrade validation findings; 2 command-handled invalid input/refusal. A successful `--upgrade` may exit 1 while `result` is `drifted` or `current`: the write completed and `files_written` names what changed. | yes |
 | `validate`, `validate-interaction`, `validate-exemption`, `validate-protocol-debt`, `validate-bridge`, `validate-evidence`, `validate-conflict-resolution`, `validate-work-package`, `validate-promotion`, `validate-callsites`, `validate-witness`, `validate-gold-set`, `validate-closure` | 0 no blocking validation findings; 1 findings or a dispatcher-caught refusal/error. | no |
 | `gate-g9`, `gate-g18`, `gate-g19` | 0 passed; 1 blocked/findings or dispatcher-caught prerequisite error. | no |
 | `gate-g14` | 0 when no cluster is blocked; 1 when a cluster is blocked, workspace findings contain errors, or no closure profile exists. | yes |
@@ -130,6 +130,31 @@ The `--json` column is checked against parser registrations by
 contract; release acceptance additionally checks representative outcomes
 through the packaged binary. A source-only table is not evidence that a
 deployed binary contains those behaviors.
+
+**`migrate --upgrade` exit semantics (chainlink #175).** `migrate` can
+write every managed-file upgrade successfully and still exit **1**. That is
+the fail-closed result, not a failed write:
+
+* `result` remains the installation status (`current`/`drifted`/
+  `conflict`/`upgradable`) computed after the writes.
+* `files_written` lists exactly the paths the run wrote. A user-owned file
+  appears there only when it was missing and the upgrade created it; an
+  existing user-owned file's bytes are never replaced.
+* `post_upgrade_validation` reports whether the descriptor, existing
+  work-package manifests, and concept specs pass the running release's
+  validators. `state: findings` means a human must repair user-authored
+  content; the same findings appear in `required_human_action`, and
+  `ligature check --json` is the consolidated detail surface.
+* `changed_paths` is the ownership-manifest record diff, not the write
+  list. A user-owned descriptor appears there when its recorded base hash
+  is re-based to the content already on disk (`file_written: false`,
+  `change_kind: "manifest-record"`); `user_owned_files.records_rebased`
+  names those records explicitly.
+
+So exit 0 means both the installation and the post-upgrade validation were
+clean. Exit 1 with `result: current` and a non-empty
+`post_upgrade_validation.findings` is the precise "the upgrade wrote, now
+repair this user content" signal.
 
 ## Compatibility aliases
 

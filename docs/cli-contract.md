@@ -1049,6 +1049,27 @@ verifies it. A modified managed file (including an edited authority
 region) makes `doctor` exit non-zero; it never auto-repairs. `init`
 installs, `migrate` is the explicit, human-invoked recovery path.
 
+**Implemented by #175.** `migrate --upgrade`'s audit is a post-write
+report, not a write receipt. It now distinguishes `files_written` (the
+managed paths this run actually wrote) from `changed_paths` (the
+ownership-manifest record diff), because a user-owned file such as
+`project-descriptor.json` can appear in the latter when its recorded base
+hash is re-based to content already on disk: the user-owned file's bytes
+are never written, and the audit now says so with `file_written: false`,
+`change_kind: "manifest-record"`, and `user_owned_files` (`written`,
+`records_updated`, `records_rebased`). The same audit validates the
+user-authored inputs the upgrade did not write — the descriptor (schema,
+including the disjoint write-set glob rule), every existing
+work-package manifest under `ci/manifest/`, and every concept spec under
+the descriptor's declared `specs_search_root` — using the same validators
+`doctor`/`check` use. Those findings appear under
+`post_upgrade_validation` and in `required_human_action`, which also names
+`ligature check --json` for the consolidated set. A successful upgrade
+therefore exits **1** when the post-upgrade validation has findings, while
+`result` stays `current`: the write completed, and the remaining work is
+user-authored repair. `docs/exit-code-contract.md` records the exit
+semantics.
+
 **Implemented by #64.** `doctor` and `version --verify` also report the
 running build's source provenance from its embedded attestation: the
 `source_commit`, and for a build made from a dirty working tree a `source:`
@@ -1835,7 +1856,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3; `gate g14 --json` emits `ligature.g14-report.v1` (#57 grammar v1.0, #159) |
 | `report` | stable; nested reporting verb, `report <report-id>` dispatches the four report generators in §6 (#57 grammar v1.0) |
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo, plus the two witness-renderer scripts G13 hash-pins (#84, §8, #58) |
-| `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C). `--upgrade` also refreshes the manifest's `gate_hashes` (the pins `gate_integrity` checks) from the actually installed managed files, updates only managed installation metadata, preserves the user-owned descriptor and normative policy, keeps a locally modified managed file's old pin instead of adopting the drifted bytes, and `--json` emits the machine-readable audit result (old/new version, changed paths, hashes, required human action) so `doctor`, `status --json`, `check --json` and `write-set-check` all read the same post-migration state (#117) |
+| `migrate` | stable; explicit recovery/upgrade for installed managed files (#58) and `--assumptions` reference migration (#59 phase C). `--upgrade` also refreshes the manifest's `gate_hashes` (the pins `gate_integrity` checks) from the actually installed managed files, updates only managed installation metadata, preserves the user-owned descriptor and normative policy, keeps a locally modified managed file's old pin instead of adopting the drifted bytes, and `--json` emits the machine-readable audit result (old/new version, changed paths, hashes, required human action) so `doctor`, `status --json`, `check --json` and `write-set-check` all read the same post-migration state (#117). The audit also separates `files_written` from the manifest record diff, reports user-owned record re-bases explicitly, and validates the descriptor, existing work-package manifests, and concept specs after the write; post-upgrade findings are added to `required_human_action`, `ligature check --json` is named as the consolidated detail surface, and a successful write can therefore exit 1 fail-closed (#175, `docs/exit-code-contract.md`) |
 | `schema` | stable; `schema list` and `schema show <name>` inspect only JSON Schemas shipped in this binary; the catalog and versioned JSON envelopes include exact schema hashes and installed build/adjudicator identity. `schema export <name> --output <path>` writes a self-contained envelope including related schemas and refuses to overwrite. Offline; no checkout/network access or internal-path guessing required (#157) |
 | `contract` | stable; prints the exact `docs/cli-contract.md` shipped in this executable, without requiring a checkout or installation. `--json` emits `ligature.cli-contract.v1` with grammar version, SHA-256, and the complete contract text (#167) |
 

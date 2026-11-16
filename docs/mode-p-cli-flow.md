@@ -1025,7 +1025,24 @@ kept here so error-case work starts from what's already known:
   in `docs/limitations.md`; no chainlink issue filed, since nothing
   here is a defect to track.
 
-Eight items above (seven closed, one resolved as "working as designed");
+- **#175** (implemented; operator closes the issue) — `migrate --upgrade`'s audit reported a successful
+  managed-file upgrade but named only pre-existing policy drift, leaving
+  an operator who read only `migrate --json` blind to user-authored
+  content the newer release already rejects: a descriptor invalid under
+  the #133 disjoint write-set glob rule, existing work-package manifests
+  invalid under the #173 harness-naming break, and pre-#105 concept specs
+  missing their required review block. The audit now validates those
+  three surfaces after the write and puts the findings in
+  `required_human_action` (with `ligature check --json` named as the
+  consolidated surface). It also distinguishes `files_written` from the
+  ownership-manifest record diff, so the user-owned descriptor's
+  record-only re-base reads as `file_written: false` rather than as a
+  tenth edited file. Exit 1 with `result: current` is the documented
+  fail-closed signal, not a failed write; `docs/exit-code-contract.md`
+  records it.
+
+Nine items above (seven closed, #175 implemented and awaiting
+operator closure, one resolved as "working as designed");
 none of the open ones blocks a Mode P project from *genuinely* reaching
 Stage 8C closure — they're either fixed, or (F4) correctly-behaving code
 against a real, separate scope gap (`#50` needing a deductive-closure

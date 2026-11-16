@@ -1294,6 +1294,7 @@ def migrate(
         upgrade_plans,
         list(force),
         messages,
+        validate_workspace=bool(upgrade or force),
     )
     return report
 
@@ -1307,6 +1308,8 @@ def build_migration_audit(
     upgrade_plans: list[FilePlan],
     forced: list[str],
     messages: list[str],
+    *,
+    validate_workspace: bool = False,
 ) -> dict:
     """The machine-readable audit result of a `migrate` run (chainlink
     #117): old/new version, changed paths, hashes, and required human
@@ -1317,6 +1320,21 @@ def build_migration_audit(
     old_files = {f["path"]: f for f in before.get("files", []) if isinstance(f, dict) and "path" in f}
     new_files = {f["path"]: f for f in after.get("files", []) if isinstance(f, dict) and "path" in f}
     outcomes = {plan.path: plan.outcome for plan in upgrade_plans}
+    # What the migration actually wrote to the workspace. `changed_paths`
+    # below is the ownership manifest's old/new-record diff, which is a
+    # different set: a user-owned descriptor is never written, but its
+    # manifest record is re-based to the content already on disk (chainlink
+    # #175). Keeping the two lists separate makes that explicit instead of
+    # letting a record-only change read as a file edit.
+    written_paths = sorted(
+        {plan.path for plan in upgrade_plans if plan.content is not None}
+        | set(forced)
+    )
+    written_set = set(written_paths)
+    ownership_by_path = {
+        path: (old_files.get(path) or new_files.get(path) or {}).get("ownership")
+        for path in set(old_files) | set(new_files)
+    }
 
     changed_paths = []
     for path in sorted(set(old_files) | set(new_files)):
@@ -1331,10 +1349,30 @@ def build_migration_audit(
             "new_base_hash": (new or {}).get("base_hash"),
             "old_expected_hash": (old or {}).get("expected_hash"),
             "new_expected_hash": (new or {}).get("expected_hash"),
+            "base_hash_changed": (old or {}).get("base_hash")
+            != (new or {}).get("base_hash"),
+            "file_written": path in written_set,
+            "change_kind": "written" if path in written_set else "manifest-record",
         }
         if path in outcomes:
             entry["outcome"] = outcomes[path]
         changed_paths.append(entry)
+
+    user_owned_written = sorted(
+        path for path in written_paths if ownership_by_path.get(path) == USER
+    )
+    user_owned_records_updated = sorted(
+        entry["path"]
+        for entry in changed_paths
+        if entry["ownership"] == USER and not entry["file_written"]
+    )
+    user_owned_records_rebased = sorted(
+        entry["path"]
+        for entry in changed_paths
+        if entry["ownership"] == USER
+        and not entry["file_written"]
+        and entry["base_hash_changed"]
+    )
 
     old_gates = before.get("gate_hashes") if isinstance(before.get("gate_hashes"), dict) else {}
     new_gates = after.get("gate_hashes") if isinstance(after.get("gate_hashes"), dict) else {}
@@ -1398,6 +1436,31 @@ def build_migration_audit(
         if "not pruned" in message:
             required_human_action.append({"path": None, "action": message})
 
+    # chainlink #175: an upgrade can mechanically succeed and still leave
+    # user-authored inputs that a newer release now rejects. Validate the
+    # descriptor, every existing work-package manifest, and every concept
+    # spec after the write, so an operator reading only `migrate --json`
+    # receives the same repair list `doctor`/`check` would reveal later.
+    post_upgrade = (
+        _post_upgrade_validation(workspace, report) if validate_workspace else None
+    )
+    if post_upgrade is not None:
+        for finding in post_upgrade["findings"]:
+            required_human_action.append(
+                {"path": finding["path"], "action": finding["action"]}
+            )
+        if post_upgrade["findings"]:
+            required_human_action.append(
+                {
+                    "path": None,
+                    "action": (
+                        "run `ligature check --json` for the consolidated post-upgrade "
+                        "finding set; migrate validates the descriptor, existing "
+                        "work-package manifests, and concept specs, not every artifact"
+                    ),
+                }
+            )
+
     return {
         "schema_version": "1.0",
         "action": action,
@@ -1419,12 +1482,311 @@ def build_migration_audit(
             "new": new_skill.get("authority_hash"),
         },
         "changed_paths": changed_paths,
+        "files_written": written_paths,
+        "user_owned_files": {
+            "written": user_owned_written,
+            "records_updated": user_owned_records_updated,
+            "records_rebased": user_owned_records_rebased,
+        },
+        "post_upgrade_validation": post_upgrade,
         "gate_hashes": gate_hashes,
         "obsolete": list(report.obsolete),
         "conflicts": conflicts,
         "required_human_action": required_human_action,
         "notes": list(messages),
     }
+
+
+def _workspace_relative(workspace: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(Path(workspace).resolve()).as_posix()
+    except (ValueError, OSError):
+        return path.as_posix()
+
+
+def _post_upgrade_validation(workspace: Path, report: InstallReport) -> dict:
+    """Validate the user-authored inputs an upgrade did not write (#175).
+
+    `migrate --upgrade` refreshes managed files only. A newer product can
+    nonetheless invalidate a user-owned descriptor (schema and the
+    disjoint write-set glob rule), an existing work-package manifest (a
+    breaking harness-naming rule), or a concept spec (a newly required
+    review block), and none of those are installation conflicts -- so the
+    pre-#175 audit named only the policy drift and left the operator to
+    discover the rest through `doctor`/`check`. This runs the same
+    validators those commands use, after the upgrade, and returns a
+    deterministic report plus one actionable item per finding."""
+    schema = report.descriptor_schema or descriptor_schema_report(
+        workspace, report.descriptor_path
+    )
+    descriptor_findings: list[dict] = []
+    if schema.state != "valid":
+        if schema.diagnostics:
+            details = list(schema.diagnostics)
+        elif schema.state == "absent":
+            details = [
+                (
+                    f"no project descriptor exists at {report.descriptor_path}; run "
+                    "`ligature init` or restore the file"
+                )
+            ]
+        elif schema.state == "unreadable":
+            details = [f"the project descriptor {report.descriptor_path} cannot be read"]
+        else:
+            details = [f"the project descriptor {report.descriptor_path} is not valid"]
+        for detail in details:
+            descriptor_findings.append(
+                {
+                    "surface": "descriptor",
+                    "path": report.descriptor_path,
+                    "gate": "P0",
+                    "severity": "high",
+                    "reason": detail,
+                    "action": (
+                        f"repair the project descriptor {report.descriptor_path}: {detail}; "
+                        "run `ligature check --json` for the property-level report"
+                    ),
+                }
+            )
+
+    descriptor_data = _read_descriptor_for_validation(workspace, report.descriptor_path)
+    work_package_findings, work_packages = _validate_work_package_manifests(
+        workspace, descriptor_data
+    )
+    concept_findings, concept_specs = _validate_concept_specs(
+        workspace, descriptor_data
+    )
+    findings = descriptor_findings + work_package_findings + concept_findings
+    return {
+        "check_command": "ligature check --json",
+        "state": "findings" if findings else "clean",
+        "descriptor": {
+            "path": report.descriptor_path,
+            "state": schema.state,
+            "findings": descriptor_findings,
+        },
+        "work_package_manifests": work_packages,
+        "concept_specs": concept_specs,
+        "findings": findings,
+        "summary": {
+            "descriptor": len(descriptor_findings),
+            "work_package_manifests": len(work_package_findings),
+            "concept_specs": len(concept_findings),
+        },
+    }
+
+
+def _read_descriptor_for_validation(workspace: Path, descriptor_rel: str) -> dict | None:
+    """Best-effort descriptor data for the post-upgrade validators.
+
+    Even when the descriptor is schema-invalid, its declared crate roots
+    are still the only authoritative way to find concept specs. Reading
+    the JSON without `load_project_descriptor` keeps the concept-spec
+    report useful in exactly the #133 case that motivated #175, while the
+    descriptor's own invalidity remains its own explicit finding."""
+    try:
+        target = safe_target(workspace, descriptor_rel)
+    except InstallError:
+        return None
+    try:
+        data = json.loads(target.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _boundary_dirs_for_descriptor(descriptor: dict, workspace: Path) -> list[Path]:
+    """`boundary_dirs_for_descriptor` without assuming a schema-valid
+    descriptor: post-upgrade validation deliberately reads a descriptor
+    that may be invalid, so a malformed `crates` entry contributes
+    nothing rather than raising."""
+    from project_descriptor import boundary_dir_for
+
+    dirs: list[Path] = []
+    crates = descriptor.get("crates")
+    if not isinstance(crates, list):
+        return dirs
+    for crate in crates:
+        if isinstance(crate, dict) and isinstance(crate.get("crate_dir"), str):
+            dirs.append(boundary_dir_for(crate, workspace))
+    return dirs
+
+
+def _validate_work_package_manifests(
+    workspace: Path, descriptor: dict | None
+) -> tuple[list[dict], list[dict]]:
+    """Validate every existing work-package manifest after an upgrade.
+
+    Mirrors `check`'s discovery: `ci/manifest/` also holds the ownership
+    manifest, so only documents shaped like a work package are validated;
+    an unparseable JSON file that is not the ownership manifest is still
+    reported rather than silently skipped."""
+    import gate_g14
+    import validate_work_package
+    import yaml
+
+    directory = workspace / "ci" / "manifest"
+    if not directory.is_dir():
+        return [], []
+
+    validator = None
+    allowed_boundary_dirs = (
+        _boundary_dirs_for_descriptor(descriptor, workspace)
+        if descriptor is not None
+        else []
+    )
+    findings: list[dict] = []
+    records: list[dict] = []
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.suffix not in (".json", ".yaml", ".yml"):
+            continue
+        if path.name == MANIFEST_RELATIVE_PATH.rsplit("/", 1)[-1]:
+            continue
+        rel = _workspace_relative(workspace, path)
+        try:
+            text = path.read_text()
+            data = (
+                json.loads(text)
+                if path.suffix == ".json"
+                else yaml.safe_load(text)
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, yaml.YAMLError) as exc:
+            detail = f"cannot read {rel} as a work-package manifest: {exc}"
+            findings.append(
+                {
+                    "surface": "work-package-manifest",
+                    "path": rel,
+                    "gate": "G1a",
+                    "severity": "error",
+                    "reason": detail,
+                    "action": (
+                        f"repair the work-package manifest {rel}: {detail}; "
+                        f"run `ligature validate-work-package {rel}`"
+                    ),
+                }
+            )
+            records.append({"path": rel, "state": "invalid", "findings": findings[-1:]})
+            continue
+        if not gate_g14.looks_like_work_package_manifest(data):
+            continue
+        if validator is None:
+            validator = validate_work_package.load_validator()
+        raw = validate_work_package.validate_file(
+            path,
+            validator,
+            workspace,
+            workspace,
+            allowed_boundary_dirs,
+            descriptor,
+        )
+        record_findings = []
+        notes = []
+        for finding in raw:
+            if finding.severity not in ("error", "high", "critical"):
+                # `validate-work-package` prints info findings without
+                # failing; they must not make migrate exit 1.
+                notes.append(
+                    {
+                        "gate": finding.gate,
+                        "severity": finding.severity,
+                        "reason": finding.reason,
+                    }
+                )
+                continue
+            item = {
+                "surface": "work-package-manifest",
+                "path": rel,
+                "gate": finding.gate,
+                "severity": finding.severity,
+                "reason": finding.reason,
+                "action": (
+                    f"repair the work-package manifest {rel}: {finding.reason}; "
+                    f"run `ligature validate-work-package {rel}`"
+                ),
+            }
+            findings.append(item)
+            record_findings.append(item)
+        record = {
+            "path": rel,
+            "state": "invalid" if record_findings else "valid",
+            "findings": record_findings,
+        }
+        if notes:
+            record["notes"] = notes
+        records.append(record)
+    return findings, records
+
+
+def _concept_spec_search_roots(
+    workspace: Path, descriptor: dict | None
+) -> list[Path]:
+    if descriptor is None:
+        return []
+    roots: list[Path] = []
+    crates = descriptor.get("crates")
+    if not isinstance(crates, list):
+        return roots
+    for crate in crates:
+        if not isinstance(crate, dict):
+            continue
+        raw = crate.get("specs_search_root")
+        if not isinstance(raw, str) or not raw:
+            continue
+        root = Path(raw)
+        roots.append(root if root.is_absolute() else workspace / root)
+    return roots
+
+
+def _validate_concept_specs(
+    workspace: Path, descriptor: dict | None
+) -> tuple[list[dict], list[dict]]:
+    """Validate every concept spec under the descriptor's declared roots.
+
+    Approve-time validation (`load_validator`, `review` required) is what
+    a new release's gates expect, so a pre-review-block spec is reported
+    here before `check`'s G2 lookups fail on it."""
+    from concept_spec_lookup import iter_concept_spec_candidates
+    from validate_concept_spec import load_validator, validate_data
+
+    validator = None
+    seen: set[Path] = set()
+    findings: list[dict] = []
+    records: list[dict] = []
+    for root in _concept_spec_search_roots(workspace, descriptor):
+        if not root.is_dir():
+            continue
+        for path, data in iter_concept_spec_candidates(root):
+            key = path.resolve()
+            if key in seen:
+                continue
+            seen.add(key)
+            rel = _workspace_relative(workspace, path)
+            if validator is None:
+                validator = load_validator()
+            raw = validate_data(path, data, validator)
+            record_findings = []
+            for finding in raw:
+                item = {
+                    "surface": "concept-spec",
+                    "path": rel,
+                    "gate": finding.gate,
+                    "severity": finding.severity,
+                    "reason": finding.reason,
+                    "action": (
+                        f"repair or approve the concept spec {rel}: {finding.reason}; "
+                        "run `ligature check --json` for the cross-artifact findings"
+                    ),
+                }
+                findings.append(item)
+                record_findings.append(item)
+            records.append(
+                {
+                    "path": rel,
+                    "state": "invalid" if record_findings else "valid",
+                    "findings": record_findings,
+                }
+            )
+    return findings, records
 
 
 def _manifest_descriptor_rel(manifest: dict) -> str:

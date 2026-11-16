@@ -134,6 +134,44 @@ def _read_candidate(path: Path, concept: str, expected_filename: str):
     return "valid", data, None
 
 
+def iter_concept_spec_candidates(root: Path):
+    """Yield ``(path, data)`` for every JSON document under ``root`` that is
+    shaped like a concept spec.
+
+    This is the discovery half of :func:`find_concept_spec` without a
+    concept name to search for, so reporting surfaces can validate each
+    declared concept spec once instead of guessing which concepts a
+    workspace has and looking each one up. The same predicates apply:
+    underscore-prefixed artifact directories are excluded, symlinks are
+    never followed, and a document must declare a string ``concept`` plus
+    either one of the concept-spec shape keys or the canonical filename
+    for that concept. Files that are not readable JSON are skipped here;
+    a caller that needs to report an unreadable expected-named file can
+    still call :func:`find_concept_spec` with the concept it expects."""
+    resolved_root = root.resolve()
+    if not resolved_root.is_dir():
+        return
+    for path in _json_paths(resolved_root):
+        resolved = path.resolve()
+        if not _is_within(resolved, resolved_root):
+            continue
+        try:
+            relative = path.relative_to(resolved_root)
+        except ValueError:
+            continue
+        if any(part.startswith("_") for part in relative.parts):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("concept"), str):
+            continue
+        expected = _expected_filename(data["concept"])
+        if _SPEC_SHAPE_KEYS.intersection(data) or path.name == expected:
+            yield path, data
+
+
 def find_concept_spec(
     concept: str,
     specs_search_root: Path | None,

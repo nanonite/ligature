@@ -1443,7 +1443,7 @@
     {
       "path": "tests/fixtures/callsites",
       "disposition": "test-only",
-      "note": "C_static fixtures: crate_scheduler/ test reports and the captured crypto-mixed pre-source 1.4.1 report used to prevent its empty, unbound observation from being consumed."
+      "note": "C_static fixtures: crate_scheduler/ and crate_array_returns/ (#170's array return/parameter types and an unindexable callee) test reports, and the captured crypto-mixed pre-source 1.4.1 report used to prevent its empty, unbound observation from being consumed."
     },
     {
       "path": "tests/fixtures/closure",

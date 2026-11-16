@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from extract_c_static import compute_source_binding, extract_crate  # noqa: E402
+from extract_c_static import EXTRACTOR_VERSION, compute_source_binding, extract_crate  # noqa: E402
 from validate_callsites import (  # noqa: E402
     callsite_report_dir_for,
     find_report_files,
@@ -67,7 +67,7 @@ def valid_report() -> dict:
         },
         "coverage_scope": {
             "extractor": "coarse-syntactic-callgraph",
-            "extractor_version": "0.2.0",
+            "extractor_version": EXTRACTOR_VERSION,
             "extractor_backing": "syntactic",
             "supported_call_forms": ["associated-path-call"],
             "unsupported_call_forms": ["macro-expanded-call"],
@@ -90,7 +90,7 @@ def bind_report(report: dict, workspace: Path) -> dict:
     crate_root = workspace / report["crate_dir"]
     crate_root.mkdir(parents=True, exist_ok=True)
     report["schema_version"] = "1.1"
-    report["coverage_scope"]["extractor_version"] = "0.2.0"
+    report["coverage_scope"]["extractor_version"] = EXTRACTOR_VERSION
     report["source_binding"] = compute_source_binding(
         crate_root, report["crate_dir"], report["config_scope"]
     )

@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from extract_c_static import VALUE_DOMAIN_INQUIRY, compute_source_binding  # noqa: E402
+from extract_c_static import EXTRACTOR_VERSION, VALUE_DOMAIN_INQUIRY, compute_source_binding  # noqa: E402
 from gate_r1_g16 import (  # noqa: E402
     EXIT_BLOCKED,
     EXIT_DECISION_REQUIRED,
@@ -427,7 +427,7 @@ class WorkspaceTest(unittest.TestCase):
 
     def write_report(self, report: dict) -> None:
         report["schema_version"] = "1.1"
-        report["coverage_scope"]["extractor_version"] = "0.2.0"
+        report["coverage_scope"]["extractor_version"] = EXTRACTOR_VERSION
         crate_root = self.workspace / report["crate_dir"]
         crate_root.mkdir(parents=True, exist_ok=True)
         report["source_binding"] = compute_source_binding(

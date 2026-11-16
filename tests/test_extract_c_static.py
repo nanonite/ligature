@@ -28,6 +28,9 @@ from extract_c_static import (  # noqa: E402
 from validate_callsites import load_validator, shape_index_resolver, validate_data  # noqa: E402
 
 FIXTURE = ROOT / "tests" / "fixtures" / "callsites" / "crate_scheduler" / "src" / "lib.rs"
+ARRAY_FIXTURE = (
+    ROOT / "tests" / "fixtures" / "callsites" / "crate_array_returns" / "src" / "lib.rs"
+)
 
 CONFIG_SCOPE = {"target": "x86_64-unknown-linux-gnu", "features": [], "cfg": []}
 
@@ -43,6 +46,19 @@ def extract_fixture(previous=None, source: str | None = None) -> dict:
         (crate_root / "src" / "lib.rs").write_text(source if source is not None else FIXTURE.read_text())
         return extract_crate(
             crate_root, workspace, "crates_scheduler", "crates/scheduler", CONFIG_SCOPE, previous
+        )
+
+
+def extract_array_fixture() -> dict:
+    """Extract the array-return-type fixture (#170) from a temporary
+    workspace, the same way a real run lays the crate out."""
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        crate_root = workspace / "crates" / "array_returns"
+        (crate_root / "src").mkdir(parents=True)
+        (crate_root / "src" / "lib.rs").write_text(ARRAY_FIXTURE.read_text())
+        return extract_crate(
+            crate_root, workspace, "crates_array_returns", "crates/array_returns", CONFIG_SCOPE, None
         )
 
 
@@ -150,6 +166,84 @@ class ClassificationTest(unittest.TestCase):
         self.assertGreater(self.report["attribution_scope"]["out_of_scope_call_sites"], 0)
         for site in self.report["callsites"]:
             self.assertNotEqual(site.get("callee", {}).get("concept"), "HashMap")
+
+
+class ArrayReturnTypeTest(unittest.TestCase):
+    """chainlink #170: a method returning `[T; N]` is an ordinary method.
+
+    The structural pass used to read the `;` inside the array type as the
+    end of a bodyless signature, so the method vanished -- as a caller AND
+    as a callee -- and calls to it were counted out of scope. In the
+    crypto-mixed pilot that hid the AEAD -> Poly1305 edge while the report
+    still claimed every discovered call site was resolved."""
+
+    def setUp(self):
+        self.report = extract_array_fixture()
+        self.sites = by_id(self.report)
+
+    def test_an_array_returning_method_is_a_scanned_caller(self):
+        # `Aead::tag` returns `[u8; 16]` and holds the cross-concept edge;
+        # if its signature is cut at the `;` this callsite does not exist.
+        site = self.sites["CS-AEAD-TAG-001"]
+        self.assertEqual(site["source"]["symbol"], "Aead::tag")
+        self.assertEqual(site["callee"], {"concept": "Poly", "method": "compute_tag_segments"})
+
+    def test_self_method_call_to_an_array_returning_callee_is_resolved(self):
+        matches = [
+            c for c in self.report["callsites"]
+            if c["call_class"] == "definite-direct-call"
+            and c["callee"] == {"concept": "Aead", "method": "tag"}
+        ]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["callsite_id"], "CS-AEAD-VERIFY-001")
+
+    def test_associated_path_call_to_an_array_returning_callee_is_resolved(self):
+        callees = [c.get("callee") for c in self.report["callsites"]]
+        self.assertIn({"concept": "Poly", "method": "compute_tag_segments"}, callees)
+        self.assertIn({"concept": "Poly", "method": "expand"}, callees)
+
+    def test_an_array_parameter_does_not_end_the_signature_either(self):
+        # `Aead::rotate(key: [u8; 32])` -- the same `;` on the way in.
+        self.assertEqual(self.sites["CS-AEAD-ROTATE-001"]["source"]["symbol"], "Aead::rotate")
+
+    def test_a_callee_the_extractor_cannot_index_is_unresolved_not_out_of_scope(self):
+        # `Unindexed::missing` is declared but has no body to index. Its
+        # two calls must be visible as unresolved; before #170 they were
+        # silently pushed into out_of_scope.
+        missing = [c for c in self.report["callsites"] if c.get("callee_method") == "missing"]
+        self.assertEqual(len(missing), 2)
+        for site in missing:
+            self.assertEqual(site["call_class"], "possible-dispatch")
+            self.assertNotIn("callee", site)
+        coverage = self.report["callsite_coverage"]
+        self.assertEqual(coverage["discovered"], 5)
+        self.assertEqual(coverage["resolved"], 3)
+        self.assertEqual(coverage["unresolved"], 2)
+
+    def test_nothing_in_the_array_fixture_falls_out_of_scope(self):
+        # Every call the fixture contains is an edge between local concept
+        # methods except the two unindexable ones, which are unresolved.
+        scope = self.report["attribution_scope"]
+        self.assertEqual(scope["out_of_scope_call_sites"], 0)
+        self.assertEqual(scope["unattributed_call_sites"], 0)
+
+    def test_the_array_fixture_report_conforms_to_the_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            crate_root = workspace / "crates" / "array_returns"
+            (crate_root / "src").mkdir(parents=True)
+            (crate_root / "src" / "lib.rs").write_text(ARRAY_FIXTURE.read_text())
+            report = extract_crate(
+                crate_root, workspace, "crates_array_returns", "crates/array_returns",
+                CONFIG_SCOPE, None,
+            )
+            findings = validate_data(
+                Path("ci/results/c_static/crates_array_returns.json"),
+                report,
+                load_validator(),
+                shape_index_resolver(workspace),
+            )
+            self.assertEqual([str(f) for f in findings], [])
 
 
 class HonestyTest(unittest.TestCase):
@@ -449,6 +543,27 @@ class HelperTest(unittest.TestCase):
     def test_trait_impl_names_the_type_not_the_trait(self):
         tokens = tokenize(strip_noncode("impl Clone for Wrapper { fn clone(&self) -> Self { } }"))
         self.assertEqual([s.concept for s in find_method_spans(tokens)], ["Wrapper"])
+
+    def test_array_return_and_parameter_types_keep_the_signature_open(self):
+        # chainlink #170: `;` inside `[...]` is part of the type, not the
+        # end of a bodyless signature.
+        tokens = tokenize(strip_noncode(
+            "impl A {"
+            " fn tag(&self) -> [u8; 16] { }"
+            " fn key(k: [u8; 32]) -> [u8; 32] { }"
+            " fn generic<const N: usize>(&self) -> [u8; N] { }"
+            "}"
+        ))
+        self.assertEqual(
+            [s.method for s in find_method_spans(tokens)], ["tag", "key", "generic"]
+        )
+
+    def test_declared_methods_include_an_unindexable_signature(self):
+        tokens = tokenize(strip_noncode("impl A { fn missing(&self) -> [u8; 16]; fn real(&self) {} }"))
+        declared: list[tuple[str, str]] = []
+        spans = find_method_spans(tokens, declared)
+        self.assertEqual([s.method for s in spans], ["real"])
+        self.assertIn(("A", "missing"), declared)
 
     def test_bodyless_trait_signature_does_not_capture_a_later_block(self):
         tokens = tokenize(strip_noncode(

@@ -76,7 +76,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 EXTRACTOR_NAME = "coarse-syntactic-callgraph"
-EXTRACTOR_VERSION = "0.2.0"
+EXTRACTOR_VERSION = "0.3.0"
 EXTRACTOR_BACKING = "syntactic"
 COMPLETENESS_CLAIM = "discovered-lower-bound"
 
@@ -321,12 +321,21 @@ def _matching_brace(tokens: list[Token], open_index: int) -> int:
     return len(tokens) - 1
 
 
-def find_method_spans(tokens: list[Token]) -> list[MethodSpan]:
+def find_method_spans(
+    tokens: list[Token], declared: list[tuple[str, str]] | None = None
+) -> list[MethodSpan]:
     """Every `fn` whose immediately enclosing item is an `impl` block on a
     concept-shaped type. A nested `fn`, a trait's default body, and an
     `impl` on a non-concept-shaped type (`impl Trait for &str`) are all
     deliberately excluded -- their calls are counted as unattributed
-    rather than attributed to a method identity that doesn't exist."""
+    rather than attributed to a method identity that doesn't exist.
+
+    `declared`, when given, receives every impl-level method-shaped
+    `(concept, method)` name this pass saw -- including one whose body it
+    could not locate. Those names exist in the source even when the
+    extractor cannot index their body, and callers use the list to report a
+    call to one as unresolved rather than letting it disappear into
+    out_of_scope (#170)."""
     spans: list[MethodSpan] = []
     i = 0
     while i < len(tokens):
@@ -340,14 +349,20 @@ def find_method_spans(tokens: list[Token]) -> list[MethodSpan]:
                 continue
             end = _matching_brace(tokens, brace)
             if name is not None and CONCEPT_RE.match(name):
-                spans.extend(_methods_in_impl(tokens, name, brace + 1, end))
+                spans.extend(_methods_in_impl(tokens, name, brace + 1, end, declared))
             i = end + 1
             continue
         i += 1
     return spans
 
 
-def _methods_in_impl(tokens: list[Token], concept: str, start: int, end: int) -> list[MethodSpan]:
+def _methods_in_impl(
+    tokens: list[Token],
+    concept: str,
+    start: int,
+    end: int,
+    declared: list[tuple[str, str]] | None = None,
+) -> list[MethodSpan]:
     spans: list[MethodSpan] = []
     i = start
     depth = 0
@@ -361,32 +376,49 @@ def _methods_in_impl(tokens: list[Token], concept: str, start: int, end: int) ->
             if i + 1 < end and tokens[i + 1].kind == "ident":
                 method = tokens[i + 1].text
                 body = _find_body(tokens, i + 2, end)
-                if body != -1 and METHOD_RE.match(method):
-                    close = _matching_brace(tokens, body)
-                    spans.append(MethodSpan(concept, method, i, body, close))
-                    i = close
+                if METHOD_RE.match(method):
+                    if declared is not None:
+                        declared.append((concept, method))
+                    if body != -1:
+                        close = _matching_brace(tokens, body)
+                        spans.append(MethodSpan(concept, method, i, body, close))
+                        i = close
         i += 1
     return spans
 
 
 def _find_body(tokens: list[Token], start: int, end: int) -> int:
     """The `{` opening this fn's body, or -1 for a bodyless signature (a
-    trait requirement) -- whose `;` must not leak into the next block."""
+    trait requirement) -- whose `;` must not leak into the next block.
+
+    A `;` only ends the signature at the top level of the type, so every
+    nested type form has to be tracked: `(...)` for tuples and `Fn(..)`
+    bounds, `<...>` for generics, and `[...]` for ARRAY TYPES. The last one
+    is chainlink #170: `-> [u8; 16]` is a ubiquitous crypto return type,
+    and treating its `;` as the end of the signature silently dropped the
+    method -- as a caller AND as a callee. A `{` is likewise only the body
+    when it is not nested inside one of those forms (a const-generic
+    expression such as `[u8; { N + 1 }]`)."""
     angle = 0
     paren = 0
+    bracket = 0
     for k in range(start, end):
         text = tokens[k].text
         if text == "(":
             paren += 1
         elif text == ")":
             paren -= 1
+        elif text == "[":
+            bracket += 1
+        elif text == "]":
+            bracket -= 1
         elif text == "<":
             angle += 1
         elif text == ">":
             angle -= 1
-        elif text == ";" and paren == 0:
+        elif text == ";" and paren == 0 and bracket == 0 and angle == 0:
             return -1
-        elif text == "{" and paren == 0:
+        elif text == "{" and paren == 0 and bracket == 0 and angle == 0:
             return k
     return -1
 
@@ -664,18 +696,31 @@ class RawCallsite:
 class CrateFacts:
     """The concept universe: types with an impl block, and the methods each
     one owns. Built over the whole crate before classification, since a
-    call in file A may target a concept defined in file B."""
+    call in file A may target a concept defined in file B.
+
+    `declared_methods` is the wider set: every impl-level method NAME the
+    structural pass saw, whether or not it could locate the body. A name
+    there and not in `methods_by_concept` is a callee the extractor could
+    not index; a call to it must surface as unresolved (#170)."""
     concepts: set[str] = field(default_factory=set)
     methods_by_concept: dict[str, set[str]] = field(default_factory=dict)
+    declared_methods: set[tuple[str, str]] = field(default_factory=set)
 
     @property
     def all_methods(self) -> set[str]:
         return {m for ms in self.methods_by_concept.values() for m in ms}
 
+    @property
+    def declared_names(self) -> set[str]:
+        return {m for _concept, m in self.declared_methods}
+
     def add(self, spans: list[MethodSpan]) -> None:
         for span in spans:
             self.concepts.add(span.concept)
             self.methods_by_concept.setdefault(span.concept, set()).add(span.method)
+
+    def add_declared(self, declared: list[tuple[str, str]]) -> None:
+        self.declared_methods.update(declared)
 
 
 def _walk_back_turbofish(tokens: list[Token], j: int) -> int:
@@ -850,6 +895,12 @@ def classify_span(
                 continue
             if concept in facts.concepts and name in facts.methods_by_concept.get(concept, set()):
                 emit("definite-direct-call", concept, name, head, expression)
+            elif concept in facts.concepts and (concept, name) in facts.declared_methods:
+                # The method is declared by this concept but this run has no
+                # body span for it, so it cannot be resolved to an indexed
+                # callee. Reporting it as out_of_scope would hide a real
+                # edge; an unresolved class keeps it auditable (#170).
+                emit("possible-dispatch", None, name, head, expression)
             else:
                 counters.out_of_scope += 1
             continue
@@ -861,9 +912,16 @@ def classify_span(
                 continue
             if receiver is not None and receiver.text == "self" and name in own_methods:
                 emit("definite-direct-call", span.concept, name, head, expression)
-            elif name in facts.all_methods:
-                # The method name belongs to some local concept; which
-                # receiver type this is stays unknown without types.
+            elif (
+                name in facts.all_methods
+                or (span.concept, name) in facts.declared_methods
+                or name in facts.declared_names
+            ):
+                # The method name belongs to some local concept -- or to a
+                # local impl-level declaration this run could not index;
+                # either way, which receiver type this is, and which body
+                # it reaches, stays unknown without name resolution. Never
+                # dropped into out_of_scope (#170).
                 emit("possible-dispatch", None, name, head, expression)
             else:
                 counters.out_of_scope += 1
@@ -876,7 +934,9 @@ def classify_span(
         # ambiguous for the same reason. Anything else is an ordinary
         # free-function call: resolved, but not an edge between concept
         # methods, so out of C's domain rather than unresolved.
-        if METHOD_RE.match(name) and (name in bindings or name in facts.all_methods):
+        if METHOD_RE.match(name) and (
+            name in bindings or name in facts.all_methods or name in facts.declared_names
+        ):
             emit("unresolved-indirect-call", None, None, head, expression)
         else:
             counters.out_of_scope += 1
@@ -958,8 +1018,10 @@ def extract_crate(
         except UnicodeDecodeError as e:
             raise ExtractionError(f"{path} is not readable as UTF-8 text: {e}")
         tokens = tokenize(strip_noncode(text))
-        spans = find_method_spans(tokens)
+        declared: list[tuple[str, str]] = []
+        spans = find_method_spans(tokens, declared)
         facts.add(spans)
+        facts.add_declared(declared)
         parsed.append((path, tokens, spans))
 
     raw: list[RawCallsite] = []

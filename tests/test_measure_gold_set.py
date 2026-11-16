@@ -29,7 +29,7 @@ from measure_gold_set import (  # noqa: E402
     measurement_dir_for,
     report,
 )
-from extract_c_static import compute_source_binding  # noqa: E402
+from extract_c_static import EXTRACTOR_VERSION, compute_source_binding  # noqa: E402
 from test_validate_gold_set import gold_set  # noqa: E402
 
 REVIEW = {"reviewer": "alice", "reviewed_at": "2026-09-04"}
@@ -145,7 +145,7 @@ class MeasurementTestCase(unittest.TestCase):
             crate_root = self.workspace / data["crate_dir"]
             crate_root.mkdir(parents=True, exist_ok=True)
             data["schema_version"] = "1.1"
-            data["coverage_scope"]["extractor_version"] = "0.2.0"
+            data["coverage_scope"]["extractor_version"] = EXTRACTOR_VERSION
             data["source_binding"] = compute_source_binding(
                 crate_root, data["crate_dir"], data["config_scope"]
             )
@@ -352,7 +352,7 @@ class ModePPilotClusterTest(unittest.TestCase):
             crate_root = self.workspace / data["crate_dir"]
             crate_root.mkdir(parents=True, exist_ok=True)
             data["schema_version"] = "1.1"
-            data["coverage_scope"]["extractor_version"] = "0.2.0"
+            data["coverage_scope"]["extractor_version"] = EXTRACTOR_VERSION
             data["source_binding"] = compute_source_binding(
                 crate_root, data["crate_dir"], data["config_scope"]
             )

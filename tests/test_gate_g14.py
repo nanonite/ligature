@@ -54,7 +54,7 @@ from validate_closure import load_degradation_records  # noqa: E402
 from generate_promotion_receipt import record_ruling  # noqa: E402
 from generate_promotion_receipt import ruling_log_path  # noqa: E402
 from record_assurance import concept_segment  # noqa: E402
-from extract_c_static import compute_source_binding  # noqa: E402
+from extract_c_static import EXTRACTOR_VERSION, compute_source_binding  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
 from test_validate_closure import valid_degradation, valid_profile  # noqa: E402
@@ -294,7 +294,7 @@ def callsite_report(unresolved=0, risk_tier="medium") -> dict:
         },
         "coverage_scope": {
             "extractor": "coarse-syntactic-callgraph",
-            "extractor_version": "0.2.0",
+            "extractor_version": EXTRACTOR_VERSION,
             "extractor_backing": "syntactic",
             "supported_call_forms": ["associated-path-call"],
             "unsupported_call_forms": ["macro-expanded-call"],
@@ -404,7 +404,7 @@ class Workspace:
         path.parent.mkdir(parents=True, exist_ok=True)
         if relative.startswith("ci/results/c_static/") and isinstance(data, dict):
             data["schema_version"] = "1.1"
-            data["coverage_scope"]["extractor_version"] = "0.2.0"
+            data["coverage_scope"]["extractor_version"] = EXTRACTOR_VERSION
             crate_root = self.root / data["crate_dir"]
             data["source_binding"] = compute_source_binding(
                 crate_root, data["crate_dir"], data["config_scope"]

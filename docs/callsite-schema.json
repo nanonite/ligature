@@ -196,7 +196,7 @@
         "call_class": {
           "type": "string",
           "enum": ["definite-direct-call", "possible-dispatch", "unresolved-indirect-call"],
-          "description": "plan.md §9's three classes, exactly. definite-direct-call: callee resolved to a concept method at source level. possible-dispatch: the method name is known, the receiver type is not -- may be a dynamic dispatch. unresolved-indirect-call: the callee cannot be named at all (call through a value, a binding indistinguishable from a fn pointer or closure without name resolution)."
+          "description": "plan.md §9's three classes, exactly. definite-direct-call: callee resolved to a concept method at source level. possible-dispatch: the method name is known but the callee is not resolved to an indexed concept-method body -- either the receiver type is unknown (may be a dynamic dispatch) or the method is declared by a local concept but this extraction could not index its body (chainlink #170). unresolved-indirect-call: the callee cannot be named at all (call through a value, a binding indistinguishable from a fn pointer or closure without name resolution)."
         },
         "caller": { "$ref": "#/$defs/role" },
         "callee": { "$ref": "#/$defs/role" },
@@ -217,7 +217,7 @@
         "callee_method": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9_]*$",
-          "description": "possible-dispatch only: the method name is known even though the receiving concept is not. Never promoted to a `callee` role -- naming a concept the extractor did not resolve would be a fabricated edge."
+          "description": "possible-dispatch only: the method name is known even though the callee was not resolved to an indexed concept-method body (the receiving concept is unknown, or the declared method's body could not be indexed). Never promoted to a `callee` role -- naming a concept and body the extractor did not resolve would be a fabricated edge."
         },
         "unresolved_expression": {
           "type": "string",

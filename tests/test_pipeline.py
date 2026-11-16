@@ -5586,6 +5586,10 @@ class WitnessIntegrationTest(unittest.TestCase):
         self.assertIn("concept spec candidate", printed)
         self.assertIn("invalid", printed)
         self.assertIn("True was expected", printed)
+        # An invalid candidate must never be treated as authoritative and
+        # handed to G2's pure-query verdict; the pre-#34fb1a1 behavior this
+        # test used to pin would report a side effect instead.
+        self.assertNotIn("observes a side effect", printed)
 
     def test_a_tampered_result_blocks(self):
         result_path = (

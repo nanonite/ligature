@@ -4583,10 +4583,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Put the same contract pointer on every subcommand's own --help output;
     # users often discover an operation without first reading top-level help.
+    # Append rather than overwrite: some commands (`draft`, `check-bridges`)
+    # already carry a command-specific epilog, and replacing it would erase
+    # the registry of draftable templates that `draft --help` is the
+    # documented discovery surface for (chainlink #105).
+    contract_pointer = (
+        "Exit codes and JSON support are command-specific. "
+        "Only commands whose usage lists --json accept it; "
+        "run ligature contract [--json] for the bundled CLI contract."
+    )
     for command_parser in registered_commands(parser).values():
         command_parser.epilog = (
-            "Exit codes and JSON support are command-specific. Only commands whose usage lists "
-            "--json accept it; run ligature contract [--json] for the bundled CLI contract."
+            f"{command_parser.epilog.rstrip()}\n\n{contract_pointer}"
+            if command_parser.epilog
+            else contract_pointer
         )
     return parser
 

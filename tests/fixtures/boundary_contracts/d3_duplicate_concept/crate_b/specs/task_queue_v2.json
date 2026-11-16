@@ -1,6 +1,38 @@
 {
   "concept": "TaskQueue",
   "constraints": [
-    { "id": "C003", "english": "an unrelated crate accidentally reused the concept name TaskQueue", "logic": "true", "kind": "postcondition", "applies_to": ["pop_ready"] }
+    {
+      "id": "C003",
+      "english": "an unrelated crate accidentally reused the concept name TaskQueue",
+      "logic": "true",
+      "kind": "postcondition",
+      "applies_to": [
+        "pop_ready"
+      ]
+    }
+  ],
+  "schema_version": "1.0",
+  "kind": "struct",
+  "cluster": "scheduling",
+  "english_description": "A queue of tasks ordered by their deadlines for scheduling.",
+  "verifier": "creusot",
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-09-04"
+  },
+  "queries": [
+    {
+      "english": "What fraction of the queue's slots are currently occupied?",
+      "rust_sig": "fn load_factor(&self) -> f64",
+      "pure": true
+    }
+  ],
+  "commands": [],
+  "adversary_table": [
+    {
+      "scenario": "a task has no deadline",
+      "violates": "deadline order",
+      "resolution": "reject"
+    }
   ]
 }

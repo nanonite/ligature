@@ -1539,20 +1539,19 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
         return self.run_artifact(build["artifact"], "init", "--mode", "greenfield", "--name", "repin")
 
     def adopt_current_descriptor_shape(self) -> None:
-        """Move the workspace's descriptor onto the current
-        `verifier_policy` shape, the way an operator upgrading an existing
-        workspace has to.
+        """Move the workspace's descriptor onto the current descriptor
+        shape, the way an operator upgrading an existing workspace has to.
 
-        `old_build`'s `init` writes the pre-chainlink-#104 shape -- a
-        per-cluster override as a sibling key of `default` -- which the
-        current schema rejects. That is the point of #104 (an arbitrary
-        key beside `default` is indistinguishable from a typo), not a
-        defect in this test, and it is deliberately NOT papered over by
-        the product: the descriptor is user-owned, so `migrate` reports a
-        normative user-owned document as drifted rather than rewriting it
-        (chainlink #78), and the load-time diagnostic names the permitted
-        keys. These tests are about the adjudicator pin, so they bring the
-        descriptor current themselves and say so."""
+        `old_build`'s `init` writes two shapes the current descriptor
+        rejects, both intended changes rather than defects in this test:
+        (a) chainlink #104 closed `verifier_policy` -- a per-cluster
+        override is not a sibling key of `default`; (b) chainlink #133
+        rejects allowed/protected overlap, and the old template's
+        `**/Cargo.toml` (etc.) overlaps `crates/*/src/` under the current
+        intersection check. Neither is papered over by the product: the
+        descriptor is user-owned, so `migrate` reports it rather than
+        rewriting it (chainlink #78). These tests are about the adjudicator
+        pin, so they bring the descriptor current themselves and say so."""
         path = self.workspace / "project-descriptor.json"
         descriptor = json.loads(path.read_text())
         policy = descriptor.get("verifier_policy", {})
@@ -1566,7 +1565,19 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
             for key in overrides:
                 del policy[key]
             descriptor["verifier_policy"] = policy
-            path.write_text(json.dumps(descriptor, indent=2) + "\n")
+        write_set = descriptor.get("write_set")
+        if isinstance(write_set, dict) and isinstance(
+            write_set.get("protected_roots"), list
+        ):
+            narrow = {
+                "**/Cargo.toml": "crates/*/Cargo.toml",
+                "**/build.rs": "crates/*/build.rs",
+                "**/kani.toml": "crates/*/kani.toml",
+            }
+            write_set["protected_roots"] = [
+                narrow.get(pattern, pattern) for pattern in write_set["protected_roots"]
+            ]
+        path.write_text(json.dumps(descriptor, indent=2) + "\n")
 
     def stamp_policy(self, build: dict) -> subprocess.CompletedProcess:
         """`accept-policy --version` against the packaged artifact: `init`

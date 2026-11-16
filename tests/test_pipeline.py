@@ -1434,6 +1434,15 @@ class CmdDraftBoundaryEndToEndTest(unittest.TestCase):
         stub = self._write_stub_backend()
         descriptor = dict(VALID_DESCRIPTOR)
         descriptor["llm_backend"] = {"kind": "claude", "command": f"{sys.executable} {stub}"}
+        # `draft` refuses a destination outside allowed_roots unless the
+        # destination is a supported artifact route inside a declared
+        # protected root. Crate spec trees are protected content in a real
+        # descriptor; declare that boundary here so this test exercises the
+        # drafting path rather than the write-scope refusal.
+        descriptor["write_set"] = {
+            "allowed_roots": [],
+            "protected_roots": ["crate_a/specs/_boundaries/**"],
+        }
         self.descriptor_path.write_text(json.dumps(descriptor))
         target = self.workspace / "crate_a" / "specs" / "_boundaries" / "scheduler_dispatch__to__task_queue_pop_ready.json"
 
@@ -5525,13 +5534,21 @@ class WitnessIntegrationTest(unittest.TestCase):
         self.assertIn("(2 discovered)", printed)
 
     def test_a_non_pure_query_blocks(self):
+        # The bundled concept-to-code schema declares `query.pure` as
+        # `const: true`, so a `pure: false` query is an invalid concept spec
+        # candidate rather than a reachable G2 side-effect verdict: resolution
+        # refuses to treat an invalid candidate as authoritative (the same
+        # behavior tests/test_validate_witness.py's QueryResolutionTest pins).
+        # The query still blocks, with the concrete schema reason named.
         spec_path = self.workspace / "crates" / "scheduler" / "specs" / "task_queue.json"
         spec = json.loads(spec_path.read_text())
         spec["queries"][0]["pure"] = False
         spec_path.write_text(json.dumps(spec))
         code, printed = self._run("validate-witness")
         self.assertEqual(code, 1, printed)
-        self.assertIn("observes a side effect", printed)
+        self.assertIn("concept spec candidate", printed)
+        self.assertIn("invalid", printed)
+        self.assertIn("True was expected", printed)
 
     def test_a_tampered_result_blocks(self):
         result_path = (

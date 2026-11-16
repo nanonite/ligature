@@ -677,21 +677,34 @@ class UndeclaredCrateTest(ScaffoldFixture):
 
     def test_two_crates_with_the_same_basename_are_ambiguous_and_refused(self):
         self.init_workspace()
-        self.declare_crate("rust/a/core", "rust/b/core")
+        # Two crates whose final path segment is `core`. They are kept at the
+        # pilot write set's one-directory depth on purpose: chainlink #133
+        # rejects allowed/protected overlaps, and the manifest patterns for
+        # deeper crate dirs cannot currently be declared without overlapping
+        # `rust/*/src/`. The ambiguity under test does not depend on depth.
+        self.declare_crate("rust/core", "crates/core")
+        self.edit_descriptor(
+            lambda d: d["write_set"]["protected_roots"].append("crates/*/Cargo.toml")
+        )
         self.granted()
         self.assertRefused(
             "--issue", "115", "--crate", "core",
-            contains=("names 2 declared crates", "rust/a/core", "rust/b/core", "name the crate_dir"),
+            contains=(
+                "names 2 declared crates",
+                "rust/core",
+                "crates/core",
+                "name the crate_dir",
+            ),
         )
         # Naming one of them by crate_dir is the documented way through.
         code, _, err = self.authorize(
-            "--issue", "115", "--path", "rust/a/core/Cargo.toml", "--op", "write",
+            "--issue", "115", "--path", "rust/core/Cargo.toml", "--op", "write",
             "--issuer", "operator", "--one-shot",
         )
         self.assertEqual(code, 0, err)
-        code, receipt = self.scaffold("--issue", "115", "--crate", "rust/a/core")
+        code, receipt = self.scaffold("--issue", "115", "--crate", "rust/core")
         self.assertEqual(code, 0, receipt)
-        self.assertEqual(receipt["crate_dir"], "rust/a/core")
+        self.assertEqual(receipt["crate_dir"], "rust/core")
 
     def test_a_declared_crate_dir_that_escapes_the_workspace_is_refused(self):
         """The declaration is checked too, not only the request: a descriptor
@@ -734,8 +747,12 @@ class InvalidTargetTest(ScaffoldFixture):
         )
 
     def test_a_crate_dir_in_a_canonical_pipeline_artifact_location_is_refused(self):
+        # chainlink #103 narrowed write_set's canonical prefixes from `ci/`
+        # to `ci/results/`: `ci/manifest/` is protected content, not a
+        # pipeline-owned location, so this test must name an artifact
+        # location the predicate still classifies as canonical.
         self.init_workspace()
-        self.declare_crate("ci/manifest/core")
+        self.declare_crate("ci/results/core")
         self.granted()
         self.assertRefused(
             "--issue", "115", "--crate", "core",
@@ -762,15 +779,29 @@ class InvalidTargetTest(ScaffoldFixture):
         """`allowed_roots` wins, exactly as `authorize-write` refuses a grant for
         a path the descriptor already permits: such a write needs no capability
         record, and authorizing it would be a permission-shaped object with no
-        work to do."""
+        work to do.
+
+        chainlink #133 makes the setup itself an invalid descriptor: adding a
+        manifest path to `allowed_roots` while the same path is protected is
+        exactly the allowed/protected overlap the loader now rejects. That is
+        the stronger, fail-closed outcome, so this pins the earlier rejection
+        rather than the now-unreachable per-command message (the same update
+        chainlink #177 made in tests/test_write_set.py)."""
         self.init_workspace()
         self.edit_descriptor(
             lambda d: d["write_set"]["allowed_roots"].append("rust/*/Cargo.toml")
         )
-        self.assertRefused(
-            "--issue", "115", "--crate", "date-creusot-core",
-            contains=("already under allowed_roots pattern",),
+        # The loader's diagnostic is multi-line (one line per overlapping
+        # pair), so this case inspects the refusal directly rather than
+        # through assertRefused's one-line refusals.
+        code, _, err = self.run_cli(
+            "scaffold-crate", "--issue", "115", "--crate", "date-creusot-core"
         )
+        self.assertEqual(code, 2, err)
+        for fragment in ("conflicting write_set patterns", "overlaps", "disjoint"):
+            self.assertIn(fragment, err)
+        self.assertFalse(self.manifest.exists(), "a refusal wrote the manifest")
+        self.assertFalse(self.skeleton.exists(), "a refusal wrote the source skeleton")
 
 
 class GrantRequiredTest(ScaffoldFixture):

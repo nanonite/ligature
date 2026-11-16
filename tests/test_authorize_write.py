@@ -109,6 +109,32 @@ class GrantFixture(unittest.TestCase):
         if mode == "port":
             descriptor["port_source"]["repository"] = "upstream"
         self.write_descriptor(descriptor)
+        # Satisfy the gates `check` runs beside write-set, so this fixture
+        # observes the write set rather than an unrelated finding: the
+        # declared crate root must exist (crate-prerequisite), and the
+        # shipped fixture values this fixture deliberately keeps must be
+        # accepted explicitly (P0, chainlink #67/#145). This is the same
+        # fixture shape tests/test_write_set.py's WriteSetFixture uses
+        # (chainlink #177); it changes no write-set input.
+        (self.workspace / "rust" / "date-creusot-core").mkdir(
+            parents=True, exist_ok=True
+        )
+        fixture_fields = ["review.reviewed_at"]
+        if mode == "port":
+            fixture_fields.extend(
+                ("port_source.language", "port_source.oracle_build_command")
+            )
+        for field in fixture_fields:
+            code, out, err = self.run_cli(
+                "accept-fixture-value",
+                "--path",
+                field,
+                "--reviewer",
+                "pilot-reviewer",
+                "--accepted-at",
+                "2026-10-01",
+            )
+            self.assertEqual(code, 0, out + err)
         return descriptor
 
     def write_descriptor(self, descriptor: dict) -> None:

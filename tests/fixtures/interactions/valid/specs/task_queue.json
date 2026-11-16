@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "concept": "TaskQueue",
+  "kind": "struct",
+  "cluster": "runtime",
+  "english_description": "A queue of tasks ordered by their deadlines for scheduling.",
+  "verifier": "creusot",
+  "queries": [
+    {
+      "english": "What fraction of the queue's slots are currently occupied?",
+      "rust_sig": "fn load_factor(&self) -> f64",
+      "pure": true
+    }
+  ],
+  "commands": [
+    {
+      "english": "Remove and return the next ready task.",
+      "rust_sig": "fn pop_ready(&mut self) -> Option<u64>"
+    }
+  ],
+  "constraints": [
+    {
+      "id": "C003",
+      "english": "pop_ready returns None only when no task has deadline <= now",
+      "logic": "true",
+      "kind": "postcondition",
+      "applies_to": [
+        "pop_ready"
+      ]
+    }
+  ],
+  "adversary_table": [
+    {
+      "scenario": "a task has no deadline",
+      "violates": "deadline order",
+      "resolution": "reject"
+    }
+  ],
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-08-30"
+  }
+}

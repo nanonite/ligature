@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "concept": "Scheduler",
+  "kind": "struct",
+  "cluster": "runtime",
+  "english_description": "A dispatcher that schedules ready tasks onto workers.",
+  "verifier": "creusot",
+  "queries": [
+    {
+      "english": "What is the identifier of the next task to dispatch?",
+      "rust_sig": "fn next_task(&self) -> Option<u64>",
+      "pure": true
+    }
+  ],
+  "commands": [
+    {
+      "english": "Dispatch the next ready task.",
+      "rust_sig": "fn dispatch(&mut self) -> Option<u64>"
+    }
+  ],
+  "constraints": [
+    {
+      "id": "C001",
+      "english": "dispatch returns only a task that was ready",
+      "logic": "true",
+      "kind": "postcondition",
+      "applies_to": [
+        "dispatch"
+      ]
+    }
+  ],
+  "adversary_table": [
+    {
+      "scenario": "no ready task exists",
+      "violates": "dispatch must not invent work",
+      "resolution": "return None"
+    }
+  ],
+  "review": {
+    "reviewer": "alice",
+    "reviewed_at": "2026-08-30"
+  }
+}

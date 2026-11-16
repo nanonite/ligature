@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- [Ligature] Publish tested verifier matrix and reproducible Nix toolchains (#174)
+- [crypto-mixed pilot] Add a generic, versioned extension point for evidence from tools outside the built-in verifier enum (e.g. dudect constant-time testing) (#171)
 - #171: add a generic, versioned external evidence extension point for tools outside the built-in verifier enum (for example dudect constant-time testing). A project descriptor's `external_evidence[]` declares the `external-<name>` kind, pinned tool identity/version/SHA-256, command, result format, permitted non-functional claims and closure ceiling; `record-assurance --external-result` ingests a `ligature-external-evidence-result/1.0` document bound to one obligation, the tool and the exact Rust source snapshot, and G14 re-reads that binding, rejecting stale sources, changed result bytes or a changed tool hash. Non-functional claims are disjoint from deductive claims, so external evidence can never satisfy `postcondition-holds`, and a closure containing it must declare `closure_kind: partial` rather than deductive/bounded. Adds `docs/external-evidence-result-schema.json` and `docs/external-evidence-extension.md`.
 
 ### Fixed

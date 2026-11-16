@@ -502,6 +502,12 @@
       "summary": "Chainlink #55's reconciled exit-code contract: a pure precedence resolver over docs/exit-code-contract.md's five conditions. Not yet called by any cmd_* -- specified here for #56/#57/#58 to adopt."
     },
     {
+      "path": "scripts/external_evidence.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "chainlink #171: shared declaration/result-format helper for the generic external evidence extension point -- reserves the external-<name> evidence-kind namespace, validates descriptor declaration uniqueness, and loads docs/external-evidence-result-schema.json. Reading and re-binding the result lives in record_assurance/G14."
+    },
+    {
       "path": "scripts/extract_c_static.py",
       "role": "generator",
       "disposition": "runtime-required",
@@ -909,6 +915,11 @@
       "disposition": "runtime-required"
     },
     {
+      "path": "docs/external-evidence-result-schema.json",
+      "disposition": "runtime-required",
+      "summary": "chainlink #171: versioned external evidence result contract (ligature-external-evidence-result/1.0) binding one observation to an obligation, a descriptor-declared tool identity/version/hash, a non-functional claim, a statistical/observational closure ceiling, and the exact Rust source snapshot. Read by record-assurance --external-result and re-read by G14."
+    },
+    {
       "path": "docs/exemption-schema.json",
       "disposition": "runtime-required"
     },
@@ -1136,6 +1147,11 @@
     {
       "path": "tests/test_extract_c_static.py",
       "kind": "unit",
+      "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_external_evidence.py",
+      "kind": "regression",
       "disposition": "test-only"
     },
     {
@@ -1576,15 +1592,15 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 107,
+      "runtime-required": 109,
       "excluded": 1,
-      "documentation": 13,
+      "documentation": 14,
       "installed-template": 4,
-      "test-only": 80,
+      "test-only": 81,
       "vendored-runtime": 1
     },
-    "total_entries": 206,
-    "test_count": 66,
+    "total_entries": 210,
+    "test_count": 67,
     "registered_cli_command_count": 52
   },
   "documentation_and_templates": [
@@ -1602,6 +1618,11 @@
       "path": "docs/cli-contract.md",
       "disposition": "runtime-required",
       "summary": "Chainlink #55/#167: stable CLI grammar, complete command-to-disposition mapping, and the exact per-command contract printed by `ligature contract` from the executable bundle."
+    },
+    {
+      "path": "docs/external-evidence-extension.md",
+      "disposition": "documentation",
+      "summary": "chainlink #171: how a project declares an external evidence tool, produces the versioned result, records it with --external-result, and what G14 reports; states explicitly that external statistical/observational evidence can never satisfy a deductive claim and requires closure_kind partial rather than deductive/bounded."
     },
     {
       "path": "docs/exit-code-contract.md",

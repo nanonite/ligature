@@ -128,6 +128,10 @@
               {
                 "if": { "properties": { "harness": { "pattern": "^kani_[A-Za-z_][A-Za-z0-9_]*$" } }, "required": ["harness"] },
                 "then": { "properties": { "required_assurance": { "properties": { "accepted_evidence_kinds": { "contains": { "const": "kani-bounded-model-check" } } } } } }
+              },
+              {
+                "if": { "properties": { "harness": { "pattern": "^external-[a-z0-9]+(?:-[a-z0-9]+)*$" } }, "required": ["harness"] },
+                "then": { "properties": { "required_assurance": { "properties": { "accepted_evidence_kinds": { "contains": { "pattern": "^external-[a-z0-9]+(?:-[a-z0-9]+)*$" } } } } } }
               }
             ]
           }
@@ -274,17 +278,32 @@
     "assurance_harness": {
       "oneOf": [
         { "type": "string", "enum": ["creusot", "verus"] },
-        { "type": "string", "pattern": "^kani_[A-Za-z_][A-Za-z0-9_]*$" }
+        { "type": "string", "pattern": "^kani_[A-Za-z_][A-Za-z0-9_]*$" },
+        { "type": "string", "pattern": "^external-[a-z0-9]+(?:-[a-z0-9]+)*$" }
       ],
-      "description": "The verifier declaration for a provided guarantee. Creusot and Verus are named directly. Kani uses the exact Rust proof-function identifier with the reserved kani_ prefix. No arbitrary function names or wildcards are accepted."
+      "description": "The verifier declaration for a provided guarantee. Creusot and Verus are named directly. Kani uses the exact Rust proof-function identifier with the reserved kani_ prefix. An external-<name> value names a project-declared external evidence kind from the descriptor's external_evidence[] (chainlink #171); its result is ingested by record-assurance --external-result and re-read by G14. No arbitrary function names or wildcards are accepted."
     },
     "claim_kind": {
       "type": "string",
-      "enum": ["callee-precondition-established", "postcondition-holds"]
+      "enum": [
+        "callee-precondition-established",
+        "postcondition-holds",
+        "timing-independence",
+        "side-channel-resistance"
+      ]
     },
     "evidence_kind": {
-      "type": "string",
-      "enum": ["kani-bounded-model-check", "creusot-deductive-check", "verus-deductive-check"]
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["kani-bounded-model-check", "creusot-deductive-check", "verus-deductive-check"]
+        },
+        {
+          "type": "string",
+          "pattern": "^external-[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "description": "A project-declared external evidence kind (chainlink #171), validated against the descriptor by validate-work-package/G14/record-assurance rather than by a closed vocabulary."
+        }
+      ]
     },
     "required_assurance": {
       "type": "object",

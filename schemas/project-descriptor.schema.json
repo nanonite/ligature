@@ -221,6 +221,13 @@
         }
       }
     },
+    "external_evidence": {
+      "type": "array",
+      "description": "chainlink #171 -- the generic, versioned extension point for evidence produced by tools outside the first-class verifier enum (for example dudect constant-time testing). Each entry declares one evidence kind in the reserved external-<name> namespace, the tool identity with a pinned version and SHA-256, the command that produces the result, the result-format version, the non-functional claims the tool may establish, and the closure ceiling the evidence can support. A reliance or work-package guarantee references the declared kind exactly like a built-in kind (docs/interaction-schema.json / docs/work-package-manifest-schema.json), and record-assurance's --external-result intake binds the result to the manifest's source bytes and to this declaration before G14 re-reads it. Optional and absent by default: a project that has no external tool declares none. This never widens the built-in vocabulary -- a descriptor may not redeclare a built-in kind -- and it never turns statistical evidence into a deductive or bounded proof; G14 refuses those closure kinds while external evidence participates.",
+      "items": {
+        "$ref": "#/$defs/external_evidence_declaration"
+      }
+    },
     "witness_backend": {
       "type": "object",
       "description": "plan.md §16.2 / chainlink #30 -- pluggable witness producer dispatch, one command, exactly as verifier_backends is pluggable dispatch for #47. `pipeline.py gate-g19` invokes this command fresh for every genuinely valid witness spec, appending --witness-id, --concept, --query, --fixture-id, --seed and --renderer taken from that spec's OWN current fields -- so a regenerated result's identity cannot silently disagree with what the spec currently declares, it was constructed from those exact values. The command must print one JSON canonical result object on stdout, matching docs/witness-result-schema.json (the same contract tests/fixtures/witnesses/stand_in_producer.py already implements). Optional and deliberately absent by default: with no backend configured, G19 cannot verify a determinism claim against an actual run and blocks -- a query that was never re-evaluated must never produce a pass.",
@@ -336,6 +343,79 @@
       "type": "string",
       "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
       "description": "A cluster name, in the one form every other cluster-naming field in this pipeline already requires: docs/closure-profile-schema.json's `cluster` (which must equal the closure profile's own filename stem, G1b) and schemas/project-state.schema.json's `cluster`. Enforced here on `verifier_policy.clusters`' keys (chainlink #104) so a key that could not name a cluster in any artifact is refused at load rather than accepted as an override nothing will ever read."
+    },
+    "external_evidence_declaration": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "kind",
+        "tool",
+        "tool_version",
+        "tool_sha256",
+        "command",
+        "result_format",
+        "claims",
+        "closure_ceiling"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "1.0",
+          "description": "This declaration's own format version, independent of the tool and result versions. A future extension-point revision can therefore be distinguished from a result-format revision."
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^external-[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "description": "The stable evidence kind a reliance or work-package guarantee references. The external- prefix reserves this namespace away from the first-class verifier kinds, and a project may not redeclare a built-in kind."
+        },
+        "tool": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]*$",
+          "description": "Tool identity, e.g. 'dudect'."
+        },
+        "tool_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact pinned tool version; a result declaring another version is refused."
+        },
+        "tool_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "SHA-256 of the pinned tool build/binary. The result must declare the same hash; editing either the declaration or the result makes G14 re-reading refuse the record."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The command that produces the result document. Recorded and displayed so a reviewer can re-run or re-verify the observation; Ligature itself re-reads the hash-bound result rather than executing an arbitrary command."
+        },
+        "result_format": {
+          "type": "string",
+          "pattern": "^ligature-external-evidence-result/[0-9]+\\.[0-9]+$",
+          "description": "Versioned result-format identity the tool's output must carry. Ligature currently reads exactly ligature-external-evidence-result/1.0 and refuses an unknown version rather than guessing its fields."
+        },
+        "claims": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "timing-independence",
+              "side-channel-resistance"
+            ]
+          },
+          "description": "Non-functional claims this tool is allowed to establish. The vocabulary is disjoint from callee-precondition-established/postcondition-holds, so external evidence cannot satisfy a deductive requirement even if a requirement accidentally lists the external evidence kind."
+        },
+        "closure_ceiling": {
+          "type": "string",
+          "enum": [
+            "statistical",
+            "observational"
+          ],
+          "description": "The strongest closure statement the evidence can support. It is recorded in every achieved record's scope and reported by G14; a deductive or bounded closure that rests on external evidence is refused."
+        }
+      }
     },
     "verifier": {
       "type": "string",

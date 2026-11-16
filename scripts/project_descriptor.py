@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+from external_evidence import declaration_diagnostics as external_evidence_diagnostics  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
 DESCRIPTOR_SCHEMA_PATH = resources.resource_path("schemas", "project-descriptor.schema.json")
@@ -485,6 +486,13 @@ def load_project_descriptor(path: Path) -> dict:
             f"project descriptor {path} has conflicting write_set patterns:\n"
             + "\n".join(f"  - {line}" for line in overlap_diagnostics),
             diagnostics=overlap_diagnostics,
+        )
+    external_diagnostics = external_evidence_diagnostics(data)
+    if external_diagnostics:
+        raise ProjectDescriptorError(
+            f"project descriptor {path} has invalid external evidence declarations:\n"
+            + "\n".join(f"  - {line}" for line in external_diagnostics),
+            diagnostics=external_diagnostics,
         )
     return data
 

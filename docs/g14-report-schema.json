@@ -153,10 +153,17 @@
       "required": ["kind", "verifier", "harness", "scope"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "type": ["string", "null"] },
-        "verifier": { "type": ["string", "null"] },
+        "kind": {
+          "type": ["string", "null"],
+          "description": "A first-class evidence kind (kani-bounded-model-check / creusot-deductive-check / verus-deductive-check) or a project-declared external-<name> kind (chainlink #171). External records carry their result/tool/source hashes, claim and closure_ceiling in scope; G14 re-reads them before counting them as evaluated evidence."
+        },
+        "verifier": { "type": ["string", "null"], "description": "The verifier system, or for external evidence the declared tool identity." },
         "harness": { "type": ["string", "null"] },
-        "scope": { "type": "object", "additionalProperties": { "type": "string" } }
+        "scope": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Evidence-specific scope. External evidence includes proof_targets (external-result:<path>), external_result_sha256, external_tool, external_tool_version, external_tool_sha256, external_source_sha256, external_claim and closure_ceiling."
+        }
       }
     },
     "use_reference": {

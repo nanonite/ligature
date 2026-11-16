@@ -112,6 +112,23 @@ use `--bridges-only`. That mode requires a regular project descriptor and a
 clean G9 validation, then copies only the package's required passing bridge
 records. It writes no obligation records and leaves G14's checks in force.
 
+External evidence (chainlink #171)
+----------------------------------
+A project may declare tools outside the first-class verifier enum in its
+descriptor's `external_evidence` list (for example dudect constant-time
+testing). For an obligation whose manifest `harness` is such an
+`external-<name>` kind, `--external-result Obligation=path` reads the
+versioned result document described by
+`docs/external-evidence-result-schema.json` and derives an achieved record
+from it: the declared kind, the tool identity, the non-functional claim, the
+statistical/observational closure ceiling, and hashes for the result, tool
+and exact Rust source snapshot. The same reader re-opens and re-binds the
+result in G14, so a changed result byte, a changed source file, or a changed
+declared tool version/hash blocks the record. External evidence is never
+promoted to a deductive or bounded claim: its claim vocabulary is disjoint
+from `postcondition-holds`, and a closure containing it may only declare
+`closure_kind: partial`.
+
 Report placement and the feature-ledger collision
 -------------------------------------------------
 The report is written to the manifest's own `report.emit` path -- the
@@ -147,18 +164,39 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from atomic_write import write_atomically  # noqa: E402
-from bridge_harness import EVIDENCE_KIND_BY_VERIFIER  # noqa: E402
-from bridge_harness import verifier_for_manifest_harness  # noqa: E402
-from gate_g14 import load_assurance_report_validator  # noqa: E402
-from gate_g14 import looks_like_work_package_manifest  # noqa: E402
-from gate_g14 import work_package_manifest_dir_for  # noqa: E402
-from generate_feature_ledger import load_validator as load_feature_ledger_validator  # noqa: E402
-from satisfies import UNIVERSAL_SCOPE_VALUE  # noqa: E402
-from satisfies import load_achieved_validator  # noqa: E402
-from satisfies import satisfies  # noqa: E402
-from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
-from validate_work_package import format_manifest_schema_error  # noqa: E402
-from validate_work_package import _pattern_covers_path  # noqa: E402
+from bridge_harness import (
+    EVIDENCE_KIND_BY_VERIFIER,  # noqa: E402
+    verifier_for_manifest_harness,  # noqa: E402
+)
+from external_evidence import (
+    EXTERNAL_RESULT_FORMAT,  # noqa: E402
+    is_external_evidence_kind,  # noqa: E402
+    load_result_validator,  # noqa: E402
+)
+from gate_g14 import (
+    load_assurance_report_validator,  # noqa: E402
+    looks_like_work_package_manifest,  # noqa: E402
+    work_package_manifest_dir_for,  # noqa: E402
+)
+from generate_feature_ledger import (
+    load_validator as load_feature_ledger_validator,  # noqa: E402
+)
+from project_descriptor import (
+    ProjectDescriptorError,  # noqa: E402
+    load_project_descriptor,  # noqa: E402
+)
+from satisfies import (
+    UNIVERSAL_SCOPE_VALUE,  # noqa: E402
+    load_achieved_validator,  # noqa: E402
+    satisfies,  # noqa: E402
+)
+from validate_work_package import (
+    _pattern_covers_path,  # noqa: E402
+    format_manifest_schema_error,  # noqa: E402
+)
+from validate_work_package import (
+    load_validator as load_work_package_validator,  # noqa: E402
+)
 
 PROOF_FILE_NAME = "proof.json"
 COMA_SUFFIX = ".coma"
@@ -169,6 +207,7 @@ COMA_SUFFIX = ".coma"
 SUPPORTED_HARNESSES = ("creusot", "verus", "kani")
 VERUS_TARGET_PREFIX = "verus-json:"
 KANI_TARGET_PREFIX = "kani-run:"
+EXTERNAL_RESULT_PREFIX = "external-result:"
 VERUS_NOTE_PREFIX = "ligature:"
 KANI_VERSION = "cargo-kani 0.67.0"
 KANI_TIMEOUT_SECONDS = 900
@@ -223,6 +262,34 @@ class Certificate:
 
 
 @dataclass(frozen=True)
+class ExternalResult:
+    """One project-declared external evidence result, reduced to its binding.
+
+    ``proved``/``goal_count`` are 1/1 so the existing RecordedObligation
+    summary can print an external observation the same way it prints a
+    certificate; they do not pretend a statistical observation is a proof.
+    """
+
+    path: Path
+    relative: str
+    content_hash: str
+    evidence_kind: str
+    claim_kind: str
+    tool: str
+    tool_version: str
+    tool_sha256: str
+    source_hash: str
+    closure_ceiling: str
+    scope: dict[str, str] = field(default_factory=dict)
+    proved: int = 1
+    goal_count: int = 1
+
+    @property
+    def evidence_format(self) -> str:
+        return "external-result"
+
+
+@dataclass(frozen=True)
 class KaniCheckResult:
     number: int
     name: str
@@ -271,7 +338,7 @@ class KaniResultSummary:
 @dataclass(frozen=True)
 class RecordedObligation:
     obligation_id: str
-    certificates: list[Certificate]
+    certificates: list[Certificate | ExternalResult]
     evidence_kind: str
 
     @property
@@ -493,6 +560,56 @@ def parse_kani_harness_specs(specs: list[str]) -> dict[str, str]:
             )
         mapping[obligation] = harness
     return mapping
+
+
+def parse_external_result_specs(specs: list[str]) -> dict[str, str]:
+    """Parse repeatable ``--external-result OBLIGATION=PATH`` mappings.
+
+    The result itself names its declared evidence kind.  One result speaks
+    for exactly one obligation, so two mappings for the same obligation with
+    different paths are refused rather than silently choosing the last.
+    """
+    mapping: dict[str, str] = {}
+    for spec in specs:
+        obligation, sep, path = spec.partition("=")
+        obligation, path = obligation.strip(), path.strip()
+        if not sep or not obligation or not path:
+            raise InvalidRecordInput(
+                f"--external-result {spec!r} is not of the form "
+                "<obligation>=<path> (e.g. "
+                "--external-result ChaCha20.C003=ci/results/dudect/chacha20.json)"
+            )
+        if not OBLIGATION_RE.match(obligation):
+            raise InvalidRecordInput(
+                f"--external-result obligation {obligation!r} does not match the "
+                "`<Concept>.C<n>` obligation id grammar"
+            )
+        if obligation in mapping and mapping[obligation] != path:
+            raise InvalidRecordInput(
+                f"--external-result maps {obligation} to more than one result path"
+            )
+        mapping[obligation] = path
+    return mapping
+
+
+def external_result_path_for(workspace: Path, spec: str) -> Path:
+    """Resolve one external result under the workspace, refusing an escape."""
+    candidate = Path(spec)
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    candidate = candidate.resolve()
+    if not _contains(workspace, candidate):
+        raise InvalidRecordInput(
+            f"external evidence result {spec!r} resolves outside the workspace -- a result "
+            "G14 cannot re-read from this workspace is not evidence for it"
+        )
+    if not candidate.is_file():
+        raise InvalidRecordInput(f"external evidence result not found: {spec}")
+    return candidate
+
+
+def parse_external_target(target: str) -> str:
+    return target[len(EXTERNAL_RESULT_PREFIX):]
 
 
 KANI_HARNESS_ID_RE = re.compile(
@@ -826,6 +943,202 @@ def require_fresh_verus_json(
             f"{_relative(path, workspace)} -- the result does not describe the current Rust "
             "sources; re-run Verus and record assurance again"
         )
+
+
+def read_external_result(
+    path: Path,
+    workspace: Path,
+    obligation_id: str,
+    declaration: dict,
+    source_snapshot: tuple[str, int, str | None],
+    expected_result_hash: str | None = None,
+    expected_claim_kind: str | None = None,
+    expected_closure_ceiling: str | None = None,
+) -> ExternalResult:
+    """Read and bind one project-declared external evidence result.
+
+    Every field that matters is CHECKED against the current workspace, never
+    taken from the result's own prose: the format version, the declared
+    kind, the pinned tool name/version/hash, the claim vocabulary, the
+    closure ceiling, the obligation, and the exact source snapshot.  A
+    result written before the Rust sources it observes, or after anything in
+    the binding changed, is refused.  G14 calls this same reader against its
+    own fresh source snapshot.
+    """
+    relative = _relative(path, workspace)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise InvalidRecordInput(f"cannot read external evidence result {relative}: {exc}") from exc
+    content_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if expected_result_hash is not None and content_hash != expected_result_hash:
+        raise EvidenceNotEstablished(
+            f"{relative} changed after external evidence was recorded for {obligation_id} -- "
+            f"expected {expected_result_hash}, found {content_hash}; re-run the external tool "
+            "and record assurance again"
+        )
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidRecordInput(f"{relative} is not readable JSON: {exc}") from exc
+    errors = list(load_result_validator().iter_errors(data))
+    if errors:
+        raise InvalidRecordInput(
+            f"{relative} is not a valid external evidence result: {errors[0].message}"
+        )
+    if data["format"] != EXTERNAL_RESULT_FORMAT:
+        raise InvalidRecordInput(
+            f"{relative} declares result format {data['format']!r}; this build reads only "
+            f"{EXTERNAL_RESULT_FORMAT!r}"
+        )
+    if data["obligation_id"] != obligation_id:
+        raise InvalidRecordInput(
+            f"{relative} speaks for obligation {data['obligation_id']!r}, not {obligation_id!r} -- "
+            "one external result cannot be re-used for another obligation"
+        )
+    kind = declaration.get("kind")
+    if data["evidence_kind"] != kind:
+        raise InvalidRecordInput(
+            f"{relative} declares evidence kind {data['evidence_kind']!r}, but the manifest "
+            f"binds {obligation_id} to {kind!r}"
+        )
+    tool = data["tool"]
+    if (
+        tool["name"] != declaration.get("tool")
+        or tool["version"] != declaration.get("tool_version")
+        or tool["sha256"] != declaration.get("tool_sha256")
+    ):
+        raise EvidenceNotEstablished(
+            f"{relative} was produced by tool {tool['name']} {tool['version']} ({tool['sha256']}), "
+            f"but the project descriptor pins {declaration.get('tool')} "
+            f"{declaration.get('tool_version')} ({declaration.get('tool_sha256')}) -- the declared "
+            "tool identity changed, so this result no longer establishes the obligation"
+        )
+    claim_kind = data["claim"]["kind"]
+    if claim_kind not in (declaration.get("claims") or ()):
+        raise InvalidRecordInput(
+            f"{relative} makes claim {claim_kind!r}, which the descriptor's {kind!r} declaration "
+            f"does not permit ({declaration.get('claims')!r})"
+        )
+    if expected_claim_kind is not None and claim_kind != expected_claim_kind:
+        raise EvidenceNotEstablished(
+            f"{relative} makes claim {claim_kind!r}, not the recorded {expected_claim_kind!r}"
+        )
+    closure_ceiling = data["closure_ceiling"]
+    if closure_ceiling != declaration.get("closure_ceiling"):
+        raise InvalidRecordInput(
+            f"{relative} declares closure ceiling {closure_ceiling!r}, but the descriptor's "
+            f"{kind!r} declaration pins {declaration.get('closure_ceiling')!r}"
+        )
+    if expected_closure_ceiling is not None and closure_ceiling != expected_closure_ceiling:
+        raise EvidenceNotEstablished(
+            f"{relative} declares closure ceiling {closure_ceiling!r}, not the recorded "
+            f"{expected_closure_ceiling!r}"
+        )
+    source_hash, newest_source_mtime_ns, newest_source = source_snapshot
+    if data["source"]["sha256"] != source_hash:
+        raise EvidenceNotEstablished(
+            f"Rust source files covered by the manifest changed after external evidence was "
+            f"recorded for {obligation_id} -- expected {source_hash}, found "
+            f"{data['source']['sha256']}; re-run {tool['name']} and record assurance again"
+        )
+    if newest_source is not None:
+        try:
+            result_mtime_ns = path.stat().st_mtime_ns
+        except OSError as exc:
+            raise InvalidRecordInput(f"cannot stat external evidence result {relative}: {exc}") from exc
+        if newest_source_mtime_ns > result_mtime_ns:
+            raise EvidenceNotEstablished(
+                f"{newest_source} is newer than the external evidence result {relative} -- the "
+                "result does not describe the current Rust sources; re-run the external tool and "
+                "record assurance again"
+            )
+    if data["claim"]["result"] != "pass":
+        raise EvidenceNotEstablished(
+            f"{relative} reports claim result {data['claim']['result']!r}, not 'pass' -- a failed "
+            "external observation establishes nothing"
+        )
+    scope = {
+        key: value
+        for key, value in (data.get("scope") or {}).items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+    return ExternalResult(
+        path=path,
+        relative=relative,
+        content_hash=content_hash,
+        evidence_kind=kind,
+        claim_kind=claim_kind,
+        tool=tool["name"],
+        tool_version=tool["version"],
+        tool_sha256=tool["sha256"],
+        source_hash=source_hash,
+        closure_ceiling=closure_ceiling,
+        scope=scope,
+    )
+
+
+def _external_record_for(
+    guarantee: dict, result: ExternalResult, provenance: dict
+) -> tuple[dict, str]:
+    """Derive the achieved record for one external-evidence guarantee.
+
+    The record says exactly what the result establishes and nothing more:
+    the external kind, the tool identity, the non-functional claim, the
+    statistical/observational closure ceiling, and hashes for the result,
+    tool and source.  It is still an achieved record -- schema-valid and
+    checked by satisfies() -- but its claim vocabulary keeps it disjoint from
+    deductive obligations.
+    """
+    obligation_id = guarantee["obligation_id"]
+    harness = guarantee["harness"]
+    required = guarantee["required_assurance"]
+    evidence_kind = result.evidence_kind
+    accepted = required.get("accepted_evidence_kinds") or []
+    if evidence_kind not in accepted:
+        raise InvalidRecordInput(
+            f"{obligation_id}: required_assurance.accepted_evidence_kinds {accepted!r} does not "
+            f"accept {evidence_kind!r}, which is what this external result is -- recording it "
+            "would produce a record satisfies() rejects"
+        )
+    required_claims = required.get("required_claims") or []
+    if result.claim_kind not in required_claims:
+        raise InvalidRecordInput(
+            f"{obligation_id}: required_assurance.required_claims {required_claims!r} does not "
+            f"include the external result's claim {result.claim_kind!r} -- a timing or "
+            "side-channel observation can never satisfy a deductive claim"
+        )
+    scope = dict(result.scope)
+    scope.update(
+        {
+            "proof_targets": EXTERNAL_RESULT_PREFIX + result.relative,
+            "external_result_sha256": result.content_hash,
+            "external_tool": result.tool,
+            "external_tool_version": result.tool_version,
+            "external_tool_sha256": result.tool_sha256,
+            "external_source_sha256": result.source_hash,
+            "external_claim": result.claim_kind,
+            "closure_ceiling": result.closure_ceiling,
+        }
+    )
+    record = {
+        "schema_version": "1.0",
+        "claim": {"kind": result.claim_kind, "result": "pass"},
+        "evidence": {
+            "kind": evidence_kind,
+            "verifier": result.tool,
+            "harness": harness,
+            "scope": scope,
+        },
+        "trust": {"assumptions": []},
+        "support": {"status": "supported"},
+        "config": {
+            "toolchain": provenance["toolchain"],
+            "target": provenance["target"],
+            "features": list(provenance["features"]),
+        },
+    }
+    return record, evidence_kind
 
 
 def verus_target(workspace: Path, path: Path, function: str) -> str:
@@ -1879,7 +2192,9 @@ def _bridge_records_for(workspace: Path, manifest: dict, base: dict) -> list[dic
     required = manifest["definition_of_done"]["required_preconditions_to_establish"]
     if not required:
         return entries
-    from gate_g9 import bridge_records_for  # local import: the report's bridge half only
+    from gate_g9 import (
+        bridge_records_for,  # local import: the report's bridge half only
+    )
 
     available = {entry["bridge_id"]: entry for entry in bridge_records_for(workspace)}
     for entry in required:
@@ -1908,9 +2223,9 @@ def _bridge_only_records(
             "bridge-only assurance requires a regular project-descriptor.json so G9 can "
             "validate the recorded bridge checks"
         )
-    from project_descriptor import ProjectDescriptorError, load_project_descriptor
-    from gate_g9 import gate_workspace as gate_g9_workspace
     from gate_g9 import bridge_records_for
+    from gate_g9 import gate_workspace as gate_g9_workspace
+    from project_descriptor import ProjectDescriptorError, load_project_descriptor
 
     try:
         descriptor = load_project_descriptor(descriptor_path)
@@ -1979,6 +2294,7 @@ def record_assurance(
     kani_crate: str | None = None,
     bridges_only: bool = False,
     descriptor_path: Path | None = None,
+    external_result_specs: list[str] | None = None,
 ) -> RecordOutcome:
     """Assemble and write one work package's assurance report.
 
@@ -1993,14 +2309,27 @@ def record_assurance(
     declared = parse_proof_specs(proof_specs) if proof_specs else {}
     verus_functions = parse_verus_function_specs(verus_function_specs or [])
     kani_harnesses = parse_kani_harness_specs(kani_harness_specs or [])
-    if not declared and not verus_functions and not kani_harnesses and not bridges_only:
+    external_results = parse_external_result_specs(external_result_specs or [])
+    if (
+        not declared
+        and not verus_functions
+        and not kani_harnesses
+        and not external_results
+        and not bridges_only
+    ):
         raise InvalidRecordInput(
             "no proof evidence given -- pass --proof for Creusot, --verus-json with "
-            "--verus-function for Verus, --kani-crate with --kani-harness for Kani, or "
+            "--verus-function for Verus, --kani-crate with --kani-harness for Kani, "
+            "--external-result for a project-declared external evidence tool, or "
             "--bridges-only for a package with no provided guarantees and required bridges"
         )
     if bridges_only and (
-        declared or verus_json or verus_functions or kani_harnesses or kani_crate
+        declared
+        or verus_json
+        or verus_functions
+        or kani_harnesses
+        or kani_crate
+        or external_results
     ):
         raise InvalidRecordInput("--bridges-only cannot be combined with obligation proof inputs")
     if verus_functions and not verus_json:
@@ -2011,7 +2340,12 @@ def record_assurance(
         raise InvalidRecordInput("--kani-harness requires --kani-crate <package-directory>")
     if kani_crate and not kani_harnesses:
         raise InvalidRecordInput("--kani-crate requires at least one --kani-harness mapping")
-    evidence_maps = [set(declared), set(verus_functions), set(kani_harnesses)]
+    evidence_maps = [
+        set(declared),
+        set(verus_functions),
+        set(kani_harnesses),
+        set(external_results),
+    ]
     overlaps = sorted(
         obligation_id
         for index, mapping in enumerate(evidence_maps)
@@ -2044,12 +2378,44 @@ def record_assurance(
         raise InvalidRecordInput(
             f"--bridges-only is only valid when {work_package} requires at least one bridge"
         )
-    unknown = sorted((set(declared) | set(verus_functions) | set(kani_harnesses)) - set(provided))
+    unknown = sorted(
+        (set(declared) | set(verus_functions) | set(kani_harnesses) | set(external_results))
+        - set(provided)
+    )
     if unknown:
         raise InvalidRecordInput(
             f"{', '.join(unknown)} is not a provided guarantee of {work_package} (it provides "
             f"{sorted(provided)}) -- only the work package that provides an obligation records it"
         )
+
+    external_declarations: dict[str, dict] = {}
+    if external_results:
+        descriptor_file = descriptor_path or (workspace / "project-descriptor.json")
+        try:
+            descriptor = load_project_descriptor(descriptor_file)
+        except ProjectDescriptorError as exc:
+            raise InvalidRecordInput(
+                f"cannot read the project descriptor required for external evidence declarations "
+                f"({descriptor_file}): {exc}"
+            ) from exc
+        external_declarations = {
+            entry["kind"]: entry
+            for entry in (descriptor.get("external_evidence") or ())
+            if isinstance(entry, dict) and isinstance(entry.get("kind"), str)
+        }
+        for obligation_id in external_results:
+            harness = provided[obligation_id]["harness"]
+            if not is_external_evidence_kind(harness):
+                raise InvalidRecordInput(
+                    f"{obligation_id}: manifest harness {harness!r} is not an external evidence "
+                    "kind; --external-result only maps a guarantee whose manifest harness names a "
+                    "descriptor-declared external-<name> kind"
+                )
+            if harness not in external_declarations:
+                raise InvalidRecordInput(
+                    f"{obligation_id}: manifest harness {harness!r} is not declared in the project "
+                    f"descriptor's external_evidence list ({sorted(external_declarations)})"
+                )
 
     kani_root = kani_crate_root(workspace, kani_crate) if kani_crate else None
     for obligation_id, mapped_harness in kani_harnesses.items():
@@ -2072,15 +2438,46 @@ def record_assurance(
     # Record in the manifest's own obligation order, so a report's entries
     # read back the way the manifest declares them.
     order = {obligation_id: index for index, obligation_id in enumerate(provided)}
-    certificates_by_obligation: dict[str, list[Certificate]] = {}
+    certificates_by_obligation: dict[str, list[Certificate | ExternalResult]] = {}
     records: dict[str, dict] = {}
     kinds: dict[str, str] = {}
     scope_warnings: dict[str, list[str]] = {}
-    requested = set(declared) | set(verus_functions) | set(kani_harnesses)
+    external_bindings: dict[str, tuple[ExternalResult, dict, tuple[str, int, str | None]]] = {}
+    requested = (
+        set(declared) | set(verus_functions) | set(kani_harnesses) | set(external_results)
+    )
     for obligation_id in sorted(requested, key=lambda obligation_id: order[obligation_id]):
         guarantee = provided[obligation_id]
         harness = guarantee["harness"]
         verifier = verifier_for_manifest_harness(harness)
+        if obligation_id in external_results:
+            if not is_external_evidence_kind(harness):
+                raise InvalidRecordInput(
+                    f"{obligation_id}: --external-result requires an external-<name> manifest "
+                    f"harness, found {harness!r}"
+                )
+            declaration = external_declarations[harness]
+            source_snapshot = rust_source_snapshot(workspace, manifest)
+            result = read_external_result(
+                external_result_path_for(workspace, external_results[obligation_id]),
+                workspace,
+                obligation_id,
+                declaration,
+                source_snapshot,
+            )
+            record, evidence_kind = _external_record_for(guarantee, result, provenance)
+            result_check = satisfies(guarantee["required_assurance"], record)
+            if not result_check:
+                raise EvidenceNotEstablished(
+                    f"{obligation_id}: the external evidence record this result yields would not "
+                    "satisfy the manifest's own required_assurance -- "
+                    + "; ".join(result_check.reasons)
+                )
+            certificates_by_obligation[obligation_id] = [result]
+            records[obligation_id] = record
+            kinds[obligation_id] = evidence_kind
+            external_bindings[obligation_id] = (result, declaration, source_snapshot)
+            continue
         if verifier == "verus":
             if obligation_id in kani_harnesses:
                 raise InvalidRecordInput(
@@ -2266,6 +2663,24 @@ def record_assurance(
                         f"Rust source or Kani harness changed while assurance was being assembled "
                         f"for {obligation_id}; rerun Kani and record assurance again"
                     )
+
+    for obligation_id, (recorded_result, declaration, recorded_snapshot) in external_bindings.items():
+        final_snapshot = rust_source_snapshot(workspace, manifest)
+        if final_snapshot[0] != recorded_snapshot[0]:
+            raise EvidenceNotEstablished(
+                f"Rust source files changed while assurance was being assembled for {obligation_id} "
+                "-- re-run the external tool and record assurance again"
+            )
+        read_external_result(
+            recorded_result.path,
+            workspace,
+            obligation_id,
+            declaration,
+            final_snapshot,
+            expected_result_hash=recorded_result.content_hash,
+            expected_claim_kind=recorded_result.claim_kind,
+            expected_closure_ceiling=recorded_result.closure_ceiling,
+        )
 
     write_atomically(report_path, json.dumps(report, indent=2, sort_keys=True) + "\n")
 

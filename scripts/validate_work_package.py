@@ -117,16 +117,23 @@ from jsonschema import Draft202012Validator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
-from manifest_input import ManifestInputError  # noqa: E402
-from manifest_input import ensure_manifest_path  # noqa: E402
-from manifest_input import read_manifest_text  # noqa: E402
-from project_descriptor import ProjectDescriptorError  # noqa: E402
-from project_descriptor import boundary_dirs_for_descriptor  # noqa: E402
-from project_descriptor import load_project_descriptor  # noqa: E402
+from external_evidence import external_kinds, is_external_evidence_kind  # noqa: E402
+from manifest_input import (
+    ManifestInputError,  # noqa: E402
+    ensure_manifest_path,  # noqa: E402
+    read_manifest_text,  # noqa: E402
+)
+from project_descriptor import (
+    ProjectDescriptorError,  # noqa: E402
+    boundary_dirs_for_descriptor,  # noqa: E402
+    load_project_descriptor,  # noqa: E402
+)
 from schema_utils import make_validator  # noqa: E402
+from validate_boundary_contracts import (
+    load_validator as load_boundary_validator,  # noqa: E402
+)
 from validate_boundary_naming import check_file as check_boundary_naming  # noqa: E402
 from validate_boundary_naming import find_boundary_files  # noqa: E402
-from validate_boundary_contracts import load_validator as load_boundary_validator  # noqa: E402
 
 SCHEMA_PATH = resources.resource_path("docs", "work-package-manifest-schema.json")
 _KANI_HARNESS_RE = re.compile(r"^kani_[A-Za-z_][A-Za-z0-9_]*$")
@@ -689,6 +696,80 @@ def check_write_set_coverage_of_functions(path: Path, data: dict) -> list[Findin
     ]
 
 
+def check_external_evidence_declarations(
+    path: Path, data: dict, descriptor: dict | None
+) -> list[Finding]:
+    """Resolve every external-<name> kind against the project descriptor.
+
+    The manifest schema deliberately keeps the external namespace open so a
+    project can add a tool without a Ligature release.  With descriptor
+    context, this check makes the reference real: an undeclared kind, a
+    guarantee whose harness is external but whose required assurance does
+    not accept that exact kind, or a reliance accepting an undeclared kind
+    is refused before Stage 8.  Without descriptor context the check is
+    skipped rather than guessed (the standalone CLI already requires a
+    descriptor).
+    """
+    if descriptor is None:
+        return []
+    declared = external_kinds(descriptor)
+    findings: list[Finding] = []
+
+    def check_assurance(subject: str, assurance: dict) -> None:
+        for kind in assurance.get("accepted_evidence_kinds") or []:
+            if is_external_evidence_kind(kind) and kind not in declared:
+                findings.append(
+                    Finding(
+                        "10.1",
+                        path,
+                        f"{subject} accepts external evidence kind {kind!r}, but the project "
+                        f"descriptor declares no external_evidence entry for it "
+                        f"(declared: {sorted(declared) or 'none'}); declare the tool identity, "
+                        "pinned version/hash, command, result format, claims and closure ceiling first",
+                    )
+                )
+
+    done = data.get("definition_of_done") or {}
+    for entry in done.get("provided_guarantees") or []:
+        obligation = entry.get("obligation_id", "(unknown obligation)")
+        harness = entry.get("harness")
+        if is_external_evidence_kind(harness) and harness not in declared:
+            findings.append(
+                Finding(
+                    "10.1",
+                    path,
+                    f"provided guarantee {obligation!r} names external evidence harness "
+                    f"{harness!r}, but the project descriptor declares no external_evidence entry "
+                    f"for it (declared: {sorted(declared) or 'none'})",
+                )
+            )
+        assurance = entry.get("required_assurance") or {}
+        check_assurance(f"provided guarantee {obligation!r}", assurance)
+        if is_external_evidence_kind(harness) and harness not in (
+            assurance.get("accepted_evidence_kinds") or ()
+        ):
+            findings.append(
+                Finding(
+                    "10.1",
+                    path,
+                    f"provided guarantee {obligation!r} names external evidence harness "
+                    f"{harness!r}, but its required_assurance.accepted_evidence_kinds does not "
+                    "accept that exact kind -- the result record could never satisfy it",
+                )
+            )
+    for entry in done.get("required_preconditions_to_establish") or []:
+        check_assurance(
+            f"required bridge {entry.get('bridge_id', '(unknown bridge)')!r}",
+            entry.get("required_assurance") or {},
+        )
+    for entry in done.get("required_guarantees") or []:
+        check_assurance(
+            f"required guarantee {entry.get('obligation_id', '(unknown obligation)')!r}",
+            entry.get("required_assurance") or {},
+        )
+    return findings
+
+
 def validate_data(
     path: Path,
     data: dict,
@@ -696,6 +777,7 @@ def validate_data(
     workspace_root: Path,
     specs_search_root: Path | None = None,
     allowed_boundary_dirs: list[Path] | None = None,
+    descriptor: dict | None = None,
 ) -> list[Finding]:
     g1a = gate_g1a(path, data, validator)
     if g1a:
@@ -710,6 +792,7 @@ def validate_data(
     findings.extend(check_witness_mitigation_risk_tier(path, data))
     findings.extend(check_promotion_reference(path, data))
     findings.extend(check_write_set_coverage_of_functions(path, data))
+    findings.extend(check_external_evidence_declarations(path, data, descriptor))
     return findings
 
 
@@ -728,6 +811,7 @@ def validate_file(
     workspace_root: Path,
     specs_search_root: Path | None = None,
     allowed_boundary_dirs: list[Path] | None = None,
+    descriptor: dict | None = None,
 ) -> list[Finding]:
     # A bad path argument raises ManifestInputError (chainlink #83)
     # instead of being turned into a Finding: there is no artifact here
@@ -738,7 +822,7 @@ def validate_file(
         data = _load_manifest(path)
     except (json.JSONDecodeError, yaml.YAMLError) as e:
         return [Finding("G1a", path, f"invalid {path.suffix or 'JSON'}: {e}")]
-    return validate_data(path, data, validator, workspace_root, specs_search_root, allowed_boundary_dirs)
+    return validate_data(path, data, validator, workspace_root, specs_search_root, allowed_boundary_dirs, descriptor)
 
 
 def main(argv: list[str]) -> int:
@@ -798,6 +882,7 @@ def main(argv: list[str]) -> int:
             return 2
         allowed_boundary_dirs = boundary_dirs_for_descriptor(descriptor, args.workspace_root)
     elif args.allowed_boundary_dir:
+        descriptor = None
         allowed_boundary_dirs = [Path(d) for d in args.allowed_boundary_dir]
     else:
         # No --allow-any-crate-boundary escape hatch here on purpose: a
@@ -822,7 +907,7 @@ def main(argv: list[str]) -> int:
 
     validator = load_validator()
     try:
-        findings = validate_file(args.manifest, validator, args.workspace_root, specs_search_root, allowed_boundary_dirs)
+        findings = validate_file(args.manifest, validator, args.workspace_root, specs_search_root, allowed_boundary_dirs, descriptor)
     except ManifestInputError as e:
         # The pre-flight above already caught the ordinary shapes; this
         # is the read-time remainder (a path removed or replaced between

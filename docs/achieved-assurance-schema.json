@@ -18,7 +18,13 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["callee-precondition-established", "postcondition-holds"]
+          "enum": [
+            "callee-precondition-established",
+            "postcondition-holds",
+            "timing-independence",
+            "side-channel-resistance"
+          ],
+          "description": "Claim category. The non-functional claims (chainlink #171) are disjoint from the deductive claims: satisfies() compares this value exactly against required_profile.required_claims, so external timing/side-channel evidence can never stand in for a postcondition-holds claim."
         },
         "result": {
           "type": "string",
@@ -32,9 +38,18 @@
       "additionalProperties": false,
       "properties": {
         "kind": {
-          "type": "string",
-          "enum": ["kani-bounded-model-check", "creusot-deductive-check", "verus-deductive-check"],
-          "description": "Verification-method category (plan.md §8.1's type split) -- never a claim value, never a trust/support state; the schema's own enum vocabulary keeps this disjoint from `claim.kind`."
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": ["kani-bounded-model-check", "creusot-deductive-check", "verus-deductive-check"]
+            },
+            {
+              "type": "string",
+              "pattern": "^external-[a-z0-9]+(?:-[a-z0-9]+)*$",
+              "description": "A project-declared external evidence kind (chainlink #171). Its scope carries the external result hash, tool identity/version/hash, source hash, claim and closure_ceiling, which G14 re-reads and re-binds."
+            }
+          ],
+          "description": "Verification/observation method category (plan.md §8.1's type split) -- never a claim value, never a trust/support state; the schema's own vocabulary keeps this disjoint from `claim.kind`."
         },
         "verifier": { "type": "string", "minLength": 1 },
         "harness": { "type": "string", "minLength": 1 },
@@ -42,7 +57,7 @@
           "type": "object",
           "minProperties": 1,
           "additionalProperties": { "type": "string" },
-          "description": "Verifier-specific scope keys (e.g. input_domain, unwind, harness_hash, proof_targets, verus_output_sha256, verus_source_sha256) -- deliberately open, mirroring docs/interaction-schema.json's own required_assurance.minimum_scope. satisfies() compares this against a required_profile's minimum_scope key-for-key, by exact string equality, with one documented exception (chainlink #163): a complete deductive proof records input_domain = scripts/satisfies.py's UNIVERSAL_SCOPE_VALUE, meaning every input the verified source contract admits, which is strictly stronger than any narrower declared domain and therefore satisfies it. No numeric or ordering relation is inferred, since the vocabulary is not typed."
+          "description": "Verifier-specific scope keys (e.g. input_domain, unwind, harness_hash, proof_targets, verus_output_sha256, verus_source_sha256) -- deliberately open, mirroring docs/interaction-schema.json's own required_assurance.minimum_scope. satisfies() compares this against a required_profile's minimum_scope key-for-key, by exact string equality, with one documented exception (chainlink #163): a complete deductive proof records input_domain = scripts/satisfies.py's UNIVERSAL_SCOPE_VALUE, meaning every input the verified source contract admits, which is strictly stronger than any narrower declared domain and therefore satisfies it. No numeric or ordering relation is inferred, since the vocabulary is not typed. External evidence (chainlink #171) records proof_targets = external-result:<path> plus external_result_sha256, external_tool, external_tool_version, external_tool_sha256, external_source_sha256, external_claim and closure_ceiling."
         }
       }
     },

@@ -445,14 +445,15 @@ def check_verifier_policy(
                 VERIFIER_EVIDENCE_KIND[verifier]
                 for verifier in allowed_verifiers
                 if verifier in VERIFIER_EVIDENCE_KIND
-            })
+            } | set(callee_policy.get("external_kinds") or ()))
             accepted = sorted(set(assurance.get("accepted_evidence_kinds") or ()))
             if unsupported:
                 findings.append(Finding(
                     "G2-policy", path,
                     f"reliance {obligation!r} accepts evidence kind(s) {unsupported!r} that are not "
-                    f"produced by callee cluster {callee_policy['owning']!r} or its declared "
-                    f"supporting verifiers {sorted(set(callee_policy['supporting']))!r}; "
+                    f"produced by callee cluster {callee_policy['owning']!r}, its declared "
+                    f"supporting verifiers {sorted(set(callee_policy['supporting']))!r}, or a "
+                    "descriptor-declared external_evidence entry; "
                     f"policy permits {allowed_kinds!r}",
                 ))
             owner_kind = VERIFIER_EVIDENCE_KIND.get(callee_policy["owning"])

@@ -138,27 +138,36 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
-from bridge_harness import EVIDENCE_KIND_BY_VERIFIER  # noqa: E402
-from bridge_harness import verifier_for_manifest_harness  # noqa: E402
+from bridge_harness import (
+    EVIDENCE_KIND_BY_VERIFIER,  # noqa: E402
+    verifier_for_manifest_harness,  # noqa: E402
+)
+from external_evidence import declaration_for, is_external_evidence_kind  # noqa: E402
 from gate_r1_g16 import unresolved_at_or_above_medium  # noqa: E402
-from review_checkpoint import review_log_path  # noqa: E402
 from project_descriptor import boundary_dir_for, bridge_dir_for  # noqa: E402
+from review_checkpoint import review_log_path  # noqa: E402
 from satisfies import satisfies  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 from validate_boundary_contracts import load_boundaries_by_id  # noqa: E402
 from validate_bridge import find_bridge_files  # noqa: E402
 from validate_bridge import load_validator as load_bridge_validator  # noqa: E402
 from validate_bridge import validate_data as validate_bridge_data  # noqa: E402
-from validate_callsites import load_reports as load_callsite_reports  # noqa: E402
 from validate_callsites import callsite_report_dir_for  # noqa: E402
-from validate_callsites import validate_workspace as validate_callsite_reports  # noqa: E402
-from validate_closure import CONDITION_KEYS  # noqa: E402
-from validate_closure import DegradationRecords  # noqa: E402
-from validate_closure import closure_dir_for  # noqa: E402
-from validate_closure import is_degradation_path  # noqa: E402
-from validate_closure import load_cluster_artifacts_with_invalid  # noqa: E402
-from validate_closure import load_degradation_records  # noqa: E402
-from validate_work_package import load_validator as load_work_package_validator  # noqa: E402
+from validate_callsites import load_reports as load_callsite_reports  # noqa: E402
+from validate_callsites import (
+    validate_workspace as validate_callsite_reports,  # noqa: E402
+)
+from validate_closure import (
+    CONDITION_KEYS,  # noqa: E402
+    DegradationRecords,  # noqa: E402
+    closure_dir_for,  # noqa: E402
+    is_degradation_path,  # noqa: E402
+    load_cluster_artifacts_with_invalid,  # noqa: E402
+    load_degradation_records,  # noqa: E402
+)
+from validate_work_package import (
+    load_validator as load_work_package_validator,  # noqa: E402
+)
 
 DOCS = resources.resource_path("docs")
 ASSURANCE_REPORT_SCHEMA_PATH = DOCS / "assurance-report-schema.json"
@@ -187,6 +196,11 @@ def assurance_record_command(work_package: str, guarantee: dict) -> str:
         return (
             f"ligature record-assurance {work_package} --verus-json <output.json> "
             f"--verus-function {obligation}=<func-details-key>"
+        )
+    if is_external_evidence_kind(harness):
+        return (
+            f"ligature record-assurance {work_package} "
+            f"--external-result {obligation}=<result.json>"
         )
     return f"ligature record-assurance {work_package} --proof {obligation}=<path>"
 
@@ -698,6 +712,7 @@ def check_record_certificates(
     manifests: dict[str, dict] | None = None,
     *,
     revalidate_kani: bool = True,
+    descriptor: dict | None = None,
 ) -> list[Finding]:
     """chainlink #92: every obligation record's proof certificate is
     RE-OPENED here, the same way record-assurance checked it before
@@ -743,8 +758,13 @@ def check_record_certificates(
     # after both modules are initialized -- the same direction
     # record_assurance uses for gate_g9's bridge half.
     from record_assurance import (  # noqa: E402
+        EXTERNAL_RESULT_PREFIX,
         RecordAssuranceError,
+        external_result_path_for,
+        parse_external_target,
+        read_external_result,
         read_proof_target,
+        rust_source_snapshot,
     )
 
     if manifests is None:
@@ -773,6 +793,124 @@ def check_record_certificates(
             kani_result_summary = (
                 scope.get("kani_result_summary") if isinstance(scope, dict) else None
             )
+            external_result_hash = (
+                scope.get("external_result_sha256") if isinstance(scope, dict) else None
+            )
+            external_tool = scope.get("external_tool") if isinstance(scope, dict) else None
+            external_tool_version = (
+                scope.get("external_tool_version") if isinstance(scope, dict) else None
+            )
+            external_tool_sha256 = (
+                scope.get("external_tool_sha256") if isinstance(scope, dict) else None
+            )
+            external_source_hash = (
+                scope.get("external_source_sha256") if isinstance(scope, dict) else None
+            )
+            external_claim = (
+                scope.get("external_claim") if isinstance(scope, dict) else None
+            )
+            external_ceiling = (
+                scope.get("closure_ceiling") if isinstance(scope, dict) else None
+            )
+            if is_external_evidence_kind(harness):
+                declaration = declaration_for(descriptor, harness)
+                missing = [
+                    key
+                    for key, value in (
+                        ("external_result_sha256", external_result_hash),
+                        ("external_tool", external_tool),
+                        ("external_tool_version", external_tool_version),
+                        ("external_tool_sha256", external_tool_sha256),
+                        ("external_source_sha256", external_source_hash),
+                        ("external_claim", external_claim),
+                        ("closure_ceiling", external_ceiling),
+                    )
+                    if not isinstance(value, str) or not value
+                ]
+                if declaration is None:
+                    findings.append(
+                        Finding(
+                            "G14", record_ref,
+                            f"the recorded achievement names external evidence kind {harness!r}, "
+                            "but the project descriptor declares no external_evidence entry for "
+                            "it -- the tool identity, pinned version/hash and closure ceiling "
+                            "that bound this result are gone; restore the declaration or "
+                            "re-record with the tool the descriptor now declares",
+                        )
+                    )
+                    continue
+                if missing:
+                    findings.append(
+                        Finding(
+                            "G14", record_ref,
+                            "the recorded external achievement has no complete binding in "
+                            f"evidence.scope (missing: {missing}); G14 cannot re-read the result "
+                            "and re-bind it to the declared tool, source bytes and closure ceiling "
+                            f"-- re-record with `ligature record-assurance {work_package} "
+                            f"--external-result {obligation}=<result.json>`",
+                        )
+                    )
+                    continue
+                if not isinstance(targets, str) or not targets.strip():
+                    findings.append(
+                        Finding(
+                            "G14", record_ref,
+                            "the recorded external achievement names no external result "
+                            "(evidence.scope.proof_targets is absent or empty) -- there is "
+                            "nothing for G14 to re-read or re-bind; re-record with "
+                            f"`ligature record-assurance {work_package} --external-result "
+                            f"{obligation}=<result.json>`",
+                        )
+                    )
+                    continue
+                for target in targets.split(","):
+                    target = target.strip()
+                    if not target.startswith(EXTERNAL_RESULT_PREFIX):
+                        findings.append(
+                            Finding(
+                                "G14", record_ref,
+                                f"the recorded external achievement names {target!r}, which is "
+                                f"not an {EXTERNAL_RESULT_PREFIX}<path> target -- re-record with "
+                                f"`ligature record-assurance {work_package} --external-result "
+                                f"{obligation}=<result.json>`",
+                            )
+                        )
+                        continue
+                    try:
+                        source_manifest = manifests.get(work_package)
+                        if source_manifest is None:
+                            raise RecordAssuranceError(
+                                f"no valid work-package manifest is available to re-check "
+                                f"external source freshness for {work_package}"
+                            )
+                        read_external_result(
+                            external_result_path_for(
+                                workspace, parse_external_target(target)
+                            ),
+                            workspace,
+                            obligation,
+                            declaration,
+                            rust_source_snapshot(workspace, source_manifest),
+                            expected_result_hash=external_result_hash,
+                            expected_claim_kind=external_claim,
+                            expected_closure_ceiling=external_ceiling,
+                        )
+                    except RecordAssuranceError as e:
+                        findings.append(
+                            Finding(
+                                "G14", record_ref,
+                                f"the recorded external achievement names result {target!r}, "
+                                f"which does not re-establish {obligation} when re-read: {e}. "
+                                "record-assurance re-reads the result, re-hashes it, and re-binds "
+                                "it to the declared tool identity, pinned tool hash and current "
+                                "Rust source snapshot; G14 applies the same reader and fails "
+                                "closed when the tool declaration, result bytes or source bytes "
+                                "changed (chainlink #171). Re-record with "
+                                f"`ligature record-assurance {work_package} --external-result "
+                                f"{obligation}=<result.json>`",
+                            )
+                        )
+                continue
             if verifier == "verus" and (not isinstance(verus_hash, str) or not verus_hash):
                 findings.append(
                     Finding(
@@ -944,7 +1082,10 @@ def check_record_certificates(
 
 
 def check_record_derivation(
-    closure: Closure, manifests: dict[str, dict], reports: dict[str, dict]
+    closure: Closure,
+    manifests: dict[str, dict],
+    reports: dict[str, dict],
+    descriptor: dict | None = None,
 ) -> list[Finding]:
     """chainlink #92, the rest of the record: record-assurance doesn't
     copy the certificate, it DERIVES the record -- evidence kind,
@@ -998,7 +1139,12 @@ def check_record_derivation(
             record_ref = f"{work_package}:{obligation}"
             record = entry["record"]
             harness = guarantee["harness"]
-            expected_verifier = verifier_for_manifest_harness(harness)
+            external = is_external_evidence_kind(harness)
+            declaration = declaration_for(descriptor, harness) if external else None
+            if external:
+                expected_verifier = declaration.get("tool") if declaration else None
+            else:
+                expected_verifier = verifier_for_manifest_harness(harness)
             evidence = record.get("evidence") if isinstance(record, dict) else None
             evidence = evidence if isinstance(evidence, dict) else {}
             config = record.get("config") if isinstance(record, dict) else None
@@ -1027,7 +1173,41 @@ def check_record_derivation(
                         f"records the bounded model encoded by its exact manifest harness "
                         f"{harness!r}"
                     )
-            expected_kind = EVIDENCE_KIND_BY_VERIFIER.get(expected_verifier)
+            if external:
+                expected_kind = harness
+                scope = evidence.get("scope")
+                scope = scope if isinstance(scope, dict) else {}
+                if declaration is None:
+                    mismatches.append(
+                        f"the manifest declares external evidence harness {harness!r}, but the "
+                        "project descriptor no longer declares that external_evidence kind"
+                    )
+                else:
+                    for key, expected_value in (
+                        ("external_tool", declaration.get("tool")),
+                        ("external_tool_version", declaration.get("tool_version")),
+                        ("external_tool_sha256", declaration.get("tool_sha256")),
+                        ("closure_ceiling", declaration.get("closure_ceiling")),
+                    ):
+                        if scope.get(key) != expected_value:
+                            mismatches.append(
+                                f"evidence.scope.{key} is {scope.get(key)!r}, but the descriptor's "
+                                f"{harness!r} declaration pins {expected_value!r}"
+                            )
+                    claim = record.get("claim") if isinstance(record, dict) else {}
+                    claim_kind = claim.get("kind") if isinstance(claim, dict) else None
+                    if claim_kind not in (declaration.get("claims") or ()):
+                        mismatches.append(
+                            f"claim.kind is {claim_kind!r}, but the descriptor's {harness!r} "
+                            f"declaration permits only {list(declaration.get('claims') or ())!r}"
+                        )
+                    if scope.get("external_claim") != claim_kind:
+                        mismatches.append(
+                            f"evidence.scope.external_claim is {scope.get('external_claim')!r}, "
+                            f"but the record's own claim.kind is {claim_kind!r}"
+                        )
+            else:
+                expected_kind = EVIDENCE_KIND_BY_VERIFIER.get(expected_verifier)
             observed_kind = evidence.get("kind")
             if expected_kind is None:
                 mismatches.append(
@@ -1050,7 +1230,14 @@ def check_record_derivation(
                     "from the provenance block of the run that produced the proof"
                 )
             if mismatches:
-                if expected_verifier == "verus":
+                if external:
+                    remediation = (
+                        f"Re-record it with `ligature record-assurance {work_package} "
+                        f"--external-result {obligation}=<result.json>` so the external kind, "
+                        "tool identity and closure ceiling come from the descriptor and current "
+                        "result again"
+                    )
+                elif expected_verifier == "verus":
                     remediation = (
                         f"Re-record it with `ligature record-assurance {work_package} "
                         f"--verus-json <output.json> --verus-function "
@@ -1766,17 +1953,35 @@ def check_closure_kind(profile: dict, computed: dict) -> list[Finding]:
     (ClusterOutcome.summary()) and policed everywhere else exactly like
     any other kind."""
     kinds = set(computed.get("_evidence_kinds") or [])
+    external_kinds = sorted(kind for kind in kinds if is_external_evidence_kind(kind))
+    findings: list[Finding] = []
+    if external_kinds and profile["closure_kind"] in ("deductive", "bounded"):
+        findings.append(
+            Finding(
+                "G17", profile["cluster"],
+                f"closure_kind is {profile['closure_kind']!r} but the transitive closure contains "
+                f"external evidence {external_kinds!r} -- external observations are statistical "
+                "or observational, neither deductive nor bounded-exhaustive, so a uniform "
+                "deductive/bounded claim over this closure is not supported; declare "
+                "closure_kind 'partial' instead (chainlink #171)",
+            )
+        )
     if profile["closure_kind"] == "deductive" and (kinds & BOUNDED_EVIDENCE_KINDS):
-        return [
+        findings.append(
             Finding(
                 "G17", profile["cluster"],
                 f"closure_kind is 'deductive' but the transitive closure contains "
                 f"{sorted(kinds & BOUNDED_EVIDENCE_KINDS)!r} -- a bounded result anywhere in the "
                 "closure makes the cluster's guarantee bounded (plan.md §4)",
             )
-        ]
-    if profile["closure_kind"] == "bounded" and kinds and not (kinds & BOUNDED_EVIDENCE_KINDS):
-        return [
+        )
+    if (
+        profile["closure_kind"] == "bounded"
+        and kinds
+        and not (kinds & BOUNDED_EVIDENCE_KINDS)
+        and not external_kinds
+    ):
+        findings.append(
             Finding(
                 "G17", profile["cluster"],
                 f"closure_kind is 'bounded' but every result in the closure is deductive "
@@ -1784,8 +1989,8 @@ def check_closure_kind(profile: dict, computed: dict) -> list[Finding]:
                 "that the cluster could close deductively",
                 severity="info",
             )
-        ]
-    return []
+        )
+    return findings
 
 
 @dataclass
@@ -2260,10 +2465,11 @@ def gate_cluster(
     # only compare the record's own words against a requirement's words.
     findings.extend(
         check_record_certificates(
-            workspace, closure, reports, manifests, revalidate_kani=revalidate_kani
+            workspace, closure, reports, manifests, revalidate_kani=revalidate_kani,
+            descriptor=descriptor,
         )
     )
-    findings.extend(check_record_derivation(closure, manifests, reports))
+    findings.extend(check_record_derivation(closure, manifests, reports, descriptor))
 
     findings.extend(check_provided_guarantees(cluster, profile, closure, manifests, reports))
     findings.extend(check_requirements(cluster, profile, closure, providers, reports, manifests))

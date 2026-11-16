@@ -103,6 +103,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import validate_work_package
+from external_evidence import external_kinds, is_external_evidence_kind
 from verifier_policy import (
     VERIFIER_EVIDENCE_KIND,
     assurance_policy_mismatches,
@@ -272,7 +273,8 @@ FIELD_SOURCES: tuple[FieldSource, ...] = (
         "interaction reliances, else a reviewed concept constraint + verifier policy",
         "content from the reliance; for a standalone obligation (no reliance), the reviewed "
         "concept spec's own constraint kind + the owning verifier policy; plan selects the "
-        "verifier declaration (creusot/verus) or exact kani_ function (chainlink #162/#173)",
+        "verifier declaration (creusot/verus), exact kani_ function (chainlink #162/#173), or a "
+        "descriptor-declared external-<name> evidence kind (chainlink #171)",
     ),
     FieldSource(
         "definition_of_done.required_preconditions_to_establish",
@@ -1146,8 +1148,9 @@ def _check_assurance_against_policy(
         raise ManifestDerivationError(
             "contradictory-source",
             f"{subject} accepts evidence kind(s) {unexpected} that no verifier declared for "
-            f"cluster {policy['owning']!r} (owning) or its supporting verifiers "
-            f"{sorted(policy['supporting'])!r} can produce",
+            f"cluster {policy['owning']!r} (owning), its supporting verifiers "
+            f"{sorted(policy['supporting'])!r}, or the descriptor's external_evidence list "
+            "can produce",
         )
     owning_kind = VERIFIER_EVIDENCE_KIND.get(str(policy["owning"]))
     if owner_missing:
@@ -1682,23 +1685,42 @@ def _derive_provided_guarantees(
                 "missing-source",
                 f"provided obligation {obligation_id!r} has no verifier/harness declaration in the plan",
             )
-        _require_match(
-            _HARNESS_RE,
-            harness,
-            "invalid-plan",
-            f"harness {harness!r} for {obligation_id!r} must be an exact Rust identifier, no wildcards",
-        )
-        if harness not in ("creusot", "verus") and not _KANI_HARNESS_RE.fullmatch(harness):
+        if not is_external_evidence_kind(harness):
+            _require_match(
+                _HARNESS_RE,
+                harness,
+                "invalid-plan",
+                f"harness {harness!r} for {obligation_id!r} must be an exact Rust identifier, no wildcards",
+            )
+        if is_external_evidence_kind(harness):
+            if harness not in external_kinds(state.descriptor):
+                raise ManifestDerivationError(
+                    "missing-source",
+                    f"harness declaration {harness!r} for {obligation_id!r} names an external "
+                    "evidence kind the project descriptor does not declare in external_evidence; "
+                    "declare the tool, pinned version/hash, command, result format, claims and "
+                    "closure ceiling there first",
+                )
+        elif harness not in ("creusot", "verus") and not _KANI_HARNESS_RE.fullmatch(harness):
             raise ManifestDerivationError(
                 "invalid-plan",
                 f"harness declaration {harness!r} for {obligation_id!r} is unsupported; use "
-                "'creusot' or 'verus' as the verifier identity, or the exact Kani function "
-                "name prefixed with 'kani_'",
+                "'creusot' or 'verus' as the verifier identity, the exact Kani function name "
+                "prefixed with 'kani_', or a descriptor-declared external-<name> evidence kind",
             )
         assurance = _resolve_obligation_assurance(state, request, obligation_id, policy)
         _check_assurance_against_policy(
             assurance, policy, f"provided guarantee {obligation_id!r}"
         )
+        if is_external_evidence_kind(harness) and harness not in (
+            assurance.get("accepted_evidence_kinds") or ()
+        ):
+            raise ManifestDerivationError(
+                "contradictory-source",
+                f"provided guarantee {obligation_id!r} declares external evidence harness "
+                f"{harness!r}, but its required_assurance.accepted_evidence_kinds "
+                f"{assurance.get('accepted_evidence_kinds')!r} does not accept it",
+            )
         provided.append(
             {
                 "obligation_id": obligation_id,

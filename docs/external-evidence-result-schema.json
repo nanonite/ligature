@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/external-evidence-result-schema.json",
+  "title": "External evidence result — ligature-external-evidence-result/1.0",
+  "description": "The versioned result document a project-declared external evidence tool produces for one obligation (chainlink #171). A project descriptor's external_evidence[] entry names the evidence kind, tool identity and pinned tool hash, command, result format and the claims the tool may establish; this document is the machine-readable observation that record-assurance ingests and G14 re-reads. It is bound to one obligation, one tool identity, and the exact Rust source snapshot under the work package's allowed write set, so a stale result or a changed tool declaration cannot keep closing an obligation. It is OBSERVATION evidence, never a deductive or bounded-exhaustive proof: its closure_ceiling says so, and it can only satisfy a requirement that explicitly accepts its external kind and non-functional claim.",
+  "type": "object",
+  "required": [
+    "format",
+    "obligation_id",
+    "evidence_kind",
+    "claim",
+    "tool",
+    "source",
+    "closure_ceiling",
+    "result"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "type": "string",
+      "pattern": "^ligature-external-evidence-result/[0-9]+\\.[0-9]+$",
+      "description": "Result-format version. Ligature currently reads exactly ligature-external-evidence-result/1.0; an unknown version is refused rather than guessed."
+    },
+    "obligation_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z0-9]*\\.[A-Z][0-9]+$",
+      "description": "The single obligation this result speaks for. record-assurance and G14 both require an exact match, so one observation cannot be re-used for an unrelated obligation."
+    },
+    "evidence_kind": {
+      "type": "string",
+      "pattern": "^external-[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "description": "The project-declared external evidence kind this result was produced for; must equal the descriptor declaration and the manifest guarantee's harness value."
+    },
+    "claim": {
+      "type": "object",
+      "required": ["kind", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["timing-independence", "side-channel-resistance"],
+          "description": "Non-functional claim vocabulary. Deliberately disjoint from postcondition-holds and callee-precondition-established, so an external observation can never satisfy a deductive requirement by accident."
+        },
+        "result": {
+          "type": "string",
+          "enum": ["pass", "fail"]
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "required": ["name", "version", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]*$",
+          "description": "Tool identity, e.g. 'dudect'."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact tool version this result came from; must equal the descriptor's pinned tool_version."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "SHA-256 of the tool build/binary this result came from; must equal the descriptor's pinned tool_sha256."
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "Digest over the exact Rust source snapshot under the work package's allowed write set, computed the same way record-assurance binds Verus and Kani evidence. A source edit after the result was produced leaves this hash stale."
+        },
+        "files": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["path", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+            }
+          },
+          "description": "Optional per-file listing for auditability. The aggregate source.sha256 is the binding G14 recomputes; this list is informative and is not allowed to substitute for it."
+        }
+      }
+    },
+    "closure_ceiling": {
+      "type": "string",
+      "enum": ["statistical", "observational"],
+      "description": "The strongest closure statement this evidence can support. Statistical evidence is not deductive and not bounded-exhaustive; G14 refuses a deductive or bounded closure while any external evidence participates, and points at closure_kind 'partial'."
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional exact invocation used to produce the result, for auditability. The descriptor's declared command remains the authoritative pinned form."
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Optional tool-specific scope values (e.g. statistical_confidence, sample_count). They are merged into the achieved record's evidence.scope and can therefore satisfy a reliance's minimum_scope only by exact string equality, never by inference."
+    },
+    "result": {
+      "type": "object",
+      "description": "Tool-specific result payload. Open by design: the extension point must not know every tool's measurements. The binding facts above are what Ligature checks; this object is retained for reviewers."
+    }
+  }
+}

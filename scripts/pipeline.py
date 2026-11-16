@@ -780,7 +780,7 @@ def cmd_validate_work_package(args: argparse.Namespace) -> int:
 
     validator = load_work_package_validator()
     findings = validate_work_package_file(
-        args.manifest, validator, args.workspace, specs_search_root, allowed_boundary_dirs
+        args.manifest, validator, args.workspace, specs_search_root, allowed_boundary_dirs, descriptor
     )
     errors = [f for f in findings if f.severity == "error"]
     infos = [f for f in findings if f.severity == "info"]
@@ -2839,7 +2839,11 @@ def cmd_record_assurance(args: argparse.Namespace) -> int:
     harness, and G14 repeats the resolution and run against current Rust inputs.
     A package with no provided guarantees can use `--bridges-only`, which
     requires a clean G9 validation and includes only its required passing
-    bridge records.
+    bridge records. `--external-result` ingests a project-declared
+    external-<name> tool result (chainlink #171), binding it to the
+    descriptor's pinned tool identity and the current Rust source snapshot;
+    G14 re-reads that binding, and external evidence can never satisfy a
+    deductive claim or a deductive/bounded closure kind.
 
     Exit codes per docs/exit-code-contract.md: 0 recorded; 1 the evidence
     does not establish the obligation (stuck subgoals, a certificate older
@@ -2858,6 +2862,7 @@ def cmd_record_assurance(args: argparse.Namespace) -> int:
             args.kani_crate,
             args.bridges_only,
             args.descriptor,
+            args.external_result,
         )
     except RecordAssuranceError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -2876,10 +2881,19 @@ def cmd_record_assurance(args: argparse.Namespace) -> int:
     else:
         print(f"recorded assurance: {outcome.report_relative} (work package {outcome.work_package})")
     for entry in outcome.recorded:
-        print(
-            f"  {entry.obligation_id}: {entry.evidence_kind} supported -- {entry.goals} proved "
-            f"goal(s) <- {', '.join(entry.targets)}"
-        )
+        if any(
+            getattr(certificate, "evidence_format", "") == "external-result"
+            for certificate in entry.certificates
+        ):
+            print(
+                f"  {entry.obligation_id}: {entry.evidence_kind} supported -- external observation "
+                f"<- {', '.join(entry.targets)}"
+            )
+        else:
+            print(
+                f"  {entry.obligation_id}: {entry.evidence_kind} supported -- {entry.goals} proved "
+                f"goal(s) <- {', '.join(entry.targets)}"
+            )
     for obligation_id, reasons in outcome.scope_warnings.items():
         print(
             f"warning: {obligation_id}: Kani result was recorded at its bounded harness scope, "
@@ -3711,6 +3725,21 @@ def build_parser() -> argparse.ArgumentParser:
             "unreachable checks. Recording and G14 can take minutes and several GB per harness; "
             "Ligature prints per-harness progress to stderr. "
             "Bounded scope cannot satisfy a broader manifest minimum_scope"
+        ),
+    )
+    record_assurance_p.add_argument(
+        "--external-result",
+        action="append",
+        default=[],
+        metavar="OBLIGATION=PATH",
+        help=(
+            "bind one obligation whose manifest harness is a descriptor-declared "
+            "external-<name> evidence kind to its versioned result document (workspace-relative); "
+            "repeatable. record-assurance checks the result's format, obligation, evidence kind, "
+            "pinned tool name/version/hash, claim vocabulary, closure ceiling and exact Rust "
+            "source snapshot before writing a record, and G14 re-reads the same result. External "
+            "evidence is statistical/observational: it can never satisfy postcondition-holds, and "
+            "a closure containing it must declare closure_kind 'partial', not deductive/bounded"
         ),
     )
     record_assurance_p.add_argument(

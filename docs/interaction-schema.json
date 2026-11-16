@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ligature-workspace/docs/interaction-schema.json",
   "title": "Interaction (I) — v1.0",
-  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. #16: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. #17: reliances[].required_assurance, applying §8.1's claim / evidence-method / scope / trust type split -- required_claims and accepted_evidence_kinds are separate enums with no shared values, so a bridge-checked-style value can never land in a bounded-model-check-style field. reliances is optional: an eligibility of inform/ignore has nothing to declare a reliance on, so it is never forced to an empty array. #18: realization.requirement + config_scope -- required on every interaction (unlike reliances, this applies uniformly regardless of eligibility: the issue text is 'each interaction edge declares', not conditioned on boundary-required). #19: protocol_class (plan.md §5.3) -- required on every interaction, same reasoning as realization. A non-pairwise classification requires an external protocol artifact or a reviewed protocol-debt record (docs/protocol-debt-schema.json); cross-referencing that coverage exists is G15's job, out of scope for this schema, the same boundary #16 drew for R2/exemptions.",
+  "description": "plan.md §5.1. One per crates/*/specs/_interactions/<interaction_id>.json. #16: caller/callee, edge_class, COMPUTED eligibility (rejected on mismatch by scripts/validate_interaction.py's G1b, plan.md §5.2), rationale, evidence_links, review. #17: reliances[].required_assurance, applying §8.1's claim / evidence-method / scope / trust type split -- required_claims and accepted_evidence_kinds are separate enums with no shared values, so a bridge-checked-style value can never land in a bounded-model-check-style field. reliances is optional: an eligibility of inform/ignore has nothing to declare a reliance on, so it is never forced to an empty array. #18: realization.requirement + config_scope -- required on every interaction (unlike reliances, this applies uniformly regardless of eligibility: the issue text is 'each interaction edge declares', not conditioned on boundary-required). #19: protocol_class (plan.md §5.3) -- required on every interaction, same reasoning as realization. A non-pairwise classification requires an external protocol artifact or a reviewed protocol-debt record (docs/protocol-debt-schema.json); cross-referencing that coverage exists is G15's job, out of scope for this schema, the same boundary #16 drew for R2/exemptions. #171: accepted_evidence_kinds also accepts a project-declared external-<name> kind, with a disjoint non-functional claim vocabulary; the descriptor's external_evidence[] supplies the tool identity, pinned version/hash, command, result format and closure ceiling.",
   "type": "object",
   "required": ["schema_version", "interaction_id", "caller", "callee", "edge_class", "eligibility", "rationale", "protocol_class", "realization", "review"],
   "additionalProperties": false,
@@ -115,7 +115,7 @@
       "type": "object",
       "required": ["required_claims", "accepted_evidence_kinds", "minimum_scope", "trust_policy"],
       "additionalProperties": false,
-      "description": "plan.md §8.1's type split, enforced structurally: required_claims and accepted_evidence_kinds are disjoint enums, so a claim-category value (e.g. postcondition-holds) can never be written where a verification-method value (e.g. kani-bounded-model-check) is expected, or vice versa -- bridge-checked and bounded-model-check-style values can never share a field because neither field's enum contains the other's vocabulary.",
+      "description": "plan.md §8.1's type split, enforced structurally: required_claims and accepted_evidence_kinds are disjoint vocabularies, so a claim-category value (e.g. postcondition-holds) can never be written where a verification-method value (e.g. kani-bounded-model-check) is expected, or vice versa -- bridge-checked and bounded-model-check-style values can never share a field because neither field's vocabulary contains the other's. accepted_evidence_kinds additionally admits a project-declared external-<name> kind (chainlink #171); the non-functional claims remain disjoint from postcondition-holds/callee-precondition-established so external evidence cannot satisfy a deductive requirement by accident.",
       "properties": {
         "required_claims": {
           "type": "array",
@@ -123,16 +123,35 @@
           "uniqueItems": true,
           "items": {
             "type": "string",
-            "enum": ["callee-precondition-established", "postcondition-holds"]
-          }
+            "enum": [
+              "callee-precondition-established",
+              "postcondition-holds",
+              "timing-independence",
+              "side-channel-resistance"
+            ]
+          },
+          "description": "Claims the provider must establish. The non-functional claims (chainlink #171) are disjoint from the two deductive claims, so external evidence can never satisfy a postcondition-holds requirement by accident, and a deductive record can never satisfy a timing-independent requirement."
         },
         "accepted_evidence_kinds": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "type": "string",
-            "enum": ["kani-bounded-model-check", "creusot-deductive-check", "verus-deductive-check"]
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "kani-bounded-model-check",
+                  "creusot-deductive-check",
+                  "verus-deductive-check"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^external-[a-z0-9]+(?:-[a-z0-9]+)*$",
+                "description": "A project-declared external evidence kind (chainlink #171). The project descriptor's external_evidence[] entry supplies the tool identity, pinned version/hash, command, result format and closure ceiling; a validator with descriptor context refuses an undeclared kind, and G14/record-assurance refuse a result whose tool binding changed."
+              }
+            ]
           }
         },
         "minimum_scope": {

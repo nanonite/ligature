@@ -64,7 +64,7 @@ your own port workspace and run it there. Requires Python ≥ 3.10 with
 `jsonschema` and `PyYAML` installed (`tomli` is also required on Python 3.10).
 
 1. Get `ligature.pyz`. Either copy the published build from
-     [`releases/v1.4.3/`](releases/v1.4.3/) (check it with
+     [`releases/v1.5.0/`](releases/v1.5.0/) (check it with
    `sha256sum -c SHA256SUMS`; `PROVENANCE.json` records the exact source
    commit), or build it yourself from this checkout:
 
@@ -92,6 +92,7 @@ backend is also set there and is pluggable (`claude -p`, `codex exec`,
 - [`docs/mode-p-cli-flow.md`](docs/mode-p-cli-flow.md): every CLI command mapped to its stage
 - [`docs/cli-contract.md`](docs/cli-contract.md): command grammar and semantics
 - [`docs/trust-and-compatibility-boundaries.md`](docs/trust-and-compatibility-boundaries.md): read/write authority
+- [`docs/verifier-compatibility.md`](docs/verifier-compatibility.md): tested verifier/toolchain matrix and reproducible per-root Nix selections
 - [`plan.md`](plan.md): full design rationale
 - `vendor/concept-to-code`: the concept/contract skill that covers layers 1–2 (git submodule)
 

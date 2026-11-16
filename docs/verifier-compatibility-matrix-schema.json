@@ -1,0 +1,559 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ligature-workspace/docs/verifier-compatibility-matrix-schema.json",
+  "title": "Ligature tested verifier and toolchain compatibility matrix",
+  "description": "A versioned, evidence-linked record of the verifier, Rust, solver/support-tool, platform and source/content pins a Ligature build was actually exercised against. This is a measured compatibility record, never an upstream support guarantee. Each result says whether it is intake-only, synthetic, or project-level, and each entry names its exclusions. The file is data, not a schema of a project artifact: a later Ligature release replaces it as one reviewed build input and must never edit or relabel an already-attested zipapp.",
+  "type": "object",
+  "required": [
+    "format",
+    "matrix_version",
+    "updated_at",
+    "published_by",
+    "evidence_classes",
+    "entries"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "ligature.verifier-compatibility-matrix.v1",
+      "description": "Versioned document format. A breaking change to this shape requires a new format string and a documented migration."
+    },
+    "matrix_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "This matrix content's own revision, independent of the Ligature product version. A later release may publish a new matrix_version without pretending an older zipapp carries it."
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "published_by": {
+      "type": "object",
+      "required": [
+        "product_name",
+        "product_version"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "product_name": {
+          "type": "string",
+          "const": "ligature"
+        },
+        "product_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "The Ligature release that publishes this matrix. `version --verify`/`doctor` refuse a matrix whose published_by.product_version disagrees with the running build's own version."
+        }
+      }
+    },
+    "evidence_classes": {
+      "type": "object",
+      "required": [
+        "intake-only",
+        "synthetic",
+        "project-level"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "intake-only": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The tool launched and Ligature could read/record its output or environment, but no proof obligation was discharged."
+        },
+        "synthetic": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A purpose-built synthetic obligation or harness was proved/checked. This is not production source proof coverage."
+        },
+        "project-level": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A declared project source obligation was proved or checked and its record meets the release gates. Production coverage requires this class plus its own risk acceptance."
+        }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": [
+        "id",
+        "verifier",
+        "status",
+        "selectable",
+        "platform",
+        "tested_with_ligature",
+        "toolchain",
+        "source_identity",
+        "evidence",
+        "coverage",
+        "exclusions",
+        "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "description": "Stable selection key used by project descriptors and the `toolchain` command."
+        },
+        "verifier": {
+          "type": "string",
+          "enum": [
+            "kani",
+            "creusot",
+            "verus"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "tested",
+            "unverified",
+            "incompatible"
+          ],
+          "description": "`tested` means the evidence below exists for this exact toolchain/platform pin. `unverified` means declared or observed but not exercised. `incompatible` means a required pair/identity check failed."
+        },
+        "selectable": {
+          "type": "boolean",
+          "description": "Whether `toolchain plan` may select this entry. An entry with status other than `tested`, or a mismatched Creusot pair, must be false."
+        },
+        "platform": {
+          "type": "object",
+          "required": [
+            "os",
+            "architecture",
+            "target"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "os": {
+              "type": "string",
+              "minLength": 1
+            },
+            "architecture": {
+              "type": "string",
+              "minLength": 1
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "tested_with_ligature": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "product_version"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "product_version": {
+                "type": "string",
+                "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+              },
+              "artifact_sha256": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "content_hash": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "source_commit": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}$"
+              }
+            }
+          },
+          "description": "The exact Ligature builds the measurements were made with. A newer publishing release may carry an entry whose measurements came from an older release; that is stated here rather than relabelled."
+        },
+        "toolchain": {
+          "type": "object",
+          "required": [
+            "primary",
+            "supporting_tools",
+            "rust"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "primary": {
+              "$ref": "#/$defs/tool"
+            },
+            "supporting_tools": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version",
+                  "role"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "verifier-std",
+                      "solver",
+                      "model-checker",
+                      "support"
+                    ]
+                  }
+                }
+              }
+            },
+            "rust": {
+              "type": "object",
+              "required": [
+                "toolchain"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "toolchain": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "rustc": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "commit": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "solvers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/tool"
+              }
+            }
+          }
+        },
+        "compatibility": {
+          "type": "object",
+          "required": [
+            "state",
+            "detail"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "compatible",
+                "mismatch"
+              ],
+              "description": "For Creusot entries this is the required cargo-creusot/creusot-std pair check; required by this matrix's own loader rather than by JSON Schema's conditional keywords."
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "source_identity": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "sha256 over the canonical `{verifier, platform, toolchain, nix|source}` record. Changing any pin changes this identity, so a project can pin the exact selection it reviewed."
+        },
+        "nix": {
+          "type": "object",
+          "required": [
+            "manager",
+            "lock_id"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "manager": {
+              "type": "string",
+              "const": "nix"
+            },
+            "environment": {
+              "type": "string",
+              "minLength": 1
+            },
+            "flake_inputs": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "url",
+                  "locked"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "locked": {
+                    "type": "object",
+                    "required": [
+                      "narHash"
+                    ],
+                    "additionalProperties": true,
+                    "properties": {
+                      "narHash": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "lock": {
+              "type": "object",
+              "required": [
+                "nodes",
+                "root",
+                "version"
+              ],
+              "additionalProperties": true,
+              "properties": {
+                "nodes": {
+                  "type": "object",
+                  "minProperties": 1
+                },
+                "root": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "description": "A lockable flake.lock-shaped document. The selection is reproducible only when this identity and every input's narHash are retained."
+            },
+            "store": {
+              "type": "object",
+              "description": "A retained content-addressed Nix store/source identity for a control whose portable flake revision was not recorded. It is not a flake lock; `lock_id` is computed over this object instead.",
+              "required": [
+                "wrapper",
+                "creusot_source"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "wrapper": {
+                  "type": "object",
+                  "required": [
+                    "path",
+                    "nar_hash"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "nar_hash": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "deriver": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "creusot_source": {
+                  "type": "object",
+                  "required": [
+                    "path",
+                    "nar_hash"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "nar_hash": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "ca": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            },
+            "lock_id": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "description": "sha256 over the canonical flake `lock` document, or over `store` when no flake lock is retained; the exact value a project descriptor may pin."
+            },
+            "creusot_std_source_nar_hash": {
+              "type": "string",
+              "minLength": 1,
+              "description": "For Creusot entries, the NAR hash of the creusot-std source supplied by the same flake input or retained source store identity."
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "flake_inputs",
+                "lock"
+              ]
+            },
+            {
+              "required": [
+                "store"
+              ]
+            }
+          ]
+        },
+        "source": {
+          "type": "object",
+          "required": [
+            "kind",
+            "locator"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "cargo-install",
+                "crates.io",
+                "release-zip",
+                "local-store"
+              ]
+            },
+            "locator": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "minLength": 1
+            },
+            "notes": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "result_class",
+              "claim",
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._-]*$"
+              },
+              "result_class": {
+                "type": "string",
+                "enum": [
+                  "intake-only",
+                  "synthetic",
+                  "project-level"
+                ]
+              },
+              "claim": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^docs/verifier-compatibility-evidence/",
+                "description": "Workspace-relative retained evidence. The loader verifies the exact sha256, so a rewritten or substituted record is reported rather than trusted."
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            }
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "required": [
+            "intake",
+            "synthetic",
+            "project_level"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "intake": {
+              "type": "boolean"
+            },
+            "synthetic": {
+              "type": "boolean"
+            },
+            "project_level": {
+              "type": "boolean"
+            }
+          }
+        },
+        "exclusions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "What this entry does NOT establish. Required so a successful tool launch cannot silently read as proof coverage."
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

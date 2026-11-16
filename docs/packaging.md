@@ -88,6 +88,18 @@ The executable is the trusted adjudicator. A built zipapp embeds
 is independent of zip metadata/compression and reproducible across
 rebuilds.
 
+The tested-verifier compatibility matrix (chainlink #174) is one more
+bundled, hashed input: `docs/verifier-compatibility-matrix.json`, its
+schema, and every retained evidence file the matrix links are copied into
+the archive from the matrix document itself. The embedded attestation and
+`PROVENANCE.json` carry the matrix version, its SHA-256, the tested-entry
+count and that same evidence set; `version --verify`/`doctor` recompute the
+evidence hashes and refuse a matrix whose `published_by.product_version`
+does not match the running build. A later Ligature release updates the
+matrix as a reviewed build input and publishes a new artifact. It must never
+edit the matrix inside, or relabel, an already-attested zipapp: the old
+artifact's matrix digest and evidence hashes are part of its identity.
+
 `ligature version --verify` and `ligature doctor`:
 
 1. recompute the bundle manifest and `content_hash` from the running

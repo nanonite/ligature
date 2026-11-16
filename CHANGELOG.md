@@ -13,6 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - [crypto-mixed pilot] extract-c-static silently skips methods whose return type is an array ([T; N]); calls to them are dropped, hiding a real cross-concept edge from R1/G16 (1.4.2) (#170)
 - #170: index methods whose return or parameter type is an array (`[T; N]`). The structural pass treated the `;` inside the array type as the end of a bodyless signature, so every such method vanished -- as a caller AND as a callee -- and calls to it were counted `out_of_scope` instead of `unresolved`, hiding the crypto-mixed `ChaCha20Poly1305::tag -> Poly1305::compute_tag_segments` edge. A call to an impl-level method whose body the extractor cannot locate is now reported as `possible-dispatch` rather than silently dropped. Bumps the extractor version to 0.3.0, so reports from the previous extractor are stale and must be re-extracted.
 
+## [1.5.0] - 2026-11-15
+
+### Added
+- #174: publish a versioned, evidence-linked tested-verifier compatibility matrix and reproducible per-project-root Nix toolchain selections. `ligature version`/`doctor` report the matrix; `ligature toolchain list|show|plan|lock|check` inspects it, resolves descriptor `toolchains[]` selections, and rechecks exact Creusot/creusot-std compatibility, source identity and committed `flake.lock` pins. The 0.14.0-dev/creusot-std 0.14.0 declared shell remains an explicitly unverified, non-selectable mismatch. New `docs/verifier-compatibility-matrix.json` and schema, retained evidence under `docs/verifier-compatibility-evidence/`, and `toolchains[]` in the project descriptor.
+
 ## [1.4.3] - 2026-10-25
 
 ### Fixed

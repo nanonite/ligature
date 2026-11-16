@@ -1,0 +1,451 @@
+{
+  "entries": [
+    {
+      "compatibility": {
+        "detail": "cargo-creusot 0.12.0-dev and creusot-std 0.12.0-dev are the exact pair measured together in the retained probe.",
+        "state": "compatible"
+      },
+      "coverage": {
+        "intake": true,
+        "project_level": false,
+        "synthetic": true
+      },
+      "evidence": [
+        {
+          "claim": "The synthetic increment obligation was proved by cargo-creusot 0.12.0-dev.",
+          "id": "creusot-synthetic-probe",
+          "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/probe-result.json",
+          "result_class": "synthetic",
+          "sha256": "sha256:370b45cd1fc659d98b519ade015a81b1c711b20b61bcb0e713ab25efd47ecbc6"
+        },
+        {
+          "claim": "Why3 reported Proved for the synthetic increment obligation.",
+          "id": "creusot-proof-log",
+          "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/prove.log",
+          "result_class": "synthetic",
+          "sha256": "sha256:2d70cd4be01d03395f9781024800d2d63c22089ae37eef0264b20ae7f5d185f3"
+        },
+        {
+          "claim": "The launcher reported cargo-creusot 0.12.0-dev, nightly-2026-04-21 and the retained solver versions.",
+          "id": "creusot-version",
+          "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/creusot-version.txt",
+          "result_class": "intake-only",
+          "sha256": "sha256:a8a5f71ee0f7a7a242b65241866d39ea3cb50191d511c1f67c494330c3020689"
+        },
+        {
+          "claim": "Nix path metadata identifies the wrapper and creusot-std source NAR hashes.",
+          "id": "creusot-nix-identity",
+          "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/nix-path-info.json",
+          "result_class": "intake-only",
+          "sha256": "sha256:784942ae74fa6b75b74bcedfcfe7357a57a9863c8568c712e31c6c77c3cb4318"
+        },
+        {
+          "claim": "The pilot compatibility record distinguishes intake, synthetic and project-level results and names the unresolved declared shell.",
+          "id": "creusot-pilot-record",
+          "path": "docs/verifier-compatibility-evidence/LIGATURE-VERIFIER-COMPATIBILITY.md",
+          "result_class": "intake-only",
+          "sha256": "sha256:323806b989889d33f862ba10b364203595b14b7cbd92422638483331e96cbaca"
+        },
+        {
+          "claim": "The local compile wrote the companion .coma under verif/<crate>/<file>.coma.",
+          "id": "creusot-compile-placement",
+          "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/compile-local.log",
+          "result_class": "intake-only",
+          "sha256": "sha256:924d6a93edf45768ef0cd3710abbf264187a06b735f780f093ca1018b29434ba"
+        },
+        {
+          "claim": "The pilot machine-readable record identifies the measured 0.12 versions and evidence paths.",
+          "id": "pilot-machine-record",
+          "path": "docs/verifier-compatibility-evidence/ligature-verifier-compatibility.json",
+          "result_class": "intake-only",
+          "sha256": "sha256:237c7949dbc90af0121b775703dfefc92fecb9891da5c19d0a60a77cc4587835"
+        }
+      ],
+      "exclusions": [
+        "The synthetic obligation is not production source proof coverage.",
+        "No portable flake revision is retained for this 0.12 control; the content-addressed store/source identity is the reproducible identity.",
+        "The measured 1.4.3 artifact did not publish this matrix; the publishing release carries the measurements rather than relabelling that artifact.",
+        "The unresolved cargo-creusot 0.14.0-dev / creusot-std 0.14.0 declared shell is a separate unverified entry."
+      ],
+      "id": "creusot-0.12.0-dev-nightly-2026-04-21-x86_64-linux",
+      "nix": {
+        "creusot_std_source_nar_hash": "sha256-fflYrng0knZwLc57qGVZz3bZXEaLmWC1FsQBIPyZ8eI=",
+        "lock_id": "sha256:707d678219fd2a622f456ff86e4b0cd3de48ddf8bd3e5b3b5036ed53e86bfec6",
+        "manager": "nix",
+        "store": {
+          "creusot_source": {
+            "ca": "fixed:r:sha256:1qpik7y200f42ssn16cb8rfdjxngb5jshyyf5mq7d4ilg2p5iybx",
+            "nar_hash": "sha256-fflYrng0knZwLc57qGVZz3bZXEaLmWC1FsQBIPyZ8eI=",
+            "path": "/nix/store/22j5g9088m140fgx2l6vbskkmg5ra5pp-creusot-source"
+          },
+          "wrapper": {
+            "deriver": "/nix/store/s5f3z5rc91smlfs5r5df9dacfc6qw874-creusot-wrapped.drv",
+            "nar_hash": "sha256-JwDDUiHsS6SLOdIDI92hx92XY+Zqz+zxrtMJyRD0B4I=",
+            "path": "/nix/store/9y9g4kpsppxn6zqmyfkvfcc2234qkdwv-creusot-wrapped"
+          }
+        }
+      },
+      "notes": "Measured linux/x86_64 control from the P4 workspace. The retained Nix metadata identifies the wrapper and creusot-std source by NAR hash but does not record a portable flake revision; this entry therefore pins a content-addressed store/source identity, not a flake input.",
+      "platform": {
+        "architecture": "x86_64",
+        "os": "linux",
+        "target": "x86_64-unknown-linux-gnu"
+      },
+      "selectable": true,
+      "source_identity": "sha256:542c3f916cf471726358c3e72de9defc02f7ea79ea5bb14ed96b7d8dad703b21",
+      "status": "tested",
+      "tested_with_ligature": [
+        {
+          "artifact_sha256": "sha256:1a7a50eab31584946d8a7035ac3633130b0dc52d473d2587f3cd26e2800fd4e1",
+          "content_hash": "sha256:bfc93caff9f5cbcfb62b9d12ab4c3761035589e7c9051683e8f2df474a5927bb",
+          "product_version": "1.4.3",
+          "source_commit": "89033eee6f0415e32ec1a2287110a1fb828dd0a8"
+        }
+      ],
+      "toolchain": {
+        "primary": {
+          "name": "cargo-creusot",
+          "version": "0.12.0-dev"
+        },
+        "rust": {
+          "commit": "66da6cae1",
+          "rustc": "1.97.0-nightly",
+          "toolchain": "nightly-2026-04-21"
+        },
+        "solvers": [
+          {
+            "name": "Why3",
+            "version": "1.8.2+git"
+          }
+        ],
+        "supporting_tools": [
+          {
+            "name": "creusot-std",
+            "role": "verifier-std",
+            "version": "0.12.0-dev"
+          },
+          {
+            "name": "why3find",
+            "role": "support",
+            "version": "1.3.0+dev"
+          },
+          {
+            "name": "Alt-Ergo",
+            "role": "solver",
+            "version": "2.6.3"
+          },
+          {
+            "name": "Z3",
+            "role": "solver",
+            "version": "4.15.3"
+          },
+          {
+            "name": "cvc4",
+            "role": "solver",
+            "version": "1.8"
+          },
+          {
+            "name": "cvc5",
+            "role": "solver",
+            "version": "1.3.1"
+          }
+        ]
+      },
+      "verifier": "creusot"
+    },
+    {
+      "coverage": {
+        "intake": true,
+        "project_level": false,
+        "synthetic": true
+      },
+      "evidence": [
+        {
+          "claim": "The synthetic Verus obligation returned success=true, verified=1, errors=0.",
+          "id": "verus-synthetic-probe",
+          "path": "docs/verifier-compatibility-evidence/verus-1.95-probe/probe-result.json",
+          "result_class": "synthetic",
+          "sha256": "sha256:5f3c6789216b7c3fa4674edb6211975ee3a75623e5629a827ed4912c90ec757d"
+        },
+        {
+          "claim": "The pilot record links the Verus measurement to #159/#160/#177 and marks it synthetic.",
+          "id": "verus-pilot-record",
+          "path": "docs/verifier-compatibility-evidence/LIGATURE-VERIFIER-COMPATIBILITY.md",
+          "result_class": "intake-only",
+          "sha256": "sha256:323806b989889d33f862ba10b364203595b14b7cbd92422638483331e96cbaca"
+        }
+      ],
+      "exclusions": [
+        "Synthetic and intake-path evidence only; no production source proof.",
+        "The measurement was made with Ligature 1.4.3, not the publishing release."
+      ],
+      "id": "verus-0.2026.05.24.ecee80a-rust-1.95.0-x86_64-linux",
+      "nix": {
+        "environment": "devShells.x86_64-linux.verus",
+        "flake_inputs": {
+          "nixpkgs": {
+            "locked": {
+              "lastModified": 1779467186,
+              "narHash": "sha256-nOesoDCiXcUftqbRBMz9tt4blI5PvljMWbm3kuCA+0s=",
+              "owner": "NixOS",
+              "repo": "nixpkgs",
+              "rev": "b77b3de8775677f84492abe84635f87b0e153f0f",
+              "type": "github"
+            },
+            "url": "github:NixOS/nixpkgs?rev=b77b3de8775677f84492abe84635f87b0e153f0f"
+          }
+        },
+        "lock": {
+          "nodes": {
+            "nixpkgs": {
+              "locked": {
+                "lastModified": 1779467186,
+                "narHash": "sha256-nOesoDCiXcUftqbRBMz9tt4blI5PvljMWbm3kuCA+0s=",
+                "owner": "NixOS",
+                "repo": "nixpkgs",
+                "rev": "b77b3de8775677f84492abe84635f87b0e153f0f",
+                "type": "github"
+              },
+              "original": {
+                "owner": "NixOS",
+                "repo": "nixpkgs",
+                "rev": "b77b3de8775677f84492abe84635f87b0e153f0f",
+                "type": "github"
+              }
+            },
+            "root": {
+              "inputs": {
+                "nixpkgs": "nixpkgs"
+              }
+            }
+          },
+          "root": "root",
+          "version": 7
+        },
+        "lock_id": "sha256:87fbdee2d13f20a224aa8794e39cbe32d2545e360908c1bc9cdc1d6973f23c91",
+        "manager": "nix"
+      },
+      "notes": "Measured linux/x86_64 control. The Nix lock pins nixpkgs; the Verus release zip is pinned by its fixed-output hash.",
+      "platform": {
+        "architecture": "x86_64",
+        "os": "linux",
+        "target": "x86_64-unknown-linux-gnu"
+      },
+      "selectable": true,
+      "source": {
+        "kind": "release-zip",
+        "locator": "https://github.com/verus-lang/verus/releases/download/release/0.2026.05.24.ecee80a/verus-0.2026.05.24.ecee80a-x86-linux.zip",
+        "notes": "Nix fetchzip fixed-output hash used by the retained pilot shell.",
+        "sha256": "sha256-Gd9tG4zmCnJs0QOepx7Lg/dFYjTvYW3n9EZhpzhY10U="
+      },
+      "source_identity": "sha256:1ae400675b4b141bc393a710f1af8986922f7698ac4add4157e6a2b6b2da4309",
+      "status": "tested",
+      "tested_with_ligature": [
+        {
+          "artifact_sha256": "sha256:1a7a50eab31584946d8a7035ac3633130b0dc52d473d2587f3cd26e2800fd4e1",
+          "content_hash": "sha256:bfc93caff9f5cbcfb62b9d12ab4c3761035589e7c9051683e8f2df474a5927bb",
+          "product_version": "1.4.3",
+          "source_commit": "89033eee6f0415e32ec1a2287110a1fb828dd0a8"
+        }
+      ],
+      "toolchain": {
+        "primary": {
+          "name": "verus",
+          "version": "0.2026.05.24.ecee80a"
+        },
+        "rust": {
+          "commit": "59807616e",
+          "rustc": "1.95.0",
+          "toolchain": "1.95.0"
+        },
+        "solvers": [],
+        "supporting_tools": []
+      },
+      "verifier": "verus"
+    },
+    {
+      "coverage": {
+        "intake": true,
+        "project_level": false,
+        "synthetic": true
+      },
+      "evidence": [
+        {
+          "claim": "The synthetic Kani harness reported 0 of 3 checks failed and a successful verification.",
+          "id": "kani-synthetic-probe",
+          "path": "docs/verifier-compatibility-evidence/kani-0.67-probe/probe-result.json",
+          "result_class": "synthetic",
+          "sha256": "sha256:9ed3b72d34faab3cf300770a80f66d43ee9ec6f606120020a9bb36747a6f63a5"
+        },
+        {
+          "claim": "The retained Kani log shows the successful summary for the synthetic harness.",
+          "id": "kani-synthetic-log",
+          "path": "docs/verifier-compatibility-evidence/kani-0.67-probe/kani.log",
+          "result_class": "synthetic",
+          "sha256": "sha256:5fee6f72a87c03bfedecab4ac6a1c76c70053df3c61c6af2d2302a6bbce014a7"
+        },
+        {
+          "claim": "The pilot record links the Kani measurement to #159/#160/#177 and marks it bounded synthetic evidence.",
+          "id": "kani-pilot-record",
+          "path": "docs/verifier-compatibility-evidence/LIGATURE-VERIFIER-COMPATIBILITY.md",
+          "result_class": "intake-only",
+          "sha256": "sha256:323806b989889d33f862ba10b364203595b14b7cbd92422638483331e96cbaca"
+        }
+      ],
+      "exclusions": [
+        "Bounded harness evidence only; not deductive coverage or production source proof.",
+        "No portable Nix lock is published for the cargo-kani/CBMC pair in this matrix revision.",
+        "The measurement was made with Ligature 1.4.3, not the publishing release."
+      ],
+      "id": "kani-0.67.0-cbmc-6.8.0-rust-1.95.0-x86_64-linux",
+      "notes": "Measured linux/x86_64 control. Selection is offered for planning, but the source identity is a cargo-install identity rather than a Nix lock.",
+      "platform": {
+        "architecture": "x86_64",
+        "os": "linux",
+        "target": "x86_64-unknown-linux-gnu"
+      },
+      "selectable": true,
+      "source": {
+        "kind": "cargo-install",
+        "locator": "kani-verifier 0.67.0",
+        "notes": "The retained pilot installed cargo-kani 0.67.0; this entry does not claim a Nix lock. cargo kani setup supplies the CBMC bundle."
+      },
+      "source_identity": "sha256:d2c36c2dbace72bdad88ffc8c68ef87745dd719f9875e0f96d57b1aa49402e52",
+      "status": "tested",
+      "tested_with_ligature": [
+        {
+          "artifact_sha256": "sha256:1a7a50eab31584946d8a7035ac3633130b0dc52d473d2587f3cd26e2800fd4e1",
+          "content_hash": "sha256:bfc93caff9f5cbcfb62b9d12ab4c3761035589e7c9051683e8f2df474a5927bb",
+          "product_version": "1.4.3",
+          "source_commit": "89033eee6f0415e32ec1a2287110a1fb828dd0a8"
+        }
+      ],
+      "toolchain": {
+        "primary": {
+          "name": "cargo-kani",
+          "version": "0.67.0"
+        },
+        "rust": {
+          "commit": "59807616e",
+          "rustc": "1.95.0",
+          "toolchain": "1.95.0"
+        },
+        "solvers": [],
+        "supporting_tools": [
+          {
+            "name": "CBMC",
+            "role": "model-checker",
+            "version": "6.8.0"
+          }
+        ]
+      },
+      "verifier": "kani"
+    },
+    {
+      "compatibility": {
+        "detail": "The declared shell resolves cargo-creusot 0.14.0-dev with creusot-std 0.14.0. The versions are not an exact tested pair and no proof evidence validates this shell.",
+        "state": "mismatch"
+      },
+      "coverage": {
+        "intake": false,
+        "project_level": false,
+        "synthetic": false
+      },
+      "evidence": [
+        {
+          "claim": "The declared shell launched cargo-creusot 0.14.0-dev with nightly-2026-08-03; no proof was recorded.",
+          "id": "creusot-declared-shell",
+          "path": "docs/verifier-compatibility-evidence/declared-shell-creusot.txt",
+          "result_class": "intake-only",
+          "sha256": "sha256:bce5e68fcac1b9f100ca0d61a822ede21d842a24f1114438e4d3e20cb27cef62"
+        },
+        {
+          "claim": "The pilot record states the 0.14 shell mismatch remains unresolved and does not validate that shell.",
+          "id": "creusot-pilot-mismatch",
+          "path": "docs/verifier-compatibility-evidence/LIGATURE-VERIFIER-COMPATIBILITY.md",
+          "result_class": "intake-only",
+          "sha256": "sha256:323806b989889d33f862ba10b364203595b14b7cbd92422638483331e96cbaca"
+        }
+      ],
+      "exclusions": [
+        "No synthetic or production proof coverage: the shell was observed to launch only.",
+        "Creates no Cargo file, flake, lock, descriptor selection or acceptance.",
+        "Does not resolve epic #2 or approve any 0.14 toolchain.",
+        "Not selectable: cargo-creusot 0.14.0-dev and creusot-std 0.14.0 are not an exact tested pair."
+      ],
+      "id": "creusot-0.14.0-dev-declared-shell-x86_64-linux",
+      "notes": "Retained as a negative compatibility record so the unresolved declared shell cannot be mistaken for the tested 0.12 pair. A future matrix revision may replace it only after a reproducible lock and a compatible pair are tested.",
+      "platform": {
+        "architecture": "x86_64",
+        "os": "linux",
+        "target": "x86_64-unknown-linux-gnu"
+      },
+      "selectable": false,
+      "source": {
+        "kind": "local-store",
+        "locator": "/nix/store/3ll0vqpzkjaimvg7s0r6qw7j1vk8lgiw-creusot-wrapped",
+        "notes": "Observed declared shell store path. It is not a portable flake lock and must not be selected as a reproducible toolchain."
+      },
+      "source_identity": "sha256:c97222a3ef4685ca609b9a25e093a382fb94fcd300d88f8f5a7e2fb522056f1b",
+      "status": "unverified",
+      "tested_with_ligature": [],
+      "toolchain": {
+        "primary": {
+          "name": "cargo-creusot",
+          "version": "0.14.0-dev"
+        },
+        "rust": {
+          "commit": "11177f223",
+          "rustc": "1.99.0-nightly",
+          "toolchain": "nightly-2026-08-03"
+        },
+        "solvers": [
+          {
+            "name": "Why3",
+            "version": "1.8.2+git"
+          }
+        ],
+        "supporting_tools": [
+          {
+            "name": "creusot-std",
+            "role": "verifier-std",
+            "version": "0.14.0"
+          },
+          {
+            "name": "Alt-Ergo",
+            "role": "solver",
+            "version": "2.6.2"
+          },
+          {
+            "name": "Z3",
+            "role": "solver",
+            "version": "5.1.0"
+          },
+          {
+            "name": "cvc4",
+            "role": "solver",
+            "version": "1.8"
+          },
+          {
+            "name": "cvc5",
+            "role": "solver",
+            "version": "1.4.1"
+          }
+        ]
+      },
+      "verifier": "creusot"
+    }
+  ],
+  "evidence_classes": {
+    "intake-only": "The tool launched and Ligature could read/record its output or environment, but no proof obligation was discharged.",
+    "project-level": "A declared project source obligation was proved or checked and its record meets the release gates. Production coverage requires this class plus its own risk acceptance.",
+    "synthetic": "A purpose-built synthetic obligation or harness was proved/checked. This is not production source proof coverage."
+  },
+  "format": "ligature.verifier-compatibility-matrix.v1",
+  "matrix_version": "1.0",
+  "published_by": {
+    "product_name": "ligature",
+    "product_version": "1.5.0"
+  },
+  "updated_at": "2026-11-15"
+}

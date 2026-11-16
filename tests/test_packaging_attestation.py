@@ -103,6 +103,15 @@ class BuildAttestationTest(unittest.TestCase):
         self.assertEqual(set(attestation["bundle_manifest"]), names - {adjudicator.ATTESTATION_ARCNAME})
         self.assertEqual(attestation["required_python"], adjudicator.required_python_string())
         self.assertTrue(attestation["bundled_schemas"])
+        # chainlink #174: the build records the exact tested matrix digest
+        # and bundles every evidence file the matrix links, so version/
+        # doctor can recompute those hashes inside the zipapp as well.
+        matrix = attestation["verifier_compatibility_matrix"]
+        self.assertEqual(matrix["published_by"]["product_version"], adjudicator.PRODUCT_VERSION)
+        self.assertTrue(matrix["entries"])
+        for entry in matrix["entries"]:
+            for item in entry["evidence"]:
+                self.assertIn(f"ligature_data/{item['path']}", names)
 
     def test_rebuild_has_the_same_content_hash(self):
         with tempfile.TemporaryDirectory() as other:

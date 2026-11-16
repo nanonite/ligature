@@ -27,6 +27,7 @@ Two levels: `ligature <top-level-verb> [<argument>] [flags...]`.
 ligature init [--mode greenfield|port]      # #58
 ligature doctor                              # #57/#58
 ligature version [--verify]                  # #57
+ligature toolchain list|show|plan|lock|check [--json]  # #174 -- tested verifier matrix + per-root reproducible Nix toolchains
 ligature schema list [--json]                # #157 -- inspect schemas packaged with this binary
 ligature schema show <name> [--json]         # #157 -- inspect one bundled schema and its related schemas
 ligature schema export <name> --output <path>  # #157 -- write a build-pinned, self-contained schema export
@@ -83,6 +84,24 @@ example, the closure-profile and degradation-record schemas are each shown
 with the other schema included as a related resource. The catalog comes from
 the binary's bundled inventory, so these commands work offline and users do
 not need to guess checkout-internal paths.
+
+`toolchain` is the tested-compatibility and reproducible-environment surface
+(chainlink #174). `toolchain list` prints a versioned matrix of the verifier,
+Rust, solver/support-tool, platform and source/content pins this release was
+actually exercised against, with each result classified `intake-only`,
+`synthetic`, or `project-level` and every entry carrying its exclusions.
+`toolchain show <entry-id>` prints one entry and its retained evidence
+links/hashes. `toolchain plan` resolves a descriptor `toolchains[]` selection
+(or `--entry`) to the exact matrix entry, rechecks the Creusot /
+`creusot-std` pair, and prints the selection's source identity and Nix lock/source identity.
+`toolchain lock` prints that lockable Nix input/lock or content-addressed
+store document, and
+`toolchain check` validates every descriptor selection plus any declared
+committed `flake.lock`. The commands are read-only: no workspace file is
+written and Nix is never invoked. A matrix entry is a measurement, never an
+upstream support guarantee; `version`/`doctor` also report the same matrix,
+and a later release publishes a new matrix rather than editing or relabelling
+an already-attested zipapp.
 
 The verbs added since are of one kind each, and are named here so the
 grammar is not read as a frozen list: `promote-evidence` (#79) and
@@ -1757,7 +1776,7 @@ gate, §5 approve, §6 report). An alias:
 resolution, which reserves the bare name for project state from the
 first release rather than treating it as an alias with a removal floor.
 
-## 10. Legacy command → disposition (complete, 52/52)
+## 10. Legacy command → disposition (complete, 53/53)
 
 Every command `scripts/pipeline.py:build_parser()` registers today,
 mapped to exactly one disposition. `tests/test_cli_contract.py` asserts
@@ -1812,6 +1831,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `check` | stable read-only consolidated gate run + one recommended next action (#56, §7); G14 reruns Kani evidence and can take minutes and several GB per harness (#166) |
 | `doctor` | stable capability/install-diagnostics report; owns the capability text `status` used to print, verifies the skill authority hash (§8, #58), reports/verifies the executable's own build attestation (#57), and fails closed on the descriptor `--descriptor` names (§8, #74/#109) |
 | `version` | stable; reports product version and the executable's build identity, `--verify` recomputes and checks the embedded attestation, and both report the build's source provenance (`source_commit`, and `source_dirty`/`working_tree_diff_hash` for a dirty tree) (§1, §8, #57, #64) |
+| `toolchain` | stable; read-only tested verifier/toolchain matrix (`list`, `show`) and per-project-root selection (`plan`, `lock`, `check`). `list`/`show`/`check`/`plan` accept `--json`; `plan` resolves to exact pins and source identity, `lock` prints the lockable Nix document, and `check` rechecks Creusot/creusot-std compatibility, matrix evidence hashes and any declared `flake.lock` (#174) |
 | `gate` | stable; nested cross-artifact gate runner, `gate <gate-id>` dispatches the six standalone gates in §3; `gate g14 --json` emits `ligature.g14-report.v1` (#57 grammar v1.0, #159) |
 | `report` | stable; nested reporting verb, `report <report-id>` dispatches the four report generators in §6 (#57 grammar v1.0) |
 | `init` | stable; installs mode-correct managed files + versioned skill into a target repo, plus the two witness-renderer scripts G13 hash-pins (#84, §8, #58) |
@@ -1820,7 +1840,7 @@ set of names matches `pipeline.registered_commands()` exactly.
 | `contract` | stable; prints the exact `docs/cli-contract.md` shipped in this executable, without requiring a checkout or installation. `--json` emits `ligature.cli-contract.v1` with grammar version, SHA-256, and the complete contract text (#167) |
 
 No command from today's registered set is deliberately unsupported —
-every one of the 52 has a nested home, an internal-operation classification,
+every one of the 53 has a nested home, an internal-operation classification,
 or (for `status`) a documented retirement. This table is exhaustive by
 construction: `tests/test_cli_contract.py` fails if
 `pipeline.registered_commands()` ever contains a name absent from it, or

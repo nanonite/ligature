@@ -1,0 +1,9 @@
+{
+  "probe": "verus-1.95.0",
+  "workdir": "/tmp/p4-smoke-icl-creusot-verus-3604358/verus",
+  "verus_bin": "/nix/store/57l94534x07sysi7gjf4zkkpai6cw6vc-verus-tools/bin/verus",
+  "verus_version": "0.2026.05.24.ecee80a",
+  "rust": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "result": "verified",
+  "production_claim": false
+}

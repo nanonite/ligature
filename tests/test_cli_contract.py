@@ -131,7 +131,8 @@ class CurrentExitAndJsonContractTest(unittest.TestCase):
             {
                 "migrate", "status", "check", "write-set-check", "authorize-write",
                 "scaffold-crate", "configure-crate", "configure-cargo-profile",
-                "generate-work-package", "schema", "contract", "gate-g14", "gate-r1-g16", "gate",
+                "generate-work-package", "schema", "contract", "toolchain",
+                "gate-g14", "gate-r1-g16", "gate",
             },
         )
 

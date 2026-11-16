@@ -1,0 +1,17 @@
+{
+  "probe": "creusot-0.12.0-dev",
+  "workdir": "/tmp/p4-smoke-icl-creusot-verus-3604358/creusot",
+  "wrapper": "/nix/store/9y9g4kpsppxn6zqmyfkvfcc2234qkdwv-creusot-wrapped",
+  "creusot_std_source": "/nix/store/22j5g9088m140fgx2l6vbskkmg5ra5pp-creusot-source/creusot-std",
+  "rust": "nightly-2026-04-21",
+  "result": "proved",
+  "local_coma": "/tmp/p4-smoke-icl-creusot-verus-3604358/creusot/crate/verif/p4_setup_creusot_probe_rlib/increment.coma",
+  "external_coma": "/tmp/p4-smoke-icl-creusot-verus-3604358/creusot/external-out/verif/p4_setup_creusot_probe_rlib/increment.coma",
+  "external_coma_count": 1,
+  "proof_json_placement": "crate-local:/tmp/p4-smoke-icl-creusot-verus-3604358/creusot/crate/verif/p4_setup_creusot_probe_rlib/increment/proof.json",
+  "external_proof_json": "absent",
+  "why3find_cache_placement": "crate-local:/tmp/p4-smoke-icl-creusot-verus-3604358/creusot/crate/.why3find",
+  "why3_provers_detected": 14,
+  "why3_local_socket_access": "proof completed under private TMPDIR/XDG_RUNTIME_DIR",
+  "production_claim": false
+}

@@ -391,6 +391,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adjudicator  # noqa: E402
 import resources  # noqa: E402
+import toolchain  # noqa: E402
+import verifier_matrix  # noqa: E402
 from schema_cli import SchemaError, export_schema, render_schema, render_schema_list  # noqa: E402
 import configure_cargo_profile  # noqa: E402
 import configure_crate_profile  # noqa: E402
@@ -2932,6 +2934,122 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_toolchain(args: argparse.Namespace) -> int:
+    """Inspect the tested compatibility matrix and resolve reproducible
+    per-project-root Nix toolchains (chainlink #174).
+
+    Read-only: `list`/`show` print the matrix, `plan` resolves a selection
+    to exact pins + lock identity, `lock` prints the lockable document, and
+    `check` compares descriptor selections (and optional committed
+    flake.lock files) against the matrix. Nothing here writes a workspace
+    file or runs Nix.
+    """
+    action = args.toolchain_action
+    try:
+        matrix = verifier_matrix.load_matrix()
+    except verifier_matrix.MatrixError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        if action == "list":
+            summary = verifier_matrix.matrix_summary(matrix)
+            if args.json:
+                sys.stdout.write(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+            else:
+                sys.stdout.write(
+                    verifier_matrix.render_summary(summary, indent="", verbose=args.verbose)
+                )
+            return 0
+
+        if action == "show":
+            entry = verifier_matrix.entries_by_id(matrix).get(args.entry_id)
+            if entry is None:
+                print(
+                    f"error: unknown compatibility-matrix entry {args.entry_id!r}; "
+                    "run `ligature toolchain list`",
+                    file=sys.stderr,
+                )
+                return 2
+            if args.json:
+                payload = {
+                    "format": "ligature.toolchain-entry.v1",
+                    "matrix": {
+                        "format": matrix["format"],
+                        "matrix_version": matrix["matrix_version"],
+                        "sha256": verifier_matrix.matrix_sha256(),
+                    },
+                    "entry": entry,
+                }
+                sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            else:
+                sys.stdout.write(toolchain.render_entry_text(entry))
+            return 0
+
+        if action == "check":
+            descriptor = load_project_descriptor(args.descriptor, args.workspace)
+            errors = toolchain.selection_errors(descriptor, args.workspace, matrix)
+            errors.extend(verifier_matrix.evidence_errors(matrix))
+            declared = toolchain.selections(descriptor)
+            if args.json:
+                payload = {
+                    "format": "ligature.toolchain-check.v1",
+                    "matrix": verifier_matrix.matrix_summary(matrix),
+                    "state": "invalid" if errors else "ok",
+                    "selection_count": len(declared),
+                    "selections": declared,
+                    "errors": errors,
+                }
+                sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            else:
+                sys.stdout.write(
+                    f"Ligature {adjudicator.PRODUCT_VERSION} toolchain check\n"
+                    f"  matrix: {matrix['format']} {matrix['matrix_version']} "
+                    f"({verifier_matrix.matrix_sha256()})\n"
+                    f"  selections: {len(declared)}\n"
+                )
+                for selection in declared:
+                    sys.stdout.write(
+                        f"    {selection.get('project_root')}: {selection.get('verifier')} "
+                        f"-> {selection.get('matrix_entry')}\n"
+                    )
+                if errors:
+                    for error in errors:
+                        sys.stdout.write(f"  error: {error}\n")
+                    sys.stdout.write(f"toolchains: {len(errors)} problem(s)\n")
+                else:
+                    sys.stdout.write("toolchains: ok\n")
+            return 1 if errors else 0
+
+        if action in ("plan", "lock"):
+            descriptor = None
+            if args.entry is None:
+                descriptor = load_project_descriptor(args.descriptor, args.workspace)
+            entry, _ = toolchain.resolve_entry(
+                descriptor,
+                args.workspace,
+                project_root=args.root,
+                verifier=args.verifier,
+                entry_id=args.entry,
+                matrix=matrix,
+            )
+            if action == "lock":
+                payload = toolchain.lock_document(entry)
+                sys.stdout.write(toolchain.render_lock_text(payload))
+                return 0
+            payload = toolchain.plan_document(entry, args.root, matrix)
+            if args.json:
+                sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            else:
+                sys.stdout.write(toolchain.render_plan_text(payload))
+            return 0
+
+        raise AssertionError(f"unknown toolchain action {action!r}")  # pragma: no cover
+    except (PipelineError, toolchain.ToolchainError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+
 def cmd_schema(args: argparse.Namespace) -> int:
     """List, inspect, or export JSON Schemas shipped in this Ligature build."""
     if args.schema_action == "list":
@@ -3076,6 +3194,34 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "unreadable",
     ):
         return 2
+    # Toolchain selections are part of the versioned workspace contract
+    # (#174): a descriptor that names an unknown, unverified, pair-mismatched
+    # or lock-mismatched entry is a blocking doctor state, not a note.
+    print("Toolchain selections:")
+    try:
+        descriptor = load_project_descriptor(args.descriptor, args.workspace)
+    except PipelineError:
+        descriptor = None
+    if descriptor is None:
+        print("  not checked -- no valid project descriptor")
+    else:
+        declared = toolchain.selections(descriptor)
+        if not declared:
+            print("  none declared")
+        else:
+            errors = toolchain.selection_errors(descriptor, args.workspace)
+            for selection in declared:
+                print(
+                    f"  {selection.get('project_root')}: {selection.get('verifier')} "
+                    f"-> {selection.get('matrix_entry')}"
+                )
+            if errors:
+                for error in errors:
+                    print(f"  error: {error}")
+                return 1
+            print("  toolchains: ok")
+    if info.get("verifier_matrix_error") or info.get("matrix_evidence_errors"):
+        return 1
     if info["kind"] == "zipapp" and not adjudicator.identity_ok(info):
         return 1
     if pin["state"] in ("mismatch", "unattested"):
@@ -3904,6 +4050,77 @@ def build_parser() -> argparse.ArgumentParser:
         help="recompute and verify the packaged build's own content hash, schemas and interpreter contract",
     )
     version_p.set_defaults(func=cmd_version)
+
+    toolchain_p = sub.add_parser(
+        "toolchain",
+        help=(
+            "Inspect tested verifier/compiler matrix entries and resolve reproducible "
+            "per-project-root Nix toolchains (chainlink #174)"
+        ),
+        description=(
+            "Inspect the exact verifier, Rust, solver/support-tool and platform pins this "
+            "Ligature build was tested with, and resolve a project root's selection to a "
+            "lockable Nix source identity. Read-only: no workspace file is written and Nix "
+            "is never invoked."
+        ),
+    )
+    toolchain_sub = toolchain_p.add_subparsers(dest="toolchain_action", required=True)
+    toolchain_list_p = toolchain_sub.add_parser(
+        "list",
+        help="List the tested verifier/toolchain matrix",
+        description="Print every entry with its platform, coverage classes, selection state and exclusions.",
+    )
+    toolchain_list_p.add_argument("--json", action="store_true", help="emit the versioned matrix summary JSON")
+    toolchain_list_p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="include per-entry evidence links and exclusions in the text output",
+    )
+    toolchain_list_p.set_defaults(func=cmd_toolchain)
+    toolchain_show_p = toolchain_sub.add_parser(
+        "show",
+        help="Show one tested matrix entry by id",
+        description="Print one matrix entry, including its lock/source identity and retained evidence.",
+    )
+    toolchain_show_p.add_argument("entry_id", metavar="ENTRY-ID", help="entry id printed by `toolchain list --json`")
+    toolchain_show_p.add_argument("--json", action="store_true", help="emit the versioned entry JSON")
+    toolchain_show_p.set_defaults(func=cmd_toolchain)
+    toolchain_plan_p = toolchain_sub.add_parser(
+        "plan",
+        help="Resolve a project root's toolchain selection to exact pins",
+        description=(
+            "Resolve the descriptor's toolchains[] selection (or an explicit --entry) to the "
+            "tested matrix entry, Creusot/creusot-std pair check, source identity and Nix lock."
+        ),
+    )
+    toolchain_plan_p.add_argument("--root", default=".", metavar="PATH", help="workspace-relative project root (default: .)")
+    toolchain_plan_p.add_argument("--verifier", choices=["kani", "creusot", "verus"], help="filter/verify the selected verifier")
+    toolchain_plan_p.add_argument("--entry", metavar="ENTRY-ID", help="select this matrix entry directly instead of a descriptor selection")
+    toolchain_plan_p.add_argument("--json", action="store_true", help="emit the versioned toolchain plan JSON")
+    toolchain_plan_p.set_defaults(func=cmd_toolchain)
+    toolchain_lock_p = toolchain_sub.add_parser(
+        "lock",
+        help="Print a matrix entry's lockable Nix source/input identity",
+        description=(
+            "Print the flake inputs, lock document and lock id a project commits to reproduce "
+            "this toolchain. Extra project inputs are allowed when comparing with `toolchain check`."
+        ),
+    )
+    toolchain_lock_p.add_argument("--root", default=".", metavar="PATH", help="workspace-relative project root (default: .)")
+    toolchain_lock_p.add_argument("--verifier", choices=["kani", "creusot", "verus"], help="filter/verify the selected verifier")
+    toolchain_lock_p.add_argument("--entry", metavar="ENTRY-ID", help="select this matrix entry directly instead of a descriptor selection")
+    toolchain_lock_p.set_defaults(func=cmd_toolchain)
+    toolchain_check_p = toolchain_sub.add_parser(
+        "check",
+        help="Validate descriptor toolchain selections and optional committed flake.lock files",
+        description=(
+            "Recheck every descriptor toolchains[] selection against the bundled matrix, "
+            "including exact Creusot/creusot-std pair compatibility, source identity and any "
+            "declared lockfile. Read-only."
+        ),
+    )
+    toolchain_check_p.add_argument("--json", action="store_true", help="emit the versioned toolchain check JSON")
+    toolchain_check_p.set_defaults(func=cmd_toolchain)
 
     schema_p = sub.add_parser(
         "schema",

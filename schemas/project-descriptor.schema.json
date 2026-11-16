@@ -151,6 +151,54 @@
         }
       }
     },
+    "toolchains": {
+      "type": "array",
+      "description": "Optional reproducible toolchain selections, one or more per independent project root (chainlink #174). Each selection names an exact entry in the Ligature build's tested verifier compatibility matrix; `ligature toolchain check` re-verifies the entry, the Creusot/creusot-std pair, the source identity and any declared committed flake.lock. A missing field means no selection is declared: the workspace can still be used, but no reproducible toolchain is claimed. A selection is configuration, never proof coverage.",
+      "items": {
+        "type": "object",
+        "required": [
+          "project_root",
+          "verifier",
+          "matrix_entry"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "project_root": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Workspace-relative independent project root (for example \".\" or \"crates/engine\"). Absolute paths and parent traversal are refused by `toolchain check`; a symlink escaping the workspace is refused too."
+          },
+          "verifier": {
+            "$ref": "#/$defs/verifier",
+            "description": "The verifier this selection is for; it must equal the matrix entry's verifier."
+          },
+          "matrix_entry": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]*$",
+            "description": "Exact entry id from the tested compatibility matrix, as printed by `ligature toolchain list --json` or `ligature toolchain show`."
+          },
+          "lock_id": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "description": "Optional exact pin of the matrix entry's Nix lock identity. When present, `toolchain check` refuses a matrix that publishes a different lock."
+          },
+          "nix": {
+            "type": "object",
+            "required": [
+              "lockfile"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "lockfile": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional workspace-relative committed flake.lock. `toolchain check` compares every matrix-pinned node, locked identity and input edge; extra project inputs are allowed."
+              }
+            }
+          }
+        }
+      }
+    },
     "closure_kind": {
       "type": "string",
       "enum": [
@@ -158,12 +206,14 @@
         "bounded",
         "partial"
       ],
-      "description": "The project's intended closure_kind for its clusters, declared before any code exists (chainlink #73). plan.md §4's vocabulary: deductive = Creusot/Verus-owned (universal over inputs, modulo SMT completeness and trusted specs); bounded = Kani-owned (holds only within unwind/harness bounds and enumerated monomorphizations); partial = partially verified (chainlink #85) -- a pilot that knows it cannot achieve full deductive closure may declare that intent here instead of being limited to the two uniform claims its clusters can only round to. This records intent only -- each cluster's closure profile (specs/_closure/<cluster>.json) remains the authoritative per-cluster declaration at Stage 8C, and gate g14 recomputes closure_kind from the evidence actually present, rejecting a uniform kind the evidence refutes (a `deductive` claim over a closure containing a Kani result is a G17 hard error). Optional and deliberately absent from the init template: a project that has not chosen an intent yet must not be silently defaulted to 'deductive'."
+      "description": "The project's intended closure_kind for its clusters, declared before any code exists (chainlink #73). plan.md \u00a74's vocabulary: deductive = Creusot/Verus-owned (universal over inputs, modulo SMT completeness and trusted specs); bounded = Kani-owned (holds only within unwind/harness bounds and enumerated monomorphizations); partial = partially verified (chainlink #85) -- a pilot that knows it cannot achieve full deductive closure may declare that intent here instead of being limited to the two uniform claims its clusters can only round to. This records intent only -- each cluster's closure profile (specs/_closure/<cluster>.json) remains the authoritative per-cluster declaration at Stage 8C, and gate g14 recomputes closure_kind from the evidence actually present, rejecting a uniform kind the evidence refutes (a `deductive` claim over a closure containing a Kani result is a G17 hard error). Optional and deliberately absent from the init template: a project that has not chosen an intent yet must not be silently defaulted to 'deductive'."
     },
     "interaction_policy": {
       "type": "object",
       "description": "Optional R1/G16 policy. The default leaves the existing risk-tiered warning/decision/block behavior unchanged; an explicit true value requires every discovered call to reconcile before the gate passes.",
-      "required": ["require_complete_reconciliation"],
+      "required": [
+        "require_complete_reconciliation"
+      ],
       "additionalProperties": false,
       "properties": {
         "require_complete_reconciliation": {
@@ -230,7 +280,7 @@
     },
     "witness_backend": {
       "type": "object",
-      "description": "plan.md §16.2 / chainlink #30 -- pluggable witness producer dispatch, one command, exactly as verifier_backends is pluggable dispatch for #47. `pipeline.py gate-g19` invokes this command fresh for every genuinely valid witness spec, appending --witness-id, --concept, --query, --fixture-id, --seed and --renderer taken from that spec's OWN current fields -- so a regenerated result's identity cannot silently disagree with what the spec currently declares, it was constructed from those exact values. The command must print one JSON canonical result object on stdout, matching docs/witness-result-schema.json (the same contract tests/fixtures/witnesses/stand_in_producer.py already implements). Optional and deliberately absent by default: with no backend configured, G19 cannot verify a determinism claim against an actual run and blocks -- a query that was never re-evaluated must never produce a pass.",
+      "description": "plan.md \u00a716.2 / chainlink #30 -- pluggable witness producer dispatch, one command, exactly as verifier_backends is pluggable dispatch for #47. `pipeline.py gate-g19` invokes this command fresh for every genuinely valid witness spec, appending --witness-id, --concept, --query, --fixture-id, --seed and --renderer taken from that spec's OWN current fields -- so a regenerated result's identity cannot silently disagree with what the spec currently declares, it was constructed from those exact values. The command must print one JSON canonical result object on stdout, matching docs/witness-result-schema.json (the same contract tests/fixtures/witnesses/stand_in_producer.py already implements). Optional and deliberately absent by default: with no backend configured, G19 cannot verify a determinism claim against an actual run and blocks -- a query that was never re-evaluated must never produce a pass.",
       "additionalProperties": false,
       "required": [
         "command"
@@ -448,7 +498,12 @@
           "description": "Explicit human acceptance of legitimate shipped fixture values that remain intentional. Each record is bound to the exact JSON value hash; changing the field makes the acceptance stale. Initialization creates no records.",
           "items": {
             "type": "object",
-            "required": ["path", "value_sha256", "reviewer", "accepted_at"],
+            "required": [
+              "path",
+              "value_sha256",
+              "reviewer",
+              "accepted_at"
+            ],
             "additionalProperties": false,
             "properties": {
               "path": {

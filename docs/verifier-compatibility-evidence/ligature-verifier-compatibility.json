@@ -1,0 +1,62 @@
+{
+  "schema": "pilot-ligature-verifier-compatibility/1",
+  "recorded_at": "2026-11-14",
+  "record_status": "measured_workspace_compatibility_not_upstream_support_claim",
+  "operator_direction": {
+    "independent_git_root_per_project": true,
+    "ligature_should_supply_reproducible_nix_creusot_pair": true,
+    "ligature_release_should_publish_tested_verifier_versions": true
+  },
+  "ligature": {
+    "version": "1.4.3",
+    "attested": true,
+    "artifact_sha256": "1a7a50eab31584946d8a7035ac3633130b0dc52d473d2587f3cd26e2800fd4e1",
+    "reported_content_hash": "sha256:bfc93caff9f5cbcfb62b9d12ab4c3761035589e7c9051683e8f2df474a5927bb",
+    "source_commit": "89033eee6f0415e32ec1a2287110a1fb828dd0a8",
+    "reports_tested_verifier_matrix": false,
+    "descriptor_schema_has_tested_verifier_field": false,
+    "toolchain_or_verifier_cli_subcommand": false
+  },
+  "verifiers": [
+    {
+      "name": "creusot",
+      "version": "cargo-creusot 0.12.0-dev; creusot-std 0.12.0-dev",
+      "rust": "nightly-2026-04-21; rustc 1.97.0-nightly (66da6cae1 2026-04-20)",
+      "support_tools": "Why3 1.8.2+git; why3find 1.3.0+dev; Alt-Ergo 2.6.3; Z3 4.15.3; cvc4 1.8; cvc5 1.3.1",
+      "measured": ["Ligature 1.4.3 intake in #159", "same executable function with Kani overlay in #160", "synthetic P4 obligation in #177"],
+      "result": "synthetic obligation proved; not a production proof",
+      "declared_shell": "0.14.0-dev / creusot-std 0.14.0 remains unresolved on epic #2"
+    },
+    {
+      "name": "verus",
+      "version": "0.2026.05.24.ecee80a",
+      "rust": "1.95.0",
+      "measured": ["Ligature 1.4.3 intake in #159", "independent Verus crate in #160", "synthetic P4 obligation in #177"],
+      "result": "success=true; verified=1; errors=0; not a production proof"
+    },
+    {
+      "name": "kani",
+      "version": "cargo-kani 0.67.0; CBMC 6.8.0",
+      "rust": "1.95.0",
+      "measured": ["exact-harness Ligature 1.4.3 intake in #159", "same executable function with Creusot overlay in #160", "synthetic P4 harness in #177"],
+      "result": "0 of 3 failed; VERIFICATION:- SUCCESSFUL; not deductive or production coverage"
+    }
+  ],
+  "creusot_nix_control": {
+    "wrapper_store_path": "/nix/store/9y9g4kpsppxn6zqmyfkvfcc2234qkdwv-creusot-wrapped",
+    "wrapper_nar_hash": "sha256-JwDDUiHsS6SLOdIDI92hx92XY+Zqz+zxrtMJyRD0B4I=",
+    "creusot_std_store_path": "/nix/store/22j5g9088m140fgx2l6vbskkmg5ra5pp-creusot-source/creusot-std",
+    "creusot_std_source_nar_hash": "sha256-fflYrng0knZwLc57qGVZz3bZXEaLmWC1FsQBIPyZ8eI=",
+    "reproducible_flake_revision_recorded": false,
+    "basis": "retained Nix path info has null deriver for the fixed-output source store path; hashes identify local outputs but are not a portable flake pin"
+  },
+  "evidence": [
+    "planning/p4-mixed-2026-10-26/setup/evidence/creusot-0.12-probe/",
+    "planning/p4-mixed-2026-10-26/setup/evidence/verus-1.95-probe/",
+    "planning/p4-mixed-2026-10-26/setup/evidence/kani-0.67-probe/",
+    "planning/p4-mixed-2026-10-26/setup/evidence/ligature-cli-capabilities-1.4.3.txt",
+    "planning/p4-mixed-2026-10-26/setup/root-compatibility-docs.sha256",
+    "crypto-mixed/analysis/p4-verifier-fit/p4-5-probes/continuation-1.4.3/README.md",
+    "crypto-mixed/analysis/p4-verifier-fit/p4-6-coexistence-2026-10-25/README.md"
+  ]
+}

@@ -34,7 +34,7 @@ behaves as if it were in a different regime than documented is the shape
 almost every gap found so far (§6) actually took:
 
 - **Deterministic, read-only.** `status`, `check`, every `validate <kind>`,
-  every `gate <gate-id>`, `doctor`, `version`. Never write, by construction
+  every `gate <gate-id>`, `doctor`, `version`, `toolchain`. Never write, by construction
   — `check`'s own schema requires `mutated_workspace: const false`. No LLM
   ever runs here. A finding from this regime is `mechanized-gate` authority
   and can legitimately block.
@@ -117,8 +117,9 @@ Two corrections to a natural first reading of this table:
 | command | earliest invocable state | prerequisite data | regime | mutates |
 |---|---|---|---|---|
 | `init --mode port` | Stage P0 (first run); rerun with a **different** binary now reports an `adjudicator pin mismatch` conflict instead of silently re-pinning — use `migrate --upgrade`/`--force` to re-pin deliberately (#65, fixed) | none | operator | managed files, `.codex/skills/`, `.ligature/`, `scripts/` (the two witness-renderer scripts G13 hash-pins — #84), **and** `project-descriptor.json` + `docs/reliance-policy.md` (written once, then marked user-owned) |
-| `doctor` | any state, including before `init` | none — reports `installation: not-initialized` | read-only | — |
+| `doctor` | any state, including before `init` | none — reports `installation: not-initialized`; when a valid descriptor declares `toolchains[]`, rechecks those selections and fails on an unknown, unverified, pair-mismatched or lock-mismatched entry | read-only | — |
 | `version [--verify]` | any state, including before `init` (inspects the running binary, not the workspace) | none | read-only | — |
+| `toolchain list|show|plan|lock|check` | any state for `list`/`show`/`lock`; `plan`/`check` need a schema-valid descriptor with a `toolchains[]` selection, or an explicit `--entry` for `plan`/`lock` | the descriptor's `toolchains[]` entry id; optional `lock_id` and committed `flake.lock` for `check` | read-only (never invokes Nix, never writes a workspace file) | — |
 | `status [--json]` | any state, including before `init` — reports `descriptor.state: absent` | none | read-only | — |
 | `check [--json]` | any state, including before `init` — reports exit 2, `conditions: [invalid_input]`, `next_action: null` | none | read-only | — |
 | `write-set-check [--json] [--issue N]` | any state with a schema-valid descriptor (before `init`: `unknown`, exit 2) | a `project-descriptor.json` with a `write_set`; `--issue N` additionally consumes the write grants recorded for that issue (chainlink #114) | read-only | — |

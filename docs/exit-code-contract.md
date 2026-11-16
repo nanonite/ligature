@@ -102,6 +102,7 @@ generic envelope.
 | `write-set-check` | 0 clean; 1 conformance violations; 2 when a valid write-set cannot be evaluated. | yes |
 | `doctor` | 0 current/healthy; 1 managed-file, descriptor, or policy state needs action; 2 installation metadata is unreadable/unavailable. | no |
 | `version` | 0 for a version report or a successful `--verify`; 1 when `--verify` rejects the executable attestation. | no |
+| `toolchain` | 0 when `list`/`show`/`plan`/`lock` produces its report or `check` finds no selection/evidence/lock problem; 1 when `check` reports a matrix, evidence or locked-identity problem; 2 for an unknown entry, invalid selection, unreadable descriptor or invalid lock. Read-only. | yes |
 | `schema` | 0 when the bundled catalog/schema is inspected or exported; 1 for an unknown bundled schema, unreadable resource, or refused export. Argparse usage errors exit 2. | yes |
 | `contract` | 0 when the exact CLI contract bundled in the executable is printed as Markdown or the versioned JSON envelope. | yes |
 | `init` | 0 completed without conflicts; 1 managed conflicts/drift; 2 command-handled invalid input/refusal. | no |

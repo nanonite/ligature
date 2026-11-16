@@ -262,27 +262,27 @@
     {
       "name": "accept-policy",
       "func": "cmd_accept_policy",
-      "stable_mapping": "stable accept path for reviewed normative-policy drift -- records the on-disk reliance-policy document as the manifest's reviewed base_hash, and with --version stamps that document's single `Policy version:` marker line first so the template `init` installs can reach an accepted state without a hand-edit of a protected_root (chainlink #78, #113, docs/cli-contract.md §8)"
+      "stable_mapping": "stable accept path for reviewed normative-policy drift -- records the on-disk reliance-policy document as the manifest's reviewed base_hash, and with --version stamps that document's single `Policy version:` marker line first so the template `init` installs can reach an accepted state without a hand-edit of a protected_root (chainlink #78, #113, docs/cli-contract.md \u00a78)"
     },
     {
       "name": "accept-fixture-value",
       "func": "cmd_accept_fixture_value",
-      "stable_mapping": "human checkpoint to retain an unchanged legitimate shipped project-descriptor value; records reviewer/date and the hash of the exact JSON value in review.accepted_fixture_values, which P0 checks. Initialization creates no acceptance and sentinel values such as review.reviewer and port_source.repository cannot be accepted (#145, docs/cli-contract.md §1/§8)"
+      "stable_mapping": "human checkpoint to retain an unchanged legitimate shipped project-descriptor value; records reviewer/date and the hash of the exact JSON value in review.accepted_fixture_values, which P0 checks. Initialization creates no acceptance and sentinel values such as review.reviewer and port_source.repository cannot be accepted (#145, docs/cli-contract.md \u00a71/\u00a78)"
     },
     {
       "name": "promote-evidence",
       "func": "cmd_promote_evidence",
-      "stable_mapping": "stable mechanical evidence-draft promotion -- re-validates a staged evidence/*.json.draft (G1a/G1b), renames it to its target, and records the move (chainlink #79, docs/cli-contract.md §1/§10)"
+      "stable_mapping": "stable mechanical evidence-draft promotion -- re-validates a staged evidence/*.json.draft (G1a/G1b), renames it to its target, and records the move (chainlink #79, docs/cli-contract.md \u00a71/\u00a710)"
     },
     {
       "name": "record-ruling",
       "func": "cmd_record_ruling",
-      "stable_mapping": "stable human-ruling record over an exact artifact set -- the gate accept-promotion enforces before minting a receipt (chainlink #82, docs/cli-contract.md §1/§5/§10)"
+      "stable_mapping": "stable human-ruling record over an exact artifact set -- the gate accept-promotion enforces before minting a receipt (chainlink #82, docs/cli-contract.md \u00a71/\u00a75/\u00a710)"
     },
     {
       "name": "record-assurance",
       "func": "cmd_record_assurance",
-      "stable_mapping": "stable assurance-recording command -- assembles a work package's report.emit assurance report from why3find certificates, official Verus JSON, or a fresh Kani 0.67 exact-harness rerun. Kani resolves a bare manifest function through fresh feature-selected Kani 0.67 compiler metadata, reruns exactly one qualified identity, and G14 repeats the identity resolution and run with source/harness hashes checked, while broader minimum_scope stays unmet. `--bridges-only` generates a no-guarantee package report from its required passing G9 bridge records after clean G9 validation (#141; chainlink #87/#129/#132/#133, docs/cli-contract.md §1/§10)"
+      "stable_mapping": "stable assurance-recording command -- assembles a work package's report.emit assurance report from why3find certificates, official Verus JSON, or a fresh Kani 0.67 exact-harness rerun. Kani resolves a bare manifest function through fresh feature-selected Kani 0.67 compiler metadata, reruns exactly one qualified identity, and G14 repeats the identity resolution and run with source/harness hashes checked, while broader minimum_scope stays unmet. `--bridges-only` generates a no-guarantee package report from its required passing G9 bridge records after clean G9 validation (#141; chainlink #87/#129/#132/#133, docs/cli-contract.md \u00a71/\u00a710)"
     },
     {
       "name": "draft",
@@ -392,27 +392,27 @@
     {
       "name": "status",
       "func": "cmd_status",
-      "stable_mapping": "stable project-state query (chainlink #56); reserved unconditionally per docs/cli-contract.md §8, not an alias"
+      "stable_mapping": "stable project-state query (chainlink #56); reserved unconditionally per docs/cli-contract.md \u00a78, not an alias"
     },
     {
       "name": "check",
       "func": "cmd_check",
-      "stable_mapping": "stable read-only consolidated gate run + one recommended next action (chainlink #56, docs/cli-contract.md §7)"
+      "stable_mapping": "stable read-only consolidated gate run + one recommended next action (chainlink #56, docs/cli-contract.md \u00a77)"
     },
     {
       "name": "write-set-check",
       "func": "cmd_write_set_check",
-      "stable_mapping": "stable read-only write-set conformance report -- files outside allowed_roots (class out-of-set) and files written into protected_roots that no declaration vouches for (class protected-write) relative to the project descriptor, with the protected surface reported per declared pattern (chainlink #77, #103, docs/cli-contract.md §8)"
+      "stable_mapping": "stable read-only write-set conformance report -- files outside allowed_roots (class out-of-set) and files written into protected_roots that no declaration vouches for (class protected-write) relative to the project descriptor, with the protected surface reported per declared pattern (chainlink #77, #103, docs/cli-contract.md \u00a78)"
     },
     {
       "name": "authorize-write",
       "func": "cmd_authorize_write",
-      "stable_mapping": "stable issue-scoped write-grant record -- authorizes one bounded write into a declared protected root as an append-only event in ci/results/protected-writes.jsonl. write-set-check/status/check report grant status; scaffold-crate and generate-work-package consume exact issue/path/op grants for their bounded generator writes, and generation audit events are never authority (chainlink #114/#122, docs/cli-contract.md §1/§8/§10)"
+      "stable_mapping": "stable issue-scoped write-grant record -- authorizes one bounded write into a declared protected root as an append-only event in ci/results/protected-writes.jsonl. write-set-check/status/check report grant status; scaffold-crate and generate-work-package consume exact issue/path/op grants for their bounded generator writes, and generation audit events are never authority (chainlink #114/#122, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
     },
     {
       "name": "scaffold-crate",
       "func": "cmd_scaffold_crate",
-      "stable_mapping": "stable deterministic crate bootstrap -- writes a MISSING declared crate's Cargo.toml and its canonical src/lib.rs in a mode: port workspace, deriving both from the project descriptor alone with no content flag and no target flag. The manifest is a protected-root write and requires an active issue-scoped `write` grant at exactly that path, consumed through the same write_authorization reader write-set-check uses; the skeleton is inside allowed_roots, needs no grant, and is never overwritten, so a missing-crate pilot bootstraps without anyone holding raw Cargo.toml write scope. Refused (exit 2, nothing written) for an undeclared/ambiguous/absolute/escaping/glob crate name, a non-port mode, a target inside a canonical pipeline artifact location, a declared crate's specs/ tree or the pinned upstream checkout, a manifest no protected_roots covers or one allowed_roots already permits, no active grant (with each nearby record's status named), or a --grant-id mismatch; an existing manifest with identical bytes is `unchanged` and writes nothing. Emits a versioned receipt (docs/scaffold-receipt-schema.json) recording the issue, the grant consumed, both generated paths with before/after hashes, and every named check -- including Cargo's offline workspace-membership check and write_set.check_write_set's own verdict on the write just made (chainlink #115, docs/cli-contract.md §1/§8/§10)"
+      "stable_mapping": "stable deterministic crate bootstrap -- writes a MISSING declared crate's Cargo.toml and its canonical src/lib.rs in a mode: port workspace, deriving both from the project descriptor alone with no content flag and no target flag. The manifest is a protected-root write and requires an active issue-scoped `write` grant at exactly that path, consumed through the same write_authorization reader write-set-check uses; the skeleton is inside allowed_roots, needs no grant, and is never overwritten, so a missing-crate pilot bootstraps without anyone holding raw Cargo.toml write scope. Refused (exit 2, nothing written) for an undeclared/ambiguous/absolute/escaping/glob crate name, a non-port mode, a target inside a canonical pipeline artifact location, a declared crate's specs/ tree or the pinned upstream checkout, a manifest no protected_roots covers or one allowed_roots already permits, no active grant (with each nearby record's status named), or a --grant-id mismatch; an existing manifest with identical bytes is `unchanged` and writes nothing. Emits a versioned receipt (docs/scaffold-receipt-schema.json) recording the issue, the grant consumed, both generated paths with before/after hashes, and every named check -- including Cargo's offline workspace-membership check and write_set.check_write_set's own verdict on the write just made (chainlink #115, docs/cli-contract.md \u00a71/\u00a78/\u00a710)"
     },
     {
       "name": "configure-cargo-profile",
@@ -432,22 +432,22 @@
     {
       "name": "doctor",
       "func": "cmd_doctor",
-      "stable_mapping": "stable capability manifest; lists `generate-work-package` as the plan-driven Stage 7 generator and separately reports that automatic promoted-I/O plan synthesis is not implemented (#155); owns the text `status` used to print (docs/cli-contract.md §8); its descriptor gate follows the global `--descriptor` flag (chainlink #109)"
+      "stable_mapping": "stable capability manifest; lists `generate-work-package` as the plan-driven Stage 7 generator and separately reports that automatic promoted-I/O plan synthesis is not implemented (#155); owns the text `status` used to print (docs/cli-contract.md \u00a78); its descriptor gate follows the global `--descriptor` flag (chainlink #109)"
     },
     {
       "name": "init",
       "func": "cmd_init",
-      "stable_mapping": "stable; installs mode-correct managed files + versioned skill, plus the two witness-renderer scripts G13 hash-pins (chainlink #58/#84, docs/cli-contract.md §8/§10)"
+      "stable_mapping": "stable; installs mode-correct managed files + versioned skill, plus the two witness-renderer scripts G13 hash-pins (chainlink #58/#84, docs/cli-contract.md \u00a78/\u00a710)"
     },
     {
       "name": "migrate",
       "func": "cmd_migrate",
-      "stable_mapping": "stable; explicit recovery/upgrade for installed managed files (chainlink #58, docs/cli-contract.md §8)"
+      "stable_mapping": "stable; explicit recovery/upgrade for installed managed files (chainlink #58, docs/cli-contract.md \u00a78)"
     },
     {
       "name": "version",
       "func": "cmd_version",
-      "stable_mapping": "stable; reports product version + executable build attestation, `--verify` self-verifies (chainlink #57, docs/cli-contract.md §1/§8)"
+      "stable_mapping": "stable; reports product version + executable build attestation, `--verify` self-verifies (chainlink #57, docs/cli-contract.md \u00a71/\u00a78)"
     },
     {
       "name": "schema",
@@ -462,12 +462,17 @@
     {
       "name": "gate",
       "func": "cmd_gate",
-      "stable_mapping": "stable; nested `gate <gate-id>` dispatches the six standalone gates; `gate g14 --json` emits the versioned G14 scope/evidence report (docs/cli-contract.md §3, grammar v1.0, chainlink #159)"
+      "stable_mapping": "stable; nested `gate <gate-id>` dispatches the six standalone gates; `gate g14 --json` emits the versioned G14 scope/evidence report (docs/cli-contract.md \u00a73, grammar v1.0, chainlink #159)"
     },
     {
       "name": "report",
       "func": "cmd_report",
-      "stable_mapping": "stable; nested `report <report-id>` dispatches the four report generators (docs/cli-contract.md §6, grammar v1.0)"
+      "stable_mapping": "stable; nested `report <report-id>` dispatches the four report generators (docs/cli-contract.md \u00a76, grammar v1.0)"
+    },
+    {
+      "name": "toolchain",
+      "func": "cmd_toolchain",
+      "stable_mapping": "toolchain <action>"
     }
   ],
   "python_modules": [
@@ -565,7 +570,7 @@
       "path": "scripts/generate_promotion_receipt.py",
       "role": "generator",
       "disposition": "runtime-required",
-      "summary": "Deterministic promotion-receipt generation (plan.md §7.1, chainlink #45)."
+      "summary": "Deterministic promotion-receipt generation (plan.md \u00a77.1, chainlink #45)."
     },
     {
       "path": "scripts/generate_witness.py",
@@ -583,25 +588,25 @@
       "path": "scripts/pipeline.py",
       "role": "entrypoint",
       "disposition": "runtime-required",
-      "summary": "The pipeline CLI entrypoint (plan.md §6.1, chainlink #37); draft/approve dispatch to workspace-level closure profiles and degradation records, and closure-profile drafting requires an explicit JSON work-package membership list for either profile-first or manifest-first Stage 3/7 order (#98/#134)."
+      "summary": "The pipeline CLI entrypoint (plan.md \u00a76.1, chainlink #37); draft/approve dispatch to workspace-level closure profiles and degradation records, and closure-profile drafting requires an explicit JSON work-package membership list for either profile-first or manifest-first Stage 3/7 order (#98/#134)."
     },
     {
       "path": "scripts/project_descriptor.py",
       "role": "shared-loader",
       "disposition": "runtime-required",
-      "summary": "Shared project-descriptor loading (plan.md §1.1)."
+      "summary": "Shared project-descriptor loading (plan.md \u00a71.1)."
     },
     {
       "path": "scripts/review_checkpoint.py",
       "role": "shared-loader",
       "disposition": "runtime-required",
-      "summary": "Human review/approval checkpoint (plan.md §7.2, chainlink #39). Owns draft_path_for() and is_staged_draft(), the one spelling of the `.draft` staging convention stage_draft() writes and every artifact-kind discovery function filters on (chainlink #110)."
+      "summary": "Human review/approval checkpoint (plan.md \u00a77.2, chainlink #39). Owns draft_path_for() and is_staged_draft(), the one spelling of the `.draft` staging convention stage_draft() writes and every artifact-kind discovery function filters on (chainlink #110)."
     },
     {
       "path": "scripts/satisfies.py",
       "role": "shared-loader",
       "disposition": "runtime-required",
-      "summary": "The satisfies() mechanism (plan.md §8.5 step 4, chainlink #23)."
+      "summary": "The satisfies() mechanism (plan.md \u00a78.5 step 4, chainlink #23)."
     },
     {
       "path": "scripts/scan_summary.py",
@@ -619,7 +624,13 @@
       "path": "scripts/select_pilot_cluster.py",
       "role": "generator",
       "disposition": "runtime-required",
-      "summary": "Pilot-cluster selection rubric (chainlink #4): plan.md §14."
+      "summary": "Pilot-cluster selection rubric (chainlink #4): plan.md \u00a714."
+    },
+    {
+      "path": "scripts/toolchain.py",
+      "role": "helper",
+      "disposition": "runtime-required",
+      "summary": "Resolve project-descriptor toolchain selections to tested matrix entries, Creusot/creusot-std pair checks, Nix source/lock identity and committed flake.lock pins."
     },
     {
       "path": "scripts/validate_boundary_contracts.py",
@@ -631,7 +642,7 @@
       "path": "scripts/validate_boundary_naming.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Boundary-artifact naming and layout (plan.md §2 / chainlink #8). Its find_boundary_files() is the discovery function validate_boundary_contracts.py shares, and excludes staged *.json.draft files so both agree on what a staged draft is (chainlink #110)."
+      "summary": "Boundary-artifact naming and layout (plan.md \u00a72 / chainlink #8). Its find_boundary_files() is the discovery function validate_boundary_contracts.py shares, and excludes staged *.json.draft files so both agree on what a staged draft is (chainlink #110)."
     },
     {
       "path": "scripts/validate_bridge.py",
@@ -694,6 +705,12 @@
       "summary": "One authoritative resolver for concept specs under descriptor-declared specs_search_root values; distinguishes absent, invalid, ambiguous, and mislocated specs and never uses an outside-root fallback (#149/#151)."
     },
     {
+      "path": "scripts/verifier_matrix.py",
+      "role": "shared-loader",
+      "disposition": "runtime-required",
+      "summary": "Load and semantically validate the versioned tested-verifier compatibility matrix, recompute pair/source/lock identities and verify retained evidence hashes."
+    },
+    {
       "path": "scripts/verifier_policy.py",
       "role": "shared-loader",
       "disposition": "runtime-required",
@@ -703,7 +720,7 @@
       "path": "scripts/validate_promotion_receipt.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Promotion receipt validation (plan.md §7.1, chainlink #15)."
+      "summary": "Promotion receipt validation (plan.md \u00a77.1, chainlink #15)."
     },
     {
       "path": "scripts/validate_protocol_debt.py",
@@ -721,7 +738,7 @@
       "path": "scripts/validate_work_package.py",
       "role": "validator",
       "disposition": "runtime-required",
-      "summary": "Work-package manifest validation (plan.md §10/§10.1, chainlink #14)."
+      "summary": "Work-package manifest validation (plan.md \u00a710/\u00a710.1, chainlink #14)."
     },
     {
       "path": "scripts/vendored_resources.py",
@@ -856,7 +873,7 @@
     {
       "path": "schemas/project-descriptor.schema.json",
       "disposition": "runtime-required",
-      "summary": "Stage P0 project structure descriptor, plan.md §1.1."
+      "summary": "Stage P0 project structure descriptor, plan.md \u00a71.1."
     },
     {
       "path": "docs/achieved-assurance-schema.json",
@@ -1007,6 +1024,16 @@
       "path": "docs/assumption-registry-schema.json",
       "disposition": "runtime-required",
       "summary": "Chainlink #59 phase A: governed assumption registry (stable id, canonical text, recomputed content hash, tracking_issue, provenance), read by scripts/assumption_registry.py."
+    },
+    {
+      "path": "docs/verifier-compatibility-matrix-schema.json",
+      "disposition": "runtime-required",
+      "summary": "JSON Schema for the versioned tested verifier/toolchain compatibility matrix."
+    },
+    {
+      "path": "docs/verifier-compatibility-matrix.json",
+      "disposition": "runtime-required",
+      "summary": "Measured verifier/Rust/solver/platform pins and retained evidence links published by this Ligature release."
     }
   ],
   "schema_examples": [
@@ -1438,6 +1465,11 @@
       "path": "tests/test_record_assurance.py",
       "kind": "regression",
       "disposition": "test-only"
+    },
+    {
+      "path": "tests/test_verifier_compatibility.py",
+      "kind": "regression",
+      "disposition": "test-only"
     }
   ],
   "fixtures": [
@@ -1592,16 +1624,16 @@
   ],
   "counts": {
     "by_disposition": {
-      "runtime-required": 109,
+      "runtime-required": 113,
       "excluded": 1,
-      "documentation": 14,
+      "documentation": 15,
       "installed-template": 4,
-      "test-only": 81,
+      "test-only": 82,
       "vendored-runtime": 1
     },
-    "total_entries": 210,
-    "test_count": 67,
-    "registered_cli_command_count": 52
+    "total_entries": 216,
+    "test_count": 68,
+    "registered_cli_command_count": 53
   },
   "documentation_and_templates": [
     {
@@ -1612,7 +1644,7 @@
     {
       "path": "docs/reliance-policy.template.md",
       "disposition": "installed-template",
-      "summary": "Governed policy-document template (plan.md §7.2, chainlink #10); copied into a target repo by `ligature init`, then human-edited and referenced by accept-promotion's --policy-path."
+      "summary": "Governed policy-document template (plan.md \u00a77.2, chainlink #10); copied into a target repo by `ligature init`, then human-edited and referenced by accept-promotion's --policy-path."
     },
     {
       "path": "docs/cli-contract.md",
@@ -1648,6 +1680,11 @@
       "path": "docs/mode-p-cli-flow.md",
       "disposition": "documentation",
       "summary": "Intended Mode P (port) CLI state machine mapped directly onto plan.md stages P0-8C, with the three authority regimes, command-by-command prerequisites, and the known gaps (the G2+/schema-conflict/rubric findings; #65, #66, #67 closed) surfaced by the #52 pilot and its review."
+    },
+    {
+      "path": "docs/verifier-compatibility.md",
+      "disposition": "documentation",
+      "summary": "Human-readable tested verifier/toolchain matrix, result-class distinctions, per-root selection and reproducible Creusot Nix identity (#174)."
     }
   ]
 }

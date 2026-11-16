@@ -1,0 +1,18 @@
+Refreshing /tmp/p4-smoke-icl-creusot-verus-3604358/creusot/config/creusot/why3.conf
+Found prover Alt-Ergo version 2.6.3, OK.
+Found prover Alt-Ergo version 2.6.3 (alternative: counterexamples)
+Found prover Alt-Ergo version 2.6.3 (alternative: BV)
+Found prover CVC5 version 1.3.1 (alternative: strings+counterexamples)
+Found prover CVC5 version 1.3.1 (alternative: strings)
+Found prover CVC5 version 1.3.1 (alternative: counterexamples)
+Found prover CVC5 version 1.3.1, OK.
+Found prover CVC4 version 1.8 (alternative: strings+counterexamples)
+Found prover CVC4 version 1.8 (alternative: strings)
+Found prover CVC4 version 1.8 (alternative: counterexamples)
+Found prover CVC4 version 1.8, OK.
+Found prover Z3 version 4.15.3 (alternative: counterexamples)
+Found prover Z3 version 4.15.3, OK.
+Found prover Z3 version 4.15.3 (alternative: noBV)
+14 prover(s) added
+Save config to /tmp/p4-smoke-icl-creusot-verus-3604358/creusot/config/creusot/why3.conf
+Proved (verif/p4_setup_creusot_probe_rlib/increment.coma) ✔

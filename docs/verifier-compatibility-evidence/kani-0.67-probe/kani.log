@@ -1,0 +1,61 @@
+Kani Rust Verifier 0.67.0 (cargo plugin)
+   Compiling p4_setup_kani_probe v0.1.0 (/tmp/p4-smoke-tinyxml2-creusot-kani-3590541/kani/crate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s
+Checking harness increment_matches_postcondition_for_all_nonmax_inputs...
+CBMC 6.8.0 (cbmc-6.8.0)
+CBMC version 6.8.0 (cbmc-6.8.0) 64-bit x86_64 linux
+Reading GOTO program from file /tmp/p4-smoke-tinyxml2-creusot-kani-3590541/kani/target/kani/x86_64-unknown-linux-gnu/debug/deps/p4_setup_kani_probe-a874367c70764f0c__RNvCsboUKKpNenDr_19p4_setup_kani_probe53increment_matches_postcondition_for_all_nonmax_inputs.out
+Generating GOTO Program
+Adding CPROVER library (x86_64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 16 object bits, 48 offset bits (user-specified)
+Starting Bounded Model Checking
+Runtime Symex: 0.00148497s
+size of program expression: 171 steps
+slicing removed 75 assignments
+Generated 6 VCC(s), 6 remaining after simplification
+Runtime Postprocess Equation: 2.5568e-05s
+Passing problem to propositional reduction
+converting SSA
+Runtime Convert SSA: 0.000266741s
+Running propositional reduction
+Post-processing
+Runtime Post-process: 4.589e-06s
+Solving with CaDiCaL 2.0.0
+264 variables, 748 clauses
+SAT checker: instance is SATISFIABLE
+Runtime Solver: 0.000117471s
+Runtime decision procedure: 0.000424497s
+Running propositional reduction
+Solving with CaDiCaL 2.0.0
+265 variables, 749 clauses
+SAT checker: instance is UNSATISFIABLE
+Runtime Solver: 0.0002612s
+Runtime decision procedure: 0.000272943s
+
+RESULTS:
+Check 1: increment_matches_postcondition_for_all_nonmax_inputs.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/lib.rs:11:29 in function increment_matches_postcondition_for_all_nonmax_inputs
+
+Check 2: increment_matches_postcondition_for_all_nonmax_inputs.assertion.2
+	 - Status: SUCCESS
+	 - Description: "assertion failed: increment(x) == x + 1"
+	 - Location: src/lib.rs:11:5 in function increment_matches_postcondition_for_all_nonmax_inputs
+
+Check 3: increment.assertion.1
+	 - Status: SUCCESS
+	 - Description: "attempt to add with overflow"
+	 - Location: src/lib.rs:3:5 in function increment
+
+
+SUMMARY:
+ ** 0 of 3 failed
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.016959097s
+
+Manual Harness Summary:
+Complete - 1 successfully verified harnesses, 0 failures, 1 total.

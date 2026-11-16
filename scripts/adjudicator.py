@@ -35,10 +35,11 @@ import zipfile
 from pathlib import Path
 
 import resources
+import verifier_matrix
 
 PRODUCT_NAME = "ligature"
 # Bump together with the git tag (vX.Y) and CHANGELOG.md's release heading.
-PRODUCT_VERSION = "1.4.3"
+PRODUCT_VERSION = "1.5.0"
 
 # The interpreter floor this packaging contract supports and needs `doctor`
 # to report rather than silently assume. `importlib.resources.files` (the
@@ -168,8 +169,26 @@ def current_identity() -> dict:
         "source_commit": None,
         "source_dirty": None,
         "working_tree_diff_hash": None,
+        "verifier_matrix": None,
+        "verifier_matrix_error": None,
+        "verifier_matrix_state": "not-bundled",
+        "matrix_evidence_errors": [],
         "errors": [],
     }
+    if verifier_matrix.matrix_path().is_file():
+        try:
+            summary = verifier_matrix.matrix_summary()
+            if summary["published_by"].get("product_version") != PRODUCT_VERSION:
+                raise verifier_matrix.MatrixError(
+                    "matrix published_by.product_version is "
+                    f"{summary['published_by'].get('product_version')!r}, but this build is {PRODUCT_VERSION!r}"
+                )
+            info["verifier_matrix"] = summary
+            info["verifier_matrix_state"] = "loaded"
+            info["matrix_evidence_errors"] = verifier_matrix.evidence_errors()
+        except verifier_matrix.MatrixError as exc:
+            info["verifier_matrix_error"] = str(exc)
+            info["verifier_matrix_state"] = "invalid"
     if not packaged:
         info["bundled_schemas"] = discover_schema_versions(resources.resource_root())
         return info
@@ -200,6 +219,29 @@ def current_identity() -> dict:
         info["source_commit"] = embedded.get("source_commit")
         info["source_dirty"] = embedded.get("source_dirty")
         info["working_tree_diff_hash"] = embedded.get("working_tree_diff_hash")
+        embedded_matrix = embedded.get("verifier_compatibility_matrix") or {}
+        running_matrix = info.get("verifier_matrix")
+        if running_matrix is not None:
+            embedded_sha = embedded_matrix.get("sha256")
+            if embedded_sha is None:
+                info["errors"].append(
+                    "bundled verifier compatibility matrix is not recorded in the build attestation"
+                )
+            elif embedded_sha != running_matrix.get("sha256"):
+                info["errors"].append(
+                    "bundled verifier compatibility matrix does not match the matrix digest "
+                    "in the build attestation"
+                )
+            published_version = (running_matrix.get("published_by") or {}).get("product_version")
+            if published_version != PRODUCT_VERSION:
+                info["errors"].append(
+                    "verifier compatibility matrix product version does not match the "
+                    "running build"
+                )
+            if info["matrix_evidence_errors"]:
+                info["errors"].extend(info["matrix_evidence_errors"])
+        elif info.get("verifier_matrix_error"):
+            info["errors"].append(info["verifier_matrix_error"])
         if embedded.get("content_hash") != content_hash:
             info["verified"] = "false"
             info["errors"].append(
@@ -222,7 +264,12 @@ def current_identity() -> dict:
 def identity_ok(info: dict) -> bool:
     """A packaged build must both self-verify and run on a supported
     interpreter. A source checkout is never 'ok' for --verify (unknown)."""
-    return info["verified"] == "true" and bool(info["interpreter_ok"])
+    return (
+        info["verified"] == "true"
+        and bool(info["interpreter_ok"])
+        and not info.get("verifier_matrix_error")
+        and not info.get("matrix_evidence_errors")
+    )
 
 
 def identity_hash() -> str | None:
@@ -271,6 +318,13 @@ def render_identity_text(info: dict, *, show_schemas: bool = False) -> str:
     source_line = render_source_provenance(info)
     if source_line is not None:
         lines.append(source_line)
+    matrix = info.get("verifier_matrix")
+    if matrix is not None:
+        lines.append(verifier_matrix.render_summary(matrix).rstrip("\n"))
+    elif info.get("verifier_matrix_error"):
+        lines.append(f"  verifier matrix: ERROR: {info['verifier_matrix_error']}")
+    elif info.get("verifier_matrix_state") == "not-bundled":
+        lines.append("  verifier matrix: not bundled (pre-#174 build)")
     if show_schemas and info["bundled_schemas"]:
         lines.append("  bundled schemas:")
         for name in sorted(info["bundled_schemas"]):

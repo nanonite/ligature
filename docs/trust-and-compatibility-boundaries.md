@@ -10,6 +10,7 @@ Chainlink #55. What is promised, what is not, and who may write what.
   `schemas/consolidated-check.schema.json` (`ligature check --json`), each
   independently versioned by their own `schema_version`.
 - `docs/exit-code-contract.md`'s five codes and their precedence order.
+- `docs/verifier-compatibility-matrix.json` and its schema: the versioned, evidence-linked tested verifier/toolchain matrix a build publishes, plus the descriptor's optional `toolchains[]` selection shape. A matrix entry is a measurement of exact pins, never an upstream support guarantee; a later release publishes a new matrix instead of editing or relabelling an already-attested zipapp (#174).
 - Every schema under `docs/*-schema.json` and `schemas/*.schema.json` that
   a `validate <kind>` command checks an artifact against — these are
   already versioned (`schema_version` fields, e.g.
@@ -46,7 +47,7 @@ reclassified. Its stability guarantee is "drift-tested," not "frozen."
 ## 4. Which commands are read-only
 
 `status`, `check`, `write-set-check`, every `validate <kind>`, every
-`gate <gate-id>`, and `doctor`/`version` (once implemented). None of
+`gate <gate-id>`, `doctor`/`version`, and `toolchain list|show|plan|lock|check`. None of
 these write to the workspace under any circumstances. This is enforced
 today by construction (none of the corresponding `cmd_*` functions call
 any write path) and is schema-enforced going forward for `check` via

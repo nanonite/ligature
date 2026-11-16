@@ -52,6 +52,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adjudicator  # noqa: E402
+import verifier_matrix  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 INVENTORY_RELPATH = "docs/implementation-inventory.json"
@@ -276,6 +277,26 @@ def _third_party_notices(inventory: dict, source_root: Path) -> str:
 def build(out_dir: Path, *, source_root: Path = ROOT) -> dict:
     inventory = load_inventory(source_root)
     entries = bundle_entries(inventory)
+    # The tested-verifier matrix's retained evidence is bundled from the
+    # matrix document itself, not from a second hand-maintained list: every
+    # `evidence[].path` the matrix names is copied into ligature_data/ so
+    # `version --verify`/`doctor` can recompute its pinned sha256 inside the
+    # zipapp too (chainlink #174).
+    try:
+        matrix = verifier_matrix.load_matrix(source_root)
+        matrix_summary = verifier_matrix.matrix_summary(matrix, root=source_root)
+    except verifier_matrix.MatrixError as exc:
+        # A pre-#174 source root has no matrix to publish (the repin
+        # acceptance test builds one). That is a legitimate older build, not
+        # a corrupt current one: only fail when the matrix file is present
+        # but invalid.
+        if verifier_matrix.matrix_path(source_root).is_file():
+            raise SystemExit(f"refusing to build: {exc}") from exc
+        matrix = None
+        matrix_summary = None
+    if matrix is not None:
+        for evidence_path in verifier_matrix.evidence_paths(matrix):
+            entries.append((evidence_path, f"ligature_data/{evidence_path}"))
     missing = [rel for rel, _ in entries if not (source_root / rel).is_file()]
     if missing:
         raise SystemExit(
@@ -324,6 +345,7 @@ def build(out_dir: Path, *, source_root: Path = ROOT) -> dict:
             "working_tree_diff_hash": git_state["diff_hash"],
             "bundle_file_count": len(manifest),
             "bundled_schemas": _bundled_schemas(staging, manifest),
+            "verifier_compatibility_matrix": matrix_summary,
             "content_hash": content_hash,
             "bundle_manifest": manifest,
         }
@@ -361,6 +383,7 @@ def build(out_dir: Path, *, source_root: Path = ROOT) -> dict:
         ),
         "bundle_file_count": len(manifest),
         "bundled_schemas": attestation["bundled_schemas"],
+        "verifier_compatibility_matrix": matrix_summary,
         "third_party_notices": "THIRD_PARTY_NOTICES.txt",
     }
     (out_dir / "SHA256SUMS").write_text(f"{artifact_sha256.split(':', 1)[1]}  {ARTIFACT_NAME}\n")

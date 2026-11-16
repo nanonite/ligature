@@ -1,0 +1,8 @@
+{
+  "probe": "kani-0.67.0",
+  "workdir": "/tmp/p4-smoke-tinyxml2-creusot-kani-3590541/kani",
+  "kani": "cargo-kani 0.67.0",
+  "rust": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "result": "successful",
+  "production_claim": false
+}

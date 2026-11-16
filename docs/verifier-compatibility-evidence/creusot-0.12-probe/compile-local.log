@@ -1,0 +1,18 @@
+   Compiling autocfg v1.5.1
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling libc v0.2.191
+   Compiling getrandom v0.4.3
+   Compiling cfg-if v1.0.5
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.119
+    Checking num-integer v0.1.47
+    Checking num-bigint v0.4.8
+   Compiling uuid v1.28.0
+    Checking num-rational v0.4.2
+   Compiling pearlite-syn v0.12.0-dev (/nix/store/22j5g9088m140fgx2l6vbskkmg5ra5pp-creusot-source/pearlite-syn)
+   Compiling creusot-std-proc v0.12.0-dev (/nix/store/22j5g9088m140fgx2l6vbskkmg5ra5pp-creusot-source/creusot-std-proc)
+    Checking creusot-std v0.12.0-dev (/nix/store/22j5g9088m140fgx2l6vbskkmg5ra5pp-creusot-source/creusot-std)
+    Checking p4_setup_creusot_probe v0.1.0 (/tmp/p4-smoke-icl-creusot-verus-3604358/creusot/crate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.33s

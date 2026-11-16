@@ -1,0 +1,36 @@
+warning: Git tree '/home/goya/storage/full-ligature-port-workspace' has uncommitted changes
+info: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu
+info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+info: component clippy is up to date
+info: component rustfmt is up to date
+
+  1.95.0-x86_64-unknown-linux-gnu unchanged - rustc 1.95.0 (59807616e 2026-04-14)
+
+info: checking for self-update (current version: 1.29.3)
+warn: tool `rust-analyzer` is already installed, remove it from `/home/goya/.cargo/bin`, then run `rustup update` to have rustup manage this tool.
+warn: tool `rustfmt` is already installed, remove it from `/home/goya/.cargo/bin`, then run `rustup update` to have rustup manage this tool.
+warn: tool `cargo-fmt` is already installed, remove it from `/home/goya/.cargo/bin`, then run `rustup update` to have rustup manage this tool.
+info: syncing channel updates for nightly-2026-04-21-x86_64-unknown-linux-gnu
+info: latest update on 2026-04-21 for version 1.97.0-nightly (66da6cae1 2026-04-20)
+info: component rust-src is up to date
+
+  nightly-2026-04-21-x86_64-unknown-linux-gnu unchanged - rustc 1.97.0-nightly (66da6cae1 2026-04-20)
+
+info: checking for self-update (current version: 1.29.3)
+warn: tool `rust-analyzer` is already installed, remove it from `/home/goya/.cargo/bin`, then run `rustup update` to have rustup manage this tool.
+warn: tool `rustfmt` is already installed, remove it from `/home/goya/.cargo/bin`, then run `rustup update` to have rustup manage this tool.
+warn: tool `cargo-fmt` is already installed, remove it from `/home/goya/.cargo/bin`, then run `rustup update` to have rustup manage this tool.
+info: component miri is up to date
+default: Creusot, Verus, Why3, Z3, cvc5, Alt-Ergo, Kani, Miri, and Rust
+cargo-creusot: /nix/store/3ll0vqpzkjaimvg7s0r6qw7j1vk8lgiw-creusot-wrapped/bin/cargo-creusot
+resolved: /nix/store/3ll0vqpzkjaimvg7s0r6qw7j1vk8lgiw-creusot-wrapped/bin/cargo-creusot
+creusot-rustc: rustc 1.99.0-nightly (11177f223 2026-08-02)
+--- cargo-creusot version ---
+cargo-creusot 0.14.0-dev
+Rust toolchain nightly-2026-08-03
+Why3 platform, version 1.8.2+git
+why3find v1.3.0+dev
+alt-ergo 2.6.2 (recommended 2.6.4)
+z3 5.1.0
+cvc4 1.8
+cvc5 bad CVC5 version: cvc5 1.4.1

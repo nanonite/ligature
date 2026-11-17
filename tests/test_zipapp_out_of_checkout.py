@@ -1627,6 +1627,42 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
         self.assertEqual(doctor.returncode, 1, doctor.stdout + doctor.stderr)
         self.assertIn("adjudicator pin: mismatch", doctor.stdout)
 
+    def test_refused_repin_names_both_identities_and_preserves_every_pin_surface(self):
+        """#206: the refusal must identify both executables and leave every
+        recorded pin surface alone, not only the headline `adjudicator` field.
+
+        The target test asserts the conflict exit and the `adjudicator`
+        content hash; this pins the rest of the fail-closed contract: the
+        message names the recorded and running content hashes (so an operator
+        can tell which binary is trusted), and the second pin the manifest
+        carries -- `gate_hashes["@adjudicator"]`, which `doctor` reads -- still
+        records the old binary after the refused rerun. The recorded product
+        version is preserved too (#68), so a refusal cannot partially adopt
+        the untrusted binary's version claims."""
+        self.assertEqual(self.init(self.old_build).returncode, 0)
+        self.adopt_current_descriptor_shape()
+        manifest_path = self.workspace / "ci" / "manifest" / "installation.json"
+        before = json.loads(manifest_path.read_text())
+
+        proc = self.init(self.new_build)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn(self.old_build["content_hash"], proc.stdout)
+        self.assertIn(self.new_build["content_hash"], proc.stdout)
+        self.assertIn("refusing to silently re-pin it", proc.stdout)
+
+        after = json.loads(manifest_path.read_text())
+        self.assertEqual(after["adjudicator"], before["adjudicator"])
+        self.assertEqual(
+            after["gate_hashes"]["@adjudicator"],
+            before["gate_hashes"]["@adjudicator"],
+        )
+        self.assertEqual(
+            after["gate_hashes"]["@adjudicator"], self.old_build["content_hash"]
+        )
+        self.assertEqual(
+            after["installed_product_version"], before["installed_product_version"]
+        )
+
     def test_migrate_upgrade_repins_deliberately(self):
         self.assertEqual(self.init(self.old_build).returncode, 0)
         self.adopt_current_descriptor_shape()

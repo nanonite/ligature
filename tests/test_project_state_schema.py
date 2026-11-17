@@ -100,6 +100,23 @@ class ProjectStateSchemaTest(unittest.TestCase):
         errors = list(self.validator.iter_errors(doc))
         self.assertEqual(errors, [], [e.message for e in errors])
 
+    def test_artifact_lifecycle_unknown_with_real_content_hash_satisfies_the_artifact_definition_directly(self):
+        """The accepted mutation in
+        `test_artifact_lifecycle_unknown_still_accepts_a_real_content_hash`
+        must also hold against the `artifact` definition on its own (#193).
+        That test loads the mixed example, so before the #179 fixture sweep
+        its assertion failed on two unrelated top-level errors
+        (`'verification' is a required property`, `'1.1' was expected`) no
+        matter what the artifact contained. Pinning the subschema directly
+        keeps example drift from masking this invariant again."""
+        artifact = self._load("project-state.mixed.example.json")["artifacts"][0]
+        artifact["lifecycle"] = "unknown"
+        del artifact["promoted_hash"]
+        self.assertIsNotNone(artifact["content_hash"])
+        validator = make_validator(self.schema["$defs"]["artifact"])
+        errors = list(validator.iter_errors(artifact))
+        self.assertEqual(errors, [], [e.message for e in errors])
+
     def test_absent_artifact_may_have_null_content_hash(self):
         doc = self._load("project-state.mixed.example.json")
         errors = list(self.validator.iter_errors(doc))

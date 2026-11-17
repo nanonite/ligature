@@ -266,6 +266,21 @@ class ArtifactLifecycleInvariantTest(unittest.TestCase):
                 artifact = self._artifact(lifecycle="unknown", content_hash=content_hash)
                 self.assertEqual(self._errors(artifact), [])
 
+    def test_unknown_lifecycle_satisfies_the_artifact_definition_directly(self):
+        """Both accepted content_hash shapes must hold against the `artifact`
+        definition on its own (#189). `_errors()` splices the artifact into a
+        full example, so before the #179 fixture sweep this assertion failed
+        on unrelated top-level errors (`'verification' is a required
+        property`, `'1.1' was expected`) no matter what the artifact
+        contained. Pinning the subschema directly keeps example drift from
+        masking this invariant again."""
+        validator = make_validator(self.schema["$defs"]["artifact"])
+        for content_hash in (None, "sha256:" + "a" * 64):
+            with self.subTest(content_hash=content_hash):
+                artifact = self._artifact(lifecycle="unknown", content_hash=content_hash)
+                errors = list(validator.iter_errors(artifact))
+                self.assertEqual(errors, [], [e.message for e in errors])
+
     def test_unknown_lifecycle_still_forbids_promoted_hash(self):
         artifact = self._artifact(lifecycle="unknown", promoted_hash="sha256:" + "b" * 64)
         self.assertTrue(self._errors(artifact))

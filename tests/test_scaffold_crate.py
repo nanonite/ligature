@@ -684,6 +684,14 @@ class UndeclaredCrateTest(ScaffoldFixture):
         # rejects allowed/protected overlaps, and the manifest patterns for
         # deeper crate dirs cannot currently be declared without overlapping
         # `rust/*/src/`. The ambiguity under test does not depend on depth.
+        #
+        # #204: this depth is also what the way-through leg below needs. The
+        # pilot's protected manifest patterns are one level deep
+        # (`rust/*/Cargo.toml`), so an earlier fixture's `rust/a/core` named no
+        # protected root at all and its `authorize-write` leg was refused
+        # before this test could prove the ambiguity was passable. Declaring
+        # the second crate under `crates/` needs one extra protected pattern,
+        # added next; both legs then have a grantable manifest.
         self.declare_crate("rust/core", "crates/core")
         self.edit_descriptor(
             lambda d: d["write_set"]["protected_roots"].append("crates/*/Cargo.toml")
@@ -707,6 +715,50 @@ class UndeclaredCrateTest(ScaffoldFixture):
         code, receipt = self.scaffold("--issue", "115", "--crate", "rust/core")
         self.assertEqual(code, 0, receipt)
         self.assertEqual(receipt["crate_dir"], "rust/core")
+
+    def test_basename_ambiguity_is_refused_before_any_grant_and_the_fixture_is_grantable(self):
+        """#204: the red case above failed in its fixture, not in the refusal
+        it asserts. It declared the two crates at `rust/a/core` and
+        `rust/b/core`; the pilot's only rust manifest pattern is
+        `rust/*/Cargo.toml`, one directory deep, so no protected root covered
+        `rust/a/core/Cargo.toml` and the way-through `authorize-write` leg
+        exited 2 before the scaffold leg could run. The basename ambiguity
+        itself was always refused correctly.
+
+        This pins both axes that made that fixture stale. First, ambiguity is
+        decided from the descriptor alone, before any grant is consulted: with
+        no grant recorded at all, `--crate core` still refuses, names both
+        declared crates in descriptor order, and tells the caller to name the
+        crate_dir. Second, every declared crate's manifest must be covered by
+        a declared protected root, because otherwise the documented way
+        through -- authorize-write at that exact manifest -- can never work.
+        """
+        self.init_workspace()
+        self.declare_crate("rust/core", "crates/core")
+        self.edit_descriptor(
+            lambda d: d["write_set"]["protected_roots"].append("crates/*/Cargo.toml")
+        )
+        descriptor = json.loads(self.descriptor_path.read_text())
+        protected = descriptor["write_set"]["protected_roots"]
+        for entry in descriptor["crates"]:
+            crate_dir = entry["crate_dir"]
+            with self.subTest(crate_dir=crate_dir):
+                self.assertIsNotNone(
+                    write_authorization.protecting_pattern(
+                        protected, f"{crate_dir}/Cargo.toml"
+                    ),
+                    f"{crate_dir}/Cargo.toml is covered by no protected root, so "
+                    "authorize-write cannot grant the documented way through",
+                )
+        # Deliberately no `granted()`: resolution runs before the capability
+        # check, so a missing grant must not be what decides this refusal.
+        self.assertRefused(
+            "--issue", "115", "--crate", "core",
+            contains=(
+                "names 2 declared crates (rust/core, crates/core)",
+                "name the crate_dir",
+            ),
+        )
 
     def test_a_declared_crate_dir_that_escapes_the_workspace_is_refused(self):
         """The declaration is checked too, not only the request: a descriptor

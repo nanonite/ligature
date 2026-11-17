@@ -239,6 +239,28 @@ class ProjectStateSchemaTest(unittest.TestCase):
         errors = list(self.validator.iter_errors(doc))
         self.assertEqual(errors, [])
 
+    def test_other_dimension_names_satisfy_the_obligation_definition_directly(self):
+        """The accepted mutation in `test_other_dimension_names_remain_open`
+        must also hold against the `obligation` definition on its own (#197).
+        That test loads the mixed example, so before the #179 fixture sweep its
+        assertion failed on two unrelated top-level errors (`'verification' is
+        a required property`, `'1.1' was expected`) no matter what dimension
+        name was appended. Pinning the subschema directly keeps example drift
+        from masking this open-vocabulary invariant again."""
+        obligation = self._load("project-state.mixed.example.json")["obligations"][0]
+        obligation["achieved_assurance"].append(
+            {"dimension": "some-future-dimension-name", "status": "achieved"}
+        )
+        # The obligation schema references #/$defs/assurance_dimension, so it
+        # needs the document's definitions beside it to resolve those refs.
+        obligation_schema = {
+            "$defs": self.schema["$defs"],
+            **self.schema["$defs"]["obligation"],
+        }
+        validator = make_validator(obligation_schema)
+        errors = list(validator.iter_errors(obligation))
+        self.assertEqual(errors, [], [e.message for e in errors])
+
     def test_cluster_state_and_closure_kind_have_explicit_unknown(self):
         doc = self._load("project-state.mixed.example.json")
         doc["clusters"][0]["state"] = "unknown"

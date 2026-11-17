@@ -196,7 +196,19 @@ class ProjectStateSchemaTest(unittest.TestCase):
         """A dimension required but not achieved must show up as TWO
         separate records (one per array), never collapsed into a single
         'partial' status -- this test asserts the shape allows exactly
-        that disagreement to be represented."""
+        that disagreement to be represented.
+
+        #199: this test was red before the #179 fixture sweep for the same
+        reason as #195/#196 -- `schemas/examples/project-state.mixed.example.json`
+        still declared `schema_version: "1.0"` while the schema's `const` had
+        moved to "1.1", and it omitted the now-required `verification` block.
+        The shape assertions above already passed (the example has always
+        listed `differential` as required and not achieved); the failure was
+        the final whole-document `self.assertEqual(errors, [])`, which
+        reported exactly `'verification' is a required property` and
+        `'1.1' was expected` before the obligation was ever considered. The
+        schema change was intended and the #179 sweep repaired the example,
+        so no production code changed. The assertion is unchanged."""
         doc = self._load("project-state.mixed.example.json")
         obligation = doc["obligations"][0]
         required_dims = {d["dimension"] for d in obligation["required_assurance"]}
@@ -207,6 +219,33 @@ class ProjectStateSchemaTest(unittest.TestCase):
         self.assertNotIn("differential", achieved_dims)
         errors = list(self.validator.iter_errors(doc))
         self.assertEqual(errors, [])
+
+    def test_required_and_achieved_assurance_satisfy_the_obligation_definition_directly(self):
+        """The obligation asserted by
+        `test_required_and_achieved_assurance_are_never_merged` must also
+        hold against the `obligation` definition on its own (#199). That
+        test loads the mixed example, so before the #179 fixture sweep its
+        final whole-document assertion failed on two unrelated top-level
+        errors (`'verification' is a required property`, `'1.1' was
+        expected`) no matter how the two assurance arrays disagreed.
+        Pinning the subschema directly keeps example drift from masking this
+        required-vs-achieved invariant again."""
+        obligation = self._load("project-state.mixed.example.json")["obligations"][0]
+        required_dims = {d["dimension"] for d in obligation["required_assurance"]}
+        achieved_dims = {
+            d["dimension"] for d in obligation["achieved_assurance"] if d["status"] == "achieved"
+        }
+        self.assertIn("differential", required_dims)
+        self.assertNotIn("differential", achieved_dims)
+        # The obligation schema references #/$defs/assurance_dimension, so it
+        # needs the document's definitions beside it to resolve those refs.
+        obligation_schema = {
+            "$defs": self.schema["$defs"],
+            **self.schema["$defs"]["obligation"],
+        }
+        validator = make_validator(obligation_schema)
+        errors = list(validator.iter_errors(obligation))
+        self.assertEqual(errors, [], [e.message for e in errors])
 
     def test_witness_is_rejected_as_an_achieved_assurance_dimension(self):
         """Round-2 external review, round 3 finding: the schema's

@@ -54,6 +54,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import pipeline  # noqa: E402
 import write_authorization  # noqa: E402
+import write_set  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
 RECEIPT_SCHEMA = json.loads((ROOT / "docs" / "scaffold-receipt-schema.json").read_text())
@@ -758,6 +759,34 @@ class InvalidTargetTest(ScaffoldFixture):
             "--issue", "115", "--crate", "core",
             contains=("canonical pipeline artifact location",),
         )
+
+    def test_canonical_refusal_covers_every_prefix_without_a_grant(self):
+        """#202: the canonical-location branch must speak for every prefix
+        `write_set._is_canonical` classifies, and it must refuse before the
+        capability-record check rather than defaulting to the grant message.
+
+        The target test above names `ci/results/core` because #103 narrowed
+        the canonical prefixes from `ci/` to `ci/results/`; before the #179
+        fixture sweep it still named `ci/manifest/core`, which the predicate
+        no longer classifies as canonical, so the refusal came from the
+        missing grant and the expected message was absent. Reading the
+        prefixes off the predicate keeps this case and the predicate from
+        drifting apart again, and running with no grant pins that the
+        canonical branch is what refuses. `ci/manifest/` is asserted not
+        canonical separately: it is protected content after #103, so a test
+        must never use it to exercise this branch.
+        """
+        self.init_workspace()
+        self.assertFalse(write_set._is_canonical("ci/manifest/core/Cargo.toml"))
+        for prefix in write_set._CANONICAL_PREFIXES:
+            with self.subTest(prefix=prefix):
+                crate_dir = f"{prefix}core"
+                self.declare_crate(crate_dir)
+                self.assertTrue(write_set._is_canonical(f"{crate_dir}/Cargo.toml"))
+                self.assertRefused(
+                    "--issue", "115", "--crate", "core",
+                    contains=("canonical pipeline artifact location",),
+                )
 
     def test_a_manifest_no_protected_root_covers_is_refused(self):
         """The command's whole premise is that the manifest is a protected

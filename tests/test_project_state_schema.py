@@ -295,6 +295,28 @@ class ProjectStateSchemaTest(unittest.TestCase):
         errors = list(self.validator.iter_errors(doc))
         self.assertEqual(errors, [], [e.message for e in errors])
 
+    def test_partial_closure_kind_satisfies_both_echo_definitions_directly(self):
+        """The accepted mutation in
+        `test_partial_closure_kind_is_carried_through_both_echoes` must also
+        hold against each echo's definition on its own (#198). That test
+        loads the mixed example, so before the #179 fixture sweep its
+        assertion failed on two unrelated top-level errors
+        (`'verification' is a required property`, `'1.1' was expected`) no
+        matter what closure_kind either echo declared. Pinning the descriptor
+        and cluster schemas directly keeps example drift from masking this
+        invariant again."""
+        doc = self._load("project-state.mixed.example.json")
+        descriptor = dict(doc["descriptor"], closure_kind="partial")
+        cluster = dict(doc["clusters"][0], closure_kind="partial")
+        for echo, schema, instance in (
+            ("descriptor echo", self.schema["properties"]["descriptor"], descriptor),
+            ("cluster echo", self.schema["$defs"]["cluster"], cluster),
+        ):
+            with self.subTest(echo=echo):
+                validator = make_validator(schema)
+                errors = list(validator.iter_errors(instance))
+                self.assertEqual(errors, [], [e.message for e in errors])
+
     def test_witness_summary_never_carries_an_assurance_field(self):
         """generated_observations must not smuggle in an assurance verdict
         -- additionalProperties:false on witness_summary is what actually

@@ -118,7 +118,16 @@ class D4NoStableIdTest(unittest.TestCase):
     def test_missing_constraint_id_is_visible_not_silent(self):
         """Review finding D4 (the live gap #6 state): a callee spec whose
         constraints have no id field yet must produce a visible,
-        non-blocking signal, not an indistinguishable 'all clean.'"""
+        non-blocking signal, not an indistinguishable 'all clean.'
+
+        #201: this test was red before the #179 fixture sweep, and the
+        cause was the fixture, not the gate: `task_queue.json` carried an
+        unmodelled `_comment` property and omitted required concept-spec
+        fields, so `find_concept_spec` classified it as an invalid
+        candidate and G2+ raised a blocking `applies_to unverifiable`
+        error before the stable-id rule could run. The #179 sweep made the
+        fixture schema-valid, which is the fix; the assertions below are
+        unchanged."""
         fixture = FIXTURES / "d4_no_stable_id"
         findings = validate(fixture, specs_search_root=fixture / "specs")
         errors = [f for f in findings if f.severity == "error"]
@@ -126,6 +135,50 @@ class D4NoStableIdTest(unittest.TestCase):
         self.assertEqual(errors, [], [str(f) for f in errors])
         self.assertEqual(len(infos), 1)
         self.assertIn("stable id", infos[0].reason)
+
+    def test_no_ids_in_schema_valid_spec_is_informational_not_unverifiable(self):
+        """#201: a schema-valid concept spec whose constraints carry no
+        `id` must yield exactly one info finding naming the stable-id gap,
+        and no error. The target test above pins that outcome on the
+        fixture, but before the #179 sweep the fixture itself was
+        schema-invalid, so the lookup never resolved it and G2+ emitted a
+        blocking `applies_to unverifiable` error instead of the intended
+        compatibility note. Building the tree here from a spec this test
+        first validates against the concept-spec schema -- and asserting
+        the constraints really have no id -- makes the informational rule
+        fail on its own terms if either the fixture goes stale or the gate
+        starts treating a missing id as an error."""
+        source = FIXTURES / "d4_no_stable_id" / "specs" / "task_queue.json"
+        spec = json.loads(source.read_text(encoding="utf-8"))
+        schema_errors = list(load_validator().iter_errors(spec))
+        self.assertEqual(schema_errors, [], [e.message for e in schema_errors])
+        self.assertTrue(spec["constraints"], "the fixture must exercise the no-id case")
+        self.assertTrue(
+            all("id" not in constraint for constraint in spec["constraints"]),
+            "the fixture must exercise the no-id case",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            specs = root / "specs"
+            specs.mkdir()
+            (specs / "task_queue.json").write_text(
+                json.dumps(spec), encoding="utf-8"
+            )
+            boundary_dir = specs / "_boundaries"
+            boundary_dir.mkdir()
+            shutil.copyfile(
+                FIXTURES / "d4_no_stable_id" / "specs" / "_boundaries"
+                / "scheduler_dispatch__to__task_queue_pop_ready.json",
+                boundary_dir / "scheduler_dispatch__to__task_queue_pop_ready.json",
+            )
+            findings = validate(root, specs_search_root=specs)
+
+        errors = [f for f in findings if f.severity == "error"]
+        infos = [f for f in findings if f.severity == "info"]
+        self.assertEqual(errors, [], [str(f) for f in errors])
+        self.assertEqual(len(infos), 1, [str(f) for f in findings])
+        self.assertIn("stable id", infos[0].reason)
+        self.assertIn("constraints[].id", infos[0].reason)
 
 
 if __name__ == "__main__":

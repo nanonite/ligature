@@ -53,6 +53,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import pipeline  # noqa: E402
+import project_descriptor  # noqa: E402
 import write_authorization  # noqa: E402
 import write_set  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
@@ -831,6 +832,55 @@ class InvalidTargetTest(ScaffoldFixture):
             self.assertIn(fragment, err)
         self.assertFalse(self.manifest.exists(), "a refusal wrote the manifest")
         self.assertFalse(self.skeleton.exists(), "a refusal wrote the source skeleton")
+
+    def test_every_protected_pattern_is_rejected_in_allowed_roots(self):
+        """#203: chainlink #133 makes an allowed/protected overlap invalid
+        *descriptor state*, so the loader -- not scaffold-crate's own
+        per-command checks -- is what refuses every protected root a
+        descriptor also permits.
+
+        The target test above covers the pilot manifest pattern. This covers
+        the whole declared cross product: the untouched pilot write set has
+        no overlap, and adding any single protected pattern to
+        `allowed_roots` produces exactly one diagnostic naming that pattern
+        on both sides, which the CLI reports as a two-line descriptor
+        refusal before any manifest or skeleton is written. Iterating over
+        `PILOT_WRITE_SET` keeps this from silently losing coverage if the
+        declared protected boundary changes, and pins that the fail-closed
+        gate applies to every protected root, not just the one the target
+        case happens to name.
+        """
+        self.init_workspace()
+        self.assertEqual(
+            project_descriptor.write_set_overlap_diagnostics({"write_set": PILOT_WRITE_SET}),
+            [],
+            "the untouched pilot write set must be overlap-free",
+        )
+        for pattern in PILOT_WRITE_SET["protected_roots"]:
+            with self.subTest(pattern=pattern):
+                mutated = json.loads(json.dumps(PILOT_WRITE_SET))
+                mutated["allowed_roots"].append(pattern)
+                diagnostics = project_descriptor.write_set_overlap_diagnostics(
+                    {"write_set": mutated}
+                )
+                self.assertEqual(len(diagnostics), 1, diagnostics)
+                self.assertIn(repr(pattern), diagnostics[0])
+
+                self.edit_descriptor(
+                    lambda d, p=pattern: d["write_set"].__setitem__(
+                        "allowed_roots", [*PILOT_WRITE_SET["allowed_roots"], p]
+                    )
+                )
+                code, _, err = self.run_cli(
+                    "scaffold-crate", "--issue", "115", "--crate", "date-creusot-core"
+                )
+                self.assertEqual(code, 2, err)
+                for fragment in ("conflicting write_set patterns", repr(pattern), "disjoint"):
+                    self.assertIn(fragment, err)
+                self.assertFalse(self.manifest.exists(), "a refusal wrote the manifest")
+                self.assertFalse(
+                    self.skeleton.exists(), "a refusal wrote the source skeleton"
+                )
 
 
 class GrantRequiredTest(ScaffoldFixture):

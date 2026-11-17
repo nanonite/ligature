@@ -206,6 +206,18 @@ class ArtifactLifecycleInvariantTest(unittest.TestCase):
         doc["artifacts"] = [artifact]
         return list(self.validator.iter_errors(doc))
 
+    def test_promoted_with_promoted_hash_satisfies_the_artifact_definition_directly(self):
+        """The accepted case must also hold against the `artifact` definition
+        on its own. `_errors()` splices the artifact into a full example,
+        which makes every assertion here sensitive to unrelated example
+        drift (#187/#188: a stale schema_version/verification block failed
+        them regardless of the artifact). This pins the invariant itself,
+        so it cannot be masked by the example."""
+        artifact = self._artifact(lifecycle="promoted", promoted_hash="sha256:" + "b" * 64)
+        validator = make_validator(self.schema["$defs"]["artifact"])
+        errors = list(validator.iter_errors(artifact))
+        self.assertEqual(errors, [], [e.message for e in errors])
+
     def test_absent_with_a_real_content_hash_is_rejected(self):
         artifact = self._artifact(lifecycle="absent", content_hash="sha256:" + "a" * 64)
         self.assertTrue(self._errors(artifact))

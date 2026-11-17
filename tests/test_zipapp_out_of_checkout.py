@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import build_zipapp  # noqa: E402
+import project_descriptor  # noqa: E402
 from schema_utils import make_validator  # noqa: E402
 
 DESCRIPTOR_SCHEMA = json.loads((ROOT / "schemas" / "project-descriptor.schema.json").read_text())
@@ -1569,6 +1570,12 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
         if isinstance(write_set, dict) and isinstance(
             write_set.get("protected_roots"), list
         ):
+            # #205: these are the three patterns `old_build`'s template
+            # declares two directories deep. Under #133's intersection engine
+            # each overlaps both allowed roots (`crates/*/src/` and
+            # `crates/*/tests/`), so without narrowing them `migrate
+            # --upgrade` refuses the still-conflicting descriptor and this
+            # suite's pin tests never reach the pin.
             narrow = {
                 "**/Cargo.toml": "crates/*/Cargo.toml",
                 "**/build.rs": "crates/*/build.rs",
@@ -1637,6 +1644,54 @@ class AdjudicatorRepinAcceptanceTest(unittest.TestCase):
         doctor = self.run_artifact(self.new_build["artifact"], "doctor")
         self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
         self.assertIn("adjudicator pin: pinned", doctor.stdout)
+
+    def test_descriptor_adoption_leaves_a_current_disjoint_descriptor(self):
+        """#205: pin what `adopt_current_descriptor_shape` has to achieve,
+        rather than only the pin assertion it protects.
+
+        The target test's upgrade path is `migrate --upgrade` succeeding, but
+        that success depends entirely on the helper first moving `old_build`'s
+        two stale descriptor surfaces onto the current shape. Before the #179
+        sweep the helper only rewrote `verifier_policy`, so the upgrade refused
+        the six allowed/protected intersections #133 rejects and the pin
+        assertion never ran. This test asserts the helper's premise (the old
+        template really is stale in both ways) and its result (the adopted
+        descriptor validates and has no intersection), then that the artifact
+        accepts it for `migrate --upgrade` and re-pins -- so a future template
+        or schema change the helper does not cover fails here, naming the
+        drift, instead of surfacing as an unexplained non-zero `migrate`."""
+        self.assertEqual(self.init(self.old_build).returncode, 0)
+        path = self.workspace / "project-descriptor.json"
+        stale = json.loads(path.read_text())
+
+        # Premise (a): #104 closed `verifier_policy`, and the old template
+        # writes its per-cluster override as a sibling of `default`.
+        stale_errors = list(make_validator(DESCRIPTOR_SCHEMA).iter_errors(stale))
+        self.assertTrue(stale_errors, "old_build's descriptor unexpectedly validates")
+        self.assertTrue(
+            any(list(error.absolute_path)[:1] == ["verifier_policy"] for error in stale_errors),
+            [list(error.absolute_path) for error in stale_errors],
+        )
+
+        # Premise (b): #133 rejects allowed/protected intersections, and the
+        # old template's three deep manifest patterns intersect both allowed
+        # roots.
+        stale_overlaps = project_descriptor.write_set_overlap_diagnostics(stale)
+        self.assertTrue(stale_overlaps, "old_build's write set unexpectedly has no overlap")
+        for pattern in ("**/Cargo.toml", "**/build.rs", "**/kani.toml"):
+            self.assertTrue(
+                any(f"pattern {pattern!r}" in line for line in stale_overlaps),
+                f"{pattern} not named in {stale_overlaps}",
+            )
+
+        self.adopt_current_descriptor_shape()
+        current = json.loads(path.read_text())
+        self.assertEqual(list(make_validator(DESCRIPTOR_SCHEMA).iter_errors(current)), [])
+        self.assertEqual(project_descriptor.write_set_overlap_diagnostics(current), [])
+
+        proc = self.run_artifact(self.new_build["artifact"], "migrate", "--upgrade")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.pinned_hash(), self.new_build["content_hash"])
 
 
 if __name__ == "__main__":

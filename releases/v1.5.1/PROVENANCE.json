@@ -1,0 +1,398 @@
+{
+  "artifact": "ligature.pyz",
+  "artifact_sha256": "sha256:d704c5a5875d200214310c1fca7854a14a105c1b74cebaa5bc03f6a870bcc030",
+  "build_command": "python3 scripts/build_zipapp.py --out <dir>",
+  "bundle_file_count": 133,
+  "bundle_manifest_derivation": "docs/implementation-inventory.json dispositions runtime-required, installed-template, and required_at_runtime vendored assets; python modules flagged installed_by_init also ship a second copy under ligature_data/<path> for `init` to copy into a target repo",
+  "bundled_schemas": {
+    "docs/achieved-assurance-schema.json": "1.0",
+    "docs/assumption-registry-schema.json": "1.0",
+    "docs/assurance-report-schema.json": "1.0",
+    "docs/boundary-contract-schema.json": "1.0",
+    "docs/bridge-check-schema.json": "1.0",
+    "docs/bridge-schema.json": "1.0",
+    "docs/callsite-schema.json": "unknown",
+    "docs/cargo-profile-audit-schema.json": "1.0",
+    "docs/cargo-verus-profile-audit-schema.json": "1.0",
+    "docs/closure-profile-schema.json": "1.0",
+    "docs/concept-to-code-constraint-id-schema.json": "unknown",
+    "docs/concept-to-code-witness-required-schema.json": "unknown",
+    "docs/conflict-resolution-schema.json": "1.0",
+    "docs/degradation-record-schema.json": "1.0",
+    "docs/evidence-schema.json": "1.0",
+    "docs/exemption-schema.json": "1.0",
+    "docs/external-evidence-result-schema.json": "unknown",
+    "docs/feature-ledger-schema.json": "1.0",
+    "docs/g14-report-schema.json": "unknown",
+    "docs/gold-set-measurement-schema.json": "1.0",
+    "docs/gold-set-schema.json": "1.0",
+    "docs/interaction-schema.json": "1.0",
+    "docs/promotion-receipt-schema.json": "unknown",
+    "docs/protocol-debt-schema.json": "1.0",
+    "docs/r1-g16-report-schema.json": "unknown",
+    "docs/scaffold-receipt-schema.json": "1.0",
+    "docs/verifier-compatibility-matrix-schema.json": "unknown",
+    "docs/witness-result-schema.json": "1.0",
+    "docs/witness-spec-schema.json": "1.0",
+    "docs/work-package-generation-audit-schema.json": "1.0",
+    "docs/work-package-manifest-schema.json": "unknown",
+    "docs/write-grant-schema.json": "1.0",
+    "schemas/consolidated-check.schema.json": "1.0",
+    "schemas/project-descriptor.schema.json": "1.0",
+    "schemas/project-state.schema.json": "1.1",
+    "vendor/concept-to-code/schemas/spec.schema.json": "1.0"
+  },
+  "content_hash": "sha256:def6b87957ff4e26737e18a469a7df447fdadb5df3eac5180db881c42baccfcb",
+  "product_name": "ligature",
+  "product_version": "1.5.1",
+  "provenance_version": "1.0",
+  "required_python": "3.10",
+  "runtime_contract": "zipapp targeting a system Python interpreter",
+  "source_commit": "29acabdb6c70dbab4213ca73626d3fed78afcbcf",
+  "source_dirty": false,
+  "third_party_notices": "THIRD_PARTY_NOTICES.txt",
+  "verifier_compatibility_matrix": {
+    "entries": [
+      {
+        "compatibility": {
+          "detail": "cargo-creusot 0.12.0-dev and creusot-std 0.12.0-dev are the exact pair measured together in the retained probe.",
+          "state": "compatible"
+        },
+        "coverage": {
+          "intake": true,
+          "project_level": false,
+          "synthetic": true
+        },
+        "evidence": [
+          {
+            "id": "creusot-synthetic-probe",
+            "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/probe-result.json",
+            "result_class": "synthetic",
+            "sha256": "sha256:370b45cd1fc659d98b519ade015a81b1c711b20b61bcb0e713ab25efd47ecbc6"
+          },
+          {
+            "id": "creusot-proof-log",
+            "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/prove.log",
+            "result_class": "synthetic",
+            "sha256": "sha256:2d70cd4be01d03395f9781024800d2d63c22089ae37eef0264b20ae7f5d185f3"
+          },
+          {
+            "id": "creusot-version",
+            "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/creusot-version.txt",
+            "result_class": "intake-only",
+            "sha256": "sha256:a8a5f71ee0f7a7a242b65241866d39ea3cb50191d511c1f67c494330c3020689"
+          },
+          {
+            "id": "creusot-nix-identity",
+            "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/nix-path-info.json",
+            "result_class": "intake-only",
+            "sha256": "sha256:784942ae74fa6b75b74bcedfcfe7357a57a9863c8568c712e31c6c77c3cb4318"
+          },
+          {
+            "id": "creusot-pilot-record",
+            "path": "docs/verifier-compatibility-evidence/LIGATURE-VERIFIER-COMPATIBILITY.md",
+            "result_class": "intake-only",
+            "sha256": "sha256:323806b989889d33f862ba10b364203595b14b7cbd92422638483331e96cbaca"
+          },
+          {
+            "id": "creusot-compile-placement",
+            "path": "docs/verifier-compatibility-evidence/creusot-0.12-probe/compile-local.log",
+            "result_class": "intake-only",
+            "sha256": "sha256:924d6a93edf45768ef0cd3710abbf264187a06b735f780f093ca1018b29434ba"
+          },
+          {
+            "id": "pilot-machine-record",
+            "path": "docs/verifier-compatibility-evidence/ligature-verifier-compatibility.json",
+            "result_class": "intake-only",
+            "sha256": "sha256:237c7949dbc90af0121b775703dfefc92fecb9891da5c19d0a60a77cc4587835"
+          }
+        ],
+        "exclusions": [
+          "The synthetic obligation is not production source proof coverage.",
+          "No portable flake revision is retained for this 0.12 control; the content-addressed store/source identity is the reproducible identity.",
+          "The measured 1.4.3 artifact did not publish this matrix; the publishing release carries the measurements rather than relabelling that artifact.",
+          "The unresolved cargo-creusot 0.14.0-dev / creusot-std 0.14.0 declared shell is a separate unverified entry."
+        ],
+        "flake_inputs": null,
+        "id": "creusot-0.12.0-dev-nightly-2026-04-21-x86_64-linux",
+        "lock_id": "sha256:707d678219fd2a622f456ff86e4b0cd3de48ddf8bd3e5b3b5036ed53e86bfec6",
+        "platform": {
+          "architecture": "x86_64",
+          "os": "linux",
+          "target": "x86_64-unknown-linux-gnu"
+        },
+        "primary": {
+          "name": "cargo-creusot",
+          "version": "0.12.0-dev"
+        },
+        "rust": {
+          "commit": "66da6cae1",
+          "rustc": "1.97.0-nightly",
+          "toolchain": "nightly-2026-04-21"
+        },
+        "selectable": true,
+        "source_identity": "sha256:542c3f916cf471726358c3e72de9defc02f7ea79ea5bb14ed96b7d8dad703b21",
+        "status": "tested",
+        "store": {
+          "creusot_source": {
+            "ca": "fixed:r:sha256:1qpik7y200f42ssn16cb8rfdjxngb5jshyyf5mq7d4ilg2p5iybx",
+            "nar_hash": "sha256-fflYrng0knZwLc57qGVZz3bZXEaLmWC1FsQBIPyZ8eI=",
+            "path": "/nix/store/22j5g9088m140fgx2l6vbskkmg5ra5pp-creusot-source"
+          },
+          "wrapper": {
+            "deriver": "/nix/store/s5f3z5rc91smlfs5r5df9dacfc6qw874-creusot-wrapped.drv",
+            "nar_hash": "sha256-JwDDUiHsS6SLOdIDI92hx92XY+Zqz+zxrtMJyRD0B4I=",
+            "path": "/nix/store/9y9g4kpsppxn6zqmyfkvfcc2234qkdwv-creusot-wrapped"
+          }
+        },
+        "supporting_tools": [
+          {
+            "name": "creusot-std",
+            "role": "verifier-std",
+            "version": "0.12.0-dev"
+          },
+          {
+            "name": "why3find",
+            "role": "support",
+            "version": "1.3.0+dev"
+          },
+          {
+            "name": "Alt-Ergo",
+            "role": "solver",
+            "version": "2.6.3"
+          },
+          {
+            "name": "Z3",
+            "role": "solver",
+            "version": "4.15.3"
+          },
+          {
+            "name": "cvc4",
+            "role": "solver",
+            "version": "1.8"
+          },
+          {
+            "name": "cvc5",
+            "role": "solver",
+            "version": "1.3.1"
+          }
+        ],
+        "verifier": "creusot"
+      },
+      {
+        "compatibility": null,
+        "coverage": {
+          "intake": true,
+          "project_level": false,
+          "synthetic": true
+        },
+        "evidence": [
+          {
+            "id": "verus-synthetic-probe",
+            "path": "docs/verifier-compatibility-evidence/verus-1.95-probe/probe-result.json",
+            "result_class": "synthetic",
+            "sha256": "sha256:5f3c6789216b7c3fa4674edb6211975ee3a75623e5629a827ed4912c90ec757d"
+          },
+          {
+            "id": "verus-pilot-record",
+            "path": "docs/verifier-compatibility-evidence/LIGATURE-VERIFIER-COMPATIBILITY.md",
+            "result_class": "intake-only",
+            "sha256": "sha256:323806b989889d33f862ba10b364203595b14b7cbd92422638483331e96cbaca"
+          }
+        ],
+        "exclusions": [
+          "Synthetic and intake-path evidence only; no production source proof.",
+          "The measurement was made with Ligature 1.4.3, not the publishing release."
+        ],
+        "flake_inputs": {
+          "nixpkgs": {
+            "locked": {
+              "lastModified": 1779467186,
+              "narHash": "sha256-nOesoDCiXcUftqbRBMz9tt4blI5PvljMWbm3kuCA+0s=",
+              "owner": "NixOS",
+              "repo": "nixpkgs",
+              "rev": "b77b3de8775677f84492abe84635f87b0e153f0f",
+              "type": "github"
+            },
+            "url": "github:NixOS/nixpkgs?rev=b77b3de8775677f84492abe84635f87b0e153f0f"
+          }
+        },
+        "id": "verus-0.2026.05.24.ecee80a-rust-1.95.0-x86_64-linux",
+        "lock_id": "sha256:87fbdee2d13f20a224aa8794e39cbe32d2545e360908c1bc9cdc1d6973f23c91",
+        "platform": {
+          "architecture": "x86_64",
+          "os": "linux",
+          "target": "x86_64-unknown-linux-gnu"
+        },
+        "primary": {
+          "name": "verus",
+          "version": "0.2026.05.24.ecee80a"
+        },
+        "rust": {
+          "commit": "59807616e",
+          "rustc": "1.95.0",
+          "toolchain": "1.95.0"
+        },
+        "selectable": true,
+        "source_identity": "sha256:1ae400675b4b141bc393a710f1af8986922f7698ac4add4157e6a2b6b2da4309",
+        "status": "tested",
+        "store": null,
+        "supporting_tools": [],
+        "verifier": "verus"
+      },
+      {
+        "compatibility": null,
+        "coverage": {
+          "intake": true,
+          "project_level": false,
+          "synthetic": true
+        },
+        "evidence": [
+          {
+            "id": "kani-synthetic-probe",
+            "path": "docs/verifier-compatibility-evidence/kani-0.67-probe/probe-result.json",
+            "result_class": "synthetic",
+            "sha256": "sha256:9ed3b72d34faab3cf300770a80f66d43ee9ec6f606120020a9bb36747a6f63a5"
+          },
+          {
+            "id": "kani-synthetic-log",
+            "path": "docs/verifier-compatibility-evidence/kani-0.67-probe/kani.log",
+            "result_class": "synthetic",
+            "sha256": "sha256:5fee6f72a87c03bfedecab4ac6a1c76c70053df3c61c6af2d2302a6bbce014a7"
+          },
+          {
+            "id": "kani-pilot-record",
+            "path": "docs/verifier-compatibility-evidence/LIGATURE-VERIFIER-COMPATIBILITY.md",
+            "result_class": "intake-only",
+            "sha256": "sha256:323806b989889d33f862ba10b364203595b14b7cbd92422638483331e96cbaca"
+          }
+        ],
+        "exclusions": [
+          "Bounded harness evidence only; not deductive coverage or production source proof.",
+          "No portable Nix lock is published for the cargo-kani/CBMC pair in this matrix revision.",
+          "The measurement was made with Ligature 1.4.3, not the publishing release."
+        ],
+        "flake_inputs": null,
+        "id": "kani-0.67.0-cbmc-6.8.0-rust-1.95.0-x86_64-linux",
+        "lock_id": null,
+        "platform": {
+          "architecture": "x86_64",
+          "os": "linux",
+          "target": "x86_64-unknown-linux-gnu"
+        },
+        "primary": {
+          "name": "cargo-kani",
+          "version": "0.67.0"
+        },
+        "rust": {
+          "commit": "59807616e",
+          "rustc": "1.95.0",
+          "toolchain": "1.95.0"
+        },
+        "selectable": true,
+        "source_identity": "sha256:d2c36c2dbace72bdad88ffc8c68ef87745dd719f9875e0f96d57b1aa49402e52",
+        "status": "tested",
+        "store": null,
+        "supporting_tools": [
+          {
+            "name": "CBMC",
+            "role": "model-checker",
+            "version": "6.8.0"
+          }
+        ],
+        "verifier": "kani"
+      },
+      {
+        "compatibility": {
+          "detail": "The declared shell resolves cargo-creusot 0.14.0-dev with creusot-std 0.14.0. The versions are not an exact tested pair and no proof evidence validates this shell.",
+          "state": "mismatch"
+        },
+        "coverage": {
+          "intake": false,
+          "project_level": false,
+          "synthetic": false
+        },
+        "evidence": [
+          {
+            "id": "creusot-declared-shell",
+            "path": "docs/verifier-compatibility-evidence/declared-shell-creusot.txt",
+            "result_class": "intake-only",
+            "sha256": "sha256:bce5e68fcac1b9f100ca0d61a822ede21d842a24f1114438e4d3e20cb27cef62"
+          },
+          {
+            "id": "creusot-pilot-mismatch",
+            "path": "docs/verifier-compatibility-evidence/LIGATURE-VERIFIER-COMPATIBILITY.md",
+            "result_class": "intake-only",
+            "sha256": "sha256:323806b989889d33f862ba10b364203595b14b7cbd92422638483331e96cbaca"
+          }
+        ],
+        "exclusions": [
+          "No synthetic or production proof coverage: the shell was observed to launch only.",
+          "Creates no Cargo file, flake, lock, descriptor selection or acceptance.",
+          "Does not resolve epic #2 or approve any 0.14 toolchain.",
+          "Not selectable: cargo-creusot 0.14.0-dev and creusot-std 0.14.0 are not an exact tested pair."
+        ],
+        "flake_inputs": null,
+        "id": "creusot-0.14.0-dev-declared-shell-x86_64-linux",
+        "lock_id": null,
+        "platform": {
+          "architecture": "x86_64",
+          "os": "linux",
+          "target": "x86_64-unknown-linux-gnu"
+        },
+        "primary": {
+          "name": "cargo-creusot",
+          "version": "0.14.0-dev"
+        },
+        "rust": {
+          "commit": "11177f223",
+          "rustc": "1.99.0-nightly",
+          "toolchain": "nightly-2026-08-03"
+        },
+        "selectable": false,
+        "source_identity": "sha256:c97222a3ef4685ca609b9a25e093a382fb94fcd300d88f8f5a7e2fb522056f1b",
+        "status": "unverified",
+        "store": null,
+        "supporting_tools": [
+          {
+            "name": "creusot-std",
+            "role": "verifier-std",
+            "version": "0.14.0"
+          },
+          {
+            "name": "Alt-Ergo",
+            "role": "solver",
+            "version": "2.6.2"
+          },
+          {
+            "name": "Z3",
+            "role": "solver",
+            "version": "5.1.0"
+          },
+          {
+            "name": "cvc4",
+            "role": "solver",
+            "version": "1.8"
+          },
+          {
+            "name": "cvc5",
+            "role": "solver",
+            "version": "1.4.1"
+          }
+        ],
+        "verifier": "creusot"
+      }
+    ],
+    "entry_count": 4,
+    "format": "ligature.verifier-compatibility-matrix.v1",
+    "matrix_version": "1.0",
+    "published_by": {
+      "product_name": "ligature",
+      "product_version": "1.5.1"
+    },
+    "sha256": "sha256:435d0f1dfc9e63ae7c554399f609d52093449ac82b98ec11e5e8e02bd82418e6",
+    "tested_entry_count": 3,
+    "updated_at": "2026-11-15"
+  },
+  "working_tree_diff_hash": null
+}

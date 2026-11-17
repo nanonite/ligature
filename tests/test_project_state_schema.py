@@ -36,6 +36,37 @@ class ProjectStateSchemaTest(unittest.TestCase):
         errors = list(self.validator.iter_errors(self._load("project-state.empty.example.json")))
         self.assertEqual(errors, [], [e.message for e in errors])
 
+    def test_empty_example_matches_current_schema_contract(self):
+        """#195: `test_empty_example_is_valid` was red before the #179 fixture
+        sweep for exactly two drift axes -- the example still declared
+        `schema_version: "1.0"` while the schema's `const` had moved to
+        "1.1", and it omitted the now-required `verification` block, so
+        whole-document validation reported `'verification' is a required
+        property` and `'1.1' was expected` regardless of the example's
+        contents. Pin those two axes by name so the next schema bump fails
+        with the drift named instead of only as a generic validation dump.
+        This does not replace `test_empty_example_is_valid`, which remains
+        the whole-document pass/fail assertion."""
+        doc = self._load("project-state.empty.example.json")
+        expected_version = self.schema["properties"]["schema_version"]["const"]
+        self.assertEqual(
+            doc.get("schema_version"),
+            expected_version,
+            "empty example schema_version must track the schema's own const",
+        )
+        missing = sorted(set(self.schema["required"]) - set(doc))
+        self.assertEqual(
+            missing,
+            [],
+            f"empty example is missing required top-level field(s): {missing}",
+        )
+        unknown = sorted(set(doc) - set(self.schema["properties"]))
+        self.assertEqual(
+            unknown,
+            [],
+            f"empty example declares unknown top-level field(s): {unknown}",
+        )
+
     def test_mixed_example_is_valid(self):
         errors = list(self.validator.iter_errors(self._load("project-state.mixed.example.json")))
         self.assertEqual(errors, [], [e.message for e in errors])

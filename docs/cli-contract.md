@@ -1649,6 +1649,45 @@ This is plan-driven generation only. Ligature has no automatic generator
 that infers a plan or package scope from promoted interactions and other I/O;
 `doctor` reports that separate capability gap explicitly.
 
+#### Mixed-verifier projects: one package per verifier (chainlink #209)
+
+A work package's cluster has one owning verifier, and every
+`provided_guarantees` entry must be producible by that verifier. A
+mixed-verifier project (a descriptor with per-crate `toolchains[]`, or a
+Creusot crate called from Verus) therefore uses **one package per
+cluster/verifier**, not one package containing obligations from several
+verifier systems. Each package keeps its own `--toolchain`/`--target`
+provenance, and each cluster's closure profile keeps its own
+`conditions.owning_verifier`.
+
+The cross-package edge is expressed with the ordinary manifest fields:
+
+- the provider's obligation id goes in the consumer plan's
+  `required_obligations` (for example a Verus package requiring
+  `Codomain.C001`, provided by a Creusot package);
+- the provider package may also be named in `depends_on`. A dependency that
+  belongs to another cluster's approved closure profile is a declared
+  cross-cluster dependency; an id no profile names is still refused as
+  dangling.
+
+The required guarantee's `required_assurance` comes from the reviewed
+interaction reliance, or from the provider concept's reviewed constraint.
+It is checked against the **provider's** cluster policy, not the requiring
+package's owning verifier: requiring Creusot deductive evidence from a
+Creusot-owned provider is correct even when the consumer package is
+Verus-owned. A package still cannot *provide* another verifier's obligation.
+
+G14 evaluates the edge across packages: it follows `required_guarantees` to
+the providing package, loads that package's `report.emit` record, and applies
+`satisfies()` to the required assurance. Because that transitive closure then
+contains evidence from both verifier systems, CG1's
+`single_verifier_system` condition is **false** -- it is an evaluated gate
+result, not an unchecked trust assumption. The cluster must declare its
+actual degraded state (a reviewed degradation record with the accepted
+ceiling, typically `harness-tested`, and a `partial` closure kind where
+appropriate) rather than claiming full deductive closure. This split is the
+intended model; Ligature does not accept a single mixed-verifier package.
+
 #### Packaged workflow and common refusals (chainlink #124)
 
 Run generation from the initialized project root after its descriptor,

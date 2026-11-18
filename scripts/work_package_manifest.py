@@ -41,8 +41,9 @@ manifest field                  authoritative source                            
 ``schema``                      constant ``work-package-manifest/1.0``                      fixed
 ``work_package``                ``WorkPackageRequest.work_package``                        plan wins; pattern-validated
 ``issue``                       ``WorkPackageRequest.issue``                               plan wins; ``chainlink:N``
-``depends_on``                  ``WorkPackageRequest`` refs                                 plan selects; must resolve inside profile
-                                                                                            membership when present; otherwise G14 checks it
+``depends_on``                  ``WorkPackageRequest`` refs                                 plan selects; must resolve inside this cluster's profile
+                                                                                            or another cluster's approved profile (cross-package edge,
+                                                                                            chainlink #209); otherwise G14 checks it
 ``coupling_notes``              ``WorkPackageRequest.coupling_notes``                      plan wins (advisory, never a merge order)
 ``scheduling_rule``             ``WorkPackageRequest`` or the default                      plan overrides the documented default
 ``functions``                   ``WorkPackageRequest.functions``                           plan selects; must name a declared crate
@@ -75,7 +76,8 @@ Rejections
   obligations, bridges, gates, write-set patterns, gate runners, features,
   assumption references);
 * a dangling dependency (when a closure profile is present, a ``depends_on``
-  entry that resolves to no package in that profile) or a self-dependency;
+  entry that resolves to no package in this cluster's profile or in another
+  cluster's approved profile) or a self-dependency;
 * a self-referential guarantee (an obligation this package both provides and
   requires);
 * a stale integrity hash (a declared gate hash that no longer matches the file
@@ -86,7 +88,11 @@ Rejections
   profile is optional during manifest-first bootstrap; G14 checks the
   completed profile against generated manifests after both sides exist;
 * a contradiction between the resolved assurance and the descriptor's declared
-  verifier policy for the cluster.
+  verifier policy for the cluster. A *provided* guarantee is checked against
+  this package's owner; a *required* guarantee is checked against its provider
+  concept's cluster policy, so a cross-package guarantee may use another
+  verifier (chainlink #209) while a package still cannot provide a foreign
+  verifier's obligation.
 """
 
 from __future__ import annotations
@@ -108,6 +114,7 @@ from verifier_policy import (
     VERIFIER_EVIDENCE_KIND,
     assurance_policy_mismatches,
     policy_for_cluster,
+    verifier_is_declared,
 )
 
 # ---------------------------------------------------------------------------
@@ -284,7 +291,8 @@ FIELD_SOURCES: tuple[FieldSource, ...] = (
     FieldSource(
         "definition_of_done.required_guarantees",
         "interaction reliances + plan",
-        "content from the reliance; plan selects",
+        "content from the reliance; plan selects; checked against the provider concept's "
+        "cluster policy, which may be a different verifier (chainlink #209)",
     ),
     FieldSource(
         "definition_of_done.trusted_assumptions",
@@ -791,14 +799,67 @@ def _reliance_for_obligation(
     return found[0]
 
 
+def _concept_spec_for_obligation(
+    state: AuthoritativeState, obligation_id: str
+) -> Mapping[str, Any] | None:
+    """The reviewed concept spec that owns ``obligation_id``'s concept.
+
+    A required guarantee's provider is identified by the obligation's own
+    concept, so this is also the lookup that distinguishes a cross-package
+    guarantee from a same-cluster one. Older interaction-only authoritative
+    states carry no concept specs; ``None`` then means "no provider policy is
+    declared here", never an invented owner."""
+    concept = obligation_id.rpartition(".")[0]
+    matches = [
+        entry
+        for entry in state.concept_specs
+        if isinstance(entry, Mapping) and entry.get("concept") == concept
+    ]
+    if len(matches) > 1:
+        raise ManifestDerivationError(
+            "ambiguous-source",
+            f"{len(matches)} reviewed concept specs declare concept {concept!r}; the "
+            "obligation's verifier source must be unique",
+        )
+    return matches[0] if matches else None
+
+
+def _provider_policy_for_obligation(
+    state: AuthoritativeState, obligation_id: str, fallback: Mapping[str, Any]
+) -> tuple[dict[str, Any], Mapping[str, Any] | None]:
+    """The verifier policy that owns a *required* obligation's provider.
+
+    A required guarantee is intended to be satisfied by another work package.
+    Mixed-verifier projects use one package per cluster/verifier, so that
+    provider deliberately may not share this package's owning verifier. The
+    provider's cluster is read from the obligation's own reviewed concept
+    spec, and ``policy_for_cluster`` resolves that cluster's declared owner --
+    the same descriptor source every other policy decision uses.
+
+    When the state carries no concept spec (the legacy interaction-only
+    path), there is no declared provider cluster to read. The requiring
+    package's policy is then returned unchanged rather than guessing a
+    foreign owner; this preserves the earlier behaviour exactly and keeps the
+    relaxation tied to an authoritative declaration."""
+    spec = _concept_spec_for_obligation(state, obligation_id)
+    if spec is None:
+        return dict(fallback), None
+    cluster = spec.get("cluster")
+    if not isinstance(cluster, str) or not cluster:
+        return dict(fallback), spec
+    return policy_for_cluster(state.descriptor, cluster), spec
+
+
 def _resolve_obligation_assurance(
     state: AuthoritativeState,
     request: WorkPackageRequest,
     obligation_id: str,
     policy: Mapping[str, Any],
-) -> dict[str, Any]:
+    *,
+    for_required: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """The authoritative ``required_assurance`` for one provided/required
-    obligation.
+    obligation and the verifier policy it must be checked against.
 
     Precedence is unchanged for an obligation some interaction declares: the
     interaction's reviewed ``reliances[]`` wins. An obligation **no**
@@ -807,13 +868,29 @@ def _resolve_obligation_assurance(
     the descriptor's verifier policy -- never by inventing a caller edge or
     borrowing an unrelated reliance's assurance. If no concept spec resolves
     the obligation either, the derivation still refuses rather than invent
-    one."""
+    one.
+
+    A *provided* guarantee is checked against this package's cluster policy:
+    this package must be able to produce the evidence. A *required* guarantee
+    is provided by another package, so it is checked against that provider's
+    declared policy instead (chainlink #209). This is what lets a Verus
+    package declare a required guarantee that a Creusot package provides,
+    while a package that tries to *provide* a foreign verifier's obligation
+    is still refused."""
+    source_policy: Mapping[str, Any] = policy
+    if for_required:
+        source_policy, _ = _provider_policy_for_obligation(
+            state, obligation_id, policy
+        )
     found = _matching_reliances(state, obligation_id)
     if found:
         _, reliance = _reliance_for_obligation(state, obligation_id)
-        return dict(reliance["required_assurance"])
-    return _standalone_obligation_assurance(
-        state, request, obligation_id, policy
+        return dict(reliance["required_assurance"]), dict(source_policy)
+    return (
+        _standalone_obligation_assurance(
+            state, request, obligation_id, source_policy, for_required=for_required
+        ),
+        dict(source_policy),
     )
 
 
@@ -822,6 +899,8 @@ def _standalone_obligation_assurance(
     request: WorkPackageRequest,
     obligation_id: str,
     policy: Mapping[str, Any],
+    *,
+    for_required: bool = False,
 ) -> dict[str, Any]:
     """Derive assurance for an obligation with no interaction reliance.
 
@@ -839,9 +918,11 @@ def _standalone_obligation_assurance(
       requirement admits is the one that verifier actually emits;
     * no assumption is allowed, matching every reviewed reliance and
       `satisfies()`'s own fail-closed reading of an absent allow-list;
-    * when the constraint names methods (`applies_to`), at least one must be
-      a method this package owns, so the obligation's proof mapping stays
-      traceable to the plan's own functions.
+    * when the constraint names methods (`applies_to`) and this package is
+      the provider, at least one must be a method this package owns, so the
+      obligation's proof mapping stays traceable to the plan's own functions.
+      A *required* guarantee's constraint belongs to the providing package, so
+      its `applies_to` is checked by that package's derivation instead.
     """
     concept, separator, constraint_id = obligation_id.rpartition(".")
     if not separator or not concept or not constraint_id:
@@ -870,12 +951,27 @@ def _standalone_obligation_assurance(
         )
     spec = matches[0]
     declared_verifier = spec.get("verifier")
-    if declared_verifier and declared_verifier != policy.get("owning"):
+    if declared_verifier and for_required:
+        # The provider's own cluster policy governs. A supporting verifier is
+        # an explicitly declared producer for that cluster, so it is accepted
+        # here even though it could never replace the owner of a *provided*
+        # guarantee.
+        if not verifier_is_declared(declared_verifier, policy):
+            raise ManifestDerivationError(
+                "contradictory-source",
+                f"required obligation {obligation_id!r} resolves to concept spec {concept!r} "
+                f"whose verifier is {declared_verifier!r}, but the provider's descriptor "
+                f"policy declares owning verifier {policy.get('owning')!r} and supporting "
+                f"verifiers {sorted(set(policy.get('supporting') or ()))!r}",
+            )
+    elif declared_verifier and declared_verifier != policy.get("owning"):
         raise ManifestDerivationError(
             "contradictory-source",
             f"standalone obligation {obligation_id!r} resolves to concept spec {concept!r} "
             f"whose verifier is {declared_verifier!r}, but the descriptor assigns cluster "
-            f"{request.cluster!r} owning verifier {policy.get('owning')!r}",
+            f"{request.cluster!r} owning verifier {policy.get('owning')!r}; a work package "
+            "provides only its own cluster's verifier -- if this obligation is supplied by "
+            "another package, declare it in required_obligations instead (chainlink #209)",
         )
     constraint = next(
         (
@@ -901,7 +997,12 @@ def _standalone_obligation_assurance(
             "without a `review` block; only a human-approved concept spec is an authoritative "
             "assurance source",
         )
-    _check_standalone_method_mapping(request, obligation_id, constraint)
+    # A required guarantee's constraint belongs to the providing package, so
+    # its `applies_to` names that package's functions. The provider's own
+    # manifest derivation checks the mapping; the requiring plan cannot and
+    # must not be made to own the provider's methods.
+    if not for_required:
+        _check_standalone_method_mapping(request, obligation_id, constraint)
     kind = constraint.get("kind", "invariant")
     if kind == "precondition":
         raise ManifestDerivationError(
@@ -1141,8 +1242,20 @@ def _verifier_policy_for_cluster(
 
 
 def _check_assurance_against_policy(
-    assurance: Mapping[str, Any], policy: Mapping[str, Any], subject: str
+    assurance: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    subject: str,
+    *,
+    require_owner: bool = True,
 ) -> None:
+    """Refuse assurance the policy cannot produce.
+
+    ``require_owner`` is true for a guarantee this package provides: it must
+    accept its own cluster owner's evidence. A required guarantee is produced
+    by another package, so it must be *producible* in the provider's cluster
+    but need not name that cluster's owner kind -- a provider concept declared
+    as a supporting verifier is a legitimate source, and the requiring
+    package's own owner is irrelevant to it (chainlink #209)."""
     unexpected, owner_missing = assurance_policy_mismatches(assurance, policy)
     if unexpected:
         raise ManifestDerivationError(
@@ -1153,7 +1266,7 @@ def _check_assurance_against_policy(
             "can produce",
         )
     owning_kind = VERIFIER_EVIDENCE_KIND.get(str(policy["owning"]))
-    if owner_missing:
+    if owner_missing and require_owner:
         raise ManifestDerivationError(
             "contradictory-source",
             f"{subject} does not accept the evidence kind of the cluster's declared owning "
@@ -1196,9 +1309,41 @@ def _derive_functions(
     return sorted(functions)
 
 
+def _cross_cluster_packages(
+    state: AuthoritativeState, cluster: str
+) -> frozenset[str]:
+    """Every work package another cluster's approved profile names.
+
+    Used only to distinguish a declared cross-cluster dependency from a
+    dangling id. The requiring package remains a member of its own cluster
+    profile; the provider stays a member of its own, exactly as G14's
+    membership check requires."""
+    packages: set[str] = set()
+    for profile in state.closure_profiles:
+        if not isinstance(profile, Mapping):
+            continue
+        if profile.get("cluster") == cluster:
+            continue
+        for work_package in profile.get("work_packages") or ():
+            if isinstance(work_package, str) and work_package:
+                packages.add(work_package)
+    return frozenset(packages)
+
+
 def _derive_dependencies(
-    request: WorkPackageRequest, closure_profile: Mapping[str, Any] | None
+    request: WorkPackageRequest,
+    closure_profile: Mapping[str, Any] | None,
+    cross_cluster_packages: frozenset[str] = frozenset(),
 ) -> list[str]:
+    """Validate the plan's work-package dependency edges.
+
+    A dependency normally belongs to this cluster's own closure profile. A
+    *cross-cluster* dependency is first-class too (chainlink #209): mixed
+    verifier projects use one package per cluster, and the requiring
+    package's closure reaches the provider through its required guarantee.
+    Such a dependency is legitimate when another cluster's approved profile
+    names it; an id no profile names is still a dangling dependency, never
+    silently accepted."""
     _reject_duplicates(request.depends_on, "dependency")
     known = set(closure_profile.get("work_packages") or ()) if closure_profile else None
     for dependency in request.depends_on:
@@ -1214,10 +1359,13 @@ def _derive_dependencies(
                 f"work package {request.work_package!r} depends on itself",
             )
         if known is not None and dependency not in known:
+            if dependency in cross_cluster_packages:
+                continue
             raise ManifestDerivationError(
                 "dangling-dependency",
                 f"dependency {dependency!r} resolves to no work package in cluster "
-                f"{closure_profile.get('cluster')!r} (declared: {sorted(known)})",
+                f"{closure_profile.get('cluster')!r} (declared: {sorted(known)}) and to no "
+                "work package in another cluster's closure profile",
             )
     return sorted(request.depends_on)
 
@@ -1708,9 +1856,11 @@ def _derive_provided_guarantees(
                 "'creusot' or 'verus' as the verifier identity, the exact Kani function name "
                 "prefixed with 'kani_', or a descriptor-declared external-<name> evidence kind",
             )
-        assurance = _resolve_obligation_assurance(state, request, obligation_id, policy)
+        assurance, assurance_policy = _resolve_obligation_assurance(
+            state, request, obligation_id, policy
+        )
         _check_assurance_against_policy(
-            assurance, policy, f"provided guarantee {obligation_id!r}"
+            assurance, assurance_policy, f"provided guarantee {obligation_id!r}"
         )
         if is_external_evidence_kind(harness) and harness not in (
             assurance.get("accepted_evidence_kinds") or ()
@@ -1743,9 +1893,14 @@ def _derive_required_guarantees(
             "invalid-plan",
             f"required obligation {obligation_id!r} is not <Concept>.<id>",
         )
-        assurance = _resolve_obligation_assurance(state, request, obligation_id, policy)
+        assurance, assurance_policy = _resolve_obligation_assurance(
+            state, request, obligation_id, policy, for_required=True
+        )
         _check_assurance_against_policy(
-            assurance, policy, f"required guarantee {obligation_id!r}"
+            assurance,
+            assurance_policy,
+            f"required guarantee {obligation_id!r}",
+            require_owner=False,
         )
         required.append(
             {
@@ -1966,7 +2121,9 @@ def derive_manifest(
         "schema": SCHEMA_ID,
         "work_package": request.work_package,
         "issue": request.issue,
-        "depends_on": _derive_dependencies(request, closure_profile),
+        "depends_on": _derive_dependencies(
+            request, closure_profile, _cross_cluster_packages(state, request.cluster)
+        ),
         "coupling_notes": sorted(set(request.coupling_notes)),
         "scheduling_rule": request.scheduling_rule or DEFAULT_SCHEDULING_RULE,
         "functions": _derive_functions(request, state.descriptor),

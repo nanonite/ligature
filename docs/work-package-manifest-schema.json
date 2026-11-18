@@ -23,6 +23,7 @@
     },
     "depends_on": {
       "type": "array",
+      "description": "Work packages this one depends on. An entry may belong to another cluster's approved closure profile: mixed-verifier projects use one package per cluster/verifier and express the cross-package guarantee in required_guarantees (chainlink #209). G14 follows required_guarantees to the provider regardless of this scheduling edge.",
       "items": { "type": "string", "pattern": "^WP-[A-Z][A-Z0-9-]*$" }
     },
     "coupling_notes": {
@@ -155,7 +156,7 @@
         },
         "required_guarantees": {
           "type": "array",
-          "description": "Assumed during this package's own check; enforced for real by G14 at 8C, not here (plan.md §8.5).",
+          "description": "Assumed during this package's own check; enforced for real by G14 at 8C, not here (plan.md §8.5). A required guarantee is satisfied by another work package and may be owned by a different verifier: mixed-verifier projects use one package per cluster/verifier, and the required assurance is checked against the provider concept's cluster policy rather than this package's owner (chainlink #209). G14 follows the obligation to the providing package and evaluates CG1 across the two packages.",
           "items": {
             "type": "object",
             "required": ["obligation_id", "assume_during_check", "required_assurance"],

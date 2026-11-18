@@ -450,6 +450,173 @@ def test_standalone_obligation_refuses_method_mismatch_and_precondition():
     assert error.value.code == "unsupported-source"
 
 
+def _cross_verifier_state(**updates):
+    """A Verus-owned package that requires a Creusot-owned guarantee.
+
+    The two packages are members of their own clusters/profiles, exactly the
+    per-verifier split a mixed project uses; only the dependency edge crosses
+    the cluster boundary."""
+    state = make_state(
+        concept_specs=(
+            _standalone_concept_spec(
+                concept="Codomain",
+                cluster="creusot-core",
+                verifier="creusot",
+                constraints=[
+                    {
+                        "english": "the codomain mapping preserves the field.",
+                        "logic": "result == input",
+                        "kind": "postcondition",
+                        "applies_to": ["compute"],
+                        "id": "C001",
+                    }
+                ],
+            ),
+        ),
+    )
+    descriptor = copy.deepcopy(state.descriptor)
+    descriptor["verifier_policy"] = {
+        "default": "creusot",
+        "clusters": {"verus-core": "verus", "creusot-core": "creusot"},
+    }
+    values = {
+        "descriptor": descriptor,
+        "closure_profiles": (
+            {
+                "cluster": "verus-core",
+                "work_packages": ["WP-VERUS-001"],
+                "conditions": {"owning_verifier": "verus"},
+            },
+            {
+                "cluster": "creusot-core",
+                "work_packages": ["WP-CREUSOT-001"],
+                "conditions": {"owning_verifier": "creusot"},
+            },
+        ),
+        "promotion_receipts": (
+            {
+                "cluster": "verus-core",
+                "promotion_id": "PROM-VERUS-001",
+                "artifact_manifest": [
+                    {"path": "docs/reliance-policy.md", "hash": digest(b"policy")}
+                ],
+            },
+        ),
+        "interactions": (),
+        "bridge_specs": (),
+    }
+    values.update(updates)
+    return AuthoritativeState(**{**state.__dict__, **values})
+
+
+def _cross_verifier_request(**updates):
+    values = {
+        "work_package": "WP-VERUS-001",
+        "cluster": "verus-core",
+        "provided_obligations": (),
+        "required_obligations": ("Codomain.C001",),
+        "bridges": (),
+        "harnesses": {},
+        "depends_on": ("WP-CREUSOT-001",),
+    }
+    values.update(updates)
+    return make_request(**values)
+
+
+def test_required_guarantee_uses_the_providers_verifier_policy():
+    """chainlink #209: a Verus package may require a Creusot-provided
+    guarantee. The required assurance is read against the provider's
+    cluster policy, not the requiring package's owner, and the cross-cluster
+    dependency is a declared package in the other cluster's profile."""
+    manifest = derive_manifest(_cross_verifier_request(), _cross_verifier_state())
+
+    required = manifest["definition_of_done"]["required_guarantees"]
+    assert [entry["obligation_id"] for entry in required] == ["Codomain.C001"]
+    assert required[0]["required_assurance"]["accepted_evidence_kinds"] == [
+        "creusot-deductive-check"
+    ]
+    assert manifest["depends_on"] == ["WP-CREUSOT-001"]
+
+
+def test_required_guarantee_from_an_interaction_may_cross_verifiers():
+    """The same edge declared by a reviewed interaction reliance is accepted
+    when the callee concept's own cluster declares the producing verifier."""
+    provider = _standalone_concept_spec(
+        concept="TaskQueue",
+        cluster="creusot-core",
+        verifier="creusot",
+    )
+    interaction = {
+        "interaction_id": "I-VERUS-CREUSOT-001",
+        "callee": {"concept": "TaskQueue", "method": "pop_ready"},
+        "realization": {
+            "config_scope": {
+                "target": "x86_64-unknown-linux-gnu",
+                "features": ["default"],
+            }
+        },
+        "reliances": [
+            {
+                "obligation_id": "TaskQueue.C003",
+                "required_assurance": {
+                    "required_claims": ["postcondition-holds"],
+                    "accepted_evidence_kinds": ["creusot-deductive-check"],
+                },
+            }
+        ],
+    }
+    state = _cross_verifier_state(
+        concept_specs=(provider,),
+        interactions=(interaction,),
+    )
+
+    manifest = derive_manifest(
+        _cross_verifier_request(
+            required_obligations=("TaskQueue.C003",),
+        ),
+        state,
+    )
+
+    required = manifest["definition_of_done"]["required_guarantees"][0]
+    assert required["required_assurance"]["accepted_evidence_kinds"] == [
+        "creusot-deductive-check"
+    ]
+
+
+def test_providing_a_foreign_verifiers_obligation_is_still_refused():
+    """The per-verifier package model is deliberate: a required guarantee may
+    cross clusters, but a package cannot *provide* an obligation its own
+    cluster/verifier does not own (chainlink #209)."""
+    with pytest.raises(ManifestDerivationError, match="owning verifier") as error:
+        derive_manifest(
+            _cross_verifier_request(
+                provided_obligations=("Codomain.C001",),
+                required_obligations=(),
+                harnesses={"Codomain.C001": "creusot"},
+                depends_on=(),
+            ),
+            _cross_verifier_state(
+                concept_specs=(
+                    _standalone_concept_spec(
+                        concept="Codomain",
+                        cluster="creusot-core",
+                        verifier="creusot",
+                    ),
+                )
+            ),
+        )
+    assert error.value.code in {"missing-source", "contradictory-source"}
+
+
+def test_cross_cluster_dependency_must_resolve_in_some_profile():
+    with pytest.raises(ManifestDerivationError, match="another cluster") as error:
+        derive_manifest(
+            _cross_verifier_request(depends_on=("WP-NOWHERE-001",)),
+            _cross_verifier_state(),
+        )
+    assert error.value.code == "dangling-dependency"
+
+
 def test_provenance_configuration_must_match_selected_interactions():
     with pytest.raises(
         ManifestDerivationError, match="do not match selected interaction"

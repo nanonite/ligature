@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- #208: `status` and `check` no longer report a project with crates, toolchain selections, verifier output, C_static/bridge-check data or a promotion receipt but no work package as a finished workspace. `check` emits a medium `stage-7` finding beginning `Stage 7 not started: no ci/manifest/WP-*.json`, recommends the `draft plan -> authorize-write -> generate-work-package` sequence as a human decision, and reports gates whose inputs cannot exist yet as `skipped`/`not yet reached` instead of `not-applicable`. `status` prints the same stage text as a `pipeline stage:` line and carries it as an open finding. The exit code is unchanged, and a plain initialized workspace with no such evidence keeps the existing `not-applicable` gate outcomes.
+
 ## [1.5.1] - 2026-11-17
 
 ### Fixed

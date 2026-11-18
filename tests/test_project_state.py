@@ -925,7 +925,13 @@ class NextActionSelectionTest(unittest.TestCase):
     analyses so each branch is isolated from gate discovery."""
 
     def _analysis(
-        self, gate_runs=(), findings=(), descriptor=True, descriptor_state=None, descriptor_diagnostics=()
+        self,
+        gate_runs=(),
+        findings=(),
+        descriptor=True,
+        descriptor_state=None,
+        descriptor_diagnostics=(),
+        work_package_stage=None,
     ) -> Analysis:
         return Analysis(
             workspace=Path("/tmp"),
@@ -942,6 +948,7 @@ class NextActionSelectionTest(unittest.TestCase):
             write_set={},
             observations={},
             descriptor_diagnostics=list(descriptor_diagnostics),
+            work_package_stage=work_package_stage,
         )
 
     def _finding(self, gate_id="r1-g16", reason="definition of done", authority="mechanized-gate"):
@@ -1027,6 +1034,35 @@ class NextActionSelectionTest(unittest.TestCase):
             )
         )
         self.assertEqual(action["action_id"], "refresh-c-static")
+
+    def test_stage_7_outranks_a_stage_8a_refresh(self):
+        """chainlink #208: a missing work package is upstream of the
+        extract-c-static/check-bridges refreshes, so check must not tell a
+        worker to refresh a later stage while Stage 7 has not started. The
+        step is a human decision -- the plan is authored and
+        `authorize-write` is a human checkpoint -- so no action_id is
+        offered."""
+        action = _next_action(
+            self._analysis(
+                gate_runs=[{"gate_id": "r1-g16", "outcome": "blocked", "reason": "no C_static reports"}],
+                work_package_stage={
+                    "stage": "7",
+                    "state": "not-started",
+                    "missing": "ci/manifest/WP-*.json",
+                    "evidence": ["verifier output files exist"],
+                    "detail": (
+                        "Stage 7 not started: no ci/manifest/WP-*.json; next: "
+                        "draft plan -> authorize-write -> generate-work-package"
+                    ),
+                },
+            )
+        )
+        self.assertEqual(action["kind"], "human-decision")
+        self.assertIsNone(action["command"])
+        self.assertNotIn("action_id", action)
+        self.assertIn("Stage 7 not started", action["description"])
+        self.assertIn("authorize-write", action["description"])
+        self.assertIn("generate-work-package", action["description"])
 
 
 class ConsolidatedCheckDocumentTest(WorkspaceFixture):
@@ -1348,6 +1384,118 @@ class ConsolidatedCheckDocumentTest(WorkspaceFixture):
         self.assertIn("refresh-c-static", out)
         self.assertNotIn("gate g14:", out)
         self.assertNotIn("consolidated check", out)
+
+
+class WorkPackageStageReportingTest(WorkspaceFixture):
+    """chainlink #208: crates, toolchain selections and real verifier output
+    without a work-package manifest must not read as a finished project.
+
+    The pilot workspace had two declared crates, Creusot/Verus toolchain
+    entries and 65 proof JSON files under `<crate>/verif/`, but no closure
+    profile, specs, promotion receipt or `ci/manifest/WP-*.json`. Both
+    `status` and `check` used to exit as clean; now Stage 7 is named and the
+    gates whose inputs cannot exist yet are `skipped` ("not yet reached"),
+    not `not-applicable`."""
+
+    def pilot_workspace(self):
+        descriptor = self.init_workspace(crates=("rust/icl-creusot", "rust/icl-verus"))
+        descriptor["toolchains"] = [
+            {
+                "project_root": "rust/icl-creusot",
+                "verifier": "creusot",
+                "matrix_entry": "creusot-0.12.0-dev-nightly-2026-04-21-x86_64-linux",
+            },
+            {
+                "project_root": "rust/icl-verus",
+                "verifier": "verus",
+                "matrix_entry": "verus-0.2026.05.24.ecee80a-rust-1.95.0-x86_64-linux",
+            },
+        ]
+        # The pilot's proof files are real verifier output, not pipeline
+        # artifacts; a workspace whose write set does not account for them
+        # would (correctly) report an out-of-set violation instead. Cover
+        # them so these tests measure Stage 7 reporting, not write-set policy.
+        descriptor["write_set"]["allowed_roots"] = [
+            "rust/*/src/",
+            "rust/*/tests/",
+            "rust/*/verif/",
+        ]
+        self.descriptor_path.write_text(json.dumps(descriptor))
+        self.write(
+            "rust/icl-creusot/verif/icl_creusot_rlib/lib/proof.json",
+            {"proved": True},
+        )
+        self.write(
+            "rust/icl-creusot/verif/icl_creusot_rlib/lib/proof2.json",
+            {"proved": True},
+        )
+        return descriptor
+
+    def test_status_names_stage_7_and_the_sanctioned_sequence(self):
+        self.pilot_workspace()
+        code, doc = self.status()
+        self.assertEqual(code, 0)
+        self.assertValid(PROJECT_STATE_SCHEMA, doc, "project-state")
+        stage = next(f for f in doc["open_findings"] if f["gate_id"] == "stage-7")
+        self.assertEqual(stage["severity"], "medium")
+        for token in (
+            "Stage 7 not started",
+            "no ci/manifest/WP-*.json",
+            "draft plan",
+            "authorize-write",
+            "generate-work-package",
+        ):
+            self.assertIn(token, stage["summary"])
+        self.assertIn("verifier output files exist under rust/icl-creusot/verif", stage["summary"])
+
+        code, text = self.run_cli("status")
+        self.assertEqual(code, 0)
+        self.assertIn("pipeline stage: Stage 7 not started", text)
+
+    def test_check_reports_stage_7_and_not_yet_reached_gates(self):
+        self.pilot_workspace()
+        code, doc = self.check()
+        # A warning, not a blocked stage: the finding is visible but the
+        # documented exit code is unchanged.
+        self.assertEqual(code, 0)
+        self.assertValid(CONSOLIDATED_CHECK_SCHEMA, doc, "consolidated-check")
+        stage = next(f for f in doc["findings"] if f["gate_id"] == "stage-7")
+        self.assertEqual(stage["severity"], "medium")
+        self.assertEqual(stage["authority"], "mechanized-gate")
+        self.assertIn("Stage 7 not started", stage["reason"])
+
+        outcomes = {run["gate_id"]: run for run in doc["gates"]}
+        for gate_id in ("g9", "g14", "g18", "g19", "g20"):
+            with self.subTest(gate_id=gate_id):
+                self.assertEqual(outcomes[gate_id]["outcome"], "skipped")
+                self.assertTrue(outcomes[gate_id]["reason"].startswith("not yet reached:"))
+
+        action = doc["next_action"]
+        self.assertEqual(action["kind"], "human-decision")
+        self.assertIsNone(action["command"])
+        self.assertNotIn("action_id", action)
+        self.assertIn("Stage 7 not started", action["description"])
+        self.assertIn("authorize-write", action["description"])
+        self.assertIn("generate-work-package", action["description"])
+
+    def test_work_package_manifest_ends_the_stage_7_warning(self):
+        self.pilot_workspace()
+        self.write("ci/manifest/WP-ICL-001.json", {"work_package": "WP-ICL-001"})
+        _code, doc = self.check()
+        self.assertFalse([f for f in doc["findings"] if f["gate_id"] == "stage-7"])
+
+    def test_gates_are_not_applicable_only_when_stage_7_is_not_pending(self):
+        """The other half of the distinction: a plain initialized workspace
+        with no verification evidence has genuinely not reached those gates
+        for lack of input, and they remain `not-applicable` -- the #208
+        change must not re-label every empty project as a skipped Stage 7."""
+        self.init_workspace()
+        _code, doc = self.check()
+        self.assertEqual(doc["findings"], [])
+        outcomes = {run["gate_id"]: run for run in doc["gates"]}
+        for gate_id in ("g9", "g14", "g18", "g19", "g20"):
+            with self.subTest(gate_id=gate_id):
+                self.assertEqual(outcomes[gate_id]["outcome"], "not-applicable")
 
 
 class GateIntegrityCheckTest(WorkspaceFixture):

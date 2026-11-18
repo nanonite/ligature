@@ -976,6 +976,28 @@ expected to add more as `check`'s own recommendation logic grows (e.g.
 for further `validate`/`gate`/`approve` follow-ups), each one landing
 here and in the schema together, never one without the other.
 
+**Not-applicable is not not-yet-reached (chainlink #208).** When a valid
+descriptor declares toolchain selections, verifier output files exist under a
+crate root (for example Creusot's `<crate>/verif/**/proof.json`),
+C_static/bridge-check data exists, or a promotion receipt exists — but no
+work-package manifest is present under `ci/manifest/` — `check` must not
+report the downstream gates as `not-applicable`. It reports them as
+`skipped` with a reason beginning `not yet reached:` and emits a
+medium-severity `stage-7` finding whose reason begins exactly
+
+```text
+Stage 7 not started: no ci/manifest/WP-*.json
+```
+
+and carries the sanctioned next sequence (`draft plan` → `authorize-write` →
+`generate-work-package`). The finding is a warning: it makes the stage
+visible without changing the documented exit code. `next_action` is a
+`human-decision` naming that sequence and offers no `action_id`/`command`,
+because the plan is authored rather than generated and `authorize-write` is
+a human checkpoint. A plain initialized workspace with no verification
+evidence keeps the existing `not-applicable` outcomes; the distinction is
+what prevents an unstarted Stage 7 from reading as a finished project.
+
 For a review-required artifact, `check next` also checks approval provenance
 before relying on its `review` field. A matching `ci/results/review_log.jsonl`
 entry establishes that the sanctioned approval path ran; it does not prove a
@@ -1778,6 +1800,22 @@ Two halves, both in the command that already owns the document:
   they had, and the outstanding condition is the finding. A *missing*
   document remains `policy-drift`'s own signal, so one defect never
   produces two findings.
+
+**Implemented by #208.** `status` names a not-yet-started Stage 7 in the
+human surface and the JSON document. When the workspace has crates,
+declared toolchains, verifier output files, C_static/bridge-check data or a
+promotion receipt but no `ci/manifest/WP-*.json`, the text output gains a
+line beginning
+
+```text
+pipeline stage: Stage 7 not started: no ci/manifest/WP-*.json;
+```
+
+and `status --json` carries the same text as the summary of a medium
+`stage-7` open finding. The line states the evidence that puts the project
+past a blank workspace and the sanctioned next sequence. It changes no exit
+code and does not claim the work package was attempted; a plain initialized
+workspace with no such evidence prints no stage line.
 
 ### Kani cost and recorded freshness (#166)
 

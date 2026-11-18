@@ -770,7 +770,7 @@
       "path": "scripts/project_state.py",
       "role": "helper",
       "disposition": "runtime-required",
-      "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`; reports missing descriptor-declared crate roots as blocking prerequisites and resolves them before recommending C_static extraction. Passes the optional interaction_policy.require_complete_reconciliation into R1/G16 so check and the standalone gate honor the same explicit policy (#160)."
+      "summary": "chainlink #56: read-only project-state + consolidated-check engine behind `ligature status`/`ligature check`; reports missing descriptor-declared crate roots as blocking prerequisites and resolves them before recommending C_static extraction. Passes the optional interaction_policy.require_complete_reconciliation into R1/G16 so check and the standalone gate honor the same explicit policy (#160). chainlink #208: names a not-yet-started Stage 7 when toolchain selections, verifier output, C_static/bridge-check data or a promotion receipt exists without a work-package manifest, emits a medium stage-7 finding, and reports downstream gates as skipped (`not yet reached`) instead of not-applicable."
     },
     {
       "path": "scripts/write_set.py",

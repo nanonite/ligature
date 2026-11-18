@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -145,6 +146,45 @@ _SEVERITY_MAP = {
     "low": "low",
     "info": "info",
 }
+
+# chainlink #208: a project that has crates, toolchain selections and/or real
+# verifier outputs but no work-package manifest has not reached Stage 7 -- it
+# has skipped it. That is a different fact from "this gate does not apply",
+# and the whole point of the finding below is that `check` must never let the
+# two collapse into a clean, exit-0, no-findings report.
+STAGE_7_GATE_ID = "stage-7"
+
+# Directories a verifier writes native proof/report output into. Creusot's
+# layout is `<crate>/verif/<crate>_rlib/.../proof.json`; the other names cover
+# the equivalent project-local output directories a Verus or Kani setup uses.
+_VERIFIER_OUTPUT_DIR_NAMES = frozenset(
+    {"verif", "verification", "verify", "proof", "proofs", "creusot", "verus", "kani"}
+)
+
+# A JSON file outside a known verifier directory still counts as verifier
+# output when its own name identifies it (e.g. `verus.json`,
+# `proof-result.json`). This is deliberately narrower than "any JSON in the
+# crate": a Cargo manifest, test fixture or config file is not evidence that
+# verification ran.
+_VERIFIER_OUTPUT_NAME_TOKENS = ("proof", "verus", "creusot", "why3", "kani")
+
+# Trees that can be very large and never hold a verifier's own report.
+_VERIFIER_SCAN_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "target",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        ".chainlink",
+    }
+)
 
 
 class StateError(Exception):
@@ -1127,6 +1167,7 @@ class Analysis:
     pending_evidence_drafts: list[Path] = field(default_factory=list)
     missing_crate_roots: list[str] = field(default_factory=list)
     issue: int | None = None
+    work_package_stage: dict | None = None
 
     @property
     def descriptor_rel(self) -> str:
@@ -1412,6 +1453,186 @@ def _has_c_static(workspace: Path) -> bool:
     return directory.is_dir() and any(directory.glob("*.json"))
 
 
+def _has_work_package_manifest(workspace: Path) -> bool:
+    """Whether `ci/manifest/` holds a work-package manifest.
+
+    The ownership manifest `installation.json` shares this directory and is
+    never a work package (chainlink #66/#72), so it is excluded by name. Any
+    other JSON/YAML file is a manifest candidate: a parseable non-manifest is
+    skipped exactly like artifact discovery skips it, while an unreadable
+    candidate counts as present -- "there is a manifest here, but it is
+    broken" must not be reported as "Stage 7 never started".
+    """
+    directory = workspace / "ci" / "manifest"
+    if not directory.is_dir():
+        return False
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.suffix not in (".json", ".yaml", ".yml"):
+            continue
+        if path.name == "installation.json":
+            continue
+        data = _load_data(path)
+        if data is None:
+            return True
+        if isinstance(data, dict) and _looks_like_work_package_manifest(data):
+            return True
+    return False
+
+
+def _verifier_output_evidence(workspace: Path, descriptor: dict) -> list[str]:
+    """Describe verifier output files that already exist under a crate root.
+
+    Read-only and deliberately heuristic: Ligature does not own a verifier's
+    output layout, so the test is "a JSON report under a directory named for
+    verification, or a JSON file whose own name names a verifier/proof". A
+    proof file left by Creusot, a Verus result, or a Kani record is enough
+    evidence that verification work exists; no file contents are trusted as
+    assurance here.
+    """
+    roots: list[str] = []
+    for crate in descriptor.get("crates", []):
+        crate_dir = crate.get("crate_dir") if isinstance(crate, dict) else None
+        if isinstance(crate_dir, str) and crate_dir:
+            roots.append(crate_dir)
+    for toolchain in descriptor.get("toolchains", []) or []:
+        if not isinstance(toolchain, dict):
+            continue
+        project_root = toolchain.get("project_root")
+        if isinstance(project_root, str) and project_root:
+            roots.append(project_root)
+
+    evidence: list[str] = []
+    seen_roots: set[str] = set()
+    for root in sorted(set(roots)):
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        base = workspace / root
+        try:
+            base.resolve().relative_to(workspace.resolve())
+        except (ValueError, OSError):
+            continue
+        if not base.is_dir():
+            continue
+
+        counts: dict[str, int] = {}
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(
+                name for name in dirnames if name not in _VERIFIER_SCAN_SKIP_DIRS
+            )
+            current = Path(dirpath)
+            try:
+                relative_parts = current.relative_to(base).parts
+            except ValueError:
+                continue
+            in_verifier_dir = any(
+                part.lower() in _VERIFIER_OUTPUT_DIR_NAMES for part in relative_parts
+            )
+            for name in filenames:
+                lower = name.lower()
+                if not lower.endswith((".json", ".jsonl")):
+                    continue
+                if not (
+                    in_verifier_dir
+                    or any(token in lower for token in _VERIFIER_OUTPUT_NAME_TOKENS)
+                ):
+                    continue
+                try:
+                    key = current.relative_to(workspace).as_posix()
+                except ValueError:
+                    key = _rel(current, workspace)
+                counts[key] = counts.get(key, 0) + 1
+        for path in sorted(counts):
+            evidence.append(
+                f"verifier output files exist under {path} ({counts[path]} JSON file(s))"
+            )
+    # Keep the report readable even on a large workspace; the point is that
+    # verification output was found, not an exhaustive listing.
+    if len(evidence) > 3:
+        remaining = len(evidence) - 3
+        evidence = evidence[:3] + [f"and {remaining} more verifier output location(s)"]
+    return evidence
+
+
+def _stage_7_evidence(workspace: Path, descriptor: dict) -> list[str]:
+    """Evidence that the project has advanced far enough that Stage 7 is the
+    missing step -- beyond a merely initialized workspace with no work done.
+
+    Toolchain selections and real verifier output are the pilot's own
+    signature (crates + toolchains + proofs, no work package). C_static and
+    bridge-check results are Stage 8A work, which cannot legitimately precede
+    a work package; a promotion receipt means Stage 4.5 is done and the
+    manifest is next. A bare `crates[]` declaration is deliberately not
+    enough -- every valid descriptor has one, including `init`'s untouched
+    template -- and neither are ordinary unapproved drafts: a project at
+    Stage 3 is not "Stage 7 not started" in the sense this finding reports,
+    and its own pending-decision findings already say what to do next.
+    """
+    evidence: list[str] = []
+    toolchains = descriptor.get("toolchains") or []
+    if isinstance(toolchains, list) and toolchains:
+        evidence.append(f"the descriptor declares {len(toolchains)} toolchain selection(s)")
+    evidence.extend(_verifier_output_evidence(workspace, descriptor))
+    promotions = workspace / "specs" / "_promotions"
+    if promotions.is_dir():
+        receipts = sorted(
+            path
+            for path in promotions.iterdir()
+            if path.is_file() and path.suffix in (".json", ".yaml", ".yml")
+        )
+        if receipts:
+            evidence.append(
+                f"{len(receipts)} promotion receipt(s) exist under specs/_promotions"
+            )
+    if _has_c_static(workspace):
+        evidence.append("C_static reports exist under ci/results/c_static")
+    if _has_bridge_checks(workspace):
+        evidence.append("bridge-check results exist under ci/results/bridge_checks")
+    return evidence
+
+
+def _work_package_stage(workspace: Path, descriptor: dict | None) -> dict | None:
+    """The not-yet-started Stage 7 position, or None when it does not apply.
+
+    The finding this drives exists because a workspace with real verification
+    output and no `ci/manifest/WP-*.json` used to produce `status`/`check`
+    output indistinguishable from a finished project. The returned detail
+    names the stage, the missing artifact, the evidence, and the sanctioned
+    sequence -- not a bare "not applicable".
+    """
+    if descriptor is None or _has_work_package_manifest(workspace):
+        return None
+    evidence = _stage_7_evidence(workspace, descriptor)
+    if not evidence:
+        return None
+    detail = (
+        "Stage 7 not started: no ci/manifest/WP-*.json; "
+        + "; ".join(evidence)
+        + "; next: draft plan -> authorize-write -> generate-work-package "
+        "(`ligature authorize-write --issue <N> --path ci/manifest/<WP>.json --op write "
+        "--issuer <human>` then `ligature generate-work-package --plan <plan> --issue <N> "
+        "--toolchain <value> --target <triple>`)."
+    )
+    return {
+        "stage": "7",
+        "state": "not-started",
+        "missing": "ci/manifest/WP-*.json",
+        "evidence": evidence,
+        "detail": detail,
+    }
+
+
+def _work_package_stage_finding(stage: dict) -> NormalizedFinding:
+    return NormalizedFinding(
+        gate_id=STAGE_7_GATE_ID,
+        severity="medium",
+        subject="ci/manifest",
+        reason=stage["detail"],
+        authority="mechanized-gate",
+        provenance="scripts/project_state.py:_work_package_stage",
+    )
+
+
 def _missing_crate_roots(workspace: Path, descriptor: dict | None) -> list[str]:
     """Return descriptor-declared crate roots that are not directories.
 
@@ -1452,6 +1673,37 @@ def _any_artifact_file(workspace: Path, descriptor: dict | None, dirname: str) -
     return False
 
 
+def _not_reached_reason(base_reason: str, stage: dict) -> str:
+    """A gate whose prerequisite artifacts cannot exist yet is `skipped`,
+    not `not-applicable` (chainlink #208): the distinction is what stops a
+    report with no work package from reading as "these gates do not apply to
+    this project" when the truth is "Stage 7 has not started"."""
+    missing = stage.get("missing") or "ci/manifest/WP-*.json"
+    return (
+        f"not yet reached: {base_reason}; {missing} is absent, so Stage 7 "
+        "has not started and this gate is downstream of an unfrozen write set"
+    )
+
+
+def _record_unrun_gate(
+    runs: list[dict],
+    gate_id: str,
+    base_reason: str,
+    stage: dict | None,
+) -> None:
+    """Record one gate check did not run, keeping the two reasons distinct."""
+    if stage is not None:
+        runs.append(
+            {
+                "gate_id": gate_id,
+                "outcome": "skipped",
+                "reason": _not_reached_reason(base_reason, stage),
+            }
+        )
+    else:
+        runs.append({"gate_id": gate_id, "outcome": "not-applicable", "reason": base_reason})
+
+
 def _run_gates(
     workspace: Path,
     descriptor: dict | None,
@@ -1459,6 +1711,7 @@ def _run_gates(
     missing_crate_roots: list[str] | None = None,
     revalidate_kani: bool = True,
     g14_outcomes: list[object] | None = None,
+    work_package_stage: dict | None = None,
 ):
     """Run the six §3 gates read-only, returning (gate_runs, findings)."""
     runs: list[dict] = []
@@ -1516,7 +1769,12 @@ def _run_gates(
 
     # g9
     if not _has_bridges(workspace, descriptor):
-        runs.append({"gate_id": "g9", "outcome": "not-applicable", "reason": "no bridge specifications present in this workspace"})
+        _record_unrun_gate(
+            runs,
+            "g9",
+            "no bridge specifications present in this workspace",
+            work_package_stage,
+        )
     elif not _has_bridge_checks(workspace):
         runs.append(
             {
@@ -1538,7 +1796,9 @@ def _run_gates(
 
     # g14
     if not _closure_profiles(workspace):
-        runs.append({"gate_id": "g14", "outcome": "not-applicable", "reason": "no closure profiles present"})
+        _record_unrun_gate(
+            runs, "g14", "no closure profiles present", work_package_stage
+        )
     else:
         try:
             import gate_g14
@@ -1562,7 +1822,9 @@ def _run_gates(
 
     # g18
     if not has_witnesses:
-        runs.append({"gate_id": "g18", "outcome": "not-applicable", "reason": "no witness specifications present"})
+        _record_unrun_gate(
+            runs, "g18", "no witness specifications present", work_package_stage
+        )
     else:
         try:
             import gate_g18
@@ -1576,7 +1838,9 @@ def _run_gates(
 
     # g19
     if not has_witnesses:
-        runs.append({"gate_id": "g19", "outcome": "not-applicable", "reason": "no witness specifications present"})
+        _record_unrun_gate(
+            runs, "g19", "no witness specifications present", work_package_stage
+        )
     elif not witness_backend:
         runs.append(
             {
@@ -1598,7 +1862,9 @@ def _run_gates(
 
     # g20
     if not has_witnesses:
-        runs.append({"gate_id": "g20", "outcome": "not-applicable", "reason": "no witness specifications present"})
+        _record_unrun_gate(
+            runs, "g20", "no witness specifications present", work_package_stage
+        )
     else:
         try:
             import gate_g20
@@ -1781,6 +2047,11 @@ def analyze(
             descriptor_error = str(exc)
 
     missing_crate_roots = _missing_crate_roots(workspace, descriptor)
+    # chainlink #208: Stage 7's own position, computed before the gates so a
+    # gate whose input cannot exist yet is reported `skipped`/`not yet
+    # reached` rather than silently `not-applicable` -- the exact reading that
+    # made an unstarted Stage 7 look like a finished project.
+    work_package_stage = _work_package_stage(workspace, descriptor)
     g14_outcomes: list[object] = []
     gate_runs, gate_findings, witness_backend = _run_gates(
         workspace,
@@ -1788,6 +2059,7 @@ def analyze(
         missing_crate_roots=missing_crate_roots,
         revalidate_kani=revalidate_kani,
         g14_outcomes=g14_outcomes,
+        work_package_stage=work_package_stage,
     )
     promotions = _promotion_manifest(workspace)
     installation = _installation_manifest(workspace)
@@ -1846,6 +2118,8 @@ def analyze(
             installation["state"] = "unknown"
 
     findings = _run_standalone_validators(workspace, descriptor)
+    if work_package_stage is not None:
+        findings.append(_work_package_stage_finding(work_package_stage))
     for crate_dir in missing_crate_roots:
         findings.append(
             NormalizedFinding(
@@ -1940,6 +2214,7 @@ def analyze(
         pending_evidence_drafts=pending_evidence_drafts,
         missing_crate_roots=missing_crate_roots,
         issue=issue,
+        work_package_stage=work_package_stage,
     )
 
 
@@ -2193,6 +2468,23 @@ def _next_action(analysis: Analysis) -> dict | None:
             "command": None,
         }
 
+    # 0.6. Stage 7 outranks every Stage 8A refresh below: a workspace with
+    #    verifier output but no work package has not frozen its write set,
+    #    so recommending extract-c-static or check-bridges would point at a
+    #    later stage than the one actually missing (chainlink #208). This is
+    #    a human decision, not an automated command: the plan is authored,
+    #    and `authorize-write` is a human checkpoint.
+    if analysis.work_package_stage is not None:
+        return {
+            "kind": "human-decision",
+            "description": (
+                f"{analysis.work_package_stage['detail']} The Stage 7 plan is drafted by the "
+                "operator or LLM side; no CLI command can invent it, and `authorize-write` is a "
+                "human checkpoint, so check cannot automate this step."
+            ),
+            "command": None,
+        }
+
     # 1. A blocked gate whose missing prerequisite is one of the three
     #    internal refresh operations check may recommend but never runs.
     for run in analysis.gate_runs:
@@ -2281,6 +2573,16 @@ def render_status_text(document: dict) -> str:
         f"gate integrity: {document['gate_integrity']['state']}"
         + (f" -- {document['gate_integrity']['details']}" if document['gate_integrity'].get('details') else ""),
     ]
+    # chainlink #208: naming the stage is the point of this line -- a project
+    # with crates/toolchains/proofs but no work package must not print a
+    # state that reads like a finished one. The same text is an open finding
+    # in the JSON document, so the terminal and machine surfaces agree.
+    stage = next(
+        (finding for finding in document["open_findings"] if finding["gate_id"] == STAGE_7_GATE_ID),
+        None,
+    )
+    if stage is not None:
+        lines.append(f"pipeline stage: {stage['summary']}")
     by_lifecycle: dict[str, int] = {}
     for artifact in document["artifacts"]:
         by_lifecycle[artifact["lifecycle"]] = by_lifecycle.get(artifact["lifecycle"], 0) + 1

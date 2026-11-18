@@ -451,6 +451,54 @@ class WitnessMitigationRiskTierTest(unittest.TestCase):
         self.assertTrue(any(f.gate == "G1a" for f in errors), [str(f) for f in errors])
 
 
+class AssumptionRiskTierTest(unittest.TestCase):
+    """chainlink #210(c): the full plan.md §12 composition, not just the
+    witness-specific slice, is compared against the fixed table stated in
+    docs/reliance-policy.template.md."""
+
+    def entry(self, risk: str, mitigations: list[dict]) -> dict:
+        data = load_valid()
+        assumption = data["definition_of_done"]["trusted_assumptions"][0]
+        assumption["risk"] = risk
+        assumption["mitigations"] = mitigations
+        return data
+
+    def test_high_risk_needs_a_technical_mitigation_beside_human_acceptance(self):
+        data = self.entry("high", [
+            {"kind": "human-risk-acceptance", "reference": "PROM-SCHED-001"},
+        ])
+        errors = errors_of(run(data))
+        self.assertTrue(any("no technical mitigation" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_high_risk_with_human_acceptance_and_a_test_passes(self):
+        data = self.entry("high", [
+            {"kind": "human-risk-acceptance", "reference": "PROM-SCHED-001"},
+            {"kind": "test", "reference": "tests/scheduler_dispatch_order.rs"},
+        ])
+        self.assertEqual(errors_of(run(data)), [])
+
+    def test_critical_risk_needs_human_acceptance_too(self):
+        data = self.entry("critical", [
+            {"kind": "proof", "reference": "proofs/scheduler_dispatch.lean"},
+        ])
+        errors = errors_of(run(data))
+        self.assertTrue(any("lacks required mitigation kind" in f.reason for f in errors), [str(f) for f in errors])
+        self.assertTrue(any("human-risk-acceptance" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_low_risk_needs_explicit_human_acceptance(self):
+        data = self.entry("low", [
+            {"kind": "test", "reference": "tests/scheduler_dispatch_order.rs"},
+        ])
+        errors = errors_of(run(data))
+        self.assertTrue(any("lacks required mitigation kind" in f.reason for f in errors), [str(f) for f in errors])
+
+    def test_medium_risk_is_satisfied_by_the_tracked_issue_and_a_declared_mitigation(self):
+        data = self.entry("medium", [
+            {"kind": "monitor", "reference": "dashboards/scheduler_dispatch"},
+        ])
+        self.assertEqual(errors_of(run(data)), [])
+
+
 class StandaloneCliBoundaryDirChoiceTest(unittest.TestCase):
     """External review, medium severity: pipeline.py correctly supplies
     descriptor-derived boundary directories, but validate_work_package.py's

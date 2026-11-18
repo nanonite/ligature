@@ -11,6 +11,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import assumption_registry  # noqa: E402
 import generate_promotion_receipt  # noqa: E402
 from generate_promotion_receipt import (  # noqa: E402
     PromotionReceiptError,
@@ -275,6 +276,41 @@ class ComputeSchemaVersionsTest(unittest.TestCase):
             )
             versions = compute_schema_versions(workspace, DESCRIPTOR, [path])
         self.assertEqual(versions, {"boundary": "1.0"})
+
+    def test_a_registry_document_is_a_recognized_kind_with_its_own_schema_version(self):
+        text = "The scheduler dispatches exactly one ready task per tick."
+        registry = {
+            "schema_version": "1.0",
+            "entries": [{
+                "assumption_id": "ASM-scheduler-dispatch",
+                "canonical_text": text,
+                "content_hash": assumption_registry.canonical_assumption_hash(text),
+                "tracking_issue": "chainlink:713",
+                "provenance": [{"action": "added", "actor": "alice", "at": "2026-09-18"}],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            path = _write_json(workspace, "specs/_assumptions/registry.json", registry)
+            versions = compute_schema_versions(workspace, DESCRIPTOR, [path])
+        self.assertEqual(versions, {"assumption_registry": "1.0"})
+
+    def test_a_registry_document_with_a_stale_content_hash_is_refused(self):
+        registry = {
+            "schema_version": "1.0",
+            "entries": [{
+                "assumption_id": "ASM-scheduler-dispatch",
+                "canonical_text": "The scheduler dispatches exactly one ready task per tick.",
+                "content_hash": "sha256:" + "0" * 64,
+                "tracking_issue": "chainlink:713",
+                "provenance": [{"action": "added", "actor": "alice", "at": "2026-09-18"}],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            path = _write_json(workspace, "specs/_assumptions/registry.json", registry)
+            with self.assertRaises(PromotionReceiptError):
+                compute_schema_versions(workspace, DESCRIPTOR, [path])
 
     def test_malformed_artifact_at_a_kind_directory_is_refused_not_silently_trusted(self):
         """The round-3 repro: {"schema_version": "999.0", "garbage":

@@ -56,6 +56,23 @@ An **empty** `callee_guarantees` is therefore a claim, not an omission: it
 declares that this call depends on nothing of the callee's and has no
 precondition to establish.
 
+## Assumption risk tiers (fixed — do not override)
+
+Every work-package `trusted_assumptions[]` entry declares a `risk` and typed
+`mitigations`. `validate-work-package` compares that pair against this fixed
+table (plan.md §12's typed-mitigation rule); it is not a project choice:
+
+| Risk | Required mitigation composition |
+|---|---|
+| `critical` | `human-risk-acceptance` plus at least one technical mitigation (`test`, `proof`, `static-analysis`, `monitor`, `environment-control`) |
+| `high` | `human-risk-acceptance` plus at least one technical mitigation (`test`, `proof`, `static-analysis`, `monitor`, `environment-control`) |
+| `medium` | the tracked issue (already required by `assumption_ref.tracking_issue`) plus at least one declared mitigation |
+| `low` | `human-risk-acceptance`; the tracked issue is already required by `assumption_ref.tracking_issue` |
+
+`witness` is a typed mitigation but is never a technical control: it is
+acceptable only at `low`, and even there it augments rather than replaces
+`human-risk-acceptance` (plan.md §16.5).
+
 ## Project-specific additions
 
 Everything below this line is this project's own governance, additive to

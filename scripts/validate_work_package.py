@@ -87,6 +87,12 @@ implements the Rust code -- this schema IS the interface spec for
     schema-valid mitigation kind (docs/work-package-manifest-schema.json);
     this is the missing cross-field composition rule G1a's per-item
     schema cannot express on its own.
+  - the rest of plan.md §12's risk-tier composition is compared too
+    (chainlink #210(c), check_assumption_risk_tiers): critical/high need
+    human-risk-acceptance plus at least one technical mitigation, and low
+    needs explicit human acceptance. The fixed table is stated in
+    docs/reliance-policy.template.md; medium's "issue + plan" half is the
+    schema-required tracking_issue plus a declared mitigation.
 
 Accepts both .json and .yaml/.yml manifests -- plan.md §10's own worked
 example is `ci/manifest/WP-MCMC-004.yaml`.
@@ -498,6 +504,7 @@ def check_trusted_assumptions(
     data: dict,
     specs_search_root: Path | None,
     allowed_boundary_dirs: list[Path] | None = None,
+    workspace_root: Path | None = None,
 ) -> list[Finding]:
     """§10.1: every assumption_ref resolves to a real boundary + tracking
     issue + hash. Resolution is by the boundary contract's own declared
@@ -575,10 +582,19 @@ def check_trusted_assumptions(
     for entry in assumptions:
         ref = entry["assumption_ref"]
         # Chainlink #59 phase B: a registry-form reference
-        # ({"assumption_id": "ASM-..."}) is resolved against
-        # docs/assumption-registry-schema.json by the dedicated G21 gate in
-        # scripts/assumption_registry.py, not against a boundary contract.
+        # ({"assumption_id": "ASM-..."}) resolves against
+        # docs/assumption-registry-schema.json rather than a boundary
+        # contract. chainlink #210: resolve it HERE too, at the point the
+        # manifest is validated, instead of accepting any well-shaped id and
+        # leaving a dangling reference for a later workspace-wide gate.
         if "assumption_id" in ref:
+            if workspace_root is not None:
+                import assumption_registry  # local: keeps this module's import graph small
+
+                for finding in assumption_registry.resolve_reference_findings(
+                    workspace_root, ref, source=path, label=f"{path.name} trusted_assumptions[]"
+                ):
+                    findings.append(Finding("10.1", path, finding.reason))
             continue
         boundary_id = ref["boundary_id"]
         matches = boundaries_by_id.get(boundary_id, [])
@@ -667,6 +683,66 @@ def check_witness_mitigation_risk_tier(path: Path, data: dict) -> list[Finding]:
                     f"assumption_ref {boundary_id!r} has a witness-kind mitigation at risk low "
                     "but no human-risk-acceptance mitigation -- a witness does not by itself "
                     "satisfy this risk tier's explicit-acceptance requirement (plan.md §12)",
+                )
+            )
+    return findings
+
+
+TECHNICAL_MITIGATION_KINDS = frozenset(
+    {"test", "proof", "static-analysis", "monitor", "environment-control"}
+)
+
+ASSUMPTION_TIER_REQUIREMENTS = {
+    # plan.md §12's typed-mitigation table, stated as the fixed section of
+    # docs/reliance-policy.template.md so the policy and the gate name the
+    # same rule. "issue" is already structural: assumption_ref.tracking_issue
+    # is required by the manifest schema.
+    "critical": (frozenset({"human-risk-acceptance"}), TECHNICAL_MITIGATION_KINDS),
+    "high": (frozenset({"human-risk-acceptance"}), TECHNICAL_MITIGATION_KINDS),
+    "medium": (frozenset(), frozenset()),
+    "low": (frozenset({"human-risk-acceptance"}), frozenset()),
+}
+
+
+def check_assumption_risk_tiers(path: Path, data: dict) -> list[Finding]:
+    """plan.md §12's risk/mitigation composition, chainlink #210(c): a
+    typed mitigation list is not evidence that the entry meets its own
+    risk tier. Before this check only the witness-specific slice was
+    compared, so a `critical` assumption carrying a single
+    human-risk-acceptance (or a `high` one with no technical mitigation)
+    validated cleanly.
+
+    The fixed table lives in docs/reliance-policy.template.md, the same
+    document an operator reviews. This gate compares every
+    ``trusted_assumptions[]`` entry against it; the tracking issue half of
+    medium/low is already enforced by the schema's required
+    ``assumption_ref.tracking_issue``."""
+    findings: list[Finding] = []
+    for entry in data["definition_of_done"]["trusted_assumptions"]:
+        risk = entry["risk"]
+        required_kinds, any_technical = ASSUMPTION_TIER_REQUIREMENTS[risk]
+        kinds = {mitigation["kind"] for mitigation in entry["mitigations"]}
+        ref = entry["assumption_ref"]
+        label = ref.get("assumption_id") or ref.get("boundary_id") or "(unknown)"
+        missing = sorted(required_kinds - kinds)
+        if missing:
+            findings.append(
+                Finding(
+                    "G6", path,
+                    f"assumption_ref {label!r} is risk {risk!r} but lacks required "
+                    f"mitigation kind(s) {missing!r} -- plan.md §12's fixed risk-tier "
+                    "table (docs/reliance-policy.template.md) requires explicit human "
+                    "risk acceptance at this tier",
+                )
+            )
+        if any_technical and not (kinds & any_technical):
+            findings.append(
+                Finding(
+                    "G6", path,
+                    f"assumption_ref {label!r} is risk {risk!r} but has no technical "
+                    f"mitigation ({sorted(any_technical)!r}) -- plan.md §12's fixed "
+                    "risk-tier table (docs/reliance-policy.template.md) requires at least "
+                    "one at this tier; human acceptance alone is not a technical control",
                 )
             )
     return findings
@@ -788,8 +864,11 @@ def validate_data(
     findings.extend(check_write_set_disjointness(path, data))
     findings.extend(check_gate_integrity(path, data, workspace_root))
     findings.extend(check_witness_renderer_integrity(path, data, workspace_root))
-    findings.extend(check_trusted_assumptions(path, data, specs_search_root, allowed_boundary_dirs))
+    findings.extend(check_trusted_assumptions(
+        path, data, specs_search_root, allowed_boundary_dirs, workspace_root
+    ))
     findings.extend(check_witness_mitigation_risk_tier(path, data))
+    findings.extend(check_assumption_risk_tiers(path, data))
     findings.extend(check_promotion_reference(path, data))
     findings.extend(check_write_set_coverage_of_functions(path, data))
     findings.extend(check_external_evidence_declarations(path, data, descriptor))

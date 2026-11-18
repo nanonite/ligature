@@ -138,6 +138,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import assumption_registry  # noqa: E402
 from ligature_install import POLICY_VERSION_MARKER_RE  # noqa: E402
 from ligature_install import policy_marker_advice  # noqa: E402
 from ligature_install import policy_version_gap  # noqa: E402
@@ -350,6 +351,8 @@ def _locate_artifact(descriptor: dict, workspace_root: Path, resolved: Path) -> 
         return "evidence", None
     if resolved.parent == conflict_dir_for(workspace_root):
         return "conflict_resolution", None
+    if resolved.parent == assumption_registry.registry_dir(workspace_root).resolve():
+        return "assumption_registry", None
     for crate in descriptor["crates"]:
         if resolved.parent == boundary_dir_for(crate, workspace_root):
             return "boundary", crate
@@ -420,6 +423,8 @@ def _validate_accepted_artifact(
     satisfied by hand."""
     if kind == "evidence":
         return _validate_evidence_data(path, data, _load_evidence_validator())
+    if kind == "assumption_registry":
+        return assumption_registry.validate_registry_data(path, data)
     if kind == "conflict_resolution":
         if "evidence_ids" not in evidence_ids_cache:
             evidence_ids_cache["evidence_ids"] = valid_evidence_ids(evidence_dir_for(workspace_root))

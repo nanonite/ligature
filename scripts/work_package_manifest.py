@@ -1176,6 +1176,19 @@ def _validate_assumption_ref(state: AuthoritativeState, ref: Mapping[str, Any]) 
             "invalid-plan",
             f"assumption_id {ref['assumption_id']!r} is not an ASM- id",
         )
+        # chainlink #210: a well-shaped id is not a registered id. Resolve
+        # it against the workspace's registry at generation time when the
+        # authoritative state carries a workspace root; a later G21 run is
+        # not the place an unregistered plan reference should first become
+        # visible.
+        if state.workspace_root is not None:
+            import assumption_registry  # local: only this branch needs it
+
+            findings = assumption_registry.resolve_reference_findings(
+                state.workspace_root, ref, label="work-package plan assumptions[]"
+            )
+            if findings:
+                raise ManifestDerivationError("dangling-reference", findings[0].reason)
         return
     if set(ref) != {"boundary_id", "tracking_issue", "assumption_hash"}:
         unexpected = sorted(set(ref) - _ASSUMPTION_REFERENCE_FIELDS)

@@ -138,6 +138,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resources  # noqa: E402
+import assumption_registry  # noqa: E402
 from bridge_harness import (
     EVIDENCE_KIND_BY_VERIFIER,  # noqa: E402
     verifier_for_manifest_harness,  # noqa: E402
@@ -1285,20 +1286,161 @@ def entry_trust_policies(closure: Closure, manifests: dict[str, dict], seed: lis
     return policies
 
 
+def _assumption_identity(
+    ref: dict, registry: assumption_registry.RegistryIndex | None
+) -> str | None:
+    """The identity a trust policy compares against.
+
+    A registry reference already carries its stable id. A legacy composite
+    is resolved through the registry when exactly one entry matches its
+    (tracking_issue, recomputed content hash), so adopting the registry
+    does not silently keep the composite spelling and pass nothing; without
+    a matching registry entry the composite's own three-part spelling is
+    retained, which fails closed unless the entry policy names it too."""
+    if not isinstance(ref, dict):
+        return None
+    assumption_id = ref.get("assumption_id")
+    if isinstance(assumption_id, str) and assumption_id:
+        return assumption_id
+    boundary_id = ref.get("boundary_id")
+    tracking_issue = ref.get("tracking_issue")
+    assumption_hash = ref.get("assumption_hash")
+    if not all(isinstance(value, str) and value for value in (boundary_id, tracking_issue, assumption_hash)):
+        return None
+    if registry is not None:
+        matches = []
+        for entries in registry.entries_by_id.values():
+            for entry in entries:
+                text = entry.get("canonical_text")
+                if (
+                    entry.get("tracking_issue") == tracking_issue
+                    and isinstance(text, str)
+                    and assumption_registry.canonical_assumption_hash(text) == assumption_hash
+                ):
+                    matches.append(entry)
+        if len(matches) == 1:
+            matched_id = matches[0].get("assumption_id")
+            if isinstance(matched_id, str):
+                return matched_id
+    return f"{boundary_id}:{tracking_issue}:{assumption_hash}"
+
+
+def _boundary_contracts_for(
+    workspace: Path, descriptor: dict | None
+) -> dict[str, dict]:
+    """Every genuinely valid boundary contract, keyed by boundary_id.
+
+    The same ``load_boundaries_by_id`` bar every other cross-reference uses
+    (canonical directory, full G1a, no duplicate id). Boundaries are only
+    read to fold their own reviewed ``assumptions[]`` into the closure;
+    an invalid one is not allowed to contribute trust declarations."""
+    if descriptor is None:
+        return {}
+    contracts: dict[str, dict] = {}
+    for crate in descriptor.get("crates", []):
+        specs_search_root = workspace / crate.get("specs_search_root", "")
+        try:
+            lookup = load_boundaries_by_id(
+                boundary_dir_for(crate, workspace), specs_search_root, workspace
+            )
+        except (OSError, ValueError):
+            continue
+        for boundary_id, data in lookup.items():
+            contracts.setdefault(boundary_id, data)
+    return contracts
+
+
+def declared_assumption_locations(
+    workspace: Path | None,
+    closure: Closure,
+    manifests: dict[str, dict],
+    bridges: dict[str, dict],
+    descriptor: dict | None,
+) -> tuple[dict[str, list[str]], assumption_registry.RegistryIndex | None]:
+    """Assumptions DECLARED by the closure's own manifests and by the
+    boundary contracts its bridges require, with the site that declared
+    each one.
+
+    This is the missing half of plan.md §8.5 step 5. ``record_assurance``
+    writes ``trust.assumptions`` empty because no verifier output names an
+    assumption a proof relied on; the reviewed declarations that DO name
+    them live in a work package's ``trusted_assumptions[]`` and in the
+    boundary contract a relied-on call is recorded against. Reading only
+    the achieved records therefore made the transitive sweep vacuously
+    true for every mixed Creusot+Verus project whose assumptions were
+    registered, hash-bound and human-accepted but never restated inside a
+    verifier record."""
+    registry = (
+        assumption_registry.load_registry(workspace)
+        if workspace is not None
+        else assumption_registry.RegistryIndex()
+    )
+    locations: dict[str, list[str]] = {}
+    boundary_ids: set[str] = set()
+
+    def record(ref: object, location: str) -> None:
+        if not isinstance(ref, dict):
+            return
+        identity = _assumption_identity(ref, registry if registry.present else None)
+        if identity:
+            locations.setdefault(identity, []).append(location)
+
+    for work_package in closure.work_packages:
+        manifest = manifests.get(work_package)
+        if manifest is None:
+            continue
+        done = manifest["definition_of_done"]
+        for entry in done.get("trusted_assumptions", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            ref = entry.get("assumption_ref")
+            record(ref, f"{work_package}:trusted_assumptions[]")
+            if isinstance(ref, dict) and isinstance(ref.get("boundary_id"), str):
+                boundary_ids.add(ref["boundary_id"])
+        for requirement in done.get("required_preconditions_to_establish", []) or []:
+            if not isinstance(requirement, dict):
+                continue
+            bridge = bridges.get(requirement.get("bridge_id"))
+            if isinstance(bridge, dict) and isinstance(bridge.get("boundary_id"), str):
+                boundary_ids.add(bridge["boundary_id"])
+
+    if boundary_ids and workspace is not None:
+        for boundary_id, data in _boundary_contracts_for(workspace, descriptor).items():
+            if boundary_id not in boundary_ids:
+                continue
+            for assumption in data.get("assumptions", []) or []:
+                record(assumption, f"boundary {boundary_id!r} assumptions[]")
+
+    return locations, registry if registry.present else None
+
+
 def check_transitive_assumptions(
-    closure: Closure, manifests: dict[str, dict], reports: dict[str, dict], seed: list[str]
+    closure: Closure,
+    manifests: dict[str, dict],
+    reports: dict[str, dict],
+    seed: list[str],
+    *,
+    workspace: Path | None = None,
+    bridges: dict[str, dict] | None = None,
+    descriptor: dict | None = None,
 ) -> list[Finding]:
     """plan.md §8.5 step 5, and the section's motivating failure: "Direct
     A->B checking passes while a C-level assumption sits below policy."
 
     Every assumption appearing in any achieved record anywhere in the
-    closure is held against every entry requirement's allow-list -- not
-    against the allow-list of the edge it happens to sit on, which step 4
-    already did."""
+    closure -- and every assumption the closure's manifests or relied-on
+    boundary contracts declare -- is held against every entry requirement's
+    allow-list, not against the allow-list of the edge it happens to sit on,
+    which step 4 already did."""
     findings: list[Finding] = []
     policies = entry_trust_policies(closure, manifests, seed)
 
     assumptions: dict[str, list[str]] = {}
+    declared, _registry = declared_assumption_locations(
+        workspace, closure, manifests, bridges or {}, descriptor
+    )
+    for assumption_id, locations in declared.items():
+        assumptions.setdefault(assumption_id, []).extend(locations)
     for work_package in closure.work_packages:
         report = reports.get(work_package)
         if report is None:
@@ -1359,6 +1501,9 @@ def check_transitive_assumptions(
                     )
                     continue
                 assumptions.setdefault(assumption, []).append(record_ref)
+
+    for assumption in assumptions:
+        assumptions[assumption] = sorted(set(assumptions[assumption]))
 
     for assumption in sorted(assumptions):
         for obligation_id, allowed in policies:
@@ -2474,7 +2619,15 @@ def gate_cluster(
     findings.extend(check_provided_guarantees(cluster, profile, closure, manifests, reports))
     findings.extend(check_requirements(cluster, profile, closure, providers, reports, manifests))
 
-    assumption_findings = check_transitive_assumptions(closure, manifests, reports, seed)
+    assumption_findings = check_transitive_assumptions(
+        closure,
+        manifests,
+        reports,
+        seed,
+        workspace=workspace,
+        bridges=bridges,
+        descriptor=descriptor,
+    )
     findings.extend(assumption_findings)
 
     bridge_findings = check_bridges(

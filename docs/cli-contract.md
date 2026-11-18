@@ -606,7 +606,14 @@ call that exercises them.
 `ligature.g14-report.v1` document defined by the bundled
 `docs/g14-report-schema.json`. The report names the transitive work packages,
 manifest-provided and required obligation IDs, assurance records G14 evaluates,
-bridge records, and proof artifact references G14 rechecks. Its scope counts
+bridge records, and proof artifact references G14 rechecks. Step 5's trust sweep
+reads the assumptions declared by those reviewed artifacts as well as the ones
+an achieved record carries: every `trusted_assumptions[].assumption_ref` of a
+work package in the closure, and every `assumptions[]` entry of a boundary
+contract one of its bridges relies on, is held against the cluster's entry
+assurance policies. A registry id is compared by its `assumption_id`; a legacy
+composite resolves to the registry entry it uniquely names, so adopting the
+registry does not make the sweep vacuous (#210). Its scope counts
 distinguish provided, required, and evaluated obligations. `scope.kind` marks
 an empty, bridge-only, obligations-only, or combined scope; `closure_kind`
 describes the profile's declared closure mode and does not itself mean a proof
@@ -1599,7 +1606,11 @@ the content policy; the command runs
 `validate-work-package` over the result before attempting a write.
 That validation uses the same descriptor-declared canonical boundary
 directories as the `validate-work-package` CLI, so trusted assumptions must
-resolve inside the project's declared crates before a file can be written.
+resolve inside the project's declared crates before a file can be written. A
+registry-form `assumption_id` is also resolved against `specs/_assumptions/`
+at validation and generation time, so a plan or manifest naming an
+unregistered id is refused where it is authored rather than only by a later
+workspace-wide G21 pass (#210).
 
 The only output path is `ci/manifest/<work_package>.json`, where the package
 id comes from the plan. The plan's `issue` must equal `--issue`; the grant

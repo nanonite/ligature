@@ -212,6 +212,52 @@ class PhaseBNewWorkspaceTest(WorkspaceFixture):
         self.assertIn("deprecation", deprecations[0].reason)
         self.assertIn("legacy composite", deprecations[0].reason)
 
+    def test_a_registry_id_without_a_registry_is_dangling_not_unadopted(self):
+        findings = self.check(boundaries=[boundary_with({"assumption_id": "ASM-scheduler-dispatch"})])
+        self.assertEqual(len(self.errors(findings)), 1)
+        self.assertIn("dangling", self.errors(findings)[0].reason)
+
+    def test_validate_work_package_resolves_the_registry_id_at_authoring_time(self):
+        import validate_work_package
+
+        self.write_registry(entry())
+        data = {
+            "definition_of_done": {
+                "trusted_assumptions": [{
+                    "assumption_ref": {"assumption_id": "ASM-missing"},
+                    "risk": "high",
+                    "mitigations": [{"kind": "human-risk-acceptance", "reference": "chainlink:713"}],
+                }],
+            },
+        }
+        findings = validate_work_package.check_trusted_assumptions(
+            Path("ci/manifest/WP-1.json"),
+            data,
+            self.workspace,
+            None,
+            self.workspace,
+        )
+        self.assertTrue(any("ASM-missing" in f.reason and "not in the registry" in f.reason for f in findings), findings)
+
+    def test_interaction_allowlist_naming_an_absent_id_is_an_error(self):
+        self.write_registry(entry())
+        path = self.workspace / "crates" / "a" / "specs" / "_interactions" / "I-SCHED-TQ-001.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "interaction_id": "I-SCHED-TQ-001",
+            "reliances": [{
+                "obligation_id": "TaskQueue.C003",
+                "required_assurance": {
+                    "trust_policy": {"assumptions_allowed": ["ASM-ghost"]},
+                },
+            }],
+        }))
+        findings = self.check()
+        self.assertTrue(any(
+            "ASM-ghost" in finding.reason and "not in the registry" in finding.reason
+            for finding in self.errors(findings)
+        ), findings)
+
 
 class MixedWorkspaceTest(WorkspaceFixture):
     def test_mixed_composite_and_registry_refs_only_deprecate_the_composite(self):

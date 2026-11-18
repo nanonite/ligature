@@ -44,6 +44,7 @@ from gate_g14 import (  # noqa: E402
     strongly_connected_components,
     work_package_manifest_dir_for,
 )
+import assumption_registry  # noqa: E402
 import pipeline  # noqa: E402
 import record_assurance as record_assurance_module  # noqa: E402
 import review_checkpoint  # noqa: E402
@@ -419,6 +420,18 @@ class Workspace:
         data = self.read(relative)
         mutate(data)
         self.write(relative, data)
+
+    def write_assumption_registry(self, assumption_id="ASM-clock-monotonic", text="The clock is monotonic.") -> None:
+        self.write("specs/_assumptions/registry.json", {
+            "schema_version": "1.0",
+            "entries": [{
+                "assumption_id": assumption_id,
+                "canonical_text": text,
+                "content_hash": assumption_registry.canonical_assumption_hash(text),
+                "tracking_issue": "chainlink:713",
+                "provenance": [{"action": "added", "actor": "alice", "at": "2026-09-18"}],
+            }],
+        })
 
     def write_certificate(self, obligation: str) -> Path:
         """A why3find proof certificate for an obligation at
@@ -888,6 +901,122 @@ class TransitiveTrustPolicyTest(GateTestCase):
         outcome, _ = self.ws.cluster()
         self.assertEqual(self.errors(outcome), [])
         self.assertEqual(outcome.status, "closes")
+
+
+class RegisteredAssumptionTrustPolicyTest(GateTestCase):
+    """chainlink #210: a registered assumption is declared in the reviewed
+    artifacts -- a work package's ``trusted_assumptions[]`` and/or the
+    boundary contract its bridge relies on -- not in a verifier's achieved
+    record, whose ``trust.assumptions`` is deliberately empty. Reading only
+    the records made step 5 vacuous for exactly the mixed-verifier projects
+    the registry exists to make honest."""
+
+    ASSUMPTION = "ASM-clock-monotonic"
+
+    def declared_in_manifest(self, work_package="WP-C") -> None:
+        def mutate(data):
+            data["definition_of_done"]["trusted_assumptions"] = [{
+                "assumption_ref": {"assumption_id": self.ASSUMPTION},
+                "risk": "high",
+                "mitigations": [{"kind": "human-risk-acceptance", "reference": "chainlink:713"}],
+            }]
+        self.ws.patch(f"ci/manifest/{work_package}.json", mutate)
+
+    def declared_in_boundary(self) -> None:
+        self.ws.patch(
+            "crates/scheduler/specs/_boundaries/scheduler_dispatch__to__task_queue_pop_ready.json",
+            lambda data: data.update({"assumptions": [{"assumption_id": self.ASSUMPTION}]}),
+        )
+
+    def allow_on_every_entry(self) -> None:
+        self.ws.patch("ci/manifest/WP-A.json", lambda data: [
+            entry["required_assurance"]["trust_policy"].update(
+                {"assumptions_allowed": [self.ASSUMPTION]}
+            )
+            for entry in (
+                data["definition_of_done"]["provided_guarantees"]
+                + data["definition_of_done"]["required_guarantees"]
+            )
+        ])
+
+    def test_a_registered_manifest_assumption_outside_entry_policy_blocks(self):
+        self.ws.write_assumption_registry(self.ASSUMPTION)
+        self.declared_in_manifest()
+
+        outcome, _ = self.ws.cluster()
+
+        errors = self.errors(outcome)
+        self.assertTrue(any(
+            self.ASSUMPTION in error and "trust policy applies across the whole closure" in error
+            for error in errors
+        ), errors)
+        self.assertTrue(any("WP-C:trusted_assumptions[]" in error for error in errors), errors)
+        self.assertEqual(outcome.status, "blocked")
+
+    def test_the_same_declaration_is_honestly_true_when_the_entry_policy_allows_it(self):
+        self.ws.write_assumption_registry(self.ASSUMPTION)
+        self.declared_in_manifest()
+        self.allow_on_every_entry()
+
+        outcome, _ = self.ws.cluster()
+
+        self.assertEqual(self.errors(outcome), [])
+        self.assertEqual(outcome.status, "closes")
+
+    def test_a_boundary_contract_assumption_enters_the_closure_too(self):
+        self.ws.write_assumption_registry(self.ASSUMPTION)
+        self.declared_in_boundary()
+
+        outcome, _ = self.ws.cluster()
+
+        errors = self.errors(outcome)
+        self.assertTrue(any(
+            self.ASSUMPTION in error and "boundary" in error for error in errors
+        ), errors)
+        self.assertEqual(outcome.status, "blocked")
+
+    def test_a_false_declaration_is_still_refused_after_folding(self):
+        self.ws.write_assumption_registry(self.ASSUMPTION)
+        self.declared_in_manifest()
+
+        outcome, _ = self.ws.cluster()
+
+        errors = self.errors(outcome)
+        self.assertTrue(any(
+            error.startswith("[G17/error]")
+            and "transitive_assumptions_within_policy is declared as True" in error
+            for error in errors
+        ), errors)
+
+    def test_depth_reached_dependency_assumptions_are_folded_in(self):
+        # WP-B is reached through WP-A; its declared assumption must not be
+        # invisible merely because the cluster profile names only WP-A.
+        self.ws.write_assumption_registry(self.ASSUMPTION)
+        self.declared_in_manifest("WP-B")
+
+        outcome, _ = self.ws.cluster()
+
+        errors = self.errors(outcome)
+        self.assertTrue(any(
+            self.ASSUMPTION in error and "WP-B:trusted_assumptions[]" in error for error in errors
+        ), errors)
+
+    def test_an_honest_false_declaration_is_degradable_with_an_accepted_record(self):
+        self.ws.write_assumption_registry(self.ASSUMPTION)
+        self.declared_in_manifest()
+        self.ws.patch(
+            "specs/_closure/scheduler-core.json",
+            lambda data: data["conditions"].update({"transitive_assumptions_within_policy": False}),
+        )
+        record = valid_degradation()
+        record["failed_conditions"] = ["transitive_assumptions_within_policy"]
+        self.ws.write_accepted_record(record)
+
+        outcome, _ = self.ws.cluster()
+
+        self.assertEqual(self.errors(outcome), [])
+        self.assertEqual(outcome.status, "degraded")
+        self.assertTrue(any("transitive_assumptions_within_policy" in d for d in self.degraded(outcome)))
 
 
 class MalformedTrustAssumptionsTest(GateTestCase):

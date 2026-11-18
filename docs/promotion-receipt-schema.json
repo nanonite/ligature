@@ -35,7 +35,7 @@
       "type": "object",
       "minProperties": 1,
       "additionalProperties": { "type": "string" },
-      "description": "Open -- which schema kinds exist depends on which stages have landed (boundary, work-package-manifest today; interaction, bridge, witness as M3/M4/M6 build them)."
+      "description": "Open -- which schema kinds exist depends on which stages have landed (boundary, work-package-manifest, interaction, exemption, protocol_debt, witness, evidence, conflict_resolution, assumption_registry). A workspace-level assumption registry document at specs/_assumptions/*.json contributes its own schema_version under the key assumption_registry, so hash-pinning it in artifact_manifest is not a pin whose schema version was silently omitted (chainlink #210)."
     },
     "accepted_at": {
       "type": "string",

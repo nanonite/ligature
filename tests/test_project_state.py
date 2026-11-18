@@ -27,6 +27,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 import ligature_install  # noqa: E402
 import pipeline  # noqa: E402
 import project_state  # noqa: E402
@@ -2486,8 +2487,8 @@ class BoundaryG2PlusSearchRootTest(WorkspaceFixture):
         self.assertTrue(any(str(self.workspace / "crates") in f["summary"] for f in findings))
 
     def test_descriptor_driven_check_uses_the_witness_search_root(self):
-        from tests.test_validate_witness import concept_spec as witness_concept_spec
-        from tests.test_validate_witness import witness_spec as witness_artifact
+        from test_validate_witness import concept_spec as witness_concept_spec
+        from test_validate_witness import witness_spec as witness_artifact
 
         self.write_descriptor()
         concept = witness_concept_spec()

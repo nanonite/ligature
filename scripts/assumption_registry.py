@@ -379,14 +379,103 @@ def _entry_hash(entry: dict) -> str | None:
     return canonical_assumption_hash(text)
 
 
+def resolve_reference_findings(
+    workspace: Path,
+    ref: dict,
+    *,
+    source: Path | str = "assumption_ref",
+    label: str = "assumption_ref",
+) -> list[Finding]:
+    """Resolve ONE already-schema-valid ``assumption_ref`` against the
+    registry, for a caller that must refuse a dangling registry id at the
+    point it is authored rather than only in a later workspace-wide gate.
+
+    A legacy composite in a workspace with no registry is phase A's
+    old-workspace-only state and resolves here (the caller's boundary
+    resolution owns it); a registry id has no such fallback -- there is no
+    registry entry to be the authority for it, so it is dangling."""
+    if not isinstance(ref, dict):
+        return []
+    index = load_registry(workspace)
+    if not index.present and "assumption_id" not in ref:
+        return []
+    return _resolve(index, Reference(dict(ref), Path(source), label))
+
+
+def validate_registry_data(path: Path, data: dict) -> list[Finding]:
+    """Validate one registry document as an accepted artifact: supported
+    reference era, its own G1a schema, and every content hash recomputed
+    from its canonical text. Used by promotion acceptance so a registry
+    document named in ``artifact_manifest`` is genuinely valid before its
+    declared ``schema_version`` is trusted -- the same bar every other
+    accepted artifact gets."""
+    if not isinstance(data, dict):
+        return [Finding("G21", path, "registry document is not a JSON object")]
+    version = data.get("schema_version")
+    if not legacy_refs_supported(str(version)):
+        return [
+            Finding(
+                "G21", path,
+                f"registry schema_version {version!r} is not supported by this product "
+                f"(implements {ASSUMPTION_REF_SCHEMA_VERSION}, legacy composite support removed at "
+                f"{ASSUMPTION_REF_LEGACY_REMOVAL_VERSION}) -- refusing to reinterpret it",
+            )
+        ]
+    errors = list(_load_validator().iter_errors(data))
+    if errors:
+        return [Finding("G21", path, "registry document fails G1a: " + "; ".join(e.message for e in errors))]
+    index = RegistryIndex(present=True)
+    _collect_entries(data, path, index)
+    _report_duplicate_ids(index)
+    return list(index.findings)
+
+
+def _interaction_policy_findings(workspace: Path, index: RegistryIndex) -> list[Finding]:
+    """A reliance's ``trust_policy.assumptions_allowed`` is the other place
+    a registry id is named. An id that looks like a registry id but is in
+    no registry entry silently allows nothing -- or, worse, looks like an
+    approval in the reviewed interaction while no such assumption exists."""
+    findings: list[Finding] = []
+    for path in sorted(workspace.glob("**/specs/_interactions/*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        interaction_id = data.get("interaction_id") or path.stem
+        for reliance in data.get("reliances", []) or []:
+            if not isinstance(reliance, dict):
+                continue
+            assurance = reliance.get("required_assurance") or {}
+            policy = assurance.get("trust_policy") or {}
+            for allowed in policy.get("assumptions_allowed", []) or []:
+                if not isinstance(allowed, str) or not ASSUMPTION_ID_RE.match(allowed):
+                    continue
+                if index.resolve_id(allowed):
+                    continue
+                findings.append(
+                    Finding(
+                        "G21", path,
+                        f"interaction {interaction_id!r} reliance "
+                        f"{reliance.get('obligation_id')!r} assumptions_allowed names "
+                        f"{allowed!r}, which is not in the registry -- an allow-list entry "
+                        "for a nonexistent assumption authorizes nothing",
+                    )
+                )
+    return findings
+
+
 def check_assumption_registry(
     workspace: Path,
     *,
     boundaries: list[dict] | None = None,
     manifests: list[tuple[Path, dict]] | None = None,
 ) -> list[Finding]:
-    """The new gate. Returns [] in phase A's old-workspace-only state (no
-    registry). With a registry present:
+    """The new gate. In phase A's old-workspace-only state (no registry)
+    legacy composites remain untouched, but a registry-ID reference is
+    DANGLING -- it has no authority to resolve against. With a registry
+    present:
       * a registry-ID reference that names an unknown id is DANGLING,
       * a reference matching more than one entry is AMBIGUOUS,
       * a composite whose declared hash is not the registry's recomputed
@@ -394,13 +483,24 @@ def check_assumption_registry(
       * a composite with no corresponding entry is MISSING,
       * a legacy composite emits a non-blocking deprecation `info`
         finding while legacy support is declared, and an ERROR once a
-        registry declares the phase-D removal major.
+        registry declares the phase-D removal major,
+      * an interaction reliance's ``assumptions_allowed[]`` naming an
+        ``ASM-`` id that no entry defines is DANGLING too (#210).
     """
     index = load_registry(workspace)
-    if not index.present:
-        return []
-    findings = list(index.findings)
     references = _boundary_references(workspace, boundaries) + _manifest_references(workspace, manifests)
+    if not index.present:
+        # Phase A still leaves legacy composites entirely alone (there is
+        # no registry to resolve them against, and they remain valid). A
+        # registry-id reference, however, has no authority at all without
+        # a registry -- it is dangling, not an unadopted mechanism.
+        return [
+            finding
+            for reference in references
+            if reference.is_registry
+            for finding in _resolve(index, reference)
+        ] + _interaction_policy_findings(workspace, index)
+    findings = list(index.findings)
     for reference in references:
         if not reference.is_registry:
             if index.legacy_supported:
@@ -422,6 +522,7 @@ def check_assumption_registry(
                     )
                 )
         findings.extend(_resolve(index, reference))
+    findings.extend(_interaction_policy_findings(workspace, index))
     return findings
 
 

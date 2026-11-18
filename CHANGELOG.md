@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-18
+
 ### Added
 - #209: make the cross-package required/provided guarantee first-class for mixed-verifier projects. A Verus-owned work package can now declare a required guarantee that a Creusot-owned package provides: `required_obligations`/`depends_on` may name an obligation/package from another cluster's approved profile, and the required assurance is resolved against the provider concept's cluster policy rather than the requiring package's owning verifier. A package still cannot *provide* another verifier's obligation, so the documented model remains one package per cluster/verifier. G14 continues to follow the edge to the providing package and evaluate `single_verifier_system`/CG1 over both verifier systems, so the mixed closure is an evaluated gate result (degradation record / `partial`) instead of an unchecked trust assumption. `docs/cli-contract.md` now documents the model and the manifest schema describes both fields.
 
